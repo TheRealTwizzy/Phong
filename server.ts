@@ -4,6 +4,7 @@ import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { db, ALL_ACHIEVEMENTS } from './server/db';
+import { transformBallForOpponent } from './server/transform';
 import { MatchEndPayload } from './src/types';
 
 interface PlayerSession {
@@ -281,15 +282,7 @@ async function startServer() {
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            const rawBall = msg.ball;
-            // Transforming coordinates for opponent's view:
-            const incomingBall = {
-              x: Math.max(0.02, Math.min(0.98, 1 - rawBall.x)),
-              vx: -rawBall.vx,
-              vy: Math.abs(rawBall.vy), // Moving DOWN into opponent's screen
-              spin: -(rawBall.spin || 0),
-              speedMultiplier: rawBall.speedMultiplier || 1.0,
-            };
+            const incomingBall = transformBallForOpponent(msg.ball);
 
             opponent.ws.send(
               JSON.stringify({

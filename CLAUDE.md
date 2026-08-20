@@ -1,208 +1,173 @@
-﻿# CLAUDE.md – Phong Project Guide
+# CLAUDE.md – Phong Project Guide
 
-
-This document provides a comprehensive overview of **Phong**, an arcade sports web application featuring a "blind half-court" gameplay mechanic and cross-device 2-phone multiplayer.
-
+This document is the working guide to **Phong**, an arcade sports web app with a "blind half-court" mechanic and cross-device 2-phone multiplayer. It describes the code as it actually is — when the code and this file disagree, fix this file.
 
 ---
-
 
 ## 1. Project Overview & Core Concept
 
+**Phong** reimagines Pong for mobile and desktop web. Each player sees only their own half of the court.
 
-**Phong** is a reimagining of classic Pong designed for mobile and desktop web. Instead of viewing the entire court, each player only sees their own half of the court.
-
-
-- **The Net Boundary**: The glowing top edge of the player's screen represents the net.
-- **Cross-Net Cyber Jump**: When a ball hits the top net, it leaves the player's screen and crosses the cyberspace boundary into the opponent's screen.
-- **Opponent Sonar / Radar**: A mini radar display tracks the opponent's movements and ball position in real time on their half.
-- **Physical 2-Phone Duel**: Players place two smartphones top-to-top on a flat table. A 4-letter room code connects them via WebSockets, allowing the ball to physically transition across phone screens.
-- **Single-Player & Dual Simulation**: Includes an adaptive AI opponent (Rookie, Pro, Master) and a split-screen Dual Court simulator for testing.
-
-
----
-
+- **The Net Boundary**: the glowing top edge of the player's screen is the net.
+- **Cross-Net Jump**: when the ball exits through the net, it leaves the player's screen and appears on the opponent's, travelling downward.
+- **Opponent Radar**: a mini radar tracks the opponent's paddle and the ball while it is on their half.
+- **Physical 2-Phone Duel**: two phones placed top-to-top, connected by a 4-letter room code over WebSockets; the ball physically transitions between screens.
+- **Solo & Split**: an adaptive AI opponent (Rookie / Pro / Cyber / Chaos) and a split-screen Dual Court simulator on one device.
 
 ## 2. Tech Stack
 
-
-- **Frontend**: React 18, TypeScript, Vite, Tailwind CSS, Motion (`motion/react`), Lucide React icons, Canvas Confetti.
-- **Backend / Server**: Express 5 (`server.ts`), Socket.IO (real-time WebSocket relay), Node.js.
-- **Audio Engine**: Pure Web Audio API procedural synthesizer (zero external audio assets; retro SFX, chiptune BGM, ambient soundscapes).
-- **Data & Persistence**: Server-side JSON store (`data/game_database.json`) via `server/db.ts` with local client fallback storage.
-
-
----
-
+- **Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 4 (CSS-first — configured in `src/index.css`, no `tailwind.config.js`), Motion (`motion/react`), Lucide React icons, Canvas Confetti.
+- **Server**: Express 4 (`server.ts`) + **`ws`** for the WebSocket relay (no Socket.IO), Node 22. One process serves the client and the relay on one port, dev (Vite middleware) and prod (static `dist/`) alike.
+- **Audio**: procedural Web Audio API synthesis in `src/audio/soundEffects.ts` — zero audio assets.
+- **Persistence**: server-side JSON store `game_database.json` in `DATA_DIR` (default `./data`), managed by `server/db.ts` with atomic tmp-and-rename writes. Client keeps a localStorage fallback for offline solo play.
 
 ## 3. Normalized Coordinate & Physics Model
 
+All positions, velocities, and dimensions are normalized to `[0.0, 1.0]`.
 
-All positions, velocities, and dimensions are strictly normalized in the range `[0.0, 1.0]`.
-code
-Code
-Opponent Court (Remote / Sonar)
-+-----------------------------------------------+ (Opponent Baseline y = 1.0)
-| [Opponent Paddle] |
-| |
-+===================== NET =====================+ (y = 0.0 for both players)
-| |
-| (Ball) |
-| |
-| [Player Paddle] |
-+-----------------------------------------------+ (Player Baseline y = 1.0)
-code
-Code
-### Coordinate Transforms Across Net:
-When the ball crosses the net (`y <= 0`):
-- `opponent_x = 1.0 - player_x` (horizontal inversion for head-to-head orientation)
-- `opponent_vx = -player_vx`
-- `opponent_vy = Math.abs(player_vy)` (travels toward opponent paddle)
-- Spin & speed multipliers are preserved across the net.
+```
+                Opponent Court (remote / radar)
++-----------------------------------------------+  (opponent baseline y = 1.0)
+|              [Opponent Paddle]                |
+|                                               |
++===================== NET =====================+  (y = 0.0 for both players)
+|                                               |
+|                   (Ball)                      |
+|                                               |
+|               [Player Paddle]                 |
++-----------------------------------------------+  (player baseline y = 1.0)
+```
 
+### Cross-net transform (`server/transform.ts`, applied server-side)
 
-### Paddle Deflection & Spin:
-- Paddle hit offset: `offset = (ball.x - paddle.x) / (paddleWidth / 2)` (clamped between `-1.0` and `1.0`).
-- Sharp deflection angle: `ball.vx = offset * MAX_HORIZONTAL_SPEED`.
-- Ball spin modifies trajectory dynamically on wall rebounds.
+When a client reports `ball_cross_net`, the server computes the opponent's view in one place so the two clients can never disagree:
 
+- `x' = clamp(1 - x, 0.02, 0.98)` (horizontal mirror for head-to-head orientation)
+- `vx' = -vx`
+- `vy' = |vy|` (downward, into the opponent's half)
+- `spin' = -spin` (mirrored court flips spin direction)
+- `speedMultiplier` preserved
 
----
+### Paddle deflection (`src/game/physics.ts`)
 
+- Hit offset: `(ball.x - paddle.x) / (paddleWidth / 2)`, clamped to `[-1.1, 1.1]` (small edge forgiveness).
+- Rebound angle: `offset × 62°` max.
+- Each paddle hit speeds the ball up 4%, capped at `MAX_BALL_SPEED` (2.4 units/s).
+- Spin modifies trajectory on wall rebounds.
 
-## 4. Codebase Directory Structure
-├── CLAUDE.md # This project guide
-├── index.html # Main HTML entry point
-├── metadata.json # Platform configuration & permissions
-├── package.json # Dependencies & scripts
-├── server.ts # Express server + Socket.IO real-time relay
-├── tsconfig.json # TypeScript configuration
-├── vite.config.ts # Vite bundler configuration
-│
-├── data/
-│ └── game_database.json # Persistent player profiles, matches, leaderboards
-│
+## 4. Directory Structure
+
+```
+├── CLAUDE.md                  # This guide
+├── README.md                  # Quickstart
+├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
+├── DEPLOYMENT.md              # Render deploy, backups, operational notes
+├── render.yaml                # Render blueprint (service + persistent disk)
+├── index.html                 # HTML entry
+├── package.json               # npm scripts & deps (lockfile: package-lock.json)
+├── server.ts                  # Express + ws relay + REST API + Vite middleware
+├── tsconfig.json
+├── vite.config.ts
 ├── server/
-│ └── db.ts # Server-side JSON database operations, ELO calculation & XP progression
-│
+│   ├── db.ts                  # JSON store: profiles, ELO, XP, achievements, history
+│   └── transform.ts           # Cross-net ball transform (unit-tested)
+├── tests/                     # Vitest: transform, physics, db invariants
 └── src/
-├── main.tsx # React application bootstrap
-├── App.tsx # Main game controller, loop, state orchestrator
-├── types.ts # TypeScript interfaces, types, and enums
-├── index.css # Global Tailwind CSS styles
-│
-├── audio/
-│ └── soundEffects.ts # Procedural Web Audio API sound synthesis (SFX, BGM, Soundscapes)
-│
-├── game/
-│ ├── physics.ts # Ball movement, collision detection, spin calculations
-│ └── themes.ts # Visual themes & palette definitions with unlock requirements
-│
-├── i18n/
-│ └── translations.ts # 12-language localization dictionary & helper functions
-│
-└── components/
-├── AchievementToast.tsx # Toast notification for unlocked achievements
-├── AchievementsModal.tsx # Full achievements gallery & milestone progress
-├── CourtCanvas.tsx # Main 60FPS HTML5 Canvas court renderer with screen shake & particles
-├── DualCourtSimulator.tsx # Split-screen sandbox simulator for two players on one device
-├── LeaderboardModal.tsx # Global ELO rankings & match win leaders
-├── MatchHistoryModal.tsx # Historical match logs with point breakdowns
-├── MissionsModal.tsx # Daily missions with XP rewards
-├── MobileGatekeeper.tsx # Mobile orientation & fullscreen helper overlay
-├── MultiplayerLobby.tsx # 4-letter room creation, joining, QR code share
-├── ProfileModal.tsx # Player profile, avatar picker, ELO stats, streak banner
-├── QuickChat.tsx # Real-time in-game emoji & tactical chat bubble overlay
-├── RadarPreview.tsx # Live opponent court radar / sonar tracker
-├── ScoreBoard.tsx # Score display, rally counter, daily streak badge, match timers
-├── SettingsModal.tsx # Visual customization, difficulty, audio, haptics & screen shake
-├── StatsOverlay.tsx # On-screen HUD for FPS, ball speed, spin & rally metrics
-└── TutorialModal.tsx # Step-by-step interactive onboarding tutorial
+    ├── main.tsx               # React bootstrap
+    ├── App.tsx                # Game controller, loop, WS client, all state
+    ├── types.ts               # Shared types incl. WSClientMessage/WSServerMessage
+    ├── index.css              # Tailwind 4 entry + base styles
+    ├── audio/soundEffects.ts  # Procedural SFX, chiptune BGM, soundscapes
+    ├── game/
+    │   ├── physics.ts         # Ball movement, collisions, spin, AI opponent
+    │   ├── themes.ts          # 10 visual themes + unlock requirements
+    │   └── missions.ts        # Daily missions & progress
+    ├── i18n/translations.ts   # 7-language dictionary (en es ja de fr pt zh) + t()
+    └── components/            # CourtCanvas, ScoreBoard, MultiplayerLobby,
+                               # DualCourtSimulator, RadarPreview, QuickChat,
+                               # Profile/Leaderboard/MatchHistory/Missions/
+                               # Achievements/Settings/Tutorial modals, etc.
+```
 
+## 5. Real-Time Protocol (`server.ts`, path `/ws`)
 
----
+Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (`WSClientMessage`, `WSServerMessage`) — update those first when changing the protocol.
 
+**Client → Server**
 
-## 5. Real-Time Socket.IO Protocol (`server.ts`)
+| Type | Payload | Purpose |
+|---|---|---|
+| `create_room` | `playerId`, `playerName?` | Create a 4-letter room (unambiguous alphabet, no 0/O/1/I) |
+| `join_room` | `roomId`, `playerId`, `playerName?` | Join as guest; triggers `game_start` for both |
+| `paddle_move` | `x` | Relay paddle position (sent throttled from the game loop) |
+| `ball_cross_net` | `ball {x,vx,vy,spin,speedMultiplier}` | Ball left this screen; server transforms & forwards |
+| `point_scored` | `scorer: 'p1'\|'p2'` | Report a point; server owns the score |
+| `quick_chat` | `text`, `senderName?` | Chat bubble (server caps at 100 chars) |
+| `rematch_request` | — | Vote for a rematch; two votes restart the match |
+| `ping` | `timestamp` | Latency probe |
+| `leave_room` | — | Leave explicitly (disconnect also handled) |
 
+**Server → Client**
 
-| Event Name | Direction | Payload | Description |
-|---|---|---|---|
-| `join_room` | Client → Server | `{ roomId, playerName, playerProfile }` | Join or create a 4-letter multiplayer lobby |
-| `room_state` | Server → Client | `{ roomId, host, guest, state, ... }` | Emitted when room membership or readiness changes |
-| `paddle_update` | Client → Server | `{ roomId, x }` | Relays player paddle horizontal position |
-| `ball_cross_net` | Client → Server | `{ roomId, ballState }` | Ball exited player screen across net -> transforms to opponent |
-| `ball_lost` | Client → Server | `{ roomId, scoringPlayerId }` | Ball passed baseline, award point and update server score |
-| `quick_chat` | Client → Server | `{ roomId, messageId, emoji, text }` | In-game chat bubble broadcast |
-| `rematch_request` | Client → Server | `{ roomId }` | Request / accept match rematch |
+| Type | Payload | Purpose |
+|---|---|---|
+| `room_created` | `roomId`, `playerIndex` | Host confirmation |
+| `room_joined` | `roomId`, `playerIndex`, `opponentName`, `opponentId` | Guest confirmation |
+| `opponent_joined` | `opponentName`, `opponentId` | Told to the host |
+| `game_start` | `servingPlayer` | Match (re)start — clients fully reset on this |
+| `opponent_paddle` | `x` | Pre-mirrored (`1 - x`) opponent paddle |
+| `ball_incoming` | `ball` | Post-transform ball; receiving client takes ownership |
+| `score_update` | `p1Score`, `p2Score`, `reason`, `nextServer` | Authoritative score |
+| `rematch_state` | `votes: [bool, bool]` | Rematch votes so the UI can show "waiting" |
+| `quick_chat` | `text`, `senderName`, `senderIdx` | Relayed chat |
+| `opponent_left` | — | Opponent disconnected |
+| `pong` | `timestamp` | Latency reply |
+| `error` | `message` | Join failures etc. |
 
+**REST API** (same origin): `GET /api/health`, `GET /api/room/:roomId`, `GET|PUT /api/profile/:id`, `POST /api/match/record`, `GET /api/leaderboard?sort=elo|level|rally|wins`, `GET /api/achievements?playerId=`, `GET /api/matches/:playerId`.
 
----
+**Trust model — deliberate trade-off**: gameplay physics is client-authoritative (each client simulates its own half and reports `ball_cross_net` / `point_scored`; each phone records its own result via `/api/match/record` with `isWinner`). This keeps the local half at zero latency and is fine for friendly play, but a modified client can cheat. The server validates room membership, owns the shared score, caps chat length, and clamps the transformed ball into the court. Revisit only if public leaderboards attract abuse.
 
+## 6. Audio Engine (`src/audio/soundEffects.ts`)
 
-## 6. Audio Engine Architecture (`src/audio/soundEffects.ts`)
+Entirely procedural Web Audio API:
 
+- **Paddle impacts**: pitched oscillator bursts scaling with rally speed and hit offset.
+- **Wall bounces & net crossing**: filtered sweeps and noise wooshes.
+- **Chiptune BGM**: procedural arpeggiator, tempo scales with rally intensity.
+- **Soundscapes**: `stadium` (crowd synthesis), `cyberpunk` (analog drone), `zen` (pentatonic chimes + wind), or `none`.
 
-The entire sound system runs dynamically via the **Web Audio API**:
-- **Paddle Impacts**: Pitched sine/triangle wave bursts that scale with rally speed and deflection point.
-- **Wall Bounces & Net Crossing**: Filtered square/sawtooth sweeps and atmospheric noise wooshes.
-- **Chiptune BGM**: Dynamic procedural arpeggiator with tempo scaling matching rally intensity.
-- **Ambient Soundscapes**:
-  - `stadium`: Filtered crowd murmurs and cheer synthesis.
-  - `cyberpunk`: Deep analog synth drone with slow FM modulation.
-  - `zen`: Resonant pentatonic bamboo chimes with white-noise wind filters.
-
-
----
-
+The `AudioContext` must be unlocked lazily from a user gesture — never play audio before `sound.unlock()`/`initCtx()` has run (iOS Safari silently discards it otherwise).
 
 ## 7. Progression, ELO & Unlockables
 
+- **ELO** (`server/db.ts`): fixed deltas, not a FIDE expected-score formula. Multiplayer: **+24 win / −16 loss**. Solo: difficulty-scaled (rookie 8, pro 16, cyber 24, chaos 32 for a win; half that, rounded, for a loss). Floor at **800**. New players start at 1200.
+- **XP**: points×15 + maxRally×6 + 60 win bonus; multipliers for cyber/chaos difficulty and multiplayer; minimum 20 per match. Levels derive from cumulative XP.
+- **Daily streak**: consecutive active days tracked on the profile.
+- **Themes** (`src/game/themes.ts`) — unlocked by default: `neon`, `retro-crt`, `midnight`, `cyberpunk`, `tennis`. Earned: `emerald-matrix` (first cross-net volley), `solar-flare` (10+ rally), `hyper-violet` (first match win), `monochrome-noir` (level 5), `quantum-gold` (25+ rally or 1400+ ELO).
+- **Achievements**: defined in `ALL_ACHIEVEMENTS` (`server/db.ts`); awarded once, never re-awarded, XP rewards attached.
 
-- **ELO Calculation**: Standard Chess/FIDE ELO formula executed on match completion in `server/db.ts`.
-- **Daily Streak System**: Tracks consecutive days active, awarding XP boosts.
-- **Unlockable Themes**:
-  - `neon` / `midnight`: Default unlocked.
-  - `retro`: Unlocked at Level 3.
-  - `tennis`: Unlocked at Level 5.
-  - `matrix`: Unlocked after winning 5 matches.
-  - `solar`: Unlocked after achieving a 20-hit rally.
-  - `hyper_violet`: Unlocked at Level 8.
-  - `noir`: Unlocked after 3 consecutive clean sheet shutouts.
-  - `quantum_gold`: Unlocked for ELO 1500+ Grandmasters.
-
-
----
-
-
-## 8. Development & Build Commands
-
+## 8. Commands
 
 ```bash
-# Start development server with tsx and Vite middleware
-npm run dev
-
-
-# Build production bundle and esbuild CommonJS backend
-npm run build
-
-
-# Start production server
-npm start
-
-
-# Run TypeScript type check / linter
-npm run lint
+npm run dev      # tsx watch server.ts — app + relay with hot reload on :3000
+npm run build    # vite build (client) + esbuild bundle (server) → dist/
+npm start        # node dist/server.cjs (production)
+npm run lint     # tsc --noEmit
+npm test         # vitest run (tests/)
 ```
 
---- 
+Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.example`.
 
+## 9. Conventions
 
-## 9. Key Conventions for Claude Code
+1. **Server-side logic lives in `server.ts` / `server/`**; no keys or secrets in client code (the app currently needs none at all).
+2. **Strictly normalized coordinates**: all court physics in `[0,1]` floats so every device agrees regardless of pixels or aspect ratio.
+3. **Audio only after a user gesture** (see §6).
+4. **Protocol changes start in `src/types.ts`** — both client and server import their message shapes from there.
+5. **Icons**: lucide-react. **Styling**: Tailwind utility classes; inline styles only for dynamic canvas/theme color bindings.
+6. **Keep the client origin-relative**: derive WS and API URLs from `window.location` (this is what makes dev, tunnels, and production work unchanged).
 
+## 10. Deployment
 
-  **1. Keep APIs and Keys Server-Side:** Server-side logic resides in server.ts or server/ files.
-  **2. Strict Normalized Coordinates:** Always compute court physics using normalized floats (0.0 to 1.0) so all devices scale consistently regardless of pixel aspect ratio.
-  **3. Sound System Safety:** Web Audio API contexts must always be lazily unlocked on user gesture (sound.initCtx() or sound.unlock()).
-  **4. Icons:** Use lucide-react for all icons throughout UI components.
-  **5. Styling:** Use Tailwind CSS utility classes; avoid inline styles except for dynamic canvas styling or theme color bindings.
+One Node service, one port, WebSockets on the same listener. The repo ships `render.yaml`: Render web service (paid **starter** plan) with a **1 GB persistent disk at `/data`** and `DATA_DIR=/data` — without persistent storage every deploy wipes profiles, ELO, and history. Health check: `/api/health`. Deploys are stop-then-start (disk-backed services can't do zero-downtime), so in-flight matches drop on deploy; clients auto-reconnect. The service is **single-instance by design** — rooms live in process memory. `SIGTERM` closes sockets (code 1001) and exits cleanly. Full runbook: `DEPLOYMENT.md`; phone testing needs HTTPS (tunnel) — see `DEVELOPMENT.md`.
