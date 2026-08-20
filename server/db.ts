@@ -9,7 +9,9 @@ import {
   MatchEndResult,
 } from '../src/types';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Overridable so production can point at a persistent volume (e.g. /data on
+// Render); the default cwd-relative path serves local development.
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'game_database.json');
 
 export const ALL_ACHIEVEMENTS: Achievement[] = [

@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: phong
+    runtime: node
+    plan: starter # persistent disks require a paid instance
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: phong-data
+      mountPath: /data
+      sizeGB: 1

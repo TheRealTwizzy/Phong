@@ -36,7 +36,7 @@ function generateRoomCode(): string {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
 
@@ -386,6 +386,20 @@ async function startServer() {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Split-Screen Half Pong server running at http://0.0.0.0:${PORT}`);
   });
+
+  // Render stops the old instance on every deploy of a disk-backed service;
+  // close sockets and the listener cleanly instead of dying mid-request.
+  const shutdown = (signal: string) => {
+    console.log(`${signal} received, shutting down`);
+    for (const client of wss.clients) {
+      client.close(1001, 'Server restarting');
+    }
+    wss.close();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 startServer();
