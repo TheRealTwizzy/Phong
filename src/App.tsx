@@ -153,6 +153,7 @@ export default function App() {
   const [opponentId, setOpponentId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [pingMs, setPingMs] = useState<number>(0);
+  const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
 
   // Refs for high-speed 60fps physics loop without stale closures
   const ballRef = useRef<BallState>(ball);
@@ -540,6 +541,7 @@ export default function App() {
             setIsServing(true);
             setWinner(null);
             setLastMatchResult(null);
+            setRematchVotes([false, false]);
             break;
 
           case 'opponent_paddle':
@@ -618,9 +620,14 @@ export default function App() {
             break;
           }
 
+          case 'rematch_state':
+            setRematchVotes(msg.votes);
+            break;
+
           case 'opponent_left':
             setOpponentName(null);
             setOpponentId(null);
+            setRematchVotes([false, false]);
             alert('Opponent disconnected from the match.');
             break;
 
@@ -1115,14 +1122,35 @@ export default function App() {
                 </div>
               )}
 
+              {mode === 'multiplayer' && playerIndex !== null && rematchVotes[playerIndex === 0 ? 1 : 0] && (
+                <p className="text-[11px] text-cyan-300 font-mono animate-pulse">
+                  {opponentName || 'Opponent'}: {t('chat_rematch', currentLanguage)}
+                </p>
+              )}
+
               <div className="flex items-center gap-2 w-full mt-2">
                 <button
                   id="btn-play-again"
-                  onClick={resetMatch}
-                  className="flex-1 py-3 rounded-xl font-mono text-xs font-bold bg-cyan-500 hover:bg-cyan-400 text-zinc-950 transition active:scale-95 shadow-lg flex items-center justify-center gap-1.5"
+                  onClick={() => {
+                    if (mode === 'multiplayer') {
+                      if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'rematch_request' }));
+                      }
+                    } else {
+                      resetMatch();
+                    }
+                  }}
+                  disabled={mode === 'multiplayer' && (opponentId === null || (playerIndex !== null && rematchVotes[playerIndex]))}
+                  className="flex-1 py-3 rounded-xl font-mono text-xs font-bold bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-700 disabled:text-zinc-400 text-zinc-950 transition active:scale-95 shadow-lg flex items-center justify-center gap-1.5"
                 >
-                  <RefreshCw className="w-4 h-4" />
-                  <span>{t('play_again', currentLanguage)}</span>
+                  <RefreshCw className={`w-4 h-4 ${mode === 'multiplayer' && playerIndex !== null && rematchVotes[playerIndex] ? 'animate-spin' : ''}`} />
+                  <span>
+                    {mode === 'multiplayer'
+                      ? playerIndex !== null && rematchVotes[playerIndex]
+                        ? t('waiting_for_opponent', currentLanguage)
+                        : t('rematch', currentLanguage)
+                      : t('play_again', currentLanguage)}
+                  </span>
                 </button>
 
                 {mode !== 'multiplayer' && (

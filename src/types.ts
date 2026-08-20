@@ -182,7 +182,7 @@ export type WSClientMessage =
   | { type: 'ball_cross_net'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'point_scored'; scorer: 'p1' | 'p2' }
   | { type: 'quick_chat'; text: string; senderName?: string }
-  | { type: 'ready_start' }
+  | { type: 'rematch_request' }
   | { type: 'ping'; timestamp: number }
   | { type: 'leave_room' };
 
@@ -195,6 +195,7 @@ export type WSServerMessage =
   | { type: 'quick_chat'; text: string; senderName: string; senderIdx: number }
   | { type: 'game_start'; servingPlayer: 0 | 1 }
   | { type: 'score_update'; p1Score: number; p2Score: number; reason: string; nextServer: 0 | 1 }
+  | { type: 'rematch_state'; votes: [boolean, boolean] }
   | { type: 'opponent_left' }
   | { type: 'pong'; timestamp: number }
   | { type: 'error'; message: string };

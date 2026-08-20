@@ -20,6 +20,7 @@ interface Room {
   rallyCount: number;
   maxRallyInMatch: number;
   servingPlayer: 0 | 1;
+  rematchVotes: [boolean, boolean];
   lastActive: number;
 }
 
@@ -176,6 +177,7 @@ async function startServer() {
             rallyCount: 0,
             maxRallyInMatch: 0,
             servingPlayer: 0,
+            rematchVotes: [false, false],
             lastActive: Date.now(),
           };
 
@@ -211,6 +213,7 @@ async function startServer() {
             playerName: msg.playerName || 'Player 2',
             playerIndex: 1,
           };
+          room.rematchVotes = [false, false];
           room.lastActive = Date.now();
           currentRoomId = code;
           playerIndex = 1;
@@ -342,6 +345,41 @@ async function startServer() {
               })
             );
           }
+        } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex !== null) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          room.lastActive = Date.now();
+          room.rematchVotes[playerIndex] = true;
+
+          if (room.rematchVotes[0] && room.rematchVotes[1] && room.players[0] && room.players[1]) {
+            // Both agreed: fresh match, loser of the coin toss last time serves first now
+            room.scores = [0, 0];
+            room.rallyCount = 0;
+            room.maxRallyInMatch = 0;
+            room.rematchVotes = [false, false];
+            room.servingPlayer = room.servingPlayer === 0 ? 1 : 0;
+            room.players.forEach((p) => {
+              if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
+                p.ws.send(
+                  JSON.stringify({
+                    type: 'game_start',
+                    servingPlayer: room.servingPlayer,
+                  })
+                );
+              }
+            });
+          } else {
+            room.players.forEach((p) => {
+              if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
+                p.ws.send(
+                  JSON.stringify({
+                    type: 'rematch_state',
+                    votes: room.rematchVotes,
+                  })
+                );
+              }
+            });
+          }
         } else if (msg.type === 'ping') {
           ws.send(JSON.stringify({ type: 'pong', timestamp: msg.timestamp }));
         }
@@ -355,6 +393,7 @@ async function startServer() {
         const room = rooms.get(currentRoomId);
         if (room) {
           room.players[playerIndex] = null;
+          room.rematchVotes[playerIndex] = false;
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opp = room.players[oppIdx];
           if (opp?.ws && opp.ws.readyState === WebSocket.OPEN) {
