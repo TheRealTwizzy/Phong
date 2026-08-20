@@ -4,7 +4,32 @@ Phong is a single Node service: Express serves the built client, the `ws` relay 
 
 Capacity note: the relay comfortably exceeds the "5 concurrent matches" requirement — the included load test (`node scripts/load-test.mjs`) drives 10 simultaneous matches (12,000+ messages over 20s) with 0% loss and ~1ms p95 relay latency on modest hardware.
 
-## Primary path: your KVM at phong.too-many-coins.com
+**Pick your path by what already runs on the box:**
+
+- The KVM already runs **Dokploy** (or any PaaS/proxy holding ports 80/443, e.g. Traefik, CloudPanel) → use [Deploying with Dokploy](#primary-path-deploying-with-dokploy) below. Do **not** run the bundled compose stack — its Caddy will fail with `Bind for :80 failed: port is already allocated` because the existing proxy owns those ports.
+- The box is **bare** (nothing on 80/443) → use [Standalone compose stack](#alternative-standalone-compose-stack-bare-box).
+
+## Primary path: Deploying with Dokploy
+
+The too-many-coins.com KVM runs Dokploy, whose Traefik terminates TLS for every site on the box. Phong deploys like any other Dokploy application — Dokploy builds the repo's `Dockerfile`, wires the domain into Traefik, and issues the certificate. WebSocket upgrades work through Traefik out of the box.
+
+1. **DNS** — A record `phong` → the KVM's public IPv4 (same panel as your other subdomains).
+
+2. **In the Dokploy dashboard** (port 3000 on the box):
+   - Create a project (e.g. `phong`) → **Application**.
+   - **Source**: this GitHub repository, branch `main`. Build type: **Dockerfile**.
+   - **Environment**: nothing required — the Dockerfile defaults `NODE_ENV=production`, `PORT=3000`, `DATA_DIR=/data`. (Add `TURN_URL`/`TURN_STATIC_SECRET` here later if you enable TURN.)
+   - **Advanced → Mounts**: add a **Volume Mount**, name `phong-data`, mount path `/data`. **This is the step that keeps player data across deploys** — skip it and every deploy silently resets profiles, ELO, and history to the seeded bots.
+   - **Domains**: add `phong.too-many-coins.com`, container port **3000**, HTTPS on (Let's Encrypt).
+   - **Deploy.** Optionally enable auto-deploy on push (Dokploy sets up the GitHub webhook).
+
+3. **Verify** — `curl -s https://phong.too-many-coins.com/api/health` returns `{"status":"ok",...}`, then the real test: two phones, create a room, scan the QR, rally across the net. The in-game badge shows `P2P` when the phones connect directly, `RELAY` otherwise.
+
+Updating = push to `main` (with auto-deploy) or click Deploy. Backups: the SQLite file lives in the `phong-data` volume — same `VACUUM INTO` technique as below, via the container's terminal in Dokploy.
+
+The optional coturn TURN relay can still run alongside Dokploy (it uses UDP 3478 + 49160–49200, which Traefik doesn't touch): `docker compose --profile turn up -d coturn` with `TURN_STATIC_SECRET` in `.env`, then set the same values in the Dokploy app's environment.
+
+## Alternative: standalone compose stack (bare box)
 
 Everything runs from `docker-compose.yml` in the repo root:
 
@@ -37,6 +62,8 @@ Everything runs from `docker-compose.yml` in the repo root:
 4. **Verify** — `curl -s https://phong.too-many-coins.com/api/health` returns `{"status":"ok",...}`. Open the URL on two phones, create a room, scan the QR, rally across the net. The in-game badge shows `P2P` when the phones are connected directly, `RELAY` otherwise.
 
 Caddy obtains the certificate on first request — DNS must already point at the box, and ports 80/443 must be reachable, or issuance fails.
+
+**Troubleshooting: `Bind for :80 failed: port is already allocated`** — something else owns 80/443. Identify it with `ss -tlnp | grep -E ':80 |:443 '` and `docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'`. If it's a preinstalled Apache/nginx you don't need: `systemctl disable --now apache2` (or `nginx`). If it's a Traefik/Dokploy/panel stack you *do* use, don't remove it — switch to the Dokploy path above and skip this compose stack's Caddy entirely.
 
 ### Updating
 
