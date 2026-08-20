@@ -1,0 +1,6 @@
+{
+  "name": "Split-Screen Half Pong",
+  "description": "A blind half-court Pong game where the net is at the top of the screen and the ball crosses into the opponent's half. Features real-time 2-device multiplayer, solo AI modes, and mobile touch controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
