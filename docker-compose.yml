@@ -1,0 +1,61 @@
+# Phong on a single VPS/KVM:
+#   app    - the game server (client + WebSocket relay + API) on the internal network
+#   caddy  - TLS termination + reverse proxy with automatic Let's Encrypt certs
+#   coturn - OPTIONAL TURN relay for P2P matches behind strict NATs
+#            (enable with: docker compose --profile turn up -d)
+#
+# Configure via .env next to this file (see deploy/.env.example).
+
+services:
+  phong:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /data
+      PORT: 3000
+      TURN_URL: ${TURN_URL:-}
+      TURN_STATIC_SECRET: ${TURN_STATIC_SECRET:-}
+    volumes:
+      - phong-data:/data
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PHONG_DOMAIN: ${PHONG_DOMAIN:-phong.too-many-coins.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - phong
+
+  coturn:
+    image: coturn/coturn:4-alpine
+    profiles: ["turn"]
+    restart: unless-stopped
+    # TURN needs its real ports exposed directly; host networking keeps the
+    # relay port range simple.
+    network_mode: host
+    command: >
+      --listening-port=3478
+      --realm=${PHONG_DOMAIN:-phong.too-many-coins.com}
+      --use-auth-secret
+      --static-auth-secret=${TURN_STATIC_SECRET}
+      --min-port=49160
+      --max-port=49200
+      --no-cli
+      --no-tls
+      --no-dtls
+      --fingerprint
+
+volumes:
+  phong-data:
+  caddy-data:
+  caddy-config:

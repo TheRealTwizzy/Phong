@@ -1,9 +1,9 @@
 import crypto from 'crypto';
 import express from 'express';
+import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import { db, ALL_ACHIEVEMENTS } from './server/db';
 import { transformBallForOpponent } from './server/transform';
 import { MatchEndPayload } from './src/types';
@@ -442,13 +442,21 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
+    // Imported lazily so the production bundle never loads (or ships) vite
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    // The bundled server.cjs lives inside dist/ next to the client files, so
+    // prefer its own directory — this makes `node /path/to/dist/server.cjs`
+    // work from any cwd. Fall back to cwd/dist for unbundled runs.
+    const bundleDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+    const distPath = fs.existsSync(path.join(bundleDir, 'index.html'))
+      ? bundleDir
+      : path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

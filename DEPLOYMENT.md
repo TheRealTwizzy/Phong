@@ -1,55 +1,95 @@
 # Deploying Phong
 
-Phong is a single Node service: Express serves the built client, and the `ws` WebSocket relay shares the same HTTP server and port. Any host that can run a **long-lived Node process with WebSockets** works; static hosts (GitHub Pages, plain Netlify) and serverless-only platforms do not. The repo ships a blueprint for **Render**, chosen because a persistent disk plus single instance matches this app's design exactly.
+Phong is a single Node service: Express serves the built client, the `ws` relay shares the same port, and player data lives in a SQLite file. Any host that can run a **long-lived Node process with WebSockets** works. The primary target is a **self-managed VPS/KVM** (e.g. Hostinger) behind Caddy with automatic HTTPS; a Render blueprint is kept as an alternative.
 
-## Render (recommended path)
+Capacity note: the relay comfortably exceeds the "5 concurrent matches" requirement — the included load test (`node scripts/load-test.mjs`) drives 10 simultaneous matches (12,000+ messages over 20s) with 0% loss and ~1ms p95 relay latency on modest hardware.
 
-`render.yaml` in the repo root defines everything:
+## Primary path: your KVM at phong.too-many-coins.com
 
-- **Web service `phong`**, Node runtime, `npm ci && npm run build` → `npm start`.
-- **Starter (paid) plan** — persistent disks require a paid instance.
-- **1 GB disk mounted at `/data`**, with `DATA_DIR=/data` so `game_database.json` (profiles, ELO, match history, achievements) survives every deploy.
-- **Health check** on `/api/health`.
+Everything runs from `docker-compose.yml` in the repo root:
 
-### First deploy
+| Service | Role |
+|---|---|
+| `phong` | The game server (client + relay + API + SQLite at `/data` on a named volume) |
+| `caddy` | Ports 80/443, automatic Let's Encrypt certificates, proxies (incl. WebSockets) to the app |
+| `coturn` | *Optional* TURN relay so P2P matches connect even behind strict NATs |
 
-1. Merge to `main` on GitHub.
-2. In the Render dashboard: **New → Blueprint**, pick this repository, confirm. Render reads `render.yaml` and provisions the service and disk.
-3. That's it — there are no secrets to configure. The service needs no API keys.
-4. Open the service URL on two phones, create a room on one, scan the QR with the other.
+### One-time setup
 
-Subsequent pushes to `main` auto-deploy.
+1. **DNS** — in your DNS panel for `too-many-coins.com`, add an **A record**: `phong` → your KVM's public IPv4. (Add an AAAA record too if the box has IPv6.)
 
-### Operational facts worth knowing
+2. **Firewall** — allow inbound **22, 80, 443**. If you'll run TURN later, also **3478 (tcp+udp)** and **udp 49160–49200**.
 
-- **A deploy restarts the service** (stop-then-start, not zero-downtime): Render never runs two instances against one disk, which protects the database but means **in-flight matches drop on deploy**. Clients reconnect automatically; the room is gone. Deploy when nobody's mid-match.
-- **Single instance is by design.** Rooms live in server memory, so the service must not scale horizontally. The disk enforces this — Render refuses to scale a disk-backed service past one instance. If Phong ever needs more, rooms move to Redis and the JSON store moves to a real database first.
-- **PORT is injected by Render** and the server binds `0.0.0.0:$PORT`. WebSocket upgrades ride the same port — no extra configuration.
-- **The client needs no environment at all**: it derives `wss://…/ws` and all API paths from `window.location`.
+3. **On the KVM** (Ubuntu/Debian assumed):
 
-### Backing up the database
+   ```bash
+   # Docker (skip if present)
+   curl -fsSL https://get.docker.com | sh
 
-The whole game state is one file. From the Render shell tab:
+   git clone https://github.com/TheRealTwizzy/Phong.git
+   cd Phong
+   cp deploy/.env.example .env
+   nano .env        # set PHONG_DOMAIN (already defaults to phong.too-many-coins.com)
+
+   docker compose up -d --build
+   ```
+
+4. **Verify** — `curl -s https://phong.too-many-coins.com/api/health` returns `{"status":"ok",...}`. Open the URL on two phones, create a room, scan the QR, rally across the net. The in-game badge shows `P2P` when the phones are connected directly, `RELAY` otherwise.
+
+Caddy obtains the certificate on first request — DNS must already point at the box, and ports 80/443 must be reachable, or issuance fails.
+
+### Updating
 
 ```bash
-cat /data/game_database.json
+cd Phong && git pull && docker compose up -d --build
 ```
 
-Copy it somewhere safe (or add a cron job that POSTs it to storage). Restoring = writing the file back and restarting. Writes are atomic (`.tmp` + rename), so the file on disk is never half-written.
+The app restarts in a few seconds. In-flight matches drop and clients auto-reconnect; player data is untouched (it lives on the `phong-data` volume, not in the container).
 
-### Verifying a deploy did not lose data
+### Enabling the TURN relay (optional)
 
-After any deploy: `GET /api/leaderboard` should show the same players as before. If it ever comes back as just the seeded bots, the service is writing to the container filesystem instead of the disk — check that `DATA_DIR=/data` is set and the disk is attached.
+STUN-only P2P works on most home/mobile networks; when it can't connect, matches transparently stay on the relay — so TURN is an optimization, not a requirement. To enable it:
 
-## Other hosts
+```bash
+# in .env:
+#   TURN_STATIC_SECRET=$(openssl rand -hex 32)
+#   TURN_URL=turn:phong.too-many-coins.com:3478
+docker compose --profile turn up -d
+```
 
-The app is host-agnostic as long as three requirements hold:
+The app then mints time-limited TURN credentials per client via `/api/rtc-config`; the shared secret never leaves the server.
 
-1. **Long-lived process** with WebSocket support on the routed port.
-2. **`DATA_DIR` pointing at storage that survives deploys** — otherwise every deploy silently wipes all player progress.
-3. **Single instance** (or sticky routing plus shared room state, which this codebase does not implement).
+### Backups
 
-Fly.io (volume + `min_machines_running=1`) and Railway (volume) both fit. Cloud Run does not fit well: it wants to scale horizontally and to zero, both of which break in-memory rooms; forcing it into shape costs more than it saves.
+All player data is one SQLite file on the `phong-data` volume. Online backup without stopping anything:
+
+```bash
+docker compose exec phong node -e \
+  "new (require('node:sqlite').DatabaseSync)('/data/phong.db').exec(\"VACUUM INTO '/data/backup-$(date +%F).db'\")"
+docker compose cp phong:/data/backup-$(date +%F).db ./
+```
+
+Restore = copy a backup to the volume as `/data/phong.db` and `docker compose restart phong`.
+
+A server that ran the pre-SQLite build imports its old `game_database.json` automatically on first boot if it sits in `/data`.
+
+### Logs & health
+
+```bash
+docker compose logs -f phong     # app logs
+docker compose logs -f caddy     # cert issuance, proxy errors
+curl -s localhost:3000/api/health  # from the box, bypassing Caddy
+```
+
+## Alternative: Render
+
+`render.yaml` still provisions a paid single instance with a persistent disk at `/data` (free tier can't attach disks and sleeps after 15 idle minutes). Dashboard → New → Blueprint → this repo. Same operational caveats: stop-then-start deploys, single instance by design.
+
+## Requirements for any other host
+
+1. Long-lived process, WebSocket upgrades on the routed port.
+2. `DATA_DIR` on storage that survives deploys — otherwise every deploy wipes profiles/ELO.
+3. Single instance (rooms live in process memory).
 
 ## Local production run
 
@@ -58,4 +98,4 @@ npm run build
 PORT=3000 DATA_DIR=./data NODE_ENV=production npm start
 ```
 
-`GET /api/health` → `{"status":"ok","activeRooms":0}` confirms the service is up. The server shuts down cleanly on SIGTERM (closes sockets with code 1001, stops the listener), which is what Render sends on deploys.
+`SIGTERM` closes sockets (code 1001) and exits cleanly — this is what `docker compose` sends on restarts.

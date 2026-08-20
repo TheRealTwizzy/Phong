@@ -14,8 +14,11 @@ One process runs everything: `tsx watch server.ts` starts Express, attaches the 
 
 You do not need two devices for most multiplayer work:
 
-- **Two browser windows** against `npm run dev`: create a room in one, join in the other. This exercises the real server path (room codes, paddle relay, net transform, scoring, rematch).
+- **Two browser windows** against `npm run dev`: create a room in one, join in the other. This exercises the real server path (room codes, paddle relay, net transform, scoring, rematch). With the lobby's "Direct connect (P2P)" toggle on (default), the two windows will also negotiate a real WebRTC DataChannel — watch the `P2P`/`RELAY` badge top-right.
 - **Dual Court Simulator** (split mode in-app): both halves on one screen, no server involved — fastest way to iterate on physics and rendering.
+- **Load**: `node scripts/load-test.mjs 10 20` runs 10 concurrent scripted matches against a local server and reports loss/latency.
+
+Note: the app gates desktop browsers behind a "smartphone required" screen — click **Preview Smartphone Screen** (or emulate a phone in devtools) when testing in desktop browsers.
 
 ## Testing on real phones
 

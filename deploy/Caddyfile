@@ -1,0 +1,7 @@
+# Caddy provisions and renews Let's Encrypt certificates automatically for
+# the domain below (set PHONG_DOMAIN in .env). WebSocket upgrades are proxied
+# out of the box.
+{$PHONG_DOMAIN:phong.too-many-coins.com} {
+	encode gzip
+	reverse_proxy phong:3000
+}
