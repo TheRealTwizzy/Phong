@@ -31,8 +31,8 @@ const match = (playerId: string, overrides: Partial<MatchEndPayload> = {}): Matc
 });
 
 describe('GameDatabase', () => {
-  it('creates the database file in DATA_DIR', () => {
-    expect(fs.existsSync(path.join(TMP, 'game_database.json'))).toBe(true);
+  it('creates the SQLite database file in DATA_DIR', () => {
+    expect(fs.existsSync(path.join(TMP, 'phong.db'))).toBe(true);
   });
 
   it('creates a profile on first read with the requested username', () => {
@@ -79,9 +79,22 @@ describe('GameDatabase', () => {
     const p = db.getProfile('p_burst');
     expect(p.matchesPlayed).toBe(50);
     expect(p.matchesWon).toBe(25);
-    // On-disk copy is valid JSON and agrees with memory
-    const disk = JSON.parse(fs.readFileSync(path.join(TMP, 'game_database.json'), 'utf-8'));
-    expect(disk.players['p_burst'].matchesPlayed).toBe(50);
+  });
+
+  it('re-derives level when achievement XP crosses a threshold', () => {
+    // A first multiplayer win grants enough achievement XP (first_serve +
+    // first_win + multiplayer_champ + rally_10 = 580) to level immediately.
+    const res = db.recordMatch(match('p_lvl'));
+    const expected = ((xp: number) => {
+      let level = 1;
+      let next = 120;
+      while (xp >= next) {
+        level++;
+        next = Math.round(120 * Math.pow(level, 1.6));
+      }
+      return level;
+    })(res.profile.xp);
+    expect(res.profile.level).toBe(expected);
   });
 
   it('sorts the leaderboard by ELO descending', () => {
