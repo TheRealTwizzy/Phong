@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -45,6 +46,27 @@ async function startServer() {
   // Health check
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', activeRooms: rooms.size });
+  });
+
+  // ICE servers for the P2P (WebRTC) private-session mode. STUN is enough on
+  // most networks; when TURN_URL + TURN_STATIC_SECRET are set (coturn with
+  // use-auth-secret), time-limited credentials are minted per request so the
+  // shared secret never reaches clients.
+  app.get('/api/rtc-config', (req, res) => {
+    const iceServers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    ];
+
+    const turnUrl = process.env.TURN_URL;
+    const turnSecret = process.env.TURN_STATIC_SECRET;
+    if (turnUrl && turnSecret) {
+      const ttlSeconds = 6 * 60 * 60;
+      const username = `${Math.floor(Date.now() / 1000) + ttlSeconds}:phong`;
+      const credential = crypto.createHmac('sha1', turnSecret).update(username).digest('base64');
+      iceServers.push({ urls: turnUrl.split(',').map((u) => u.trim()), username, credential });
+    }
+
+    res.json({ iceServers });
   });
 
   // Room status check
@@ -335,6 +357,24 @@ async function startServer() {
                 text: String(msg.text || '').slice(0, 100),
                 senderName,
                 senderIdx: playerIndex,
+              })
+            );
+          }
+        } else if (msg.type === 'rtc_signal' && currentRoomId && playerIndex !== null) {
+          // Pure pass-through: the server never inspects SDP or candidates,
+          // it only ferries them between the two members of the room.
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          room.lastActive = Date.now();
+
+          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const opponent = room.players[oppIdx];
+          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
+            opponent.ws.send(
+              JSON.stringify({
+                type: 'rtc_signal',
+                payload: msg.payload,
+                fromIdx: playerIndex,
               })
             );
           }

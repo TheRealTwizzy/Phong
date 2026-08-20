@@ -174,6 +174,14 @@ export interface MatchEndResult {
   newAchievements: Achievement[];
 }
 
+// WebRTC signaling payload relayed verbatim between the two peers in a room.
+// kind 'offer'/'answer' carry SDP; 'ice' carries an ICE candidate.
+export interface RTCSignalPayload {
+  kind: 'offer' | 'answer' | 'ice';
+  sdp?: string;
+  candidate?: RTCIceCandidateInit | null;
+}
+
 // WebSocket Messages
 export type WSClientMessage =
   | { type: 'join_room'; roomId: string; playerId: string; playerName?: string }
@@ -183,6 +191,7 @@ export type WSClientMessage =
   | { type: 'point_scored'; scorer: 'p1' | 'p2' }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
+  | { type: 'rtc_signal'; payload: RTCSignalPayload }
   | { type: 'ping'; timestamp: number }
   | { type: 'leave_room' };
 
@@ -196,6 +205,7 @@ export type WSServerMessage =
   | { type: 'game_start'; servingPlayer: 0 | 1 }
   | { type: 'score_update'; p1Score: number; p2Score: number; reason: string; nextServer: 0 | 1 }
   | { type: 'rematch_state'; votes: [boolean, boolean] }
+  | { type: 'rtc_signal'; payload: RTCSignalPayload; fromIdx: 0 | 1 }
   | { type: 'opponent_left' }
   | { type: 'pong'; timestamp: number }
   | { type: 'error'; message: string };

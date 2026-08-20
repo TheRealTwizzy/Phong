@@ -4,6 +4,7 @@ import {
   GameMode,
   GameSettings,
   PlayerStats,
+  WSClientMessage,
   WSServerMessage,
   PlayerProfile,
   Achievement,
@@ -13,6 +14,7 @@ import {
   DailyMission,
   LanguageCode,
 } from './types';
+import { P2PGameLink, P2PStatus } from './net/p2p';
 import { THEMES, ThemeConfig } from './game/themes';
 import {
   PADDLE_Y,
@@ -154,6 +156,9 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [pingMs, setPingMs] = useState<number>(0);
   const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
+  // 'relay' = via server; 'connecting' = P2P handshake running; 'p2p' = direct
+  const [linkStatus, setLinkStatus] = useState<'relay' | 'connecting' | 'p2p'>('relay');
+  const [p2pEnabled, setP2pEnabled] = useState<boolean>(true);
 
   // Refs for high-speed 60fps physics loop without stale closures
   const ballRef = useRef<BallState>(ball);
@@ -169,6 +174,16 @@ export default function App() {
   const settingsRef = useRef<GameSettings>(settings);
   const profileRef = useRef<PlayerProfile | null>(profile);
 
+  // P2P link plumbing. dispatchRef always points at the CURRENT render's
+  // message handler, so both the WebSocket and the P2P link dispatch into
+  // fresh state (the old direct socket.onmessage closure captured a stale
+  // playerIndex from before the room existed, deadlocking the first serve).
+  const p2pRef = useRef<P2PGameLink | null>(null);
+  const rtcConfigRef = useRef<RTCIceServer[] | undefined>(undefined);
+  const dispatchRef = useRef<(msg: WSServerMessage) => void>(() => {});
+  const sendNetRef = useRef<(msg: WSClientMessage) => void>(() => {});
+  const playerIndexRef = useRef<0 | 1 | null>(playerIndex);
+
   ballRef.current = ball;
   oppBallRef.current = oppBall;
   paddleXRef.current = paddleX;
@@ -178,6 +193,16 @@ export default function App() {
   statsRef.current = stats;
   settingsRef.current = settings;
   profileRef.current = profile;
+  playerIndexRef.current = playerIndex;
+
+  // Route a gameplay message over the P2P link when it is open, otherwise
+  // over the WebSocket relay. Reassigned every render so it sees fresh refs.
+  sendNetRef.current = (msg: WSClientMessage) => {
+    if (p2pRef.current?.sendGame(msg)) return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msg));
+    }
+  };
 
   const currentLanguage: LanguageCode = settings.language || 'en';
 
@@ -326,15 +351,13 @@ export default function App() {
 
     setActiveChatMessages((prev) => [...prev.slice(-3), newMsg]);
 
-    // Send over WebSocket if in multiplayer
-    if (mode === 'multiplayer' && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'quick_chat',
-          text,
-          senderName: myName,
-        })
-      );
+    // Send to the opponent (P2P when linked, relay otherwise) in multiplayer
+    if (mode === 'multiplayer') {
+      sendNetRef.current({
+        type: 'quick_chat',
+        text,
+        senderName: myName,
+      });
     } else if (mode === 'solo' || mode === 'practice') {
       // Simulate friendly AI response in solo mode after a small delay
       setTimeout(() => {
@@ -441,8 +464,8 @@ export default function App() {
     prevPaddleXRef.current = newX;
 
     // Send position to multiplayer opponent
-    if (modeRef.current === 'multiplayer' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'paddle_move', x: newX }));
+    if (modeRef.current === 'multiplayer') {
+      sendNetRef.current({ type: 'paddle_move', x: newX });
     }
   }, []);
 
@@ -484,11 +507,222 @@ export default function App() {
     }
   }, [isPlayerServer]);
 
+  // Build (or rebuild) the P2P link for the current room. The host creates
+  // the offer; the guest side is created lazily when the first offer arrives.
+  const createP2PLink = (asHost: boolean): P2PGameLink => {
+    p2pRef.current?.close();
+    const myIdx = (playerIndexRef.current ?? (asHost ? 0 : 1)) as 0 | 1;
+    const myName = profileRef.current?.username || `Player ${myIdx + 1}`;
+    const theirName = opponentName || `Player ${myIdx === 0 ? 2 : 1}`;
+    const playerNames: [string, string] = myIdx === 0 ? [myName, theirName] : [theirName, myName];
+
+    const link = new P2PGameLink({
+      myIndex: myIdx,
+      playerNames,
+      iceServers: rtcConfigRef.current,
+      sendSignal: (payload) => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'rtc_signal', payload }));
+        }
+      },
+      onMessage: (m) => dispatchRef.current(m),
+      onStatus: (s: P2PStatus) => {
+        if (s === 'p2p') {
+          setLinkStatus('p2p');
+        } else if (s === 'closed') {
+          if (p2pRef.current === link) p2pRef.current = null;
+          setLinkStatus('relay');
+        }
+      },
+    });
+    p2pRef.current = link;
+    setLinkStatus('connecting');
+    return link;
+  };
+
+  // All server-shaped messages (from the WebSocket relay AND synthesized by
+  // the P2P link) land here. Defined fresh each render and published through
+  // dispatchRef so handlers never see stale state.
+  const handleServerMessage = (msg: WSServerMessage) => {
+    switch (msg.type) {
+      case 'room_created':
+        setRoomId(msg.roomId);
+        setPlayerIndex(msg.playerIndex);
+        playerIndexRef.current = msg.playerIndex;
+        setMode('multiplayer');
+        p2pRef.current?.close();
+        p2pRef.current = null;
+        setLinkStatus('relay');
+        break;
+
+      case 'room_joined':
+        setRoomId(msg.roomId);
+        setPlayerIndex(msg.playerIndex);
+        playerIndexRef.current = msg.playerIndex;
+        setOpponentName(msg.opponentName);
+        setOpponentId(msg.opponentId);
+        setMode('multiplayer');
+        p2pRef.current?.close();
+        p2pRef.current = null;
+        setLinkStatus('relay');
+        break;
+
+      case 'opponent_joined':
+        setOpponentName(msg.opponentName);
+        setOpponentId(msg.opponentId);
+        sound.playScore();
+        // Host offers a direct connection; gameplay stays on the relay until
+        // (unless) the DataChannels open.
+        if (p2pEnabled) {
+          createP2PLink(true)
+            .startAsHost()
+            .catch((e) => console.warn('P2P offer failed, staying on relay:', e));
+        }
+        break;
+
+      case 'rtc_signal':
+        if (!p2pRef.current && msg.payload.kind === 'offer') {
+          createP2PLink(false);
+        }
+        p2pRef.current?.handleSignal(msg.payload);
+        break;
+
+      case 'game_start':
+        setStats({
+          score: 0,
+          opponentScore: 0,
+          rallyCount: 0,
+          maxRally: 0,
+          aces: 0,
+          matchesWon: 0,
+        });
+        setTotalTouches(0);
+        setMatchStartTime(Date.now());
+        setIsPlayerServer(msg.servingPlayer === playerIndexRef.current);
+        setIsServing(true);
+        setWinner(null);
+        setLastMatchResult(null);
+        setRematchVotes([false, false]);
+        p2pRef.current?.resetMatchState(msg.servingPlayer);
+        break;
+
+      case 'opponent_paddle':
+        setOppPaddleX(msg.x);
+        break;
+
+      case 'ball_incoming': {
+        // Ball crossed the net on opponent's phone and arrived here!
+        const inc = msg.ball;
+        setBall({
+          x: inc.x,
+          y: 0.02,
+          vx: inc.vx,
+          vy: inc.vy,
+          radius: 0.022,
+          active: true,
+          speedMultiplier: inc.speedMultiplier,
+        });
+        setStats((s) => {
+          const nextRally = s.rallyCount + 1;
+          const { missions: m } = updateMissionProgress('rally', nextRally);
+          setMissions(m);
+          return { ...s, rallyCount: nextRally, maxRally: Math.max(s.maxRally, nextRally) };
+        });
+        break;
+      }
+
+      case 'score_update': {
+        const myIdx = playerIndexRef.current;
+        if (myIdx === 0) {
+          setStats((s) => ({
+            ...s,
+            score: msg.p1Score,
+            opponentScore: msg.p2Score,
+            rallyCount: 0,
+          }));
+          if (msg.p1Score >= settingsRef.current.winningScore) {
+            setWinner('player');
+            confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
+          } else if (msg.p2Score >= settingsRef.current.winningScore) {
+            setWinner('opponent');
+          } else {
+            setIsPlayerServer(msg.nextServer === 0);
+            setIsServing(true);
+          }
+        } else {
+          setStats((s) => ({
+            ...s,
+            score: msg.p2Score,
+            opponentScore: msg.p1Score,
+            rallyCount: 0,
+          }));
+          if (msg.p2Score >= settingsRef.current.winningScore) {
+            setWinner('player');
+            confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
+          } else if (msg.p1Score >= settingsRef.current.winningScore) {
+            setWinner('opponent');
+          } else {
+            setIsPlayerServer(msg.nextServer === 1);
+            setIsServing(true);
+          }
+        }
+        break;
+      }
+
+      case 'quick_chat': {
+        // Display opponent's speech bubble!
+        const chatItem: ChatMessage = {
+          id: `opp_chat_${Date.now()}`,
+          text: msg.text,
+          senderName: msg.senderName || opponentName || 'Opponent',
+          isSelf: false,
+          timestamp: Date.now(),
+        };
+        setActiveChatMessages((prev) => [...prev.slice(-3), chatItem]);
+        sound.playBallIncoming();
+        break;
+      }
+
+      case 'rematch_state':
+        setRematchVotes(msg.votes);
+        break;
+
+      case 'opponent_left':
+        setOpponentName(null);
+        setOpponentId(null);
+        setRematchVotes([false, false]);
+        p2pRef.current?.close();
+        p2pRef.current = null;
+        setLinkStatus('relay');
+        alert('Opponent disconnected from the match.');
+        break;
+
+      case 'pong':
+        setPingMs(Date.now() - msg.timestamp);
+        break;
+
+      case 'error':
+        alert(msg.message);
+        break;
+    }
+  };
+  dispatchRef.current = handleServerMessage;
+
   // WebSocket Connection Lifecycle
   const connectWebSocket = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     const socket = new WebSocket(wsUrl);
+
+    // Prefetch ICE servers so the P2P link can be created synchronously later
+    if (!rtcConfigRef.current) {
+      fetch('/api/rtc-config')
+        .then((r) => r.json())
+        .then((cfg) => {
+          if (Array.isArray(cfg?.iceServers)) rtcConfigRef.current = cfg.iceServers;
+        })
+        .catch(() => {});
+    }
 
     socket.onopen = () => {
       setIsConnected(true);
@@ -504,141 +738,7 @@ export default function App() {
     socket.onmessage = (event) => {
       try {
         const msg: WSServerMessage = JSON.parse(event.data);
-
-        switch (msg.type) {
-          case 'room_created':
-            setRoomId(msg.roomId);
-            setPlayerIndex(msg.playerIndex);
-            setMode('multiplayer');
-            break;
-
-          case 'room_joined':
-            setRoomId(msg.roomId);
-            setPlayerIndex(msg.playerIndex);
-            setOpponentName(msg.opponentName);
-            setOpponentId(msg.opponentId);
-            setMode('multiplayer');
-            break;
-
-          case 'opponent_joined':
-            setOpponentName(msg.opponentName);
-            setOpponentId(msg.opponentId);
-            sound.playScore();
-            break;
-
-          case 'game_start':
-            setStats({
-              score: 0,
-              opponentScore: 0,
-              rallyCount: 0,
-              maxRally: 0,
-              aces: 0,
-              matchesWon: 0,
-            });
-            setTotalTouches(0);
-            setMatchStartTime(Date.now());
-            setIsPlayerServer(msg.servingPlayer === playerIndex);
-            setIsServing(true);
-            setWinner(null);
-            setLastMatchResult(null);
-            setRematchVotes([false, false]);
-            break;
-
-          case 'opponent_paddle':
-            setOppPaddleX(msg.x);
-            break;
-
-          case 'ball_incoming': {
-            // Ball crossed the net on opponent's phone and arrived here!
-            const inc = msg.ball;
-            setBall({
-              x: inc.x,
-              y: 0.02,
-              vx: inc.vx,
-              vy: inc.vy,
-              radius: 0.022,
-              active: true,
-              speedMultiplier: inc.speedMultiplier,
-            });
-            setStats((s) => {
-              const nextRally = s.rallyCount + 1;
-              const { missions: m } = updateMissionProgress('rally', nextRally);
-              setMissions(m);
-              return { ...s, rallyCount: nextRally, maxRally: Math.max(s.maxRally, nextRally) };
-            });
-            break;
-          }
-
-          case 'score_update':
-            // Update scores based on playerIndex
-            if (playerIndex === 0) {
-              setStats((s) => ({
-                ...s,
-                score: msg.p1Score,
-                opponentScore: msg.p2Score,
-                rallyCount: 0,
-              }));
-              if (msg.p1Score >= settingsRef.current.winningScore) {
-                setWinner('player');
-                confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
-              } else if (msg.p2Score >= settingsRef.current.winningScore) {
-                setWinner('opponent');
-              } else {
-                setIsPlayerServer(msg.nextServer === 0);
-                setIsServing(true);
-              }
-            } else {
-              setStats((s) => ({
-                ...s,
-                score: msg.p2Score,
-                opponentScore: msg.p1Score,
-                rallyCount: 0,
-              }));
-              if (msg.p2Score >= settingsRef.current.winningScore) {
-                setWinner('player');
-                confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
-              } else if (msg.p1Score >= settingsRef.current.winningScore) {
-                setWinner('opponent');
-              } else {
-                setIsPlayerServer(msg.nextServer === 1);
-                setIsServing(true);
-              }
-            }
-            break;
-
-          case 'quick_chat': {
-            // Display opponent's speech bubble!
-            const chatItem: ChatMessage = {
-              id: `opp_chat_${Date.now()}`,
-              text: msg.text,
-              senderName: msg.senderName || opponentName || 'Opponent',
-              isSelf: false,
-              timestamp: Date.now(),
-            };
-            setActiveChatMessages((prev) => [...prev.slice(-3), chatItem]);
-            sound.playBallIncoming();
-            break;
-          }
-
-          case 'rematch_state':
-            setRematchVotes(msg.votes);
-            break;
-
-          case 'opponent_left':
-            setOpponentName(null);
-            setOpponentId(null);
-            setRematchVotes([false, false]);
-            alert('Opponent disconnected from the match.');
-            break;
-
-          case 'pong':
-            setPingMs(Date.now() - msg.timestamp);
-            break;
-
-          case 'error':
-            alert(msg.message);
-            break;
-        }
+        dispatchRef.current(msg);
       } catch (err) {
         console.error('WS parse error:', err);
       }
@@ -650,7 +750,7 @@ export default function App() {
 
     setWs(socket);
     return socket;
-  }, [playerIndex, opponentName]);
+  }, []);
 
   const handleCreateRoom = (name: string) => {
     let socket = ws;
@@ -696,6 +796,9 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
+    p2pRef.current?.close();
+    p2pRef.current = null;
+    setLinkStatus('relay');
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'leave_room' }));
       ws.close();
@@ -780,20 +883,16 @@ export default function App() {
 
           if (currentMode === 'multiplayer') {
             // Broadcast net crossing to remote player's phone
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(
-                JSON.stringify({
-                  type: 'ball_cross_net',
-                  ball: {
-                    x: b.x,
-                    vx: b.vx,
-                    vy: b.vy,
-                    spin: 0,
-                    speedMultiplier: hitResult.speed ? hitResult.speed / BASE_BALL_SPEED : 1,
-                  },
-                })
-              );
-            }
+            sendNetRef.current({
+              type: 'ball_cross_net',
+              ball: {
+                x: b.x,
+                vx: b.vx,
+                vy: b.vy,
+                spin: 0,
+                speedMultiplier: hitResult.speed ? hitResult.speed / BASE_BALL_SPEED : 1,
+              },
+            });
           } else if (currentMode === 'solo' || currentMode === 'practice') {
             // Spawn ball on unseen Opponent AI's half court
             setOppBall({
@@ -815,14 +914,10 @@ export default function App() {
           sound.playLose();
 
           if (currentMode === 'multiplayer') {
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(
-                JSON.stringify({
-                  type: 'point_scored',
-                  scorer: playerIndex === 0 ? 'p2' : 'p1',
-                })
-              );
-            }
+            sendNetRef.current({
+              type: 'point_scored',
+              scorer: playerIndexRef.current === 0 ? 'p2' : 'p1',
+            });
           } else {
             // Solo mode point for AI
             setStats((s) => {
@@ -1027,6 +1122,30 @@ export default function App() {
           active={settings.showRadar && (mode === 'solo' || mode === 'practice')}
         />
 
+        {/* Connection badge: direct P2P vs server relay (multiplayer only) */}
+        {mode === 'multiplayer' && opponentId && (
+          <div
+            id="link-status-badge"
+            className={`absolute top-14 right-2 z-30 px-2 py-0.5 rounded-full border font-mono text-[10px] tracking-wide select-none ${
+              linkStatus === 'p2p'
+                ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-300'
+                : linkStatus === 'connecting'
+                  ? 'bg-amber-500/15 border-amber-400/50 text-amber-300 animate-pulse'
+                  : 'bg-cyan-500/15 border-cyan-400/50 text-cyan-300'
+            }`}
+            title={
+              linkStatus === 'p2p'
+                ? 'Direct peer-to-peer connection'
+                : linkStatus === 'connecting'
+                  ? 'Negotiating direct connection'
+                  : 'Playing via server relay'
+            }
+          >
+            {linkStatus === 'p2p' ? 'P2P' : linkStatus === 'connecting' ? 'P2P…' : 'RELAY'}
+            {pingMs > 0 && linkStatus !== 'p2p' ? ` ${pingMs}ms` : ''}
+          </div>
+        )}
+
         {/* Main Single Half-Court View (The Half-Pong Table) */}
         <main className="flex-1 w-full h-full pt-14 relative flex items-center justify-center">
           {/* Real-time Telemetry Stats Overlay directly on court */}
@@ -1133,9 +1252,7 @@ export default function App() {
                   id="btn-play-again"
                   onClick={() => {
                     if (mode === 'multiplayer') {
-                      if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'rematch_request' }));
-                      }
+                      sendNetRef.current({ type: 'rematch_request' });
                     } else {
                       resetMatch();
                     }
@@ -1223,6 +1340,8 @@ export default function App() {
             setIsServing(true);
           }}
           onOpenTutorial={() => setIsTutorialOpen(true)}
+          p2pEnabled={p2pEnabled}
+          onToggleP2P={setP2pEnabled}
         />
 
         {/* Player Profile & Stats Modal */}
