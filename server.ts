@@ -1,8 +1,9 @@
+import crypto from 'crypto';
 import express from 'express';
+import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import { db, ALL_ACHIEVEMENTS } from './server/db';
 import { transformBallForOpponent } from './server/transform';
 import { MatchEndPayload } from './src/types';
@@ -45,6 +46,27 @@ async function startServer() {
   // Health check
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', activeRooms: rooms.size });
+  });
+
+  // ICE servers for the P2P (WebRTC) private-session mode. STUN is enough on
+  // most networks; when TURN_URL + TURN_STATIC_SECRET are set (coturn with
+  // use-auth-secret), time-limited credentials are minted per request so the
+  // shared secret never reaches clients.
+  app.get('/api/rtc-config', (req, res) => {
+    const iceServers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    ];
+
+    const turnUrl = process.env.TURN_URL;
+    const turnSecret = process.env.TURN_STATIC_SECRET;
+    if (turnUrl && turnSecret) {
+      const ttlSeconds = 6 * 60 * 60;
+      const username = `${Math.floor(Date.now() / 1000) + ttlSeconds}:phong`;
+      const credential = crypto.createHmac('sha1', turnSecret).update(username).digest('base64');
+      iceServers.push({ urls: turnUrl.split(',').map((u) => u.trim()), username, credential });
+    }
+
+    res.json({ iceServers });
   });
 
   // Room status check
@@ -338,6 +360,24 @@ async function startServer() {
               })
             );
           }
+        } else if (msg.type === 'rtc_signal' && currentRoomId && playerIndex !== null) {
+          // Pure pass-through: the server never inspects SDP or candidates,
+          // it only ferries them between the two members of the room.
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          room.lastActive = Date.now();
+
+          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const opponent = room.players[oppIdx];
+          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
+            opponent.ws.send(
+              JSON.stringify({
+                type: 'rtc_signal',
+                payload: msg.payload,
+                fromIdx: playerIndex,
+              })
+            );
+          }
         } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -402,13 +442,21 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
+    // Imported lazily so the production bundle never loads (or ships) vite
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    // The bundled server.cjs lives inside dist/ next to the client files, so
+    // prefer its own directory — this makes `node /path/to/dist/server.cjs`
+    // work from any cwd. Fall back to cwd/dist for unbundled runs.
+    const bundleDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+    const distPath = fs.existsSync(path.join(bundleDir, 'index.html'))
+      ? bundleDir
+      : path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

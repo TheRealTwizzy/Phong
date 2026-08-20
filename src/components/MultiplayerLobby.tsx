@@ -16,6 +16,8 @@ interface MultiplayerLobbyProps {
   onLeaveRoom: () => void;
   onReadyToPlay: () => void;
   onOpenTutorial?: () => void;
+  p2pEnabled?: boolean;
+  onToggleP2P?: (enabled: boolean) => void;
 }
 
 export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
@@ -28,6 +30,8 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   isConnected,
   currentUsername,
   onCreateRoom,
+  p2pEnabled = true,
+  onToggleP2P,
   onJoinRoom,
   onLeaveRoom,
   onReadyToPlay,
@@ -245,6 +249,21 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                   Start a match and share the code or QR with a friend on another device.
                 </p>
               </div>
+              {onToggleP2P && (
+                <label
+                  id="toggle-p2p"
+                  className="flex items-center justify-between gap-2 text-[11px] font-mono text-zinc-400 cursor-pointer select-none"
+                  title="Connect the two devices directly (WebRTC). Falls back to the server relay automatically if a direct link can't be established."
+                >
+                  <span>Direct connect (P2P)</span>
+                  <input
+                    type="checkbox"
+                    checked={p2pEnabled}
+                    onChange={(e) => onToggleP2P(e.target.checked)}
+                    className="accent-cyan-500 w-4 h-4"
+                  />
+                </label>
+              )}
               <button
                 id="btn-create-room"
                 onClick={handleCreate}

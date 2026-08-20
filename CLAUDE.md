@@ -17,9 +17,10 @@ This document is the working guide to **Phong**, an arcade sports web app with a
 ## 2. Tech Stack
 
 - **Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 4 (CSS-first — configured in `src/index.css`, no `tailwind.config.js`), Motion (`motion/react`), Lucide React icons, Canvas Confetti.
-- **Server**: Express 4 (`server.ts`) + **`ws`** for the WebSocket relay (no Socket.IO), Node 22. One process serves the client and the relay on one port, dev (Vite middleware) and prod (static `dist/`) alike.
+- **Server**: Express 4 (`server.ts`) + **`ws`** for the WebSocket relay (no Socket.IO), Node 22. One process serves the client and the relay on one port, dev (Vite middleware) and prod (static `dist/`) alike. Runtime dependencies are only `express` + `ws`; everything else is dev tooling.
+- **P2P mode**: private matches connect the two phones directly over **WebRTC DataChannels** (`src/net/p2p.ts`), with the relay as automatic fallback — see §5.
 - **Audio**: procedural Web Audio API synthesis in `src/audio/soundEffects.ts` — zero audio assets.
-- **Persistence**: server-side JSON store `game_database.json` in `DATA_DIR` (default `./data`), managed by `server/db.ts` with atomic tmp-and-rename writes. Client keeps a localStorage fallback for offline solo play.
+- **Persistence**: **SQLite** via Node's built-in `node:sqlite` (no native deps) at `DATA_DIR/phong.db` (default `./data`), WAL mode, managed by `server/db.ts`. A legacy `game_database.json` in `DATA_DIR` is imported once on first boot. Client keeps a localStorage fallback for offline solo play.
 
 ## 3. Normalized Coordinate & Physics Model
 
@@ -61,22 +62,27 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── CLAUDE.md                  # This guide
 ├── README.md                  # Quickstart
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
-├── DEPLOYMENT.md              # Render deploy, backups, operational notes
-├── render.yaml                # Render blueprint (service + persistent disk)
+├── DEPLOYMENT.md              # KVM/docker-compose runbook (+ Render alternative)
+├── Dockerfile                 # Multi-stage build → slim runtime (express+ws only)
+├── docker-compose.yml         # phong + caddy (auto-HTTPS) + optional coturn
+├── deploy/                    # Caddyfile, .env.example
+├── render.yaml                # Render blueprint (alternative host)
+├── scripts/load-test.mjs      # N-concurrent-matches relay load test
 ├── index.html                 # HTML entry
 ├── package.json               # npm scripts & deps (lockfile: package-lock.json)
 ├── server.ts                  # Express + ws relay + REST API + Vite middleware
 ├── tsconfig.json
 ├── vite.config.ts
 ├── server/
-│   ├── db.ts                  # JSON store: profiles, ELO, XP, achievements, history
-│   └── transform.ts           # Cross-net ball transform (unit-tested)
-├── tests/                     # Vitest: transform, physics, db invariants
+│   ├── db.ts                  # SQLite store: profiles, ELO, XP, achievements, history
+│   └── transform.ts           # Cross-net ball transform (unit-tested, shared with client)
+├── tests/                     # Vitest: transform, physics, db invariants, legacy import
 └── src/
     ├── main.tsx               # React bootstrap
     ├── App.tsx                # Game controller, loop, WS client, all state
     ├── types.ts               # Shared types incl. WSClientMessage/WSServerMessage
     ├── index.css              # Tailwind 4 entry + base styles
+    ├── net/p2p.ts             # WebRTC DataChannel link (P2P play + fallback)
     ├── audio/soundEffects.ts  # Procedural SFX, chiptune BGM, soundscapes
     ├── game/
     │   ├── physics.ts         # Ball movement, collisions, spin, AI opponent
@@ -104,6 +110,7 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 | `point_scored` | `scorer: 'p1'\|'p2'` | Report a point; server owns the score |
 | `quick_chat` | `text`, `senderName?` | Chat bubble (server caps at 100 chars) |
 | `rematch_request` | — | Vote for a rematch; two votes restart the match |
+| `rtc_signal` | `payload {kind, sdp?, candidate?}` | WebRTC signaling, relayed verbatim to the room peer |
 | `ping` | `timestamp` | Latency probe |
 | `leave_room` | — | Leave explicitly (disconnect also handled) |
 
@@ -119,12 +126,15 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 | `ball_incoming` | `ball` | Post-transform ball; receiving client takes ownership |
 | `score_update` | `p1Score`, `p2Score`, `reason`, `nextServer` | Authoritative score |
 | `rematch_state` | `votes: [bool, bool]` | Rematch votes so the UI can show "waiting" |
+| `rtc_signal` | `payload`, `fromIdx` | Relayed signaling from the room peer |
 | `quick_chat` | `text`, `senderName`, `senderIdx` | Relayed chat |
 | `opponent_left` | — | Opponent disconnected |
 | `pong` | `timestamp` | Latency reply |
 | `error` | `message` | Join failures etc. |
 
-**REST API** (same origin): `GET /api/health`, `GET /api/room/:roomId`, `GET|PUT /api/profile/:id`, `POST /api/match/record`, `GET /api/leaderboard?sort=elo|level|rally|wins`, `GET /api/achievements?playerId=`, `GET /api/matches/:playerId`.
+**REST API** (same origin): `GET /api/health`, `GET /api/rtc-config` (STUN list + time-limited TURN creds when `TURN_URL`/`TURN_STATIC_SECRET` are set), `GET /api/room/:roomId`, `GET|PUT /api/profile/:id`, `POST /api/match/record`, `GET /api/leaderboard?sort=elo|level|rally|wins`, `GET /api/achievements?playerId=`, `GET /api/matches/:playerId`.
+
+**P2P mode** (`src/net/p2p.ts`): the host offers a WebRTC session when the guest joins (lobby toggle, default on); signaling rides `rtc_signal` over the relay. Gameplay starts relayed and hands over when the DataChannels open — "fast" (unordered, no retransmit) carries `paddle_move`, "game" (reliable ordered) carries everything else. Peers exchange the same client-message shapes and each side synthesizes the server-shaped equivalents locally, replicating the room rules (score, serve rotation, rematch votes) deterministically and reusing `server/transform.ts` for the net cross. If the link never opens or dies, play continues on the relay (the HUD badge shows `P2P` / `RELAY`). Adding a gameplay message means handling it in **both** `server.ts` and `src/net/p2p.ts`.
 
 **Trust model — deliberate trade-off**: gameplay physics is client-authoritative (each client simulates its own half and reports `ball_cross_net` / `point_scored`; each phone records its own result via `/api/match/record` with `isWinner`). This keeps the local half at zero latency and is fine for friendly play, but a modified client can cheat. The server validates room membership, owns the shared score, caps chat length, and clamps the transformed ball into the court. Revisit only if public leaderboards attract abuse.
 
@@ -170,4 +180,4 @@ Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.exa
 
 ## 10. Deployment
 
-One Node service, one port, WebSockets on the same listener. The repo ships `render.yaml`: Render web service (paid **starter** plan) with a **1 GB persistent disk at `/data`** and `DATA_DIR=/data` — without persistent storage every deploy wipes profiles, ELO, and history. Health check: `/api/health`. Deploys are stop-then-start (disk-backed services can't do zero-downtime), so in-flight matches drop on deploy; clients auto-reconnect. The service is **single-instance by design** — rooms live in process memory. `SIGTERM` closes sockets (code 1001) and exits cleanly. Full runbook: `DEPLOYMENT.md`; phone testing needs HTTPS (tunnel) — see `DEVELOPMENT.md`.
+One Node service, one port, WebSockets on the same listener; **single-instance by design** (rooms live in process memory). Primary target: a **self-managed KVM** running `docker-compose.yml` — the app container (SQLite on the `phong-data` volume at `/data`), Caddy for automatic HTTPS on `phong.too-many-coins.com`, and an optional coturn TURN relay (`--profile turn`) whose time-limited credentials the app mints from `TURN_STATIC_SECRET`. `render.yaml` remains as an alternative host. Env: `PORT`, `DATA_DIR`, `TURN_URL`, `TURN_STATIC_SECRET`. `SIGTERM` closes sockets (code 1001) and exits cleanly; deploys drop in-flight matches and clients auto-reconnect. Capacity: `scripts/load-test.mjs` demonstrates 10 concurrent matches with 0% loss. Full runbook: `DEPLOYMENT.md`; phone testing needs HTTPS (tunnel) — see `DEVELOPMENT.md`.

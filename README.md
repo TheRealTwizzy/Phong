@@ -4,6 +4,8 @@ A blind half-court Pong for the web. Each player sees only their own half of the
 
 Also playable solo against an adaptive AI (Rookie → Chaos) and in a split-screen dual-court simulator on one device.
 
+Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server.
+
 ## Quick start
 
 ```bash
@@ -20,12 +22,13 @@ Open two browser windows, create a room in one (2-Phone mode), join with the cod
 | `npm start` | Run the production build (`node dist/server.cjs`) |
 | `npm run lint` | TypeScript typecheck (`tsc --noEmit`) |
 | `npm test` | Vitest unit tests (physics, net transform, database) |
+| `node scripts/load-test.mjs` | Load test: N concurrent matches against the relay |
 
-Environment variables (see `.env.example`): `PORT` (default 3000) and `DATA_DIR` (default `./data`) — the JSON game database lives there.
+Environment variables (see `.env.example`): `PORT` (default 3000), `DATA_DIR` (default `./data` — the SQLite database lives there), and optional `TURN_URL`/`TURN_STATIC_SECRET` for the P2P TURN relay.
 
 ## Deploying
 
-The repo ships a `render.yaml` blueprint for [Render](https://render.com): a single Node web service that serves the client and the WebSocket relay on one port, with a 1 GB persistent disk mounted at `/data` so profiles, ELO, and match history survive deploys. See [DEPLOYMENT.md](DEPLOYMENT.md) for the step-by-step and the operational caveats, and [DEVELOPMENT.md](DEVELOPMENT.md) for testing on real phones (HTTPS matters).
+Primary path: **your own VPS/KVM** via `docker-compose.yml` — the app, Caddy with automatic HTTPS for your domain, and an optional TURN relay, in three commands. A `render.yaml` blueprint for [Render](https://render.com) is included as an alternative. See [DEPLOYMENT.md](DEPLOYMENT.md) for the runbook (DNS, firewall, backups) and [DEVELOPMENT.md](DEVELOPMENT.md) for testing on real phones (HTTPS matters).
 
 ## How it works
 
