@@ -183,7 +183,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     icon: 'crown',
   },
   {
-    id: 'rating_1400',
+    id: 'master_tier',
     title: 'Elite Contender',
     description: 'Reach the Master tier in ranked play.',
     category: 'special',
@@ -429,6 +429,12 @@ class GameDatabase {
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_username
          ON players(username COLLATE NOCASE) WHERE initializedAt IS NOT NULL`
     );
+    // Achievement ids are persisted in each player's JSON array, so renaming
+    // one silently un-awards it — and re-awards it later, paying its XP twice.
+    // 'rating_1400' was named for the ELO threshold it used to key on; it has
+    // keyed on the Master tier since ELO was replaced.
+    this.renameAchievement('rating_1400', 'master_tier');
+
     // Backfill codes for rows created before recovery codes existed
     const missing = this.sql
       .prepare('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -437,6 +443,27 @@ class GameDatabase {
       this.sql
         .prepare('UPDATE players SET recoveryCode = ? WHERE id = ?')
         .run(this.newRecoveryCode(), row.id);
+    }
+  }
+
+  /** Rewrite a stored achievement id across every profile that holds it. */
+  private renameAchievement(from: string, to: string): void {
+    const rows = this.sql
+      .prepare(`SELECT id, achievements FROM players WHERE achievements LIKE ?`)
+      .all(`%"${from}"%`) as unknown as Array<{ id: string; achievements: string }>;
+    for (const row of rows) {
+      let list: string[];
+      try {
+        list = JSON.parse(row.achievements || '[]');
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(list) || !list.includes(from)) continue;
+      // Map then de-duplicate, in case both ids somehow ended up stored.
+      const renamed = Array.from(new Set(list.map((a) => (a === from ? to : a))));
+      this.sql
+        .prepare('UPDATE players SET achievements = ? WHERE id = ?')
+        .run(JSON.stringify(renamed), row.id);
     }
   }
 
@@ -1047,7 +1074,7 @@ class GameDatabase {
     if (profile.matchesPlayed >= 10) unlock('veteran_10');
     if (profile.level >= 5) unlock('level_5');
     if (profile.level >= 10) unlock('level_10');
-    if (isPlaced(profile.rankedGames, profile.rankSigma) && profile.rankMu >= 28) unlock('rating_1400');
+    if (isPlaced(profile.rankedGames, profile.rankSigma) && profile.rankMu >= 28) unlock('master_tier');
 
     // Daily mission progress rides the same server-verified match record, so
     // it can never be reported independently of an actual game.

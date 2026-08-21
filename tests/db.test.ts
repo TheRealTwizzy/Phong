@@ -11,9 +11,11 @@ process.env.DATA_DIR = TMP;
 
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 let db: typeof import('../server/db').db;
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+let ALL_ACHIEVEMENTS: typeof import('../server/db').ALL_ACHIEVEMENTS;
 
 beforeAll(async () => {
-  ({ db } = await import('../server/db'));
+  ({ db, ALL_ACHIEVEMENTS } = await import('../server/db'));
 });
 
 afterAll(() => {
@@ -205,5 +207,62 @@ describe('scaled achievement rewards', () => {
     const res = db.recordMatch(match('p_ach_flat', { maxRally: 12 }));
     const flat = res.newAchievements.find((a) => a.id === 'rally_10')!;
     expect(flat.awardedXp).toBe(flat.xpReward);
+  });
+});
+
+describe('renaming an achievement id', () => {
+  it('keeps the award, and does not pay it a second time', () => {
+    // Achievement ids are persisted in each player's JSON array, so a rename
+    // without a migration silently un-awards it — and then re-awards it on the
+    // next qualifying match, paying its XP twice.
+    init('p_rename', 'RenameCase');
+    const legacy = 'rating_1400';
+    const current = 'master_tier';
+
+    // Simulate a profile carrying the pre-rename id, as a live database would.
+    const profile = db.getProfile('p_rename');
+    profile.achievements.push(legacy);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).upsertProfile(profile);
+    expect(db.getProfile('p_rename').achievements).toContain(legacy);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).renameAchievement(legacy, current);
+
+    const after = db.getProfile('p_rename').achievements;
+    expect(after).toContain(current);
+    expect(after).not.toContain(legacy);
+    // The award moved, it did not duplicate.
+    expect(after.filter((a) => a === current)).toHaveLength(1);
+  });
+
+  it('is a no-op for a profile that never held the old id', () => {
+    init('p_norename', 'NoRenameCase');
+    const before = db.getProfile('p_norename').achievements.slice();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).renameAchievement('rating_1400', 'master_tier');
+    expect(db.getProfile('p_norename').achievements).toEqual(before);
+  });
+
+  it('de-duplicates if a profile somehow held both ids', () => {
+    init('p_bothids', 'BothIdsCase');
+    const profile = db.getProfile('p_bothids');
+    profile.achievements.push('rating_1400', 'master_tier');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).upsertProfile(profile);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).renameAchievement('rating_1400', 'master_tier');
+
+    const after = db.getProfile('p_bothids').achievements;
+    expect(after.filter((a) => a === 'master_tier')).toHaveLength(1);
+    expect(after).not.toContain('rating_1400');
+  });
+
+  it('leaves no reference to the retired id in the catalogue', () => {
+    expect(ALL_ACHIEVEMENTS.some((a) => a.id === 'rating_1400')).toBe(false);
+    const master = ALL_ACHIEVEMENTS.find((a) => a.id === 'master_tier');
+    expect(master).toBeTruthy();
+    // The id and the description have to agree about what it is for.
+    expect(master!.description).toMatch(/Master tier/i);
   });
 });
