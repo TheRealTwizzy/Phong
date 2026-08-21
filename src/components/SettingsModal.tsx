@@ -1,5 +1,5 @@
 import React from 'react';
-import { AIDifficulty, CourtTheme, GameMode, GameSettings, LanguageCode, PlayerProfile, SoundscapeType } from '../types';
+import { CourtTheme, GameSettings, LanguageCode, PlayerProfile, SoundscapeType } from '../types';
 import { THEMES, ThemeConfig, isThemeUnlocked } from '../game/themes';
 import { LANGUAGES, t } from '../i18n/translations';
 import { sound } from '../audio/soundEffects';
@@ -12,9 +12,7 @@ import {
   VolumeX,
   Music,
   Vibrate,
-  Shield,
   Eye,
-  Gamepad2,
   Activity,
   Globe,
   Flame,
@@ -26,13 +24,14 @@ import {
   Zap,
 } from 'lucide-react';
 
+// Device & presentation preferences only. Match settings (mode, difficulty,
+// winning score) are chosen on the main menu BEFORE a match starts, and
+// paddle width / ball speed are fixed constants — never editable here.
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   settings: GameSettings;
   onUpdateSettings: (newSettings: Partial<GameSettings>) => void;
-  currentMode: GameMode;
-  onSelectMode: (mode: GameMode) => void;
   currentTheme: ThemeConfig;
   profile?: PlayerProfile | null;
   onOpenTutorial?: () => void;
@@ -44,8 +43,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   settings,
   onUpdateSettings,
-  currentMode,
-  onSelectMode,
   currentTheme,
   profile = null,
   onOpenTutorial,
@@ -169,39 +166,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-slate-400">
               <span className="text-xs">▼</span>
             </div>
-          </div>
-        </div>
-
-        {/* Game Mode Selector */}
-        <div className="flex flex-col gap-2">
-          <label className="text-xs font-mono text-zinc-400 flex items-center gap-1.5">
-            <Gamepad2 className="w-3.5 h-3.5" />
-            {t('mode_solo', lang).toUpperCase()} & MORE
-          </label>
-          <div className="grid grid-cols-2 gap-2">
-            {[
-              { id: 'solo', labelKey: 'mode_solo', desc: '1 Screen blind half-court' },
-              { id: 'multiplayer', labelKey: 'mode_multiplayer', desc: 'Real-time two device' },
-              { id: 'split', labelKey: 'mode_split', desc: 'Side-by-side both halves' },
-              { id: 'practice', labelKey: 'mode_practice', desc: 'Reflex & angle training' },
-            ].map((m) => (
-              <button
-                key={m.id}
-                id={`mode-select-${m.id}`}
-                onClick={() => {
-                  onSelectMode(m.id as GameMode);
-                  if (m.id !== 'multiplayer') onClose();
-                }}
-                className={`p-2.5 rounded-xl border text-left flex flex-col transition active:scale-95 ${
-                  currentMode === m.id
-                    ? 'border-cyan-400 bg-cyan-950/40 text-cyan-200 font-bold'
-                    : 'border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/60 text-zinc-400'
-                }`}
-              >
-                <span className="text-xs font-mono">{t(m.labelKey, lang)}</span>
-                <span className="text-[10px] text-zinc-500 font-sans">{m.desc}</span>
-              </button>
-            ))}
           </div>
         </div>
 
@@ -520,92 +484,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               );
             })}
-          </div>
-        </div>
-
-        {/* AI Difficulty */}
-        <div className="flex flex-col gap-2">
-          <label className="text-xs font-mono text-zinc-400 flex items-center gap-1.5">
-            <Shield className="w-3.5 h-3.5" />
-            {t('ai_difficulty', lang)}
-          </label>
-          <div className="grid grid-cols-4 gap-1.5">
-            {(['rookie', 'pro', 'cyber', 'chaos'] as AIDifficulty[]).map((diff) => (
-              <button
-                key={diff}
-                id={`diff-btn-${diff}`}
-                onClick={() => onUpdateSettings({ difficulty: diff })}
-                className={`py-1.5 px-2 rounded-xl border text-xs font-mono capitalize transition ${
-                  settings.difficulty === diff
-                    ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                    : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800'
-                }`}
-              >
-                {diff}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Physics Controls: Ball Speed, Paddle Size, Winning Score */}
-        <div className="flex flex-col gap-3 p-3.5 rounded-2xl bg-zinc-900/50 border border-zinc-800">
-          <div>
-            <div className="flex justify-between text-xs font-mono mb-1">
-              <span className="text-zinc-400">{t('ball_speed', lang)}</span>
-              <span className="text-cyan-400 font-bold">{settings.ballSpeedFactor.toFixed(1)}x</span>
-            </div>
-            <input
-              id="slider-ball-speed"
-              type="range"
-              min="0.8"
-              max="1.6"
-              step="0.1"
-              value={settings.ballSpeedFactor}
-              onChange={(e) => onUpdateSettings({ ballSpeedFactor: parseFloat(e.target.value) })}
-              className="w-full accent-cyan-400 h-1.5 rounded-lg bg-zinc-700"
-            />
-          </div>
-
-          <div>
-            <div className="flex justify-between text-xs font-mono mb-1">
-              <span className="text-zinc-400">{t('paddle_width', lang)}</span>
-              <span className="text-cyan-400 font-bold">
-                {Math.round(settings.paddleWidthRatio * 100)}%
-              </span>
-            </div>
-            <input
-              id="slider-paddle-width"
-              type="range"
-              min="0.15"
-              max="0.35"
-              step="0.02"
-              value={settings.paddleWidthRatio}
-              onChange={(e) => onUpdateSettings({ paddleWidthRatio: parseFloat(e.target.value) })}
-              className="w-full accent-cyan-400 h-1.5 rounded-lg bg-zinc-700"
-            />
-          </div>
-
-          <div>
-            <div className="flex justify-between text-xs font-mono mb-1">
-              <span className="text-zinc-400">{t('winning_score', lang)}</span>
-              <span className="text-cyan-400 font-bold">{settings.winningScore} {t('points_to_win', lang)}</span>
-            </div>
-            <div className="grid grid-cols-4 gap-1.5 mt-1">
-              {[3, 5, 10, 15].map((pts) => (
-                <button
-                  key={pts}
-                  id={`pts-btn-${pts}`}
-                  onClick={() => onUpdateSettings({ winningScore: pts })}
-                  className={`py-1 rounded-xl text-xs font-mono border transition ${
-                    settings.winningScore === pts
-                      ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                      : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
-                  }`}
-                >
-                  {pts} pts
-                </button>
-              ))}
-            </div>
           </div>
         </div>
 
