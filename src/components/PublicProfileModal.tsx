@@ -3,6 +3,7 @@ import { LanguageCode, PublicProfile } from '../types';
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
+import { TierBadge } from './TierBadge';
 import { X, Trophy, Flame, Activity, Target, Award, Bot, Loader2 } from 'lucide-react';
 
 // World-readable profile card — opens when any username is tapped anywhere
@@ -122,8 +123,11 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
                     </span>
                   )}
                 </div>
-                <span className="text-[11px] font-mono" style={{ color: theme.accentColor }}>
-                  {profile.rankTitle} · LV{profile.level}
+                <span className="flex items-center gap-1.5 mt-0.5">
+                  <TierBadge tier={profile.tier} language={language} />
+                  <span className="text-[11px] font-mono" style={{ color: theme.accentColor }}>
+                    LV{profile.level}
+                  </span>
                 </span>
                 <span className="text-[10px] font-mono text-zinc-500">
                   {t('member_since', language)} {memberSince}
@@ -135,9 +139,11 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
             <div className="grid grid-cols-3 gap-2">
               <div className="p-2.5 rounded-2xl bg-zinc-900/70 border border-zinc-800 text-center">
                 <div className="text-base font-black font-mono text-cyan-300">
-                  {profile.eloRating}
+                  {profile.rankedGames}
                 </div>
-                <div className="text-[9px] font-mono text-zinc-500 uppercase">ELO</div>
+                <div className="text-[9px] font-mono text-zinc-500 uppercase">
+                  {t('ranked_games', language)}
+                </div>
               </div>
               <div className="p-2.5 rounded-2xl bg-zinc-900/70 border border-zinc-800 text-center">
                 <div className="text-base font-black font-mono text-emerald-300">{winRate}%</div>

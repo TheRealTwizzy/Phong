@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import type { MatchEndPayload } from '../src/types';
+import { levelFromXp } from '../src/rating';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-db-test-'));
@@ -48,7 +49,7 @@ describe('GameDatabase', () => {
     const p = db.getProfile('p_new');
     expect(p.initialized).toBe(false);
     expect(p.username.startsWith('Paddle-')).toBe(true);
-    expect(p.eloRating).toBe(1200);
+    expect(p.tier).toBe('unranked');
     expect(p.level).toBe(1);
   });
 
@@ -68,15 +69,47 @@ describe('GameDatabase', () => {
     expect(() => db.recordMatch(match('p_uninit'))).toThrow('PROFILE_NOT_INITIALIZED');
   });
 
-  it('applies +24 ELO for a multiplayer win and -16 for a loss', () => {
-    const before = init('p_elo', 'EloCase').eloRating;
+  it('moves the ranked rating on a PvP win and back down on a loss', () => {
+    const before = init('p_elo', 'EloCase').rankMu;
     const win = db.recordMatch(match('p_elo'));
-    expect(win.eloDelta).toBe(24);
-    expect(win.profile.eloRating).toBe(before + 24);
+    expect(win.profile.rankMu).toBeGreaterThan(before);
+    expect(win.profile.rankedGames).toBe(1);
 
+    const peak = win.profile.rankMu;
     const loss = db.recordMatch(match('p_elo', { isWinner: false, playerScore: 2, opponentScore: 7 }));
-    expect(loss.eloDelta).toBe(-16);
-    expect(loss.profile.eloRating).toBe(before + 24 - 16);
+    expect(loss.profile.rankMu).toBeLessThan(peak);
+    expect(loss.profile.rankedGames).toBe(2);
+  });
+
+  it('solo results move hidden MMR but NEVER the ranked rating or tier', () => {
+    const p = init('p_solo_only', 'SoloOnly');
+    const beforeRank = p.rankMu;
+    const beforeMmr = p.mmrMu;
+    for (let i = 0; i < 6; i++) {
+      db.recordMatch(match('p_solo_only', { mode: 'solo', difficulty: 'cyber' }));
+    }
+    const after = db.getProfile('p_solo_only');
+    expect(after.mmrMu).not.toBe(beforeMmr);
+    expect(after.rankMu).toBe(beforeRank);
+    expect(after.rankedGames).toBe(0);
+    expect(after.tier).toBe('unranked');
+  });
+
+  it('awards more XP for beating a hard AI than an easy one', () => {
+    init('p_xp_hard', 'XpHard');
+    init('p_xp_easy', 'XpEasy');
+    const hard = db.recordMatch(match('p_xp_hard', { mode: 'solo', difficulty: 'cyber' }));
+    const easy = db.recordMatch(match('p_xp_easy', { mode: 'solo', difficulty: 'rookie' }));
+    expect(hard.earnedXp).toBeGreaterThan(easy.earnedXp);
+  });
+
+  it('never subtracts XP, even on a heavy loss', () => {
+    const before = init('p_xp_loss', 'XpLoss').xp;
+    const res = db.recordMatch(
+      match('p_xp_loss', { mode: 'solo', difficulty: 'rookie', isWinner: false, playerScore: 0 })
+    );
+    expect(res.earnedXp).toBeGreaterThan(0);
+    expect(res.profile.xp).toBeGreaterThanOrEqual(before);
   });
 
   it('records matches under the profile username, ignoring the payload name', () => {
@@ -86,12 +119,14 @@ describe('GameDatabase', () => {
     expect(hist[0].player1Name).toBe('RealName');
   });
 
-  it('never lets ELO fall below the 800 floor', () => {
+  it('keeps uncertainty above the floor after a long losing streak', () => {
     init('p_floor', 'FloorCase');
     for (let i = 0; i < 40; i++) {
       db.recordMatch(match('p_floor', { isWinner: false, playerScore: 0, maxRally: 1 }));
     }
-    expect(db.getProfile('p_floor').eloRating).toBe(800);
+    const p = db.getProfile('p_floor');
+    expect(p.rankSigma).toBeGreaterThanOrEqual(0.6);
+    expect(p.rankMu).toBeLessThan(25);
   });
 
   it('unlocks first_win and multiplayer_champ on a first multiplayer win', () => {
@@ -115,29 +150,22 @@ describe('GameDatabase', () => {
     expect(p.matchesWon).toBe(25);
   });
 
-  it('re-derives level when achievement XP crosses a threshold', () => {
-    // A first multiplayer win grants enough achievement XP (first_serve +
-    // first_win + multiplayer_champ + rally_10 = 580) to level immediately.
+  it('re-derives level from the shared curve after achievement XP lands', () => {
     init('p_lvl', 'LevelCase');
     const res = db.recordMatch(match('p_lvl'));
-    const expected = ((xp: number) => {
-      let level = 1;
-      let next = 120;
-      while (xp >= next) {
-        level++;
-        next = Math.round(120 * Math.pow(level, 1.6));
-      }
-      return level;
-    })(res.profile.xp);
-    expect(res.profile.level).toBe(expected);
+    expect(res.profile.level).toBe(levelFromXp(res.profile.xp).level);
+    expect(res.profile.xpNext).toBe(levelFromXp(res.profile.xp).xpNext);
   });
 
-  it('sorts the leaderboard by ELO descending', () => {
+  it('sorts the leaderboard with placed players first', () => {
     const rows = db.getLeaderboard('elo', 50);
-    for (let i = 1; i < rows.length; i++) {
-      expect(rows[i - 1].eloRating).toBeGreaterThanOrEqual(rows[i].eloRating);
-    }
     expect(rows.length).toBeGreaterThan(0);
+    const placedFlags = rows.map((r) => r.tier !== 'unranked');
+    // Once an unranked row appears, no placed row may follow it.
+    const firstUnranked = placedFlags.indexOf(false);
+    if (firstUnranked >= 0) {
+      expect(placedFlags.slice(firstUnranked).every((p) => !p)).toBe(true);
+    }
   });
 
   it('records match history newest-first', () => {

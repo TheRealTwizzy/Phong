@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LeaderboardEntry } from '../types';
 import { AvatarImage } from './AvatarImage';
+import { TierBadge } from './TierBadge';
 import { X, Trophy, Crown, Medal, RefreshCw } from 'lucide-react';
 
 interface Props {
@@ -122,7 +123,7 @@ export const LeaderboardModal: React.FC<Props> = ({
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                ELO Rating
+                Skill Tier
               </button>
               <button
                 id="filter-leaderboard-level"
@@ -236,9 +237,11 @@ export const LeaderboardModal: React.FC<Props> = ({
 
                     <div className="text-right">
                       {category === 'elo' && (
-                        <div>
-                          <div className="text-sm font-black text-amber-400">{entry.eloRating}</div>
-                          <div className="text-[10px] text-slate-400 uppercase font-medium">Rating</div>
+                        <div className="flex flex-col items-end gap-0.5">
+                          <TierBadge tier={entry.tier} />
+                          <div className="text-[10px] text-slate-400 uppercase font-medium">
+                            {entry.rankedGames} ranked
+                          </div>
                         </div>
                       )}
                       {category === 'level' && (

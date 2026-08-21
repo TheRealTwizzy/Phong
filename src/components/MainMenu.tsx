@@ -3,6 +3,8 @@ import { AIDifficulty, GameMode, GameSettings, PlayerProfile, PlayerStatus } fro
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
+import { TierBadge } from './TierBadge';
+import { AI_RATINGS, winProbability, recommendedDifficulty } from '../rating';
 import {
   Bot,
   Dumbbell,
@@ -95,6 +97,11 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     else if (expandedMode === 'split') onStartSplit();
   };
 
+  // Hidden MMR drives every prediction on this screen (solo play moves it,
+  // even though it can never move the visible tier).
+  const myRating = { mu: profile?.mmrMu ?? 25, sigma: profile?.mmrSigma ?? 25 / 3 };
+  const bestDifficulty = recommendedDifficulty(myRating);
+
   const navButtons: { id: string; icon: React.ReactNode; labelKey: string; onClick: () => void; badge?: number }[] = [
     { id: 'missions', icon: <Target className="w-4 h-4 text-cyan-400" />, labelKey: 'daily_missions', onClick: onOpenMissions, badge: unclaimedMissionsCount },
     { id: 'leaderboard', icon: <Trophy className="w-4 h-4 text-amber-400" />, labelKey: 'leaderboard', onClick: onOpenLeaderboard },
@@ -154,7 +161,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               </span>
             </div>
             <div className="flex items-center gap-1.5 mt-0.5 text-[9px] font-mono text-cyan-300/80">
-              <span>{profile?.eloRating || 1200} ELO</span>
+              <TierBadge tier={profile?.tier || 'unranked'} language={lang} />
               <span className="inline-flex items-center gap-0.5 px-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">
                 <Flame className="w-2.5 h-2.5 text-amber-400 fill-amber-400" />
                 {profile?.dailyStreak || 1}d
@@ -229,22 +236,50 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                         <label className="text-[10px] font-mono text-zinc-400 flex items-center gap-1">
                           <Shield className="w-3 h-3" />
                           {t('ai_difficulty', lang)}
+                          <span className="ml-auto text-[9px] text-zinc-500 normal-case">
+                            {t('win_chance', lang)}
+                          </span>
                         </label>
                         <div className="grid grid-cols-4 gap-1.5">
-                          {(['rookie', 'pro', 'cyber', 'chaos'] as AIDifficulty[]).map((diff) => (
-                            <button
-                              key={diff}
-                              id={`menu-diff-${diff}`}
-                              onClick={() => onUpdateSettings({ difficulty: diff })}
-                              className={`py-1.5 px-1 rounded-lg border text-[10px] font-mono capitalize transition ${
-                                settings.difficulty === diff
-                                  ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                                  : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800'
-                              }`}
-                            >
-                              {diff}
-                            </button>
-                          ))}
+                          {(['rookie', 'pro', 'cyber', 'chaos'] as AIDifficulty[]).map((diff) => {
+                            // Pre-match prediction from hidden MMR vs this AI
+                            // anchor — the same number that scales match XP.
+                            const chance = Math.round(winProbability(myRating, AI_RATINGS[diff]) * 100);
+                            return (
+                              <button
+                                key={diff}
+                                id={`menu-diff-${diff}`}
+                                onClick={() => onUpdateSettings({ difficulty: diff })}
+                                className={`relative py-1.5 px-1 rounded-lg border text-[10px] font-mono capitalize transition flex flex-col items-center gap-0.5 ${
+                                  settings.difficulty === diff
+                                    ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
+                                    : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800'
+                                }`}
+                              >
+                                <span>{diff}</span>
+                                <span
+                                  id={`menu-diff-${diff}-odds`}
+                                  className={`text-[9px] font-bold ${
+                                    chance >= 60
+                                      ? 'text-emerald-400'
+                                      : chance >= 40
+                                        ? 'text-amber-400'
+                                        : 'text-rose-400'
+                                  }`}
+                                >
+                                  {chance}%
+                                </span>
+                                {diff === bestDifficulty && (
+                                  <span
+                                    id="menu-diff-balanced"
+                                    className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-[7px] font-black tracking-wider px-1 rounded bg-cyan-400 text-slate-950"
+                                  >
+                                    {t('balanced', lang)}
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     )}

@@ -52,6 +52,7 @@ import { TutorialModal } from './components/TutorialModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { PublicProfileModal } from './components/PublicProfileModal';
 import { isLinkableId } from './profileRules';
+import { TierBadge } from './components/TierBadge';
 import confetti from 'canvas-confetti';
 import { Trophy, RefreshCw, Home } from 'lucide-react';
 
@@ -110,6 +111,9 @@ export default function App() {
   // Any tapped username opens this player's public profile (z-[60], above
   // whichever modal spawned it). null = closed.
   const [publicProfileId, setPublicProfileId] = useState<string | null>(null);
+  // Server-computed odds for the current PvP match (never exposes the
+  // opponent's hidden rating to this client).
+  const [matchPrediction, setMatchPrediction] = useState<number | null>(null);
 
   // Quick Chat State
   const [activeChatMessages, setActiveChatMessages] = useState<ChatMessage[]>([]);
@@ -301,6 +305,9 @@ export default function App() {
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
           isWinner,
+          // Lets the server cross-check this PvP result against the room
+          // state it owns instead of trusting the numbers above.
+          roomId: modeRef.current === 'multiplayer' ? roomId || undefined : undefined,
         };
 
         const res = await fetch('/api/match/record', {
@@ -327,7 +334,7 @@ export default function App() {
         console.error('Failed to record match on server:', e);
       }
     },
-    [playerId, opponentId, opponentName]
+    [playerId, opponentId, opponentName, roomId]
   );
 
   // Trigger match completion on winner change
@@ -726,11 +733,16 @@ export default function App() {
         break;
       }
 
+      case 'match_prediction':
+        setMatchPrediction(msg.winProbability);
+        break;
+
       case 'rematch_state':
         setRematchVotes(msg.votes);
         break;
 
       case 'opponent_left':
+        setMatchPrediction(null);
         setOpponentName(null);
         setOpponentId(null);
         setRematchVotes([false, false]);
@@ -1354,10 +1366,23 @@ export default function App() {
                   </div>
                   <div className="w-px h-8 bg-slate-800" />
                   <div>
-                    <div className={`font-bold text-sm ${lastMatchResult.eloDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {lastMatchResult.eloDelta >= 0 ? `+${lastMatchResult.eloDelta}` : lastMatchResult.eloDelta} ELO
-                    </div>
-                    <div className="text-[10px] text-slate-400 uppercase">{t('elo_rating', currentLanguage)}</div>
+                    {lastMatchResult.tier ? (
+                      <>
+                        <TierBadge tier={lastMatchResult.tier} language={currentLanguage} size="md" />
+                        <div className="text-[10px] text-slate-400 uppercase mt-0.5">
+                          {lastMatchResult.tierChanged ? t('rank_updated', currentLanguage) : t('skill_tier', currentLanguage)}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="font-bold text-sm text-cyan-300">
+                          {Math.round(lastMatchResult.winProbability * 100)}%
+                        </div>
+                        <div className="text-[10px] text-slate-400 uppercase">
+                          {t('predicted_odds', currentLanguage)}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               )}
@@ -1454,6 +1479,7 @@ export default function App() {
           onLeaveRoom={handleLeaveRoom}
           opponentId={opponentId}
           onViewProfile={openPublicProfile}
+          winProbability={matchPrediction}
           language={currentLanguage}
           onReadyToPlay={() => {
             setIsMultiplayerOpen(false);
