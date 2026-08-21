@@ -30,7 +30,7 @@ function writeQueue(items: Queued[]): void {
   }
 }
 
-/** One attempt. Returns the result, or null if the server refused it. */
+/** One attempt. Throws with a classification the caller can act on. */
 async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null> {
   const res = await fetch('/api/match/record', {
     method: 'POST',
@@ -38,7 +38,23 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    // 4xx is a verdict, not a hiccup: replaying it will fail identically.
+    let code = '';
+    try {
+      code = (await res.json())?.error || '';
+    } catch {
+      /* no body to read */
+    }
+    // The server does not recognise this device. That is not the player's
+    // fault and not a hiccup: the device cookie is signed with a secret held
+    // in the database, so a reset or a deploy that loses the data volume
+    // rotates it and every existing cookie stops verifying. The middleware
+    // then quietly mints a NEW device id, whose profile has no username — so
+    // every match 403s while the UI still shows the old cached profile. The
+    // caller has to re-sync and re-onboard; the match is kept meanwhile.
+    if (res.status === 403 && code === 'PROFILE_NOT_INITIALIZED') {
+      throw Object.assign(new Error(code), { unidentified: true });
+    }
+    // Any other 4xx is a verdict, not a hiccup: replaying it fails identically.
     const permanent = res.status >= 400 && res.status < 500;
     throw Object.assign(new Error(`record failed: ${res.status}`), { permanent });
   }
@@ -48,24 +64,48 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Record a finished match. Retries once on a transient failure, and queues the
- * payload for replay if it still doesn't land. Returns null when the result
- * could not be recorded now — the caller should tell the player.
+ * Deliberately a flat interface rather than a discriminated union: this repo
+ * compiles with strictNullChecks off, under which TypeScript cannot narrow a
+ * union by its tag, so `outcome.reason` would not type-check after `if
+ * (!outcome.ok)`.
  */
-export async function postMatchRecord(payload: MatchEndPayload): Promise<MatchEndResult | null> {
+export interface RecordOutcome {
+  ok: boolean;
+  /** Present when ok. */
+  result?: MatchEndResult;
+  /**
+   * Why it did not land:
+   *  - 'queued'       parked on the device; it will be replayed
+   *  - 'unidentified' the server doesn't know this device; re-onboard needed
+   *  - 'rejected'     refused outright; replaying would fail identically
+   */
+  reason?: 'queued' | 'unidentified' | 'rejected';
+}
+
+/**
+ * Record a finished match. Retries once on a transient failure, and queues the
+ * payload for replay if it still doesn't land.
+ */
+export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordOutcome> {
   for (let tryIndex = 0; tryIndex < 2; tryIndex++) {
     try {
-      return await attempt(payload);
+      const result = await attempt(payload);
+      if (result) return { ok: true, result };
     } catch (e: any) {
+      if (e?.unidentified) {
+        // Keep the match: once the player re-onboards it can still be paid.
+        writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
+        return { ok: false, reason: 'unidentified' };
+      }
       if (e?.permanent) {
         console.error('Match rejected by the server:', e.message);
-        return null; // queueing a rejected payload would just fail forever
+        return { ok: false, reason: 'rejected' };
       }
       if (tryIndex === 0) await sleep(RETRY_DELAY_MS);
     }
   }
   writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
-  return null;
+  return { ok: false, reason: 'queued' };
 }
 
 /**
@@ -83,6 +123,7 @@ export async function flushPendingMatches(): Promise<number> {
       await attempt(item.payload);
       recovered++;
     } catch (e: any) {
+      // Keep anything that might still land; drop only outright refusals.
       if (!e?.permanent) stillPending.push(item);
     }
   }

@@ -30,6 +30,7 @@ import {
   PVP_UPDATE,
   PLACEMENT_GAMES,
   surpriseMultiplier,
+  normalizeDifficulty,
   practiceXp,
   PRACTICE_XP_DAILY_CAP,
 } from '../src/rating';
@@ -63,6 +64,12 @@ const DB_FILE = path.join(DATA_DIR, 'phong.db');
 // relaunched with 0 players, so the first boot on an old database drops all
 // player data (including auth_secret, which retires every old device cookie).
 const WIPE_V1_KEY = 'wipe_v1';
+// A second one-shot reset, for the release that retires the Chaos difficulty
+// and lowers the AI ceiling: every stored rating was earned against a ladder
+// that no longer exists. Like wipe_v1 this also clears `meta`, which rotates
+// auth_secret and therefore retires every existing device cookie — see the
+// note on PROFILE_NOT_INITIALIZED in server.ts for how clients recover.
+const WIPE_V2_KEY = 'wipe_v2';
 
 // Result of any operation that (re)names a profile. Optional fields rather
 // than a discriminated union — strictNullChecks is off in this repo, so
@@ -128,7 +135,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'cyber_slayer',
     title: 'Cyber Slayer',
-    description: 'Defeat the Cyber or Chaos difficulty AI in Solo mode.',
+    description: 'Defeat the Cyber difficulty AI in Solo mode.',
     category: 'mastery',
     xpReward: 400,
     scaled: true,
@@ -368,13 +375,20 @@ class GameDatabase {
   // issued device cookie fails verification and each device re-onboards as
   // a brand-new player. New databases just get the flag stamped.
   private applyWipeV1(): void {
-    if (this.getMeta(WIPE_V1_KEY)) return;
+    this.applyWipe(WIPE_V1_KEY, 'wipe_v1: cleared all player data for the fresh launch (0 players)');
+    this.applyWipe(WIPE_V2_KEY, 'wipe_v2: cleared all player data for the rebalanced AI ladder (0 players)');
+  }
+
+  private applyWipe(key: string, message: string): void {
+    if (this.getMeta(key)) return;
     const hadPlayers = this.playerCount() > 0;
     this.sql.exec('BEGIN');
     try {
       this.sql.exec('DROP TABLE IF EXISTS players');
       this.sql.exec('DROP TABLE IF EXISTS matches');
       this.sql.exec('DROP TABLE IF EXISTS avatars');
+      this.sql.exec('DROP TABLE IF EXISTS daily_missions');
+      this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -382,10 +396,10 @@ class GameDatabase {
       throw e;
     }
     this.ensureBaseSchema();
+    // Every wipe flag is re-stamped: a later one must not re-run an earlier.
     this.setMeta(WIPE_V1_KEY, new Date().toISOString());
-    if (hadPlayers) {
-      console.log('wipe_v1: cleared all player data for the fresh launch (0 players)');
-    }
+    this.setMeta(key, new Date().toISOString());
+    if (hadPlayers) console.log(message);
   }
 
   // Additive schema changes for databases created by earlier builds. After
@@ -920,12 +934,14 @@ class GameDatabase {
     // rating decides both how much the rating moves and how much XP is paid,
     // so difficulty scaling is implicit — there is no per-difficulty table.
     const isPvp = payload.mode === 'multiplayer';
+    // A client on an older bundle can still name a retired difficulty.
+    const difficulty = normalizeDifficulty(payload.difficulty);
     const myMmr: Rating = { mu: profile.mmrMu, sigma: profile.mmrSigma };
     const oppRating: Rating = isPvp
       ? opponentRating || { mu: profile.mmrMu, sigma: profile.mmrSigma }
       // The AI slides part-way toward the player's own rating, so the anchor
       // to rate against is the strength they actually faced, not the label.
-      : aiRating(payload.difficulty || 'pro', profile.mmrMu);
+      : aiRating(difficulty, profile.mmrMu);
     const winProb = winProbability(myMmr, oppRating);
 
     // 2. Experience — always positive, never subtracted: levels can't regress.
@@ -958,7 +974,7 @@ class GameDatabase {
       // difficulty converges on that difficulty and stops. Deliberately the
       // BASE anchor, not the adapted one — capping at a target that rises with
       // the player would be circular and let solo lift mu without limit.
-      cap: AI_RATINGS[payload.difficulty || 'pro'].mu,
+      cap: AI_RATINGS[difficulty].mu,
     };
     if (ranked) {
       const nextMmr = updateRating(
@@ -1026,7 +1042,7 @@ class GameDatabase {
     if (payload.maxRally >= 50) unlock('rally_50');
     if (isWin) unlock('first_win');
     if (isWin && payload.opponentScore === 0 && payload.playerScore >= 5) unlock('shutout');
-    if (isWin && (payload.difficulty === 'cyber' || payload.difficulty === 'chaos')) unlock('cyber_slayer');
+    if (isWin && difficulty === 'cyber') unlock('cyber_slayer');
     if (isWin && payload.mode === 'multiplayer') unlock('multiplayer_champ');
     if (profile.matchesPlayed >= 10) unlock('veteran_10');
     if (profile.level >= 5) unlock('level_5');
@@ -1047,15 +1063,15 @@ class GameDatabase {
       id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       player1Id: payload.playerId,
       player1Name: profile.username,
-      player2Id: payload.opponentId || (payload.mode === 'solo' ? `AI-${payload.difficulty || 'Pro'}` : 'Player 2'),
-      player2Name: payload.opponentName || (payload.mode === 'solo' ? `AI (${payload.difficulty || 'Pro'})` : 'Opponent'),
+      player2Id: payload.opponentId || (payload.mode === 'solo' ? `AI-${difficulty}` : 'Player 2'),
+      player2Name: payload.opponentName || (payload.mode === 'solo' ? `AI (${difficulty})` : 'Opponent'),
       winnerId: isWin ? payload.playerId : (payload.opponentId || 'opponent'),
       winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
       scoreP1: payload.playerScore,
       scoreP2: payload.opponentScore,
       maxRally: payload.maxRally,
       mode: payload.mode,
-      difficulty: payload.difficulty,
+      difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
       timestamp: new Date().toISOString(),
     };
 

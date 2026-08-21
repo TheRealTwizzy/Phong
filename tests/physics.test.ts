@@ -7,7 +7,14 @@ import {
   PADDLE_Y,
   OpponentAI,
   checkPaddleCollision,
+  aiServeAim,
+  aiServeDelay,
+  playerPressure,
+  AI_SERVE_DELAY_MIN,
+  AI_SERVE_DELAY_MAX,
+  MAX_AI_COMPETENCE,
 } from '../src/game/physics';
+import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
 const ballAt = (x: number, overrides: Partial<BallState> = {}): BallState => ({
   x,
@@ -129,23 +136,22 @@ function returnRate(difficulty: AIDifficulty, playerMu = 25, n = 240): number {
   return returned / total;
 }
 
-const LADDER: AIDifficulty[] = ['rookie', 'pro', 'chaos', 'cyber'];
+const LADDER: AIDifficulty[] = ['rookie', 'pro', 'cyber'];
 
 describe('OpponentAI is beatable at every difficulty', () => {
   it('never returns every ball, not even at the top of the ladder', () => {
     for (const difficulty of LADDER) {
       const rate = returnRate(difficulty);
-      // Headroom for a player to actually score. Cyber sits near the ceiling
-      // by design, but a perfect wall is not a difficulty setting.
-      expect(rate).toBeLessThan(0.95);
+      // Headroom for a player to actually score. Cyber sits at the ceiling by
+      // design, but a perfect wall is not a difficulty setting.
+      expect(rate).toBeLessThan(0.88);
     }
   });
 
   it('lets an average player score against the hardest AI', () => {
     // Nothing subtler than this is worth asserting: the shipped bug was that
     // this number was exactly zero.
-    expect(returnRate('cyber')).toBeLessThan(0.95);
-    expect(returnRate('chaos')).toBeLessThan(0.95);
+    expect(returnRate('cyber')).toBeLessThan(0.88);
   });
 
   it('orders the ladder: harder difficulties return more balls', () => {
@@ -166,7 +172,119 @@ describe('OpponentAI is beatable at every difficulty', () => {
       const vsWeak = returnRate(difficulty, 15);
       const vsStrong = returnRate(difficulty, 40);
       expect(vsStrong).toBeGreaterThan(vsWeak);
-      expect(vsStrong).toBeLessThan(0.97);
+      // The ceiling holds no matter how good the player gets. This is what
+      // "lower the ceiling, not the floor" means in one assertion.
+      expect(vsStrong).toBeLessThan(0.9);
     }
+  });
+});
+
+describe('AI serving', () => {
+  it('waits between 0.6s and 1.15s, always', () => {
+    for (const c of [0.05, 0.2, 0.4, 0.66, 1]) {
+      for (const pressure of [0, 0.5, 1]) {
+        for (let i = 0; i < 60; i++) {
+          const d = aiServeDelay(c, pressure);
+          expect(d).toBeGreaterThanOrEqual(AI_SERVE_DELAY_MIN);
+          expect(d).toBeLessThanOrEqual(AI_SERVE_DELAY_MAX);
+        }
+      }
+    }
+  });
+
+  it('serves quicker the better it is', () => {
+    const mean = (c: number) => {
+      let total = 0;
+      for (let i = 0; i < 400; i++) total += aiServeDelay(c, 0.5);
+      return total / 400;
+    };
+    expect(mean(MAX_AI_COMPETENCE)).toBeLessThan(mean(0.1));
+  });
+
+  it('bears down while the player is winning', () => {
+    const mean = (pressure: number) => {
+      let total = 0;
+      for (let i = 0; i < 400; i++) total += aiServeDelay(0.4, pressure);
+      return total / 400;
+    };
+    expect(mean(1)).toBeLessThan(mean(0));
+  });
+
+  it('reads pressure from the score and the rally, not just the score', () => {
+    expect(playerPressure({ playerScore: 4, opponentScore: 0, maxRally: 6 })).toBeGreaterThan(
+      playerPressure({ playerScore: 0, opponentScore: 4, maxRally: 6 })
+    );
+    // Losing but hanging on in long rallies still reads as competing.
+    expect(playerPressure({ playerScore: 1, opponentScore: 3, maxRally: 20 })).toBeGreaterThan(
+      playerPressure({ playerScore: 1, opponentScore: 3, maxRally: 1 })
+    );
+    for (const s of [
+      { playerScore: 0, opponentScore: 0, maxRally: 0 },
+      { playerScore: 9, opponentScore: 0, maxRally: 99 },
+      { playerScore: 0, opponentScore: 9, maxRally: 0 },
+    ]) {
+      const p = playerPressure(s);
+      expect(p).toBeGreaterThanOrEqual(0);
+      expect(p).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('serves away from where the player is standing', () => {
+    // The cross-net transform mirrors x, so a serve aimed away from the
+    // player in the AI's own half must arrive away from them in the player's.
+    const sample = (playerX: number) => {
+      let total = 0;
+      for (let i = 0; i < 500; i++) total += aiServeAim(MAX_AI_COMPETENCE, playerX).angle;
+      return total / 500;
+    };
+    // Player hugging the left: seen from the AI they are on the right, so the
+    // AI plays left — and the mirror lands it on the player's right.
+    expect(sample(0.1)).toBeLessThan(0);
+    expect(sample(0.9)).toBeGreaterThan(0);
+  });
+
+  it('commits harder and hits harder the better it is', () => {
+    const commitment = (c: number) => {
+      let total = 0;
+      for (let i = 0; i < 600; i++) total += Math.abs(aiServeAim(c, 0.1).angle);
+      return total / 600;
+    };
+    const power = (c: number) => {
+      let total = 0;
+      for (let i = 0; i < 600; i++) total += aiServeAim(c, 0.5).power;
+      return total / 600;
+    };
+    expect(commitment(MAX_AI_COMPETENCE)).toBeGreaterThan(commitment(0.08));
+    expect(power(MAX_AI_COMPETENCE)).toBeGreaterThan(power(0.08));
+  });
+
+  it('never produces an aim the serve engine would reject', () => {
+    for (const c of [0.05, 0.3, 0.66, 1]) {
+      for (let i = 0; i < 300; i++) {
+        const aim = aiServeAim(c, Math.random());
+        expect(aim.angle).toBeGreaterThanOrEqual(-1);
+        expect(aim.angle).toBeLessThanOrEqual(1);
+        expect(aim.power).toBeGreaterThanOrEqual(0);
+        expect(aim.power).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+});
+
+describe('the retired difficulty', () => {
+  it('maps a stored chaos setting to the surviving hard rung', () => {
+    expect(normalizeDifficulty('chaos')).toBe('cyber');
+    expect(normalizeDifficulty('CHAOS')).toBe('cyber');
+  });
+
+  it('passes real difficulties through and defaults anything else', () => {
+    for (const d of AI_DIFFICULTIES) expect(normalizeDifficulty(d)).toBe(d);
+    expect(normalizeDifficulty(undefined)).toBe('pro');
+    expect(normalizeDifficulty('nonsense')).toBe('pro');
+    expect(normalizeDifficulty(42)).toBe('pro');
+  });
+
+  it('leaves only three rungs on the ladder', () => {
+    expect(AI_DIFFICULTIES).toEqual(['rookie', 'pro', 'cyber']);
   });
 });

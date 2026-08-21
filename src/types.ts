@@ -2,7 +2,11 @@ import type { Tier } from './rating';
 
 export type GameMode = 'solo' | 'multiplayer' | 'split' | 'practice';
 
-export type AIDifficulty = 'rookie' | 'pro' | 'cyber' | 'chaos';
+// Three rungs: Rookie is the floor, Pro is the average-player baseline, Cyber
+// is the ceiling. 'chaos' was retired — it sat between Pro and Cyber in rating
+// but was defined by volatility rather than strength, which made the ladder
+// read as four rungs with only three distinct difficulties.
+export type AIDifficulty = 'rookie' | 'pro' | 'cyber';
 
 export type CourtTheme =
   | 'neon'

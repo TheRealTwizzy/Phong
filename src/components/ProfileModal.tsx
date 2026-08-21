@@ -352,7 +352,13 @@ export const ProfileModal: React.FC<Props> = ({
             <div className="mt-5">
               <div className="flex justify-between text-xs text-slate-400 font-semibold mb-1">
                 <span>Progress to Level {profile.level + 1}</span>
-                <span className="text-cyan-400">{profile.xp} / {profile.xpNext} XP</span>
+                {/* Progress WITHIN this level, matching the bar beside it.
+                    These used to be the cumulative totals while the bar showed
+                    the level slice, so the number and the fill disagreed:
+                    at level 3 the bar read 38% next to the text "700 / 930". */}
+                <span className="text-cyan-400">
+                  {xpCurrentLevelProgress.toLocaleString()} / {xpNeededForLevel.toLocaleString()} XP
+                </span>
               </div>
               <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden p-0.5 border border-slate-700">
                 <div

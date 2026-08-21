@@ -2,7 +2,7 @@
 
 A blind half-court Pong for the web. Each player sees only their own half of the court — the glowing top edge of the screen is the net, and when the ball crosses it, it leaves your screen and appears on your opponent's. Place two phones top-to-top on a table, connect them with a 4-letter room code, and the ball physically travels across both screens.
 
-The main menu offers four modes: **Solo AI** (adaptive Rookie → Chaos opponent on the hidden half), **Practice Wall** (fully solo — the net becomes a return line that bounces every ball back, ball never leaves your screen), **Split Screen** (2 players on one device, classic full court with the net across the middle — offline and unranked), and the **2-Phone Duel**. Match settings are locked in before each match starts: difficulty, points to win, and a **match-rules panel** — paddle size, ball size, min/max ball speed, serve angle and power, opponent sonar, telemetry, quick chat, and a PvP auto-serve timer. Changing the *physics* still earns XP but plays the match **unranked**, so the tier ladder always means one ruleset. Serving is aimed: drag from your paddle to set direction and power, or just tap.
+The main menu offers four modes: **Solo AI** (adaptive Rookie / Pro / Cyber opponent on the hidden half), **Practice Wall** (fully solo — the net becomes a return line that bounces every ball back, ball never leaves your screen), **Split Screen** (2 players on one device, classic full court with the net across the middle — offline and unranked), and the **2-Phone Duel**. Match settings are locked in before each match starts: difficulty, points to win, and a **match-rules panel** — paddle size, ball size, min/max ball speed, serve angle and power, opponent sonar, telemetry, quick chat, and a PvP auto-serve timer. Changing the *physics* still earns XP but plays the match **unranked**, so the tier ladder always means one ruleset. Serving is aimed: push up from your paddle to set direction and power, or just tap.
 
 Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server, keyed to a **server-issued device identity** (signed cookie — one profile per device, no login) with a recovery code to move your profile to a new phone.
 
@@ -10,7 +10,7 @@ The AI ladder is **rating-based and adaptive**: each difficulty is an anchor rat
 
 Progression is server-owned: daily missions live in the database on a UTC day key and are claimed by id, and achievements that mean "you beat something" pay out scaled by the same prediction the match XP uses. Every player locks in a **unique username** on first arrival (case-insensitive, held for 365 days per change) and can upload an **avatar** (auto-cropped to 256×256). Tap any username — leaderboard, match history, lobby, or mid-match — to view that player's public profile.
 
-> **Note:** the next deploy of this version performs a **one-time player wipe** (`wipe_v1`) — the game relaunches with 0 players; bots return later. `npm run db:reset -- --yes` (server stopped) is the manual equivalent.
+> **Note:** the next deploy of this version performs a **one-time player wipe** (`wipe_v2`) — the game relaunches with 0 players; bots return later. `npm run db:reset -- --yes` (server stopped) is the manual equivalent.
 
 ## Quick start
 

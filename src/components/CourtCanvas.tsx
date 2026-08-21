@@ -261,12 +261,12 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   const aimRef = useRef<ServeAim | null>(null);
   aimRef.current = aim;
 
-  // Drag distance, in fractions of the court, that counts as a full pull.
   // How far the aim arrow may swing, mirroring what the match rules allow.
   const serveAngleLimitRef = useRef(serveAngleLimitDeg);
   serveAngleLimitRef.current = serveAngleLimitDeg;
 
-  const AIM_FULL_PULL = 0.22;
+  // Drag distance up the court, in fractions of screen height, for full power.
+  const AIM_FULL_PUSH = 0.35;
   const AIM_DEADZONE = 0.02;
 
   const aimFromEvent = (e: React.PointerEvent<HTMLCanvasElement>): ServeAim | null => {
@@ -277,9 +277,12 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     const dx = (e.clientX - rect.left) / rect.width - start.x;
     const dy = (e.clientY - rect.top) / rect.height - start.y;
     if (Math.hypot(dx, dy) < AIM_DEADZONE) return null;
-    // Pull back (downward) for power, sideways for direction — a slingshot.
-    const power = Math.max(0, Math.min(1, dy / AIM_FULL_PULL));
-    const angle = Math.max(-1, Math.min(1, -dx / AIM_FULL_PULL));
+    // PUSH the serve up the court, don't pull it back. The paddle sits at 90%
+    // of the screen height, so a pull-back gesture only has ~10% of travel
+    // below it — maximum power was literally unreachable on a phone. Pushing
+    // up has the whole court to work with, and the aim follows the finger.
+    const power = Math.max(0, Math.min(1, -dy / AIM_FULL_PUSH));
+    const angle = Math.max(-1, Math.min(1, dx / AIM_FULL_PUSH));
     return { angle, power };
   };
 

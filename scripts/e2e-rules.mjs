@@ -133,16 +133,22 @@ await page.waitForTimeout(1200);
 const canvasText = await page.evaluate(() => !!document.querySelector('#half-court-canvas'));
 if (!canvasText) fail('court did not open');
 const box = await (await page.$('#half-court-canvas')).boundingBox();
-// Drag from the paddle to aim, then release to serve.
-await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.9);
+// Push UP from the paddle to aim, then release to serve. The gesture must
+// reach FULL power without leaving the screen: the paddle sits at 90% of the
+// court height, so a pull-back gesture had only ~10% of travel below it and
+// maximum power was unreachable on a phone.
+const startY = box.y + box.height * 0.9;
+await page.mouse.move(box.x + box.width * 0.5, startY);
 await page.mouse.down();
-await page.mouse.move(box.x + box.width * 0.62, box.y + box.height * 0.98, { steps: 8 });
+const fullPowerY = startY - box.height * 0.35;
+if (fullPowerY < box.y) fail('a full-power serve gesture runs off the top of the court');
+await page.mouse.move(box.x + box.width * 0.62, fullPowerY, { steps: 10 });
 await page.waitForTimeout(250);
 await page.mouse.up();
 await page.waitForTimeout(700);
-const served = await page.evaluate(() => !document.body.textContent.includes('DRAG TO AIM'));
-if (!served) fail('a drag-release did not serve the ball');
-ok('drag-to-aim serves the ball');
+const served = await page.evaluate(() => !/PUSH UP TO AIM/.test(document.body.textContent));
+if (!served) fail('a push-release did not serve the ball');
+ok('push-up-to-aim reaches full power on screen and serves');
 
 if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
 console.log('\nALL VERIFICATION CHECKS PASSED');

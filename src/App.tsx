@@ -32,8 +32,11 @@ import {
   ballRadiusFor,
   clampBallSpeed,
   SERVE_MAX_ANGLE_DEG,
+  aiServeAim,
+  aiServeDelay,
+  playerPressure,
 } from './game/physics';
-import { START_MU } from './rating';
+import { START_MU, normalizeDifficulty } from './rating';
 import { DEFAULT_MATCH_RULES, normalizeRules, isRankedRules } from './matchRules';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
@@ -93,7 +96,14 @@ export default function App() {
     // Legacy loose settings from before match rules were a single object.
     delete parsed.ballSpeedFactor;
     delete parsed.paddleWidthRatio;
-    return { ...DEFAULT_SETTINGS, ...parsed, rules: normalizeRules(parsed.rules) };
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      // 'chaos' was retired; a device that had it selected would otherwise
+      // start a match against a difficulty that no longer has an anchor.
+      difficulty: normalizeDifficulty(parsed.difficulty),
+      rules: normalizeRules(parsed.rules),
+    };
   });
 
   // Player identity is server-issued (signed device cookie); the id arrives
@@ -344,12 +354,20 @@ export default function App() {
           roomId: modeRef.current === 'multiplayer' ? roomId || undefined : undefined,
         };
 
-        const result = await postMatchRecord(payload);
-        if (!result) {
+        const outcome = await postMatchRecord(payload);
+        if (!outcome.ok) {
+          if (outcome.reason === 'unidentified') {
+            // The server no longer recognises this device (its signing secret
+            // was rotated by a reset or a deploy that lost the data volume).
+            // Re-syncing surfaces the uninitialized profile, which re-opens
+            // onboarding instead of leaving the player silently unrecorded.
+            fetchProfile();
+          }
           // Queued for replay; tell the player rather than silently losing it.
           setToastRecordFailed(true);
           return;
         }
+        const result = outcome.result!;
         setLastMatchResult(result);
         setToastRecordFailed(false);
         if (result.profile) {
@@ -376,11 +394,19 @@ export default function App() {
     [playerId, opponentId, opponentName, roomId]
   );
 
-  // Trigger match completion on winner change
+  // Trigger match completion on winner change. Guarded by a ref because the
+  // effect also re-runs whenever recordMatchCompletion's identity changes
+  // (playerId/opponent/room), which happens while `winner` is still set — that
+  // recorded the same match twice.
+  const recordedWinnerRef = useRef<'player' | 'opponent' | null>(null);
   useEffect(() => {
-    if (winner) {
-      recordMatchCompletion(winner === 'player');
+    if (!winner) {
+      recordedWinnerRef.current = null;
+      return;
     }
+    if (recordedWinnerRef.current === winner) return;
+    recordedWinnerRef.current = winner;
+    recordMatchCompletion(winner === 'player');
   }, [winner, recordMatchCompletion]);
 
   // Daily Mission Claim Handler
@@ -574,7 +600,12 @@ export default function App() {
         // Opponent is serving: Ball starts in opponent's half
         setBall((b) => ({ ...b, active: false }));
         if (modeRef.current === 'solo') {
-          const aiLaunch = serveVelocity({ angle: (Math.random() - 0.5) * 0.5, power: 0.5 }, rules);
+          // The AI serves the way it plays: away from where the player is
+          // standing, harder and more committed the better it is.
+          const aiLaunch = serveVelocity(
+            aiServeAim(aiRef.current.competence(), paddleXRef.current),
+            rules
+          );
           setOppBall({
             x: 0.5,
             y: PADDLE_Y - 0.05,
@@ -620,7 +651,16 @@ export default function App() {
   useEffect(() => {
     if (mode !== 'solo' || screen !== 'game') return;
     if (!isServing || isPlayerServer || winner) return;
-    const timer = setTimeout(() => handleServe(), 900);
+    const delayMs =
+      aiServeDelay(
+        aiRef.current.competence(),
+        playerPressure({
+          playerScore: statsRef.current.score,
+          opponentScore: statsRef.current.opponentScore,
+          maxRally: statsRef.current.maxRally,
+        })
+      ) * 1000;
+    const timer = setTimeout(() => handleServe(), delayMs);
     return () => clearTimeout(timer);
   }, [mode, screen, isServing, isPlayerServer, winner, handleServe]);
 
