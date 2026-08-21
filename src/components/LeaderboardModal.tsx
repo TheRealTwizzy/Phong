@@ -15,10 +15,12 @@ export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlay
   const [category, setCategory] = useState<SortCategory>('elo');
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  // Bot rankings hidden by default; showing them never changes a human's rank
+  const [showBots, setShowBots] = useState(false);
 
-  const fetchLeaderboard = (cat: SortCategory) => {
+  const fetchLeaderboard = (cat: SortCategory, bots: boolean) => {
     setIsLoading(true);
-    fetch(`/api/leaderboard?sort=${cat}&limit=50`)
+    fetch(`/api/leaderboard?sort=${cat}&limit=50${bots ? '&bots=1' : ''}`)
       .then((res) => res.json())
       .then((data) => {
         setEntries(data.leaderboard || []);
@@ -29,13 +31,20 @@ export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlay
 
   useEffect(() => {
     if (isOpen) {
-      fetchLeaderboard(category);
+      fetchLeaderboard(category, showBots);
     }
-  }, [isOpen, category]);
+  }, [isOpen, category, showBots]);
 
   if (!isOpen) return null;
 
-  const renderRankBadge = (rank: number) => {
+  const renderRankBadge = (rank: number | null) => {
+    if (rank === null) {
+      return (
+        <div className="w-8 h-8 rounded-full bg-violet-500/15 border border-violet-400/40 flex items-center justify-center text-violet-300 text-[9px] font-black font-mono">
+          BOT
+        </div>
+      );
+    }
     if (rank === 1) {
       return (
         <div className="w-8 h-8 rounded-full bg-amber-400/20 border border-amber-400/50 flex items-center justify-center text-amber-300">
@@ -141,6 +150,21 @@ export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlay
                 Victories
               </button>
             </div>
+
+            {/* Bot visibility toggle — bots never affect human ranks */}
+            <label
+              id="toggle-show-bots"
+              className="flex items-center justify-between mt-2.5 px-1 text-[11px] font-mono text-slate-400 cursor-pointer select-none"
+              title="Bots are ranked separately and never change a human player's rank"
+            >
+              <span>Show AI bot rankings</span>
+              <input
+                type="checkbox"
+                checked={showBots}
+                onChange={(e) => setShowBots(e.target.checked)}
+                className="accent-violet-500 w-4 h-4"
+              />
+            </label>
           </div>
 
           {/* List Content */}
@@ -176,6 +200,11 @@ export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlay
                           {isMe && (
                             <span className="text-[10px] uppercase font-black px-1.5 py-0.5 rounded bg-amber-400 text-slate-950">
                               YOU
+                            </span>
+                          )}
+                          {entry.isBot && (
+                            <span className="text-[10px] uppercase font-black px-1.5 py-0.5 rounded bg-violet-500/25 text-violet-300 border border-violet-400/40">
+                              BOT
                             </span>
                           )}
                         </div>
@@ -225,7 +254,7 @@ export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlay
           <div className="p-4 bg-slate-950 border-t border-slate-800 flex items-center justify-between">
             <span className="text-xs text-slate-400">Updates live after every completed match</span>
             <button
-              onClick={() => fetchLeaderboard(category)}
+              onClick={() => fetchLeaderboard(category, showBots)}
               className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors"
             >
               <RefreshCw className="w-3.5 h-3.5" />

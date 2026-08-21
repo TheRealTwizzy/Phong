@@ -149,7 +149,8 @@ async function startServer() {
     try {
       const sort = (req.query.sort as 'elo' | 'level' | 'rally' | 'wins') || 'elo';
       const limit = Math.min(100, parseInt((req.query.limit as string) || '50', 10));
-      const leaderboard = db.getLeaderboard(sort, limit);
+      const includeBots = req.query.bots === '1' || req.query.bots === 'true';
+      const leaderboard = db.getLeaderboard(sort, limit, includeBots);
       res.json({ leaderboard });
     } catch (e: any) {
       res.status(500).json({ error: e.message });

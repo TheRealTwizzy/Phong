@@ -144,7 +144,10 @@ export interface MatchRecord {
 }
 
 export interface LeaderboardEntry {
-  rank: number;
+  // Rank among HUMAN players only — bots never shift a human's number.
+  // Bot rows (isBot) carry rank: null.
+  rank: number | null;
+  isBot?: boolean;
   id: string;
   username: string;
   eloRating: number;

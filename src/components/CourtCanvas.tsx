@@ -406,7 +406,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         ctx.globalAlpha = Math.max(0, r.opacity);
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(r.x * width, r.y * height, r.radius * width, 0, Math.PI * 2);
+        ctx.arc(r.x * width, r.y * height, Math.max(0, r.radius * width), 0, Math.PI * 2);
         ctx.stroke();
         ctx.restore();
         return true;
@@ -515,7 +515,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         ctx.fillStyle = p.color;
         ctx.globalAlpha = Math.max(0, p.life);
         ctx.beginPath();
-        ctx.arc(p.x * width, p.y * height, p.size * p.life, 0, Math.PI * 2);
+        ctx.arc(p.x * width, p.y * height, Math.max(0, p.size * p.life), 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
         return true;
