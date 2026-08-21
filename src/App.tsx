@@ -35,6 +35,7 @@ import {
   aiServeAim,
   aiServeDelay,
   playerPressure,
+  bounceOffWall,
 } from './game/physics';
 import { START_MU, normalizeDifficulty } from './rating';
 import { DEFAULT_MATCH_RULES, normalizeRules, isRankedRules } from './matchRules';
@@ -786,6 +787,9 @@ export default function App() {
           vy: inc.vy,
           radius: ballRadiusRef.current,
           active: true,
+          // The server mirrors spin across the net (server/transform.ts), so a
+          // ball that was curving right on their screen curves right on ours.
+          spin: inc.spin || 0,
           speedMultiplier: inc.speedMultiplier,
         });
         setStats((s) => {
@@ -996,14 +1000,15 @@ export default function App() {
         b.x += b.vx * dt;
         b.y += b.vy * dt;
 
-        // Sidewall bounces
-        if (b.x - b.radius <= 0) {
-          b.x = b.radius;
-          b.vx = Math.abs(b.vx);
-          sound.playWallBounce();
-        } else if (b.x + b.radius >= 1) {
-          b.x = 1 - b.radius;
-          b.vx = -Math.abs(b.vx);
+        // Sidewall bounces. Spin never bends the flight — it spends itself
+        // here, tilting the angle the ball leaves the wall at.
+        if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
+          const atLeft = b.x - b.radius <= 0;
+          b.x = atLeft ? b.radius : 1 - b.radius;
+          const bounced = bounceOffWall(b.vx, b.vy, b.spin, atLeft);
+          b.vx = bounced.vx;
+          b.vy = bounced.vy;
+          b.spin = bounced.spin;
           sound.playWallBounce();
         }
 
@@ -1020,6 +1025,9 @@ export default function App() {
           const hitSpeed = clampBallSpeed(hitResult.speed, rulesRef.current);
           b.vy = -Math.abs(hitSpeed * Math.cos(hitResult.angle));
           b.vx = hitSpeed * Math.sin(hitResult.angle);
+          // A fresh contact defines the spin: how fast the paddle was moving,
+          // weighted by how far from centre the ball caught it.
+          b.spin = hitResult.spin ?? 0;
           b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
 
           sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
@@ -1060,7 +1068,7 @@ export default function App() {
                 x: b.x,
                 vx: b.vx,
                 vy: b.vy,
-                spin: 0,
+                spin: b.spin || 0,
                 speedMultiplier: hitResult.speed ? hitResult.speed / BASE_BALL_SPEED : 1,
               },
             });
@@ -1072,6 +1080,9 @@ export default function App() {
               vx: -b.vx,
               vy: Math.abs(b.vy),
               radius: b.radius,
+              // Same mirror the server applies for PvP, kept in step here so
+              // solo and PvP agree on what crossing the net does to spin.
+              spin: -(b.spin || 0),
               active: true,
             });
           }
@@ -1121,14 +1132,14 @@ export default function App() {
         ob.x += ob.vx * dt;
         ob.y += ob.vy * dt;
 
-        // Opponent side wall bounces
-        if (ob.x - ob.radius <= 0) {
-          ob.x = ob.radius;
-          ob.vx = Math.abs(ob.vx);
-          sound.playWallBounce();
-        } else if (ob.x + ob.radius >= 1) {
-          ob.x = 1 - ob.radius;
-          ob.vx = -Math.abs(ob.vx);
+        // Opponent side wall bounces, same spin rules as the player's half.
+        if (ob.x - ob.radius <= 0 || ob.x + ob.radius >= 1) {
+          const atLeft = ob.x - ob.radius <= 0;
+          ob.x = atLeft ? ob.radius : 1 - ob.radius;
+          const bounced = bounceOffWall(ob.vx, ob.vy, ob.spin, atLeft);
+          ob.vx = bounced.vx;
+          ob.vy = bounced.vy;
+          ob.spin = bounced.spin;
           sound.playWallBounce();
         }
 
