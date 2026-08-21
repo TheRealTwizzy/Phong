@@ -6,6 +6,7 @@ import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
 import { AI_DIFFICULTIES, aiRating, winProbability, recommendedDifficulty } from '../rating';
 import { normalizeRules } from '../matchRules';
+import { hasUnlock, unlockedBy } from '../achievements';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import {
   Bot,
@@ -23,6 +24,7 @@ import {
   Shield,
   Flame,
   ChevronDown,
+  Lock,
 } from 'lucide-react';
 
 // Out-of-match hub: pick a mode, lock in the match settings (difficulty,
@@ -103,6 +105,12 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // even though it can never move the visible tier).
   const myRating = { mu: profile?.mmrMu ?? 25, sigma: profile?.mmrSigma ?? 25 / 3 };
   const bestDifficulty = recommendedDifficulty(myRating);
+  // The achievement tree gates the ladder: a difficulty or a match length is
+  // something you earn your way into, so the menu shows what is still shut and
+  // what opens it rather than silently offering everything.
+  const earned = profile?.achievements || [];
+  const opened = (kind: 'difficulty' | 'winningScore' | 'mode', value: string | number) =>
+    hasUnlock(earned, kind, value);
 
   const navButtons: { id: string; icon: React.ReactNode; labelKey: string; onClick: () => void; badge?: number }[] = [
     { id: 'missions', icon: <Target className="w-4 h-4 text-cyan-400" />, labelKey: 'daily_missions', onClick: onOpenMissions, badge: unclaimedMissionsCount },
@@ -247,17 +255,29 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                             // Pre-match prediction from hidden MMR vs this AI
                             // anchor — the same number that scales match XP.
                             const chance = Math.round(winProbability(myRating, aiRating(diff, myRating.mu)) * 100);
+                            const unlocked = opened('difficulty', diff);
+                            const gate = unlocked ? null : unlockedBy('difficulty', diff);
                             return (
                               <button
                                 key={diff}
                                 id={`menu-diff-${diff}`}
+                                disabled={!unlocked}
+                                title={gate ? `${gate.title} — ${gate.description}` : undefined}
                                 onClick={() => onUpdateSettings({ difficulty: diff })}
                                 className={`relative py-1.5 px-1 rounded-lg border text-[10px] font-mono capitalize transition flex flex-col items-center gap-0.5 ${
-                                  settings.difficulty === diff
-                                    ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                                    : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800'
+                                  !unlocked
+                                    ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
+                                    : settings.difficulty === diff
+                                      ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
+                                      : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800'
                                 }`}
                               >
+                                {!unlocked && (
+                                  <Lock
+                                    id={`menu-diff-${diff}-lock`}
+                                    className="absolute top-0.5 right-0.5 w-2.5 h-2.5 text-zinc-600"
+                                  />
+                                )}
                                 <span>{diff}</span>
                                 <span
                                   id={`menu-diff-${diff}-odds`}
@@ -292,20 +312,28 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                           {t('winning_score', lang)}
                         </label>
                         <div className="grid grid-cols-4 gap-1.5">
-                          {[3, 5, 10, 15].map((pts) => (
+                          {[3, 5, 10, 15].map((pts) => {
+                            const ptsOpen = opened('winningScore', pts);
+                            const ptsGate = ptsOpen ? null : unlockedBy('winningScore', pts);
+                            return (
                             <button
                               key={pts}
                               id={`menu-pts-${pts}`}
+                              disabled={!ptsOpen}
+                              title={ptsGate ? `${ptsGate.title} — ${ptsGate.description}` : undefined}
                               onClick={() => onUpdateSettings({ winningScore: pts })}
                               className={`py-1.5 rounded-lg text-[10px] font-mono border transition ${
-                                settings.winningScore === pts
+                                !ptsOpen
+                                  ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
+                                  : settings.winningScore === pts
                                   ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
                                   : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
                               }`}
                             >
                               {pts} pts
                             </button>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}

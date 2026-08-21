@@ -145,6 +145,8 @@ export interface PlayerProfile {
   highestRally: number;
   totalPointsScored: number;
   totalAces: number;
+  /** PvP wins only — solo wins never count toward the duel branch. */
+  multiplayerWins: number;
   dailyStreak: number;
   lastDailyDate?: string;
   achievements: string[]; // achievement IDs
@@ -183,6 +185,8 @@ export interface PublicProfile {
   highestRally: number;
   totalPointsScored: number;
   totalAces: number;
+  /** PvP wins only — solo wins never count toward the duel branch. */
+  multiplayerWins: number;
   dailyStreak: number;
   // Tier only — a public profile never exposes raw mu/sigma numbers.
   tier: Tier;
@@ -213,16 +217,37 @@ export interface UsernameCheckResponse {
   reason?: string;
 }
 
+/**
+ * Something an achievement opens up. The tree gates access to the game, so a
+ * difficulty or a match length is earned rather than simply offered.
+ */
+export interface GameUnlock {
+  kind: 'difficulty' | 'winningScore' | 'mode';
+  value: string | number;
+}
+
+export type AchievementBranch = 'foundation' | 'rally' | 'ladder' | 'duel' | 'craft';
+
 export interface Achievement {
   id: string;
   title: string;
   description: string;
+  /** Which tree this belongs to. */
+  branch: AchievementBranch;
+  /** The achievement that must be earned first; absent on a branch root. */
+  parent?: string;
   category: 'beginner' | 'mastery' | 'online' | 'special';
   // Base reward. Achievements flagged `scaled` pay this multiplied by the
   // match's surprise multiplier, so a moving-target difficulty (the AI adapts
   // to the player) cannot be worth a fixed amount — see server/db.ts.
   xpReward: number;
   scaled?: boolean;
+  /**
+   * Concealed until its parent is earned: the catalogue shows a silhouette
+   * rather than the name, so the deep rungs of a branch are something to
+   * discover instead of a list of chores read on day one.
+   */
+  hidden?: boolean;
   icon: string;
   unlockedAt?: string;
   // XP actually granted when this achievement was unlocked. Only set on the
@@ -275,6 +300,8 @@ export interface MatchEndPayload {
   mode: GameMode;
   difficulty?: AIDifficulty;
   isWinner: boolean;
+  /** Points won directly off this player's own serve, this match. */
+  aces?: number;
   // Rules the match was played under. Non-stock physics means XP but no
   // rating movement — the server re-derives this, never trusting a flag.
   rules?: Partial<MatchRules>;

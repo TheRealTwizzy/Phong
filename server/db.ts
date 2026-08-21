@@ -14,6 +14,7 @@ import {
 } from '../src/types';
 import { validateUsername, usernameLockExpiry } from '../src/profileRules';
 import { isRankedRules } from '../src/matchRules';
+import { ALL_ACHIEVEMENTS, achievementById, isUnlockable } from '../src/achievements';
 import {
   Rating,
   Tier,
@@ -82,116 +83,10 @@ export interface UsernameResult {
   unlockAt?: string;
 }
 
-export const ALL_ACHIEVEMENTS: Achievement[] = [
-  {
-    id: 'first_serve',
-    title: 'First Impact',
-    description: 'Complete your first cross-net volley.',
-    category: 'beginner',
-    xpReward: 25,
-    icon: 'zap',
-  },
-  {
-    id: 'rally_10',
-    title: 'Rally Apprentice',
-    description: 'Sustain a rally of 10 or more hits in a single point.',
-    category: 'mastery',
-    xpReward: 60,
-    icon: 'activity',
-  },
-  {
-    id: 'rally_25',
-    title: 'Sonic Speed',
-    description: 'Sustain a lightning-fast rally of 25 or more hits.',
-    category: 'mastery',
-    xpReward: 200,
-    icon: 'flame',
-  },
-  {
-    id: 'rally_50',
-    title: 'Quantum Reflexes',
-    description: 'Reach a legendary 50-hit rally without missing.',
-    category: 'mastery',
-    xpReward: 450,
-    icon: 'shield',
-  },
-  {
-    id: 'first_win',
-    title: 'First Blood',
-    description: 'Win your first full match in any mode.',
-    category: 'beginner',
-    xpReward: 60,
-    scaled: true,
-    icon: 'trophy',
-  },
-  {
-    id: 'shutout',
-    title: 'Clean Sheet',
-    description: 'Win a match without conceding a single point (5-0 or better).',
-    category: 'mastery',
-    xpReward: 200,
-    scaled: true,
-    icon: 'star',
-  },
-  {
-    id: 'cyber_slayer',
-    title: 'Cyber Slayer',
-    description: 'Defeat the Cyber difficulty AI in Solo mode.',
-    category: 'mastery',
-    xpReward: 260,
-    scaled: true,
-    icon: 'cpu',
-  },
-  {
-    id: 'multiplayer_champ',
-    title: 'Twin Link Master',
-    description: 'Win a 2-device online multiplayer match across the net.',
-    category: 'online',
-    xpReward: 240,
-    scaled: true,
-    icon: 'smartphone',
-  },
-  {
-    id: 'ace_sniper',
-    title: 'Ace Sniper',
-    description: 'Score 5 or more career aces directly on serve.',
-    category: 'special',
-    xpReward: 150,
-    icon: 'target',
-  },
-  {
-    id: 'veteran_10',
-    title: 'Paddle Veteran',
-    description: 'Complete 10 total matches.',
-    category: 'beginner',
-    xpReward: 120,
-    icon: 'award',
-  },
-  {
-    id: 'level_5',
-    title: 'Rising Star',
-    description: 'Reach Player Level 5.',
-    category: 'special',
-    xpReward: 120,
-    icon: 'sparkles',
-  },
-  {
-    id: 'level_10',
-    title: 'Grandmaster',
-    description: 'Reach Player Level 10.',
-    category: 'special',
-    xpReward: 200,
-    icon: 'crown',
-  },
-  {
-    id: 'master_tier',
-    title: 'Elite Contender',
-    description: 'Reach the Master tier in ranked play.',
-    category: 'special',
-    xpReward: 400,
-    icon: 'trending-up',
-  },
-];
+// The catalogue itself lives in src/achievements.ts so the client can draw
+// the tree without asking the server what shape it is. Re-exported here
+// because every consumer of the database already imports from this module.
+export { ALL_ACHIEVEMENTS };
 
 function calculateLevelFromXp(xp: number): { level: number; xpNext: number } {
   return levelFromXp(xp);
@@ -228,6 +123,8 @@ function updatePlayerStreak(profile: PlayerProfile): void {
 }
 
 interface PlayerRow {
+  /** Added by migration, so an old row reads back null. */
+  multiplayerWins: number | null;
   id: string;
   username: string;
   level: number;
@@ -265,6 +162,9 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
   return {
     ...rest,
     tier: tierFor(row.rankMu, row.rankedGames, row.rankSigma),
+    // Defaulted rather than required: a row written before the column existed
+    // reads back as null under the ALTER TABLE default.
+    multiplayerWins: row.multiplayerWins || 0,
     achievements: JSON.parse(row.achievements || '[]'),
     recoveryCode: row.recoveryCode || undefined,
     initializedAt: row.initializedAt || undefined,
@@ -311,6 +211,7 @@ class GameDatabase {
         highestRally INTEGER NOT NULL,
         totalPointsScored INTEGER NOT NULL,
         totalAces INTEGER NOT NULL,
+        multiplayerWins INTEGER NOT NULL DEFAULT 0,
         dailyStreak INTEGER NOT NULL,
         lastDailyDate TEXT NOT NULL,
         achievements TEXT NOT NULL,
@@ -422,6 +323,8 @@ class GameDatabase {
     addColumn('rankedGames', 'rankedGames INTEGER NOT NULL DEFAULT 0');
     addColumn('initializedAt', 'initializedAt TEXT');
     addColumn('usernameChangedAt', 'usernameChangedAt TEXT');
+    // The duel branch counts PvP wins on their own; matchesWon mixes in solo.
+    addColumn('multiplayerWins', 'multiplayerWins INTEGER NOT NULL DEFAULT 0');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
     // Uniqueness is case-insensitive and applies to chosen names only:
     // uninitialized rows keep their Paddle-XXXX placeholders outside the
@@ -505,9 +408,9 @@ class GameDatabase {
     this.sql
       .prepare(
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
-           matchesLost, highestRally, totalPointsScored, totalAces, dailyStreak, lastDailyDate,
+           matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins, dailyStreak, lastDailyDate,
            achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
@@ -515,7 +418,8 @@ class GameDatabase {
            matchesPlayed=excluded.matchesPlayed,
            matchesWon=excluded.matchesWon, matchesLost=excluded.matchesLost,
            highestRally=excluded.highestRally, totalPointsScored=excluded.totalPointsScored,
-           totalAces=excluded.totalAces, dailyStreak=excluded.dailyStreak,
+           totalAces=excluded.totalAces, multiplayerWins=excluded.multiplayerWins,
+           dailyStreak=excluded.dailyStreak,
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive,
            recoveryCode=excluded.recoveryCode, initializedAt=excluded.initializedAt,
@@ -538,6 +442,7 @@ class GameDatabase {
         p.highestRally,
         p.totalPointsScored,
         p.totalAces,
+        p.multiplayerWins || 0,
         p.dailyStreak,
         p.lastDailyDate,
         JSON.stringify(p.achievements),
@@ -610,6 +515,7 @@ class GameDatabase {
         highestRally: 0,
         totalPointsScored: 0,
         totalAces: 0,
+        multiplayerWins: 0,
         dailyStreak: 1,
         lastDailyDate: todayStr,
         achievements: [],
@@ -715,7 +621,12 @@ class GameDatabase {
     playerId: string,
     bestStreak: number,
     now: Date = new Date()
-  ): { earnedXp: number; dailyRemaining: number; profile: PlayerProfile } {
+  ): {
+    earnedXp: number;
+    dailyRemaining: number;
+    newAchievements: Achievement[];
+    profile: PlayerProfile;
+  } {
     const profile = this.getProfile(playerId);
     if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
 
@@ -730,13 +641,34 @@ class GameDatabase {
       Math.min(practiceXp(bestStreak), PRACTICE_XP_DAILY_CAP - alreadyPaid)
     );
 
-    if (earnedXp > 0) {
-      this.sql
-        .prepare(
-          `INSERT INTO daily_practice (playerId, dayKey, xpAwarded) VALUES (?, ?, ?)
-           ON CONFLICT(playerId, dayKey) DO UPDATE SET xpAwarded = xpAwarded + excluded.xpAwarded`
-        )
-        .run(playerId, dayKey, earnedXp);
+    // The rally branch's wall rungs are the only achievements a player who
+    // never records a match can reach, so they are checked here as well.
+    const streak = Math.max(0, Math.floor(bestStreak || 0));
+    const newAchievements: Achievement[] = [];
+    let budget = achievementXpCap(profile.level);
+    const grantWall = (achId: string) => {
+      if (!isUnlockable(achId, profile.achievements)) return;
+      if (profile.achievements.includes(achId)) return;
+      const meta = achievementById(achId);
+      if (!meta) return;
+      profile.achievements.push(achId);
+      const awardedXp = Math.max(0, Math.min(meta.xpReward, budget));
+      budget -= awardedXp;
+      profile.xp += awardedXp;
+      newAchievements.push({ ...meta, unlockedAt: now.toISOString(), awardedXp });
+    };
+    if (streak >= 30) grantWall('wall_30');
+    if (streak >= 90) grantWall('wall_90');
+
+    if (earnedXp > 0 || newAchievements.length > 0) {
+      if (earnedXp > 0) {
+        this.sql
+          .prepare(
+            `INSERT INTO daily_practice (playerId, dayKey, xpAwarded) VALUES (?, ?, ?)
+             ON CONFLICT(playerId, dayKey) DO UPDATE SET xpAwarded = xpAwarded + excluded.xpAwarded`
+          )
+          .run(playerId, dayKey, earnedXp);
+      }
 
       profile.xp += earnedXp;
       const { level, xpNext } = calculateLevelFromXp(profile.xp);
@@ -749,6 +681,7 @@ class GameDatabase {
     return {
       earnedXp,
       dailyRemaining: Math.max(0, PRACTICE_XP_DAILY_CAP - alreadyPaid - earnedXp),
+      newAchievements,
       profile: this.readProfile(playerId)!,
     };
   }
@@ -885,6 +818,7 @@ class GameDatabase {
       highestRally: p.highestRally,
       totalPointsScored: p.totalPointsScored,
       totalAces: p.totalAces,
+      multiplayerWins: p.multiplayerWins || 0,
       dailyStreak: p.dailyStreak,
       tier: p.tier,
       rankedGames: p.rankedGames,
@@ -930,6 +864,7 @@ class GameDatabase {
       highestRally: bot.highestRally || 0,
       totalPointsScored: bot.totalPointsScored || 0,
       totalAces: bot.totalAces || 0,
+      multiplayerWins: bot.multiplayerWins || 0,
       dailyStreak: bot.dailyStreak || 1,
       lastDailyDate: todayStr,
       achievements: bot.achievements || [],
@@ -1036,6 +971,11 @@ class GameDatabase {
       profile.matchesLost += 1;
     }
     profile.totalPointsScored += payload.playerScore;
+    // Aces were a stored column nothing ever incremented, so `ace_sniper` was
+    // unobtainable. Self-reported like every other solo stat, and bounded by
+    // the achievements being once-only.
+    profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
+    if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
     if (payload.maxRally > profile.highestRally) {
       profile.highestRally = payload.maxRally;
     }
@@ -1050,10 +990,21 @@ class GameDatabase {
     // there is still no per-difficulty table anywhere.
     const achievementMultiplier = surpriseMultiplier(winProb, isWin);
     let achievementBudget = achievementXpCap(profile.level);
+    // Tree rule, strictly: a child cannot be earned before its parent, and the
+    // parent is never granted implicitly. Auto-granting ancestors seemed
+    // helpful until the data showed it handing out `ai_rookie` for beating
+    // Pro — a difficulty the player had never beaten. Where one result really
+    // does satisfy a whole chain (a 50-hit rally is also a 25 and a 10), the
+    // triggers below fire in order and each rung opens the next.
     const unlock = (achId: string) => {
+      if (!isUnlockable(achId, profile.achievements)) return;
+      grant(achId);
+    };
+
+    const grant = (achId: string) => {
       if (!profile.achievements.includes(achId)) {
         profile.achievements.push(achId);
-        const meta = ALL_ACHIEVEMENTS.find((a) => a.id === achId);
+        const meta = achievementById(achId);
         if (meta) {
           const scaled = meta.scaled
             ? Math.max(1, Math.round(meta.xpReward * achievementMultiplier))
@@ -1072,18 +1023,48 @@ class GameDatabase {
     };
 
     // Achievement triggers
+    const solo = payload.mode === 'solo';
+    const pvp = payload.mode === 'multiplayer';
+    const shutOut = isWin && payload.opponentScore === 0 && payload.playerScore >= 5;
+    const placed = isPlaced(profile.rankedGames, profile.rankSigma);
+
+    // Foundation
     if (payload.maxRally >= 1) unlock('first_serve');
+    if (isWin) unlock('first_win');
+    if (shutOut) unlock('shutout');
+    if (profile.matchesPlayed >= 10) unlock('veteran_10');
+    if (profile.matchesPlayed >= 50) unlock('veteran_50');
+    if (profile.matchesPlayed >= 200) unlock('veteran_200');
+    if (profile.level >= 5) unlock('level_5');
+    if (profile.level >= 10) unlock('level_10');
+    if (profile.level >= 25) unlock('level_25');
+    if (profile.dailyStreak >= 7) unlock('streak_7');
+
+    // Rally
     if (payload.maxRally >= 10) unlock('rally_10');
     if (payload.maxRally >= 25) unlock('rally_25');
     if (payload.maxRally >= 50) unlock('rally_50');
-    if (isWin) unlock('first_win');
-    if (isWin && payload.opponentScore === 0 && payload.playerScore >= 5) unlock('shutout');
-    if (isWin && difficulty === 'cyber') unlock('cyber_slayer');
-    if (isWin && payload.mode === 'multiplayer') unlock('multiplayer_champ');
-    if (profile.matchesPlayed >= 10) unlock('veteran_10');
-    if (profile.level >= 5) unlock('level_5');
-    if (profile.level >= 10) unlock('level_10');
-    if (isPlaced(profile.rankedGames, profile.rankSigma) && profile.rankMu >= 28) unlock('master_tier');
+    if (payload.maxRally >= 100) unlock('rally_100');
+
+    // Ladder
+    if (isWin && solo && difficulty === 'rookie') unlock('ai_rookie');
+    if (isWin && solo && difficulty === 'pro') unlock('ai_pro');
+    if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
+    if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
+
+    // Duel
+    if (pvp) unlock('first_duel');
+    if (isWin && pvp) unlock('multiplayer_champ');
+    if (profile.multiplayerWins >= 10) unlock('duel_10');
+    if (placed && profile.rankMu >= 28) unlock('master_tier');
+    if (placed && profile.rankMu >= 34) unlock('legend_tier');
+
+    // Craft
+    if (profile.totalAces >= 1) unlock('first_ace');
+    if (profile.totalAces >= 5) unlock('ace_sniper');
+    if (profile.totalAces >= 25) unlock('ace_25');
+    if (profile.totalPointsScored >= 100) unlock('points_100');
+    if (profile.totalPointsScored >= 500) unlock('points_500');
 
     // Daily mission progress rides the same server-verified match record, so
     // it can never be reported independently of an actual game.

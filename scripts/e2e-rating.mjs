@@ -51,6 +51,24 @@ const record = (page, body) =>
 
 const me = (page) => page.evaluate(async () => (await fetch('/api/profile/me')).json());
 
+// The achievement tree gates the ladder now: a fresh player can only play
+// Rookie, so anything that needs Pro or Cyber has to earn its way there first.
+const openLadder = (page) =>
+  page.evaluate(async () => {
+    const win = (difficulty) =>
+      fetch('/api/match/record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerScore: 5, opponentScore: 1, maxRally: 6,
+          mode: 'solo', difficulty, isWinner: true,
+        }),
+      });
+    await win('rookie');
+    await win('pro');
+  });
+
+
 // ---- 1. Per-difficulty predictions on the menu ---------------------------
 const alice = await newPlayer('Rate');
 await alice.click('#menu-mode-solo');
@@ -91,6 +109,7 @@ const oddsAfterSoloRun = async (page) => {
 };
 
 const climber = await newPlayer('Climb');
+await openLadder(climber);
 const oddsBefore = await oddsAfterSoloRun(climber);
 for (let i = 0; i < 8; i++) {
   await record(climber, {
@@ -122,6 +141,7 @@ ok('no ELO / raw rating number rendered on the menu');
 
 // ---- 3. XP scales with the prediction ------------------------------------
 const base = { playerScore: 3, opponentScore: 1, maxRally: 10, mode: 'solo', isWinner: true };
+await openLadder(alice);
 const hardWin = await record(alice, { ...base, difficulty: 'cyber' });
 const easyPlayer = await newPlayer('Easy');
 const easyWin = await record(easyPlayer, { ...base, difficulty: 'rookie' });
@@ -131,6 +151,7 @@ if (!(hardWin.earnedXp > easyWin.earnedXp)) {
 ok(`XP scales with difficulty via prediction: Cyber ${hardWin.earnedXp} XP > Rookie ${easyWin.earnedXp} XP`);
 
 const lossPlayer = await newPlayer('Loss');
+await openLadder(lossPlayer);
 const loss = await record(lossPlayer, { ...base, difficulty: 'cyber', isWinner: false, playerScore: 0 });
 if (!(loss.earnedXp > 0)) fail('a loss awarded no XP at all');
 const afterLoss = await me(lossPlayer);
@@ -180,7 +201,8 @@ if (!start.missions?.length) fail('no missions served');
 if (start.missions.some((m) => m.current > 0 || m.claimed)) fail('a fresh day started dirty');
 ok(`server serves ${start.missions.length} missions, all at zero`);
 
-await record(questPlayer, { ...base, difficulty: 'pro', playerScore: 5, maxRally: 9 });
+// Rookie: the only difficulty a fresh player has open.
+await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, maxRally: 9 });
 const advanced = (await missionsOf(questPlayer)).missions;
 const winQuest = advanced.find((m) => m.id === 'mission_win');
 if (!winQuest || winQuest.current < winQuest.target) {
