@@ -716,7 +716,11 @@ class GameDatabase {
     return this.readProfile(newDeviceId);
   }
 
-  public getLeaderboard(sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo', limit = 50): LeaderboardEntry[] {
+  public getLeaderboard(
+    sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
+    limit = 50,
+    includeBots = false
+  ): LeaderboardEntry[] {
     const orderBy = {
       level: 'xp DESC',
       rally: 'highestRally DESC',
@@ -725,14 +729,23 @@ class GameDatabase {
     }[sortBy];
 
     const rows = this.sql
-      .prepare(`SELECT * FROM players ORDER BY ${orderBy} LIMIT ?`)
-      .all(limit) as unknown as PlayerRow[];
+      .prepare(`SELECT * FROM players ORDER BY ${orderBy}`)
+      .all() as unknown as PlayerRow[];
 
-    return rows.map((row, idx) => {
+    // Ranks count human players only, so a human's number is identical
+    // whether bot rows are interleaved into the view or not.
+    const out: LeaderboardEntry[] = [];
+    let humanRank = 0;
+    for (const row of rows) {
+      if (out.length >= limit) break;
+      const isBot = row.id.startsWith('bot-');
+      if (isBot && !includeBots) continue;
+      if (!isBot) humanRank++;
       const p = rowToProfile(row);
       const winRate = p.matchesPlayed > 0 ? Math.round((p.matchesWon / p.matchesPlayed) * 100) : 0;
-      return {
-        rank: idx + 1,
+      out.push({
+        rank: isBot ? null : humanRank,
+        isBot: isBot || undefined,
         id: p.id,
         username: p.username,
         eloRating: p.eloRating,
@@ -742,8 +755,9 @@ class GameDatabase {
         matchesWon: p.matchesWon,
         winRate,
         highestRally: p.highestRally,
-      };
-    });
+      });
+    }
+    return out;
   }
 
   public getAchievementsList(playerId?: string): Achievement[] {

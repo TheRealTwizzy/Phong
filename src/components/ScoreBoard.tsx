@@ -68,7 +68,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
   return (
     <div
       id="scoreboard-header"
-      className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-2 sm:px-3 py-1.5 border-b backdrop-blur-md transition-colors duration-300 gap-1.5 sm:gap-2"
+      className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-2 sm:px-3 py-1.5 border-b backdrop-blur-md transition-colors duration-300 gap-1.5 sm:gap-2 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0"
       style={{
         backgroundColor: 'rgba(10, 15, 25, 0.88)',
         borderColor: theme.courtBorder + '30',

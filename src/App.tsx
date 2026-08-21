@@ -503,6 +503,16 @@ export default function App() {
     }
   }, [isPlayerServer]);
 
+  // Solo/practice only: the AI has no finger to tap with. When the rules hand
+  // it the serve (the AI missed the last point), serve on its behalf after a
+  // short beat — otherwise the match waits forever on a prompt nobody sees.
+  useEffect(() => {
+    if (mode !== 'solo' && mode !== 'practice') return;
+    if (!isServing || isPlayerServer || winner) return;
+    const timer = setTimeout(() => handleServe(), 900);
+    return () => clearTimeout(timer);
+  }, [mode, isServing, isPlayerServer, winner, handleServe]);
+
   // Build (or rebuild) the P2P link for the current room. The host creates
   // the offer; the guest side is created lazily when the first offer arrives.
   const createP2PLink = (asHost: boolean): P2PGameLink => {
