@@ -40,7 +40,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/matches/${playerId}`);
+      const res = await fetch('/api/matches/me');
       if (!res.ok) throw new Error('Failed to fetch match history');
       const data = await res.json();
       setMatches(data.matches || []);

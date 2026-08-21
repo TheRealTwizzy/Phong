@@ -5,6 +5,7 @@ import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { db, ALL_ACHIEVEMENTS } from './server/db';
+import { deviceIdentity, deviceIdFromCookieHeader } from './server/auth';
 import { transformBallForOpponent } from './server/transform';
 import { MatchEndPayload } from './src/types';
 
@@ -41,7 +42,10 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
+  // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies)
+  app.set('trust proxy', true);
   app.use(express.json());
+  app.use('/api', deviceIdentity);
 
   // Health check
   app.get('/api/health', (req, res) => {
@@ -86,24 +90,44 @@ async function startServer() {
   });
 
   // Player Profile API
-  app.get('/api/profile/:id', (req, res) => {
+  // The profile belongs to the device identity in the signed cookie; clients
+  // can no longer name (or forge) a player id.
+  app.get('/api/profile/me', (req, res) => {
     try {
       const defaultUsername = (req.query.username as string) || undefined;
-      const profile = db.getProfile(req.params.id, defaultUsername);
+      const profile = db.getProfile(req.deviceId!, defaultUsername);
       res.json(profile);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.put('/api/profile/:id', (req, res) => {
+  app.put('/api/profile/me', (req, res) => {
     try {
       const { username } = req.body;
       if (!username) {
         return res.status(400).json({ error: 'Username is required' });
       }
-      const updated = db.updateUsername(req.params.id, username);
+      const updated = db.updateUsername(req.deviceId!, username);
       res.json(updated);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Restore a profile on this device using its recovery code. The profile
+  // moves: the previous device unlinks and the code rotates.
+  app.post('/api/profile/claim', (req, res) => {
+    try {
+      const code = String(req.body?.code || '');
+      if (!code.trim()) {
+        return res.status(400).json({ error: 'Recovery code required' });
+      }
+      const profile = db.claimProfileByCode(code, req.deviceId!);
+      if (!profile) {
+        return res.status(404).json({ error: 'No profile matches that code' });
+      }
+      res.json(profile);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -112,10 +136,7 @@ async function startServer() {
   // Match Result & Stats Recording API
   app.post('/api/match/record', (req, res) => {
     try {
-      const payload: MatchEndPayload = req.body;
-      if (!payload.playerId) {
-        return res.status(400).json({ error: 'Player ID required' });
-      }
+      const payload: MatchEndPayload = { ...req.body, playerId: req.deviceId! };
       const result = db.recordMatch(payload);
       res.json(result);
     } catch (e: any) {
@@ -138,8 +159,7 @@ async function startServer() {
   // Achievements API
   app.get('/api/achievements', (req, res) => {
     try {
-      const playerId = req.query.playerId as string | undefined;
-      const list = db.getAchievementsList(playerId);
+      const list = db.getAchievementsList(req.deviceId!);
       res.json({ achievements: list });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -147,9 +167,9 @@ async function startServer() {
   });
 
   // Match History API
-  app.get('/api/matches/:playerId', (req, res) => {
+  app.get('/api/matches/me', (req, res) => {
     try {
-      const history = db.getMatchHistory(req.params.playerId);
+      const history = db.getMatchHistory(req.deviceId!);
       res.json({ matches: history });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -169,7 +189,8 @@ async function startServer() {
     }
   }, 60000);
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
+    const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
     let currentRoomId: string | null = null;
     let playerIndex: 0 | 1 | null = null;
     let currentPlayerId: string = '';
@@ -184,7 +205,7 @@ async function startServer() {
             code = generateRoomCode();
           }
 
-          currentPlayerId = msg.playerId || `p_${Date.now()}`;
+          currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
           const room: Room = {
             id: code,
             players: [
@@ -229,7 +250,7 @@ async function startServer() {
             return;
           }
 
-          currentPlayerId = msg.playerId || `p_${Date.now()}`;
+          currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
           room.players[1] = {
             ws,
             playerId: currentPlayerId,

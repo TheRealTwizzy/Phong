@@ -196,12 +196,14 @@ interface PlayerRow {
   createdAt: string;
   lastActive: string;
   rankTitle: string;
+  recoveryCode: string | null;
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
   return {
     ...row,
     achievements: JSON.parse(row.achievements || '[]'),
+    recoveryCode: row.recoveryCode || undefined,
   };
 }
 
@@ -252,9 +254,60 @@ class GameDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
       CREATE INDEX IF NOT EXISTS idx_matches_p2 ON matches(player2Id);
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
+    this.migrateSchema();
     this.importLegacyJsonIfPresent();
     this.seedBotsIfEmpty();
+  }
+
+  // Additive schema changes for databases created by earlier builds.
+  private migrateSchema(): void {
+    const cols = this.sql.prepare('PRAGMA table_info(players)').all() as unknown as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'recoveryCode')) {
+      this.sql.exec('ALTER TABLE players ADD COLUMN recoveryCode TEXT');
+    }
+    this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
+    // Backfill codes for rows created before recovery codes existed
+    const missing = this.sql
+      .prepare('SELECT id FROM players WHERE recoveryCode IS NULL')
+      .all() as unknown as Array<{ id: string }>;
+    for (const row of missing) {
+      this.sql
+        .prepare('UPDATE players SET recoveryCode = ? WHERE id = ?')
+        .run(this.newRecoveryCode(), row.id);
+    }
+  }
+
+  public getMeta(key: string): string | null {
+    const row = this.sql.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    return row ? row.value : null;
+  }
+
+  public setMeta(key: string, value: string): void {
+    this.sql
+      .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, value);
+  }
+
+  // Human-friendly code (no 0/O/1/I), e.g. "K3TF-9WQZ". Unique via index +
+  // retry; the space is ~1.1e12 so collisions are effectively theoretical.
+  private newRecoveryCode(): string {
+    const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    for (;;) {
+      let code = '';
+      for (let i = 0; i < 8; i++) {
+        code += alphabet[Math.floor(Math.random() * alphabet.length)];
+        if (i === 3) code += '-';
+      }
+      const clash = this.sql.prepare('SELECT 1 FROM players WHERE recoveryCode = ?').get(code);
+      if (!clash) return code;
+    }
   }
 
   private playerCount(): number {
@@ -267,8 +320,8 @@ class GameDatabase {
       .prepare(
         `INSERT INTO players (id, username, level, xp, xpNext, eloRating, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, dailyStreak, lastDailyDate,
-           achievements, createdAt, lastActive, rankTitle)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           achievements, createdAt, lastActive, rankTitle, recoveryCode)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            eloRating=excluded.eloRating, matchesPlayed=excluded.matchesPlayed,
@@ -276,7 +329,8 @@ class GameDatabase {
            highestRally=excluded.highestRally, totalPointsScored=excluded.totalPointsScored,
            totalAces=excluded.totalAces, dailyStreak=excluded.dailyStreak,
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
-           createdAt=excluded.createdAt, lastActive=excluded.lastActive, rankTitle=excluded.rankTitle`
+           createdAt=excluded.createdAt, lastActive=excluded.lastActive, rankTitle=excluded.rankTitle,
+           recoveryCode=excluded.recoveryCode`
       )
       .run(
         p.id,
@@ -296,7 +350,8 @@ class GameDatabase {
         JSON.stringify(p.achievements),
         p.createdAt,
         p.lastActive,
-        p.rankTitle
+        p.rankTitle,
+        p.recoveryCode ?? null
       );
   }
 
@@ -333,7 +388,9 @@ class GameDatabase {
       };
       this.sql.exec('BEGIN');
       try {
-        Object.values(legacy.players || {}).forEach((p) => this.upsertProfile(p));
+        Object.values(legacy.players || {}).forEach((p) =>
+          this.upsertProfile({ ...p, recoveryCode: p.recoveryCode || this.newRecoveryCode() })
+        );
         // Legacy matches array is newest-first; insert reversed so rowid order
         // (our sort key) stays oldest-to-newest.
         [...(legacy.matches || [])].reverse().forEach((m) => this.insertMatch(m));
@@ -440,6 +497,7 @@ class GameDatabase {
           createdAt: now,
           lastActive: now,
           rankTitle: calculateRankTitle(level, b.eloRating || 1200),
+          recoveryCode: this.newRecoveryCode(),
         };
         this.upsertProfile(full);
       });
@@ -462,7 +520,9 @@ class GameDatabase {
     if (!existing) {
       const now = new Date().toISOString();
       const todayStr = now.slice(0, 10);
-      const username = defaultUsername || `Paddle-${id.slice(0, 4).toUpperCase()}`;
+      // Use the END of the id: device ids share a dev_ prefix, so the head
+      // would name every new player identically.
+      const username = defaultUsername || `Paddle-${id.slice(-4).toUpperCase()}`;
       const newPlayer: PlayerProfile = {
         id,
         username,
@@ -482,6 +542,7 @@ class GameDatabase {
         createdAt: now,
         lastActive: now,
         rankTitle: 'Rookie',
+        recoveryCode: this.newRecoveryCode(),
       };
       this.upsertProfile(newPlayer);
       return newPlayer;
@@ -621,6 +682,38 @@ class GameDatabase {
       eloDelta,
       newAchievements,
     };
+  }
+
+  /**
+   * Transfer the profile owning `code` to `newDeviceId`. The recovery code
+   * rotates on use, the old device id stops resolving to anything, and any
+   * throwaway profile the claiming device already had is deleted. Returns
+   * null when the code matches nothing.
+   */
+  public claimProfileByCode(code: string, newDeviceId: string): PlayerProfile | null {
+    const canonical = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const formatted = canonical.length === 8 ? `${canonical.slice(0, 4)}-${canonical.slice(4)}` : code.trim().toUpperCase();
+    const row = this.sql.prepare('SELECT * FROM players WHERE recoveryCode = ?').get(formatted) as unknown as
+      | PlayerRow
+      | undefined;
+    if (!row) return null;
+    if (row.id === newDeviceId) return rowToProfile(row);
+
+    this.sql.exec('BEGIN');
+    try {
+      this.sql.prepare('DELETE FROM players WHERE id = ?').run(newDeviceId);
+      this.sql
+        .prepare('UPDATE players SET id = ?, recoveryCode = ?, lastActive = ? WHERE id = ?')
+        .run(newDeviceId, this.newRecoveryCode(), new Date().toISOString(), row.id);
+      this.sql.prepare('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, row.id);
+      this.sql.prepare('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, row.id);
+      this.sql.prepare('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, row.id);
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    return this.readProfile(newDeviceId);
   }
 
   public getLeaderboard(sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo', limit = 50): LeaderboardEntry[] {

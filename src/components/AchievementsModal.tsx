@@ -49,7 +49,7 @@ export const AchievementsModal: React.FC<Props> = ({ isOpen, onClose, playerId }
   useEffect(() => {
     if (isOpen && playerId) {
       setIsLoading(true);
-      fetch(`/api/achievements?playerId=${playerId}`)
+      fetch('/api/achievements')
         .then((res) => res.json())
         .then((data) => {
           setAchievements(data.achievements || []);

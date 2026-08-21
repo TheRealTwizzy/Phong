@@ -15,6 +15,8 @@ import {
   Swords,
   ShieldAlert,
   Radio,
+  KeyRound,
+  Copy,
 } from 'lucide-react';
 
 interface Props {
@@ -35,6 +37,55 @@ export const ProfileModal: React.FC<Props> = ({
   onRefreshProfile,
 }) => {
   const [isEditingName, setIsEditingName] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
+  const [claimCode, setClaimCode] = useState('');
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [claimError, setClaimError] = useState<string | null>(null);
+
+  const copyRecoveryCode = () => {
+    if (!profile?.recoveryCode) return;
+    navigator.clipboard
+      ?.writeText(profile.recoveryCode)
+      .then(() => {
+        setCodeCopied(true);
+        setTimeout(() => setCodeCopied(false), 2000);
+      })
+      .catch(() => {});
+  };
+
+  const handleClaim = async () => {
+    if (!claimCode.trim() || claimBusy) return;
+    if (
+      profile &&
+      profile.matchesPlayed > 0 &&
+      !window.confirm(
+        'Restoring another profile will replace the profile currently on this device (its stats will be lost). Continue?'
+      )
+    ) {
+      return;
+    }
+    setClaimBusy(true);
+    setClaimError(null);
+    try {
+      const res = await fetch('/api/profile/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: claimCode }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setClaimError(data.error || 'Could not restore profile');
+        return;
+      }
+      localStorage.setItem('half_pong_player_name', data.username);
+      // Identity swapped server-side; reload so every view reflects it
+      window.location.reload();
+    } catch {
+      setClaimError('Network error — try again');
+    } finally {
+      setClaimBusy(false);
+    }
+  };
   const [tempName, setTempName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<'stats' | 'history'>('stats');
@@ -50,7 +101,7 @@ export const ProfileModal: React.FC<Props> = ({
   useEffect(() => {
     if (isOpen && profile && activeTab === 'history') {
       setIsLoadingMatches(true);
-      fetch(`/api/matches/${profile.id}`)
+      fetch('/api/matches/me')
         .then((res) => res.json())
         .then((data) => {
           setMatches(data.matches || []);
@@ -262,6 +313,64 @@ export const ProfileModal: React.FC<Props> = ({
                         Keep logging in daily to maintain streak boosts & unlock special themes!
                       </div>
                     </div>
+                  </div>
+                </div>
+
+                {/* Device Identity & Recovery */}
+                <div
+                  id="recovery-card"
+                  className="bg-slate-900/70 border border-cyan-500/25 rounded-2xl p-4 space-y-3"
+                >
+                  <div className="flex items-center gap-2 text-cyan-300">
+                    <KeyRound className="w-4 h-4" />
+                    <span className="text-xs font-mono font-bold uppercase tracking-wider">
+                      Profile Recovery Code
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Your profile lives on this device. Save this code somewhere safe — it moves your
+                    profile to a new phone or restores it after clearing browser data. Using it
+                    generates a fresh code.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <code
+                      id="recovery-code"
+                      className="flex-1 text-center text-lg font-black font-mono tracking-[0.2em] text-cyan-300 bg-slate-950 border border-slate-800 rounded-xl py-2 select-all"
+                    >
+                      {profile.recoveryCode || '····-····'}
+                    </code>
+                    <button
+                      id="btn-copy-recovery"
+                      onClick={copyRecoveryCode}
+                      title="Copy code"
+                      className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95"
+                    >
+                      {codeCopied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <div className="pt-1 border-t border-slate-800/80 space-y-2">
+                    <p className="text-[11px] text-slate-400">
+                      Have a code from another device? Restore that profile here:
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="input-claim-code"
+                        value={claimCode}
+                        onChange={(e) => setClaimCode(e.target.value.toUpperCase())}
+                        placeholder="XXXX-XXXX"
+                        maxLength={9}
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm font-mono tracking-widest text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/60"
+                      />
+                      <button
+                        id="btn-claim-profile"
+                        onClick={handleClaim}
+                        disabled={claimBusy || !claimCode.trim()}
+                        className="px-4 py-2 rounded-xl font-mono text-xs font-bold bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-800 disabled:text-slate-500 text-white transition active:scale-95"
+                      >
+                        {claimBusy ? '…' : 'Restore'}
+                      </button>
+                    </div>
+                    {claimError && <p className="text-[11px] text-rose-400">{claimError}</p>}
                   </div>
                 </div>
 

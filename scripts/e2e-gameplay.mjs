@@ -206,6 +206,67 @@ const guest = await newPage();
   }
 }
 
+// ---- Scenario 5: device identity — cookie survives wipes, codes transfer ----
+{
+  const me = (page) => page.evaluate(() => fetch('/api/profile/me').then((r) => r.json()));
+
+  const ctxA = await browser.newContext({ ...devices['iPhone 13'] });
+  const a = await ctxA.newPage();
+  a.on('dialog', (d) => d.accept().catch(() => {}));
+  await a.goto(BASE, { waitUntil: 'networkidle' });
+  const profA1 = await me(a);
+  if (!/^dev_[0-9a-f]{18}$/.test(profA1.id)) fail(`server-issued id malformed: ${profA1.id}`);
+  if (!/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(profA1.recoveryCode)) fail(`bad recovery code: ${profA1.recoveryCode}`);
+
+  // localStorage wipe must NOT re-roll identity (the cookie is the anchor)
+  await a.evaluate(() => localStorage.clear());
+  await a.reload({ waitUntil: 'networkidle' });
+  const profA2 = await me(a);
+  if (profA2.id !== profA1.id) fail(`identity re-rolled after localStorage clear: ${profA1.id} -> ${profA2.id}`);
+  console.log('scenario 5a OK — identity survives localStorage wipe');
+
+  // Give A's profile a distinctive name so the move is provable
+  await a.evaluate(() =>
+    fetch('/api/profile/me', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'KeeperA' }),
+    }).then((r) => r.json())
+  );
+
+  // Second device gets its own profile; claiming A's code moves A's profile over
+  const ctxB = await browser.newContext({ ...devices['iPhone 13'] });
+  const b = await ctxB.newPage();
+  b.on('dialog', (d) => d.accept().catch(() => {}));
+  await b.goto(BASE, { waitUntil: 'networkidle' });
+  const profB1 = await me(b);
+  if (profB1.id === profA1.id) fail('two devices shared an identity');
+
+  await b.click('#btn-open-profile');
+  await b.waitForSelector('#input-claim-code', { timeout: 5000 });
+  await b.fill('#input-claim-code', profA1.recoveryCode);
+  await Promise.all([
+    b.waitForNavigation({ waitUntil: 'networkidle' }).catch(() => {}),
+    b.click('#btn-claim-profile'),
+  ]);
+  const profB2 = await me(b);
+  if (profB2.username !== 'KeeperA') fail(`claim did not move profile: got ${profB2.username}`);
+  if (profB2.id !== profB1.id) fail('device id changed on claim');
+  if (profB2.recoveryCode === profA1.recoveryCode) fail('recovery code did not rotate on use');
+
+  // The old device unlinks: same device id, but a brand-new profile row
+  await a.reload({ waitUntil: 'networkidle' });
+  const profA3 = await me(a);
+  if (profA3.createdAt === profA1.createdAt) fail('old device still holds the moved profile');
+  if (profA3.recoveryCode === profA1.recoveryCode || profA3.recoveryCode === profB2.recoveryCode)
+    fail('fresh profile did not get its own recovery code');
+  if (profA3.matchesPlayed !== 0) fail('old device profile not fresh');
+  console.log('scenario 5b OK — recovery code transfers the profile and rotates');
+
+  await ctxA.close();
+  await ctxB.close();
+}
+
 await browser.close();
 console.log('BROWSER E2E PASSED');
 process.exit(0);
