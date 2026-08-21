@@ -17,6 +17,7 @@ You do not need two devices for most multiplayer work:
 - **Two browser windows** against `npm run dev`: create a room in one, join in the other. This exercises the real server path (room codes, paddle relay, net transform, scoring, rematch). With the lobby's "Direct connect (P2P)" toggle on (default), the two windows will also negotiate a real WebRTC DataChannel — watch the `P2P`/`RELAY` badge top-right.
 - **Dual Court Simulator** (split mode in-app): both halves on one screen, no server involved — fastest way to iterate on physics and rendering.
 - **Load**: `node scripts/load-test.mjs 10 20` runs 10 concurrent scripted matches against a local server and reports loss/latency.
+- **Browser E2E**: `scripts/e2e-gameplay.mjs` drives two real Chromium pages through the full flow — room create/join, P2P DataChannel handshake, and two played points including the serve handoff to the player who missed. Needs `npm i --no-save playwright-core` and `CHROMIUM_PATH` pointing at a Chromium binary; target with `E2E_URL` (default `http://localhost:3000`). Run it after touching the serve/score/transport logic.
 
 Note: the app gates desktop browsers behind a "smartphone required" screen — click **Preview Smartphone Screen** (or emulate a phone in devtools) when testing in desktop browsers.
 

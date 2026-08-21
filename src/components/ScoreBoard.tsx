@@ -153,6 +153,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
             {opponentName}
           </span>
           <span
+            id="score-opponent"
             className="text-lg sm:text-2xl font-black leading-none"
             style={{ color: theme.opponentPaddleColor }}
           >
@@ -172,6 +173,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
             {t('you', language)}
           </span>
           <span
+            id="score-player"
             className="text-lg sm:text-2xl font-black leading-none"
             style={{ color: theme.playerPaddleColor }}
           >
