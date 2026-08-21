@@ -12,7 +12,11 @@ This document is the working guide to **Phong**, an arcade sports web app with a
 - **Cross-Net Jump**: when the ball exits through the net, it leaves the player's screen and appears on the opponent's, travelling downward.
 - **Opponent Radar**: a mini radar tracks the opponent's paddle and the ball while it is on their half.
 - **Physical 2-Phone Duel**: two phones placed top-to-top, connected by a 4-letter room code over WebSockets; the ball physically transitions between screens.
-- **Solo & Split**: an adaptive AI opponent (Rookie / Pro / Cyber / Chaos) and a split-screen Dual Court simulator on one device.
+- **Solo AI**: an adaptive AI opponent (Rookie / Pro / Cyber / Chaos) on the hidden half.
+- **Practice Wall**: fully solo drill mode — no opponent exists and the ball never leaves the player's screen; the net line acts as a *return line* that bounces every ball back. HUD shows current/best return streak; nothing is recorded.
+- **Split Screen**: local 2-player classic Pong on ONE device (`SplitScreenMatch`) — full court on a single screen, net across the middle, one player per half (multi-touch; each pointer is locked to the half it started in). No networking, no stats saved, unranked.
+
+**Navigation**: the app opens on a **MainMenu** screen (`screen: 'menu' | 'game'` in `App.tsx`). Match settings — AI difficulty and winning score — are locked in on the menu **before** a match starts and are not editable mid-match; the in-game Settings modal carries device/presentation preferences only. The in-match HUD keeps just sound/reset/settings/home; the winner overlay offers Play Again (or Rematch) and Main Menu.
 
 ## 2. Tech Stack
 
@@ -55,6 +59,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 - Rebound angle: `offset × 62°` max.
 - Each paddle hit speeds the ball up 4%, capped at `MAX_BALL_SPEED` (2.4 units/s).
 - Spin modifies trajectory on wall rebounds.
+- **Paddle width (`PADDLE_WIDTH_RATIO` = 0.22) and base ball speed are fixed constants — they must NEVER become user-editable settings** (fairness rule; `SplitScreenMatch` scales them internally for its full-court geometry, still non-editable).
 
 ## 4. Directory Structure
 
@@ -89,8 +94,9 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
     │   ├── themes.ts          # 10 visual themes + unlock requirements
     │   └── missions.ts        # Daily missions & progress
     ├── i18n/translations.ts   # 7-language dictionary (en es ja de fr pt zh) + t()
-    └── components/            # CourtCanvas, ScoreBoard, MultiplayerLobby,
-                               # DualCourtSimulator, RadarPreview, QuickChat,
+    └── components/            # MainMenu, CourtCanvas, ScoreBoard,
+                               # MultiplayerLobby, SplitScreenMatch,
+                               # RadarPreview, QuickChat,
                                # Profile/Leaderboard/MatchHistory/Missions/
                                # Achievements/Settings/Tutorial modals, etc.
 ```
@@ -179,6 +185,7 @@ Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.exa
 4. **Protocol changes start in `src/types.ts`** — both client and server import their message shapes from there.
 5. **Icons**: lucide-react. **Styling**: Tailwind utility classes; inline styles only for dynamic canvas/theme color bindings.
 6. **Keep the client origin-relative**: derive WS and API URLs from `window.location` (this is what makes dev, tunnels, and production work unchanged).
+7. **Match settings are pre-match only**: mode, AI difficulty, and winning score are chosen on the MainMenu before play; the in-game Settings modal is device preferences only. Paddle width and ball speed are engine constants, never settings (see §3).
 
 ## 10. Deployment
 

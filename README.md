@@ -2,7 +2,7 @@
 
 A blind half-court Pong for the web. Each player sees only their own half of the court — the glowing top edge of the screen is the net, and when the ball crosses it, it leaves your screen and appears on your opponent's. Place two phones top-to-top on a table, connect them with a 4-letter room code, and the ball physically travels across both screens.
 
-Also playable solo against an adaptive AI (Rookie → Chaos) and in a split-screen dual-court simulator on one device.
+The main menu offers four modes: **Solo AI** (adaptive Rookie → Chaos opponent on the hidden half), **Practice Wall** (fully solo — the net becomes a return line that bounces every ball back, ball never leaves your screen), **Split Screen** (2 players on one device, classic full court with the net across the middle — offline and unranked), and the **2-Phone Duel**. Match settings (difficulty, points to win) are locked in before each match starts.
 
 Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server, keyed to a **server-issued device identity** (signed cookie — one profile per device, no login) with a recovery code to move your profile to a new phone.
 

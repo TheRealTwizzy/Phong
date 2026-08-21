@@ -44,8 +44,8 @@ export interface GameSettings {
   showRadar: boolean;
   showStatsOverlay: boolean;
   showTrails: boolean;
-  ballSpeedFactor: number; // 0.8 to 1.6
-  paddleWidthRatio: number; // 0.15 to 0.35
+  // Paddle width and ball speed are deliberately NOT settings — they are
+  // fixed constants in game/physics.ts and must never be player-editable.
   difficulty: AIDifficulty;
   winningScore: number;
   theme: CourtTheme;

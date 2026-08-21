@@ -2,6 +2,9 @@ import { AIDifficulty, BallState } from '../types';
 
 export const PADDLE_Y = 0.92;
 export const PADDLE_HEIGHT = 0.024;
+// Fixed for every player and mode — fairness rule: paddle width and ball
+// speed are never exposed as user settings.
+export const PADDLE_WIDTH_RATIO = 0.22;
 export const BALL_BASE_RADIUS = 0.022;
 export const BASE_BALL_SPEED = 0.85; // units per second
 export const MAX_BALL_SPEED = 2.4;

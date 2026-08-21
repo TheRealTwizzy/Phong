@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback } from 'react';
 import { BallState, GameSettings, Particle, Ripple, LanguageCode } from '../types';
 import { ThemeConfig } from '../game/themes';
-import { PADDLE_Y, PADDLE_HEIGHT, BALL_BASE_RADIUS } from '../game/physics';
+import { PADDLE_Y, PADDLE_HEIGHT, PADDLE_WIDTH_RATIO } from '../game/physics';
 import { sound } from '../audio/soundEffects';
 import { t } from '../i18n/translations';
 
@@ -27,6 +27,8 @@ interface CourtCanvasProps {
   language?: LanguageCode;
   onImpact?: (type: 'paddle' | 'wall' | 'net' | 'score') => void;
   shakeTrigger?: number;
+  // Overrides the top-line caption (e.g. Practice Wall's "return line").
+  netLabel?: string;
 }
 
 export const CourtCanvas: React.FC<CourtCanvasProps> = ({
@@ -43,6 +45,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   language = 'en',
   onImpact,
   shakeTrigger = 0,
+  netLabel,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -78,7 +81,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         // gamma is left-to-right tilt in degrees (-90 to +90)
         const tilt = Math.max(-30, Math.min(30, e.gamma));
         const normalizedX = 0.5 + (tilt / 30) * 0.45;
-        const halfP = settings.paddleWidthRatio / 2;
+        const halfP = PADDLE_WIDTH_RATIO / 2;
         const clampedX = Math.max(halfP, Math.min(1 - halfP, normalizedX));
         onPaddleMove(clampedX);
       }
@@ -88,7 +91,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     return () => {
       window.removeEventListener('deviceorientation', handleOrientation);
     };
-  }, [settings.tiltEnabled, settings.paddleWidthRatio, onPaddleMove]);
+  }, [settings.tiltEnabled, onPaddleMove]);
 
   // Keyboard controls
   useEffect(() => {
@@ -117,7 +120,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         if (keysPressed.has('ArrowRight') || keysPressed.has('KeyD')) delta += 0.025;
 
         if (delta !== 0) {
-          const halfP = settings.paddleWidthRatio / 2;
+          const halfP = PADDLE_WIDTH_RATIO / 2;
           const nextX = Math.max(halfP, Math.min(1 - halfP, paddleXRef.current + delta));
           onPaddleMove(nextX);
         }
@@ -134,7 +137,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       window.removeEventListener('keyup', handleKeyUp);
       cancelAnimationFrame(animFrame);
     };
-  }, [settings.paddleWidthRatio, onPaddleMove, isServing, onServe]);
+  }, [onPaddleMove, isServing, onServe]);
 
   // Create particle burst helper
   const addParticles = useCallback((x: number, y: number, count: number, color: string) => {
@@ -265,7 +268,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const rawX = (e.clientX - rect.left) / rect.width;
-    const halfP = settings.paddleWidthRatio / 2;
+    const halfP = PADDLE_WIDTH_RATIO / 2;
     const clampedX = Math.max(halfP, Math.min(1 - halfP, rawX));
     onPaddleMove(clampedX);
   };
@@ -370,7 +373,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       ctx.fillStyle = theme.netGlowColor;
       ctx.font = '9px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText(t('net_halfway_line', language), width / 2, 20);
+      ctx.fillText(netLabel ?? t('net_halfway_line', language), width / 2, 20);
 
       // Pulsing sonar warning arrow when ball is over in the opponent's court
       if (isBallInOpponentCourt) {
@@ -547,7 +550,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       // ==========================================
       // PLAYER PADDLE (AT BOTTOM OF HALF COURT)
       // ==========================================
-      const paddleW = settings.paddleWidthRatio * width;
+      const paddleW = PADDLE_WIDTH_RATIO * width;
       const paddleH = PADDLE_HEIGHT * height;
       const paddleCenterPx = paddleXRef.current * width;
       const paddleLeftPx = paddleCenterPx - paddleW / 2;
@@ -589,12 +592,12 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   }, [
     ball,
     theme,
-    settings.paddleWidthRatio,
     settings.showTrails,
     isServing,
     isBallInOpponentCourt,
     oppEstimatedX,
     language,
+    netLabel,
   ]);
 
   return (

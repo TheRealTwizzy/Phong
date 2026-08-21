@@ -19,6 +19,7 @@ import { THEMES, ThemeConfig } from './game/themes';
 import {
   PADDLE_Y,
   PADDLE_HEIGHT,
+  PADDLE_WIDTH_RATIO,
   BASE_BALL_SPEED,
   checkPaddleCollision,
   OpponentAI,
@@ -36,7 +37,8 @@ import { ScoreBoard } from './components/ScoreBoard';
 import { RadarPreview } from './components/RadarPreview';
 import { SettingsModal } from './components/SettingsModal';
 import { MultiplayerLobby } from './components/MultiplayerLobby';
-import { DualCourtSimulator } from './components/DualCourtSimulator';
+import { MainMenu } from './components/MainMenu';
+import { SplitScreenMatch } from './components/SplitScreenMatch';
 import { ProfileModal } from './components/ProfileModal';
 import { LeaderboardModal } from './components/LeaderboardModal';
 import { AchievementsModal } from './components/AchievementsModal';
@@ -48,7 +50,7 @@ import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
 import { TutorialModal } from './components/TutorialModal';
 import confetti from 'canvas-confetti';
-import { Trophy, RefreshCw, Smartphone, Play, Sparkles, Award, User, ArrowUp } from 'lucide-react';
+import { Trophy, RefreshCw, Home } from 'lucide-react';
 
 const DEFAULT_SETTINGS: GameSettings = {
   soundEnabled: true,
@@ -63,8 +65,6 @@ const DEFAULT_SETTINGS: GameSettings = {
   showRadar: true,
   showStatsOverlay: true,
   showTrails: true,
-  ballSpeedFactor: 1.0,
-  paddleWidthRatio: 0.22,
   difficulty: 'pro',
   winningScore: 5,
   theme: 'neon',
@@ -74,7 +74,13 @@ const DEFAULT_SETTINGS: GameSettings = {
 export default function App() {
   const [settings, setSettings] = useState<GameSettings>(() => {
     const saved = localStorage.getItem('half_pong_settings');
-    return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
+    if (!saved) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(saved);
+    // Paddle width & ball speed were briefly user-tunable; they are fixed
+    // engine constants now, so stored values are dropped on load.
+    delete parsed.ballSpeedFactor;
+    delete parsed.paddleWidthRatio;
+    return { ...DEFAULT_SETTINGS, ...parsed };
   });
 
   // Player identity is server-issued (signed device cookie); the id arrives
@@ -113,6 +119,8 @@ export default function App() {
   const [toastAchievement, setToastAchievement] = useState<Achievement | null>(null);
   const [toastLevelUp, setToastLevelUp] = useState<number | null>(null);
 
+  // 'menu' = out-of-match navigation hub; 'game' = a match is on court.
+  const [screen, setScreen] = useState<'menu' | 'game'>('menu');
   const [mode, setMode] = useState<GameMode>('solo');
   const [stats, setStats] = useState<PlayerStats>({
     score: 0,
@@ -163,6 +171,7 @@ export default function App() {
   const paddleVxRef = useRef<number>(0);
   const aiRef = useRef<OpponentAI>(new OpponentAI(settings.difficulty));
   const modeRef = useRef<GameMode>(mode);
+  const screenRef = useRef<'menu' | 'game'>(screen);
   const wsRef = useRef<WebSocket | null>(ws);
   const isServingRef = useRef<boolean>(isServing);
   const statsRef = useRef<PlayerStats>(stats);
@@ -183,6 +192,7 @@ export default function App() {
   oppBallRef.current = oppBall;
   paddleXRef.current = paddleX;
   modeRef.current = mode;
+  screenRef.current = screen;
   wsRef.current = ws;
   isServingRef.current = isServing;
   statsRef.current = stats;
@@ -242,6 +252,10 @@ export default function App() {
   // Record Match Result to Server Database and Track Daily Missions
   const recordMatchCompletion = useCallback(
     async (isWinner: boolean) => {
+      // Practice Wall and Split Screen are unranked: no winner is ever set
+      // for them, and even if one were, nothing gets recorded.
+      if (modeRef.current === 'practice' || modeRef.current === 'split') return;
+
       // Advance daily missions: games_played, matches_won, multiplayer
       const { missions: m1 } = updateMissionProgress('games_played', 1);
       let updatedMissions = m1;
@@ -354,7 +368,7 @@ export default function App() {
         text,
         senderName: myName,
       });
-    } else if (mode === 'solo' || mode === 'practice') {
+    } else if (mode === 'solo') {
       // Simulate friendly AI response in solo mode after a small delay
       setTimeout(() => {
         const aiReplies = [
@@ -473,7 +487,7 @@ export default function App() {
     setWinner(null);
     setLastMatchResult(null);
 
-    const speed = BASE_BALL_SPEED * settingsRef.current.ballSpeedFactor;
+    const speed = BASE_BALL_SPEED;
     const initialVx = (Math.random() - 0.5) * 0.7;
 
     if (isPlayerServer) {
@@ -490,7 +504,7 @@ export default function App() {
     } else {
       // Opponent is serving: Ball starts in opponent's half
       setBall((b) => ({ ...b, active: false }));
-      if (modeRef.current === 'solo' || modeRef.current === 'practice') {
+      if (modeRef.current === 'solo') {
         setOppBall({
           x: 0.5,
           y: PADDLE_Y - 0.05,
@@ -503,15 +517,16 @@ export default function App() {
     }
   }, [isPlayerServer]);
 
-  // Solo/practice only: the AI has no finger to tap with. When the rules hand
-  // it the serve (the AI missed the last point), serve on its behalf after a
-  // short beat — otherwise the match waits forever on a prompt nobody sees.
+  // Solo only: the AI has no finger to tap with. When the rules hand it the
+  // serve (the AI missed the last point), serve on its behalf after a short
+  // beat — otherwise the match waits forever on a prompt nobody sees.
+  // (Practice Wall has no opponent at all: the player always serves.)
   useEffect(() => {
-    if (mode !== 'solo' && mode !== 'practice') return;
+    if (mode !== 'solo' || screen !== 'game') return;
     if (!isServing || isPlayerServer || winner) return;
     const timer = setTimeout(() => handleServe(), 900);
     return () => clearTimeout(timer);
-  }, [mode, isServing, isPlayerServer, winner, handleServe]);
+  }, [mode, screen, isServing, isPlayerServer, winner, handleServe]);
 
   // Build (or rebuild) the P2P link for the current room. The host creates
   // the offer; the guest side is created lazily when the first offer arrives.
@@ -556,6 +571,7 @@ export default function App() {
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
         setMode('multiplayer');
+        setScreen('game');
         p2pRef.current?.close();
         p2pRef.current = null;
         setLinkStatus('relay');
@@ -568,6 +584,7 @@ export default function App() {
         setOpponentName(msg.opponentName);
         setOpponentId(msg.opponentId);
         setMode('multiplayer');
+        setScreen('game');
         p2pRef.current?.close();
         p2pRef.current = null;
         setLinkStatus('relay');
@@ -821,6 +838,7 @@ export default function App() {
     setOpponentName(null);
     setOpponentId(null);
     setMode('solo');
+    setScreen('menu');
     resetMatch();
   };
 
@@ -833,7 +851,8 @@ export default function App() {
       const dt = Math.min((time - lastTime) / 1000, 0.05);
       lastTime = time;
 
-      if (isServingRef.current || winner) {
+      // Idle while on the menu; split mode runs its own self-contained loop.
+      if (screenRef.current !== 'game' || modeRef.current === 'split' || isServingRef.current || winner) {
         animId = requestAnimationFrame(gameLoop);
         return;
       }
@@ -864,7 +883,7 @@ export default function App() {
         const hitResult = checkPaddleCollision(
           b,
           paddleXRef.current,
-          currentSettings.paddleWidthRatio,
+          PADDLE_WIDTH_RATIO,
           paddleVxRef.current
         );
 
@@ -877,8 +896,12 @@ export default function App() {
           setTotalTouches((t) => t + 1);
           setStats((s) => {
             const nextRally = s.rallyCount + 1;
-            const { missions: m } = updateMissionProgress('rally', nextRally);
-            setMissions(m);
+            // Practice Wall returns are guaranteed, so they don't feed the
+            // rally missions — that would make the reward trivial.
+            if (currentMode !== 'practice') {
+              const { missions: m } = updateMissionProgress('rally', nextRally);
+              setMissions(m);
+            }
             return {
               ...s,
               rallyCount: nextRally,
@@ -888,9 +911,18 @@ export default function App() {
         }
 
         // ==============================================================
-        // 2. BALL CROSSES TOP NET (Y <= 0) - DISAPPEARS ACROSS THE DIVIDE!
+        // 2. BALL REACHES TOP NET (Y <= 0)
+        //    - Practice Wall: the net is a RETURN LINE — the ball bounces
+        //      straight back; it never leaves the player's screen.
+        //    - Everything else: it disappears across the divide!
         // ==============================================================
-        if (b.y <= 0) {
+        if (currentMode === 'practice') {
+          if (b.y - b.radius <= 0) {
+            b.y = b.radius;
+            b.vy = Math.abs(b.vy);
+            sound.playWallBounce();
+          }
+        } else if (b.y <= 0) {
           // Ball disappears from player's screen!
           b.active = false;
 
@@ -906,7 +938,7 @@ export default function App() {
                 speedMultiplier: hitResult.speed ? hitResult.speed / BASE_BALL_SPEED : 1,
               },
             });
-          } else if (currentMode === 'solo' || currentMode === 'practice') {
+          } else if (currentMode === 'solo') {
             // Spawn ball on unseen Opponent AI's half court
             setOppBall({
               x: Math.max(0.02, Math.min(0.98, 1 - b.x)),
@@ -920,7 +952,7 @@ export default function App() {
         }
 
         // ==============================================================
-        // 3. BALL MISSED BASELINE (Y >= 1.05) - OPPONENT SCORES!
+        // 3. BALL MISSED BASELINE (Y >= 1.05)
         // ==============================================================
         if (b.y >= 1.05) {
           b.active = false;
@@ -931,6 +963,12 @@ export default function App() {
               type: 'point_scored',
               scorer: playerIndexRef.current === 0 ? 'p2' : 'p1',
             });
+          } else if (currentMode === 'practice') {
+            // No opponent, no score — the streak just resets and the player
+            // serves again. Best streak stays on the board.
+            setStats((s) => ({ ...s, rallyCount: 0 }));
+            setIsServing(true);
+            setIsPlayerServer(true);
           } else {
             // Solo mode point for AI
             setStats((s) => {
@@ -952,7 +990,7 @@ export default function App() {
       // ==============================================================
       // 4. SIMULATE OPPONENT'S UNSEEN COURT (SOLO AI MODE)
       // ==============================================================
-      if ((currentMode === 'solo' || currentMode === 'practice') && oppBallRef.current?.active) {
+      if (currentMode === 'solo' && oppBallRef.current?.active) {
         let ob = { ...oppBallRef.current };
         ob.x += ob.vx * dt;
         ob.y += ob.vy * dt;
@@ -969,14 +1007,14 @@ export default function App() {
         }
 
         // Update Opponent AI Paddle tracking
-        aiRef.current.update(ob, dt, currentSettings.paddleWidthRatio);
+        aiRef.current.update(ob, dt, PADDLE_WIDTH_RATIO);
         setOppPaddleX(aiRef.current.paddleX);
 
         // Check Opponent Paddle Collision
         const oppHit = checkPaddleCollision(
           ob,
           aiRef.current.paddleX,
-          currentSettings.paddleWidthRatio,
+          PADDLE_WIDTH_RATIO,
           aiRef.current.paddleVx
         );
 
@@ -1048,6 +1086,7 @@ export default function App() {
       score: 0,
       opponentScore: 0,
       rallyCount: 0,
+      maxRally: 0,
     }));
     setTotalTouches(0);
     setMatchStartTime(Date.now());
@@ -1060,29 +1099,37 @@ export default function App() {
       x: 0.5,
       y: 0.82,
       vx: 0.3,
-      vy: -BASE_BALL_SPEED * settings.ballSpeedFactor,
+      vy: -BASE_BALL_SPEED,
       radius: 0.022,
       active: true,
     });
     setOppBall(null);
   };
 
+  // Menu → court. Match settings (difficulty, winning score) are already
+  // locked in on the menu before this runs — nothing re-opens them mid-match.
+  const startMatch = (newMode: GameMode) => {
+    setMode(newMode);
+    setScreen('game');
+    resetMatch();
+  };
+
+  // Court → menu, from the HUD home button or the winner overlay. Multiplayer
+  // additionally tears the room down (handleLeaveRoom returns to menu itself).
+  const quitToMenu = () => {
+    if (mode === 'multiplayer') {
+      handleLeaveRoom();
+      return;
+    }
+    setScreen('menu');
+    resetMatch();
+  };
+
   const currentTheme: ThemeConfig = THEMES[settings.theme] || THEMES.neon;
   const missionsSummary = getMissionsStatusSummary(missions);
 
-  // Render Dual Court Simulator if in 'split' mode
-  if (mode === 'split') {
-    return (
-      <DualCourtSimulator
-        settings={settings}
-        theme={currentTheme}
-        onExitSplitMode={() => {
-          setMode('solo');
-          resetMatch();
-        }}
-      />
-    );
-  }
+  const inSplitMatch = screen === 'game' && mode === 'split';
+  const inCourtMatch = screen === 'game' && mode !== 'split';
 
   return (
     <MobileGatekeeper language={currentLanguage}>
@@ -1101,6 +1148,40 @@ export default function App() {
           }}
         />
 
+        {/* Out-of-match hub: mode select + pre-match settings + navigation */}
+        {screen === 'menu' && (
+          <MainMenu
+            theme={currentTheme}
+            settings={settings}
+            onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
+            profile={profile}
+            playerStatus={playerStatus}
+            unclaimedMissionsCount={missionsSummary.unclaimed}
+            onStartSolo={() => startMatch('solo')}
+            onStartPractice={() => startMatch('practice')}
+            onStartSplit={() => startMatch('split')}
+            onOpenMultiplayer={() => setIsMultiplayerOpen(true)}
+            onOpenProfile={() => setIsProfileOpen(true)}
+            onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
+            onOpenAchievements={() => setIsAchievementsOpen(true)}
+            onOpenHistory={() => setIsHistoryOpen(true)}
+            onOpenMissions={() => setIsMissionsOpen(true)}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            onOpenTutorial={() => setIsTutorialOpen(true)}
+          />
+        )}
+
+        {/* Local 2-player classic court on one screen — offline & unranked */}
+        {inSplitMatch && (
+          <SplitScreenMatch
+            settings={settings}
+            theme={currentTheme}
+            onExitSplitMode={quitToMenu}
+          />
+        )}
+
+        {inCourtMatch && (
+          <>
         {/* Top HUD / Scoreboard */}
         <ScoreBoard
           stats={stats}
@@ -1111,28 +1192,22 @@ export default function App() {
           soundEnabled={settings.soundEnabled}
           onToggleSound={() => setSettings((s) => ({ ...s, soundEnabled: !s.soundEnabled }))}
           onOpenSettings={() => setIsSettingsOpen(true)}
-          onOpenMultiplayer={() => setIsMultiplayerOpen(true)}
           onOpenProfile={() => setIsProfileOpen(true)}
-          onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
-          onOpenAchievements={() => setIsAchievementsOpen(true)}
-          onOpenHistory={() => setIsHistoryOpen(true)}
-          onOpenMissions={() => setIsMissionsOpen(true)}
           onResetMatch={resetMatch}
+          onQuitToMenu={quitToMenu}
           winningScore={settings.winningScore}
           opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${settings.difficulty})`}
-          isOnlineConnected={isConnected}
-          pingMs={pingMs}
           language={currentLanguage}
-          unclaimedMissionsCount={missionsSummary.unclaimed}
         />
 
-        {/* Mini Radar Sonar Preview (Shows unseen opponent court if enabled) */}
+        {/* Mini Radar Sonar Preview (Shows unseen opponent court if enabled).
+            Practice Wall has no opponent court, so no radar there. */}
         <RadarPreview
           oppBall={oppBall}
           oppPaddleX={oppPaddleX}
-          paddleWidthRatio={settings.paddleWidthRatio}
+          paddleWidthRatio={PADDLE_WIDTH_RATIO}
           theme={currentTheme}
-          active={settings.showRadar && (mode === 'solo' || mode === 'practice')}
+          active={settings.showRadar && mode === 'solo'}
         />
 
         {/* Connection badge: direct P2P vs server relay (multiplayer only) */}
@@ -1176,14 +1251,16 @@ export default function App() {
             matchStartTime={matchStartTime}
           />
 
-          {/* Quick Chat overlay & popup tray */}
-          <QuickChat
-            onSendMessage={handleSendQuickChat}
-            activeMessages={activeChatMessages}
-            theme={currentTheme}
-            language={currentLanguage}
-            disabled={Boolean(winner)}
-          />
+          {/* Quick Chat overlay & popup tray (nobody to chat with in practice) */}
+          {mode !== 'practice' && (
+            <QuickChat
+              onSendMessage={handleSendQuickChat}
+              activeMessages={activeChatMessages}
+              theme={currentTheme}
+              language={currentLanguage}
+              disabled={Boolean(winner)}
+            />
+          )}
 
           <CourtCanvas
             ball={ball}
@@ -1193,11 +1270,15 @@ export default function App() {
             theme={currentTheme}
             isServing={isServing && isPlayerServer}
             onServe={handleServe}
-            isBallInOpponentCourt={oppBall?.active || (!ball.active && !(isServing && isPlayerServer))}
+            isBallInOpponentCourt={
+              mode !== 'practice' &&
+              (oppBall?.active || (!ball.active && !(isServing && isPlayerServer)))
+            }
             oppEstimatedX={oppBall?.active ? 1 - oppBall.x : 0.5}
             rallyCount={stats.rallyCount}
             language={currentLanguage}
             shakeTrigger={shakeTrigger}
+            netLabel={mode === 'practice' ? t('return_line', currentLanguage) : undefined}
           />
         </main>
 
@@ -1283,19 +1364,20 @@ export default function App() {
                   </span>
                 </button>
 
-                {mode !== 'multiplayer' && (
-                  <button
-                    id="btn-multiplayer-from-win"
-                    onClick={() => setIsMultiplayerOpen(true)}
-                    className="px-4 py-3 rounded-xl font-mono text-xs font-bold bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 transition active:scale-95 flex items-center justify-center gap-1.5"
-                  >
-                    <Smartphone className="w-4 h-4 text-cyan-400" />
-                    <span>2-Phone</span>
-                  </button>
-                )}
+                {/* Between-match navigation: back to the out-of-match hub */}
+                <button
+                  id="btn-menu-from-win"
+                  onClick={quitToMenu}
+                  className="px-4 py-3 rounded-xl font-mono text-xs font-bold bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 transition active:scale-95 flex items-center justify-center gap-1.5"
+                >
+                  <Home className="w-4 h-4 text-cyan-400" />
+                  <span>{t('main_menu', currentLanguage)}</span>
+                </button>
               </div>
             </div>
           </div>
+        )}
+          </>
         )}
 
         {/* Daily Missions Modal */}
@@ -1308,18 +1390,13 @@ export default function App() {
           language={currentLanguage}
         />
 
-        {/* Settings & Customization Modal */}
+        {/* Settings & Customization Modal (device preferences only —
+            match settings live on the main menu, pre-match) */}
         <SettingsModal
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
-          currentMode={mode}
-          onSelectMode={(newMode) => {
-            setMode(newMode);
-            if (newMode === 'multiplayer') setIsMultiplayerOpen(true);
-            resetMatch();
-          }}
           currentTheme={currentTheme}
           profile={profile}
           onOpenTutorial={() => setIsTutorialOpen(true)}
