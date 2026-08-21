@@ -181,6 +181,31 @@ const guest = await newPage();
   await g2.context().close();
 }
 
+// ---- Scenario 4: desktop viewports get the playable phone frame, never a wall ----
+{
+  for (const vp of [{ width: 1280, height: 900, label: 'desktop 100%' },
+                    { width: 2400, height: 1400, label: 'desktop zoomed-out' },
+                    { width: 800, height: 600, label: 'small desktop window' }]) {
+    const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+    const page = await ctx.newPage();
+    page.on('dialog', (d) => d.dismiss().catch(() => {}));
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    const frame = await page.$('#phone-frame');
+    if (!frame) fail(`${vp.label}: no #phone-frame rendered`);
+    const wall = await page.$('#simulate-smartphone-btn');
+    if (wall) fail(`${vp.label}: lock screen still present`);
+    await page.waitForSelector('#half-court-canvas', { timeout: 5000 }).catch(() => fail(`${vp.label}: game canvas missing`));
+    // The full HUD must be interactable without any zooming
+    await page.waitForSelector('#btn-multiplayer-lobby', { timeout: 5000 }).catch(() => fail(`${vp.label}: lobby button missing`));
+    const box = await (await page.$('#btn-multiplayer-lobby')).boundingBox();
+    if (!box || box.width < 20) fail(`${vp.label}: lobby button not reasonably sized (${box && box.width}px)`);
+    await page.click('#btn-multiplayer-lobby');
+    await page.waitForSelector('#btn-create-room', { timeout: 5000 }).catch(() => fail(`${vp.label}: lobby did not open`));
+    console.log(`scenario 4 OK — ${vp.label}: framed, playable, HUD at full size`);
+    await ctx.close();
+  }
+}
+
 await browser.close();
 console.log('BROWSER E2E PASSED');
 process.exit(0);
