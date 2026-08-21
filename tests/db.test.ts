@@ -181,11 +181,15 @@ describe('GameDatabase', () => {
 
 describe('scaled achievement rewards', () => {
   it('pays a scaled achievement by the prediction, not a flat constant', () => {
-    // cyber_slayer sits behind ai_rookie and ai_pro in the ladder branch, so
-    // the path has to be walked before it can be earned at all.
+    // cyber_slayer sits at the far end of the ladder branch: Rookie, then Pro,
+    // then ten Pro wins at level 10 or above. The whole path has to be walked
+    // before it can be earned at all.
     init('p_ach_hard', 'AchHard');
     db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'rookie', maxRally: 5 }));
-    db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'pro', maxRally: 5 }));
+    for (let i = 0; i < 60 && !db.getProfile('p_ach_hard').achievements.includes('ai_pro_10'); i++) {
+      db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'pro', maxRally: 5 }));
+    }
+    expect(db.getProfile('p_ach_hard').achievements).toContain('ai_pro_10');
     const res = db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'cyber', maxRally: 5 }));
     const hard = res.newAchievements.find((a) => a.id === 'cyber_slayer')!;
     expect(hard).toBeTruthy();

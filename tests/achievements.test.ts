@@ -8,6 +8,7 @@ import {
   BRANCHES,
   achievementById,
   ancestorsOf,
+  isBranchRevealed,
   isRevealed,
   isUnlockable,
   rootsOfBranch,
@@ -17,6 +18,18 @@ import {
   UNLOCKS,
 } from '../src/achievements';
 import { AI_DIFFICULTIES } from '../src/rating';
+import type { AchievementBranch } from '../src/types';
+
+// Gate contexts used across the tree tests.
+const NEWBIE = { level: 1, tier: 'unranked' } as const;
+const VETERAN = { level: 99, tier: 'legend' } as const;
+
+const branchGate = (id: AchievementBranch) => BRANCHES.find((b) => b.id === id)?.gate;
+/** The achievement ids that open a branch, if any. */
+const branchOpeners = (id: AchievementBranch): string[] => {
+  const gate = branchGate(id);
+  return gate?.achievement ? [gate.achievement] : [];
+};
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-ach-test-'));
 process.env.DATA_DIR = TMP;
@@ -57,11 +70,14 @@ describe('achievement reward shape', () => {
   it('keeps the catalogue worth a sane number of levels in total', () => {
     const total = ALL_ACHIEVEMENTS.reduce((sum, a) => sum + a.xpReward, 0);
     const { level } = levelFromXp(total);
-    // The tree spans a whole playing career — 200 matches, Legend tier, a
-    // 100-hit rally — so it is worth more in total than the old flat list,
-    // spread far thinner per match by the band cap.
-    expect(level).toBeGreaterThanOrEqual(8);
-    expect(level).toBeLessThanOrEqual(16);
+    // The tree spans a whole playing career across eight branches — 200
+    // matches, Cyber Overlord, a 150-hit rally, level 50 — so it is worth more
+    // in total than the old flat list, spread far thinner per match by the
+    // band cap. The ceiling is what stops the catalogue quietly becoming the
+    // main way to level: earning ALL of it must still be a career, not a
+    // shortcut past one.
+    expect(level).toBeGreaterThanOrEqual(12);
+    expect(level).toBeLessThanOrEqual(28);
   });
 });
 
@@ -218,27 +234,123 @@ describe('the tree itself', () => {
   });
 
   it('keeps a child locked until its parent is earned', () => {
-    const child = ALL_ACHIEVEMENTS.find((a) => a.parent)!;
-    expect(isUnlockable(child.id, [])).toBe(false);
-    expect(isUnlockable(child.id, [child.parent!])).toBe(true);
-    // Roots are always reachable.
-    for (const branch of BRANCHES) {
+    const child = ALL_ACHIEVEMENTS.find((a) => a.parent && !a.gate && !branchGate(a.branch))!;
+    expect(isUnlockable(child.id, [], VETERAN)).toBe(false);
+    expect(isUnlockable(child.id, [child.parent!], VETERAN)).toBe(true);
+    // Roots of an OPEN branch are always reachable.
+    for (const branch of BRANCHES.filter((b) => !b.gate)) {
       for (const root of rootsOfBranch(branch.id)) {
-        expect(isUnlockable(root.id, [])).toBe(true);
+        expect(isUnlockable(root.id, [], NEWBIE)).toBe(true);
       }
     }
   });
 
   it('conceals hidden rungs until their parent is earned', () => {
-    const secret = ALL_ACHIEVEMENTS.find((a) => a.hidden)!;
-    expect(isRevealed(secret.id, [])).toBe(false);
-    expect(isRevealed(secret.id, [secret.parent!])).toBe(true);
+    const secret = ALL_ACHIEVEMENTS.find((a) => a.hidden && !branchGate(a.branch))!;
+    expect(isRevealed(secret.id, [], VETERAN)).toBe(false);
+    expect(isRevealed(secret.id, [secret.parent!], VETERAN)).toBe(true);
     // Someone who already holds it can always read what they did.
-    expect(isRevealed(secret.id, [secret.id])).toBe(true);
-    // Nothing reachable on day one is hidden — a branch has to have a visible
-    // way in or a player never learns it exists.
-    for (const branch of BRANCHES) {
+    expect(isRevealed(secret.id, [secret.id], NEWBIE)).toBe(true);
+    // Nothing reachable on day one is hidden — an OPEN branch has to have a
+    // visible way in or a player never learns it exists. A concealed branch is
+    // the opposite by design: the branch itself is the silhouette.
+    for (const branch of BRANCHES.filter((b) => !b.gate)) {
       for (const root of rootsOfBranch(branch.id)) expect(root.hidden).toBeFalsy();
+    }
+  });
+
+  it('roots every branch on a node inside it', () => {
+    // `parent` chains WITHIN a tree; `gate` opens the tree. A cross-branch
+    // parent would make a branch unreadable as a tree of its own.
+    for (const b of BRANCHES) {
+      expect(rootsOfBranch(b.id).length).toBeGreaterThan(0);
+      for (const node of ALL_ACHIEVEMENTS.filter((a) => a.branch === b.id && a.parent)) {
+        expect(achievementById(node.parent!)!.branch).toBe(b.id);
+      }
+    }
+  });
+});
+
+describe('concealed branches', () => {
+  it('hides a gated branch, and everything in it, until it opens', () => {
+    const gated = BRANCHES.filter((x) => x.gate);
+    expect(gated.length).toBeGreaterThanOrEqual(3);
+    for (const b of gated) {
+      expect(isBranchRevealed(b.id, [], NEWBIE)).toBe(false);
+      for (const node of ALL_ACHIEVEMENTS.filter((a) => a.branch === b.id)) {
+        expect(isRevealed(node.id, [], NEWBIE)).toBe(false);
+        expect(isUnlockable(node.id, [], NEWBIE)).toBe(false);
+      }
+    }
+  });
+
+  it('opens each one on the thing it names, and not before', () => {
+    expect(isBranchRevealed('ascent', ['first_duel'], NEWBIE)).toBe(true);
+    expect(isBranchRevealed('ascent', ['shutout'], NEWBIE)).toBe(false);
+    expect(isBranchRevealed('dominion', ['shutout'], NEWBIE)).toBe(true);
+    expect(isBranchRevealed('dominion', ['first_duel'], NEWBIE)).toBe(false);
+    expect(isBranchRevealed('devotion', [], { level: 5, tier: 'unranked' })).toBe(true);
+    expect(isBranchRevealed('devotion', [], { level: 4, tier: 'unranked' })).toBe(false);
+  });
+
+  it('gives every concealed branch a hint, gated on something outside itself', () => {
+    for (const b of BRANCHES.filter((x) => x.gate)) {
+      expect(b.gateHintKey).toBeTruthy();
+      if (b.gate?.achievement) {
+        const opener = achievementById(b.gate.achievement)!;
+        expect(opener).toBeTruthy();
+        // A branch gated on one of its own nodes could never open.
+        expect(opener.branch).not.toBe(b.id);
+      }
+    }
+  });
+});
+
+describe('level and rank gates', () => {
+  it('refuses a gated rung until the level or tier is there', () => {
+    const gated = ALL_ACHIEVEMENTS.filter((a) => a.gate);
+    expect(gated.length).toBeGreaterThan(4);
+    for (const a of gated) {
+      const earned = [...(a.parent ? [a.parent] : []), ...branchOpeners(a.branch)];
+      const open = a.gate!.level
+        ? { level: a.gate!.level, tier: 'legend' as const }
+        : { level: 99, tier: a.gate!.tier! };
+      const short = a.gate!.level
+        ? { level: a.gate!.level - 1, tier: 'legend' as const }
+        : { level: 99, tier: 'rookie' as const };
+      expect(isUnlockable(a.id, earned, open)).toBe(true);
+      expect(isUnlockable(a.id, earned, short)).toBe(false);
+    }
+  });
+
+  it('banks a feat performed before its gate opened', () => {
+    // A 150-hit rally at level 3 must not vanish: rally rungs are measured on
+    // the profile's stored best, so the rung lands on the first match played
+    // after the gate is finally met.
+    db.getProfile('g_bank');
+    db.initializeProfile('g_bank', 'GateBank');
+    const play = (over: Record<string, unknown> = {}) =>
+      db.recordMatch({
+        playerId: 'g_bank', username: 'GateBank', playerScore: 5, opponentScore: 1,
+        maxRally: 5, mode: 'solo', difficulty: 'rookie', isWinner: true, ...over,
+      } as never);
+    play({ maxRally: 150 });
+    const early = db.getProfile('g_bank');
+    expect(early.highestRally).toBe(150);
+    expect(early.achievements).toContain('rally_100');
+    expect(early.achievements).not.toContain('rally_150'); // gate: level 15
+    // Grind ordinary matches until level 15; the banked rally then pays out.
+    for (let i = 0; i < 200 && db.getProfile('g_bank').level < 15; i++) play();
+    for (let i = 0; i < 3 && !db.getProfile('g_bank').achievements.includes('rally_150'); i++) play();
+    expect(db.getProfile('g_bank').level).toBeGreaterThanOrEqual(15);
+    expect(db.getProfile('g_bank').achievements).toContain('rally_150');
+  }, 30_000);
+
+  it('never gates a rung behind a level the game does not reach', () => {
+    // A gate is a delay, not a dead end. Level 25 is the deepest milestone the
+    // tree itself celebrates, so nothing may ask for more than that.
+    for (const a of ALL_ACHIEVEMENTS.filter((x) => x.gate?.level)) {
+      expect(a.gate!.level).toBeLessThanOrEqual(25);
     }
   });
 });
@@ -271,8 +383,33 @@ describe('parent gating in play', () => {
       .toContain('ai_rookie');
     expect(solo('g_walk', { difficulty: 'pro' }).newAchievements.map((a) => a.id))
       .toContain('ai_pro');
-    expect(solo('g_walk', { difficulty: 'cyber' }).newAchievements.map((a) => a.id))
-      .toContain('cyber_slayer');
+  });
+
+  it('will not open Cyber on one Pro win, and does open it on the climb', () => {
+    // The complaint this rung answers: Cyber arrived in a first session, off a
+    // single Pro win, before the player had any feel for the middle rung.
+    init('g_cyber', 'GateCyber');
+    solo('g_cyber', { difficulty: 'rookie' });
+    solo('g_cyber', { difficulty: 'pro' });
+    const early = db.getProfile('g_cyber');
+    expect(hasUnlock(early.achievements, 'difficulty', 'cyber')).toBe(false);
+
+    // Ten Pro wins AND level 10. Ten wins alone arrive first; the gate holds
+    // until the level does too.
+    for (let i = 0; i < 9; i++) solo('g_cyber', { difficulty: 'pro' });
+    const after = db.getProfile('g_cyber');
+    expect(after.proWins).toBeGreaterThanOrEqual(10);
+    if (after.level < 10) {
+      expect(hasUnlock(after.achievements, 'difficulty', 'cyber')).toBe(false);
+    }
+    // Keep playing until the level lands; the rung then opens by itself.
+    for (let i = 0; i < 40 && db.getProfile('g_cyber').level < 10; i++) {
+      solo('g_cyber', { difficulty: 'pro' });
+    }
+    const climbed = db.getProfile('g_cyber');
+    expect(climbed.level).toBeGreaterThanOrEqual(10);
+    expect(climbed.achievements).toContain('ai_pro_10');
+    expect(hasUnlock(climbed.achievements, 'difficulty', 'cyber')).toBe(true);
   });
 
   it('lets one result climb a chain when it genuinely satisfies every rung', () => {
@@ -300,7 +437,10 @@ describe('the tree gates the game', () => {
   it('opens the next rung of the ladder only by beating the one below', () => {
     expect(hasUnlock(['ai_rookie'], 'difficulty', 'pro')).toBe(true);
     expect(hasUnlock(['ai_rookie'], 'difficulty', 'cyber')).toBe(false);
-    expect(hasUnlock(['ai_rookie', 'ai_pro'], 'difficulty', 'cyber')).toBe(true);
+    // A single Pro win is no longer enough — that used to hand a first-session
+    // player the hardest opponent in the game.
+    expect(hasUnlock(['ai_rookie', 'ai_pro'], 'difficulty', 'cyber')).toBe(false);
+    expect(hasUnlock(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'difficulty', 'cyber')).toBe(true);
   });
 
   it('opens longer matches as a career builds', () => {
@@ -311,7 +451,7 @@ describe('the tree gates the game', () => {
 
   it('can name the achievement that opens each locked thing', () => {
     expect(unlockedBy('difficulty', 'pro')!.id).toBe('ai_rookie');
-    expect(unlockedBy('difficulty', 'cyber')!.id).toBe('ai_pro');
+    expect(unlockedBy('difficulty', 'cyber')!.id).toBe('ai_pro_10');
     expect(unlockedBy('winningScore', 15)!.id).toBe('veteran_10');
     // Nothing gates what is open from the start.
     expect(unlockedBy('difficulty', 'rookie')).toBeUndefined();
@@ -337,7 +477,19 @@ describe('the tree gates the game', () => {
     expect(reachable()).toEqual(['rookie']);
     earned = [...earned, 'ai_rookie'];
     expect(reachable()).toEqual(['rookie', 'pro']);
+    // Beating Pro once opens nothing further: the top rung is behind ten Pro
+    // wins AND level 10.
     earned = [...earned, 'ai_pro'];
+    expect(reachable()).toEqual(['rookie', 'pro']);
+    earned = [...earned, 'ai_pro_10'];
     expect(reachable()).toEqual(['rookie', 'pro', 'cyber']);
+  });
+
+  it('makes the Cyber gate a real climb, not a first-session accident', () => {
+    const gate = unlockedBy('difficulty', 'cyber')!;
+    // Ten Pro wins is the trigger; level 10 is the gate on the same rung.
+    expect(gate.gate?.level).toBe(10);
+    expect(isUnlockable(gate.id, ['ai_pro'], { level: 9, tier: 'unranked' })).toBe(false);
+    expect(isUnlockable(gate.id, ['ai_pro'], { level: 10, tier: 'unranked' })).toBe(true);
   });
 });

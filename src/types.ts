@@ -171,6 +171,17 @@ export interface PlayerProfile {
   totalAces: number;
   /** PvP wins only — solo wins never count toward the duel branch. */
   multiplayerWins: number;
+  // Every one of these is computed by the server inside recordMatch from the
+  // match it just wrote. None is ever accepted as a total from a client.
+  /** Consecutive wins right now, reset by any loss. */
+  winStreak: number;
+  bestWinStreak: number;
+  /** Matches won without conceding a point. */
+  shutoutsWon: number;
+  /** Solo wins per difficulty — what the ladder branch is measured on. */
+  rookieWins: number;
+  proWins: number;
+  cyberWins: number;
   /**
    * Permanent unlocks banked by completing elite daily missions. Kept for
    * good: the mission's XP is a daily reward, this is not.
@@ -260,7 +271,27 @@ export interface GameUnlock {
   value: string | number;
 }
 
-export type AchievementBranch = 'foundation' | 'rally' | 'ladder' | 'duel' | 'craft';
+export type AchievementBranch =
+  | 'foundation'
+  | 'rally'
+  | 'ladder'
+  | 'duel'
+  | 'craft'
+  // Concealed branches — a whole tree the player discovers rather than reads
+  // on day one. What opens each is in src/achievements.ts.
+  | 'ascent'
+  | 'dominion'
+  | 'devotion';
+
+/**
+ * A rung that needs more than its parent: a minimum profile level, a minimum
+ * visible tier, or both. Deep rungs are held behind real progression so the
+ * far end of a branch cannot be reached in a first session.
+ */
+export interface AchievementGate {
+  level?: number;
+  tier?: Tier;
+}
 
 export interface Achievement {
   id: string;
@@ -282,6 +313,8 @@ export interface Achievement {
    * discover instead of a list of chores read on day one.
    */
   hidden?: boolean;
+  /** Extra requirements beyond the parent — see AchievementGate. */
+  gate?: AchievementGate;
   icon: string;
   unlockedAt?: string;
   // XP actually granted when this achievement was unlocked. Only set on the

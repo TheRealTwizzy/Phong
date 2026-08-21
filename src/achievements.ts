@@ -1,4 +1,5 @@
-import { Achievement, AchievementBranch, GameUnlock } from './types';
+import { Achievement, AchievementBranch, AchievementGate, GameUnlock } from './types';
+import { TIER_ORDER, Tier } from './rating';
 
 // The achievement tree, shared by client and server like profileRules.ts,
 // rating.ts and matchRules.ts. Definitions live here rather than in the
@@ -10,13 +11,85 @@ import { Achievement, AchievementBranch, GameUnlock } from './types';
 // what makes the catalogue readable — a flat list of thirty is a checklist,
 // five short trees are five things you are working toward.
 
-export const BRANCHES: { id: AchievementBranch; titleKey: string; icon: string }[] = [
+/**
+ * A branch may itself be concealed. The first five are open from the first
+ * match; the last three are trees you DISCOVER — the tab shows as locked with
+ * a one-line hint until the thing that opens it happens. A branch gate is a
+ * prerequisite from OUTSIDE the branch, which is why every branch root is
+ * parentless: `parent` chains within a tree, `gate` opens the tree.
+ */
+export interface BranchDef {
+  id: AchievementBranch;
+  titleKey: string;
+  icon: string;
+  gate?: { achievement?: string; level?: number };
+  /** Shown on the locked tab so the player knows what to go and do. */
+  gateHintKey?: string;
+}
+
+export const BRANCHES: BranchDef[] = [
   { id: 'foundation', titleKey: 'branch_foundation', icon: 'flag' },
   { id: 'rally', titleKey: 'branch_rally', icon: 'activity' },
   { id: 'ladder', titleKey: 'branch_ladder', icon: 'cpu' },
   { id: 'duel', titleKey: 'branch_duel', icon: 'smartphone' },
   { id: 'craft', titleKey: 'branch_craft', icon: 'target' },
+  {
+    id: 'ascent',
+    titleKey: 'branch_ascent',
+    icon: 'trending-up',
+    gate: { achievement: 'first_duel' },
+    gateHintKey: 'branch_ascent_hint',
+  },
+  {
+    id: 'dominion',
+    titleKey: 'branch_dominion',
+    icon: 'swords',
+    gate: { achievement: 'shutout' },
+    gateHintKey: 'branch_dominion_hint',
+  },
+  {
+    id: 'devotion',
+    titleKey: 'branch_devotion',
+    icon: 'flame',
+    gate: { level: 5 },
+    gateHintKey: 'branch_devotion_hint',
+  },
 ];
+
+/**
+ * What a gate is measured against. The server passes the profile it is about
+ * to write; the client passes the profile it is showing.
+ */
+export interface ProgressContext {
+  level: number;
+  tier: Tier;
+}
+
+const tierRank = (tier: Tier): number => TIER_ORDER.indexOf(tier);
+
+/** Whether a level/tier gate is satisfied. No gate is always satisfied. */
+export function gateMet(gate: AchievementGate | undefined, ctx: ProgressContext): boolean {
+  if (!gate) return true;
+  if (gate.level !== undefined && ctx.level < gate.level) return false;
+  if (gate.tier !== undefined && tierRank(ctx.tier) < tierRank(gate.tier)) return false;
+  return true;
+}
+
+/** Whether a whole branch is visible yet. */
+export function isBranchRevealed(
+  branch: AchievementBranch,
+  earned: readonly string[],
+  ctx: ProgressContext
+): boolean {
+  const def = BRANCHES.find((b) => b.id === branch);
+  if (!def?.gate) return true;
+  if (def.gate.achievement && !earned.includes(def.gate.achievement)) return false;
+  if (def.gate.level !== undefined && ctx.level < def.gate.level) return false;
+  return true;
+}
+
+export const branchDef = (branch: AchievementBranch): BranchDef | undefined =>
+  BRANCHES.find((b) => b.id === branch);
 
 /**
  * Every achievement. `parent` is the one that must be earned first; an entry
@@ -104,8 +177,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     id: 'level_10',
     title: 'Seasoned',
     description: 'Reach Player Level 10.',
-    branch: 'foundation',
-    parent: 'level_5',
+    branch: 'devotion',
     category: 'special',
     xpReward: 200,
     icon: 'crown',
@@ -114,7 +186,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     id: 'level_25',
     title: 'Long Game',
     description: 'Reach Player Level 25.',
-    branch: 'foundation',
+    branch: 'devotion',
     parent: 'level_10',
     category: 'special',
     xpReward: 380,
@@ -125,8 +197,8 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     id: 'streak_7',
     title: 'Creature of Habit',
     description: 'Play on 7 consecutive days.',
-    branch: 'foundation',
-    parent: 'veteran_10',
+    branch: 'devotion',
+    parent: 'daily_3',
     category: 'special',
     xpReward: 200,
     icon: 'flame',
@@ -195,6 +267,30 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     icon: 'shield',
   },
 
+  {
+    id: 'rally_150',
+    title: 'Immovable Object',
+    description: 'Sustain a 150-hit rally.',
+    branch: 'rally',
+    parent: 'rally_100',
+    category: 'mastery',
+    xpReward: 900,
+    hidden: true,
+    gate: { level: 15 },
+    icon: 'activity',
+  },
+  {
+    id: 'wall_200',
+    title: 'The Wall Blinked First',
+    description: 'Return 200 in a row on the Practice Wall.',
+    branch: 'rally',
+    parent: 'wall_90',
+    category: 'mastery',
+    xpReward: 520,
+    hidden: true,
+    icon: 'activity',
+  },
+
   // ---- Ladder: climbing the AI difficulties -----------------------------
   {
     id: 'ai_rookie',
@@ -218,13 +314,34 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     icon: 'cpu',
   },
   {
+    id: 'ai_rookie_10',
+    title: 'Rookie Regular',
+    description: 'Beat the Rookie AI 10 times.',
+    branch: 'ladder',
+    parent: 'ai_rookie',
+    category: 'beginner',
+    xpReward: 140,
+    icon: 'cpu',
+  },
+  {
+    id: 'ai_pro_10',
+    title: 'Professional Standard',
+    description: 'Beat the Pro AI 10 times, at level 10 or above.',
+    branch: 'ladder',
+    parent: 'ai_pro',
+    category: 'mastery',
+    xpReward: 340,
+    gate: { level: 10 },
+    icon: 'cpu',
+  },
+  {
     id: 'cyber_slayer',
     title: 'Cyber Slayer',
     description: 'Beat the Cyber AI in Solo mode.',
     branch: 'ladder',
-    parent: 'ai_pro',
+    parent: 'ai_pro_10',
     category: 'mastery',
-    xpReward: 260,
+    xpReward: 420,
     scaled: true,
     icon: 'cpu',
   },
@@ -239,6 +356,19 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     scaled: true,
     hidden: true,
     icon: 'star',
+  },
+
+  {
+    id: 'cyber_10',
+    title: 'Machine Ender',
+    description: 'Beat the Cyber AI 10 times.',
+    branch: 'ladder',
+    parent: 'cyber_shutout',
+    category: 'mastery',
+    xpReward: 800,
+    hidden: true,
+    gate: { tier: 'ace' },
+    icon: 'cpu',
   },
 
   // ---- Duel: the two-phone game -----------------------------------------
@@ -277,8 +407,8 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     id: 'master_tier',
     title: 'Elite Contender',
     description: 'Reach the Master tier in ranked play.',
-    branch: 'duel',
-    parent: 'multiplayer_champ',
+    branch: 'ascent',
+    parent: 'tier_ace',
     category: 'special',
     xpReward: 400,
     icon: 'trending-up',
@@ -287,12 +417,36 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     id: 'legend_tier',
     title: 'Living Legend',
     description: 'Reach the Legend tier in ranked play.',
-    branch: 'duel',
-    parent: 'master_tier',
+    branch: 'ascent',
+    parent: 'tier_grandmaster',
     category: 'special',
     xpReward: 650,
     hidden: true,
     icon: 'trending-up',
+  },
+
+  {
+    id: 'duel_shutout',
+    title: 'Nothing Given',
+    description: 'Win a duel without conceding a point.',
+    branch: 'duel',
+    parent: 'multiplayer_champ',
+    category: 'online',
+    xpReward: 320,
+    scaled: true,
+    icon: 'smartphone',
+  },
+  {
+    id: 'duel_50',
+    title: 'Fixture',
+    description: 'Win 50 duels.',
+    branch: 'duel',
+    parent: 'duel_10',
+    category: 'online',
+    xpReward: 700,
+    hidden: true,
+    gate: { tier: 'vanguard' },
+    icon: 'smartphone',
   },
 
   // ---- Craft: what you do with the ball ---------------------------------
@@ -346,6 +500,175 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     hidden: true,
     icon: 'zap',
   },
+  {
+    id: 'ace_100',
+    title: 'Untouchable Serve',
+    description: 'Score 100 career aces.',
+    branch: 'craft',
+    parent: 'ace_25',
+    category: 'mastery',
+    xpReward: 600,
+    hidden: true,
+    gate: { level: 15 },
+    icon: 'target',
+  },
+  {
+    id: 'points_2000',
+    title: 'Two Thousand',
+    description: 'Score 2,000 career points.',
+    branch: 'craft',
+    parent: 'points_500',
+    category: 'special',
+    xpReward: 850,
+    hidden: true,
+    gate: { level: 25 },
+    icon: 'zap',
+  },
+
+  // ---- Ascent: the ranked ladder ----------------------------------------
+  // Concealed until the player has actually played a duel — rank means
+  // nothing before then, and a tier ladder read on day one is a wall.
+  {
+    id: 'placed',
+    title: 'On the Board',
+    description: 'Finish placement and earn a visible skill tier.',
+    branch: 'ascent',
+    category: 'online',
+    xpReward: 180,
+    icon: 'trending-up',
+  },
+  {
+    id: 'tier_vanguard',
+    title: 'Vanguard',
+    description: 'Reach the Vanguard tier in ranked play.',
+    branch: 'ascent',
+    parent: 'placed',
+    category: 'online',
+    xpReward: 260,
+    icon: 'trending-up',
+  },
+  {
+    id: 'tier_ace',
+    title: 'Ace',
+    description: 'Reach the Ace tier in ranked play.',
+    branch: 'ascent',
+    parent: 'tier_vanguard',
+    category: 'online',
+    xpReward: 340,
+    icon: 'trending-up',
+  },
+  {
+    id: 'tier_grandmaster',
+    title: 'Grandmaster',
+    description: 'Reach the Grandmaster tier in ranked play.',
+    branch: 'ascent',
+    parent: 'master_tier',
+    category: 'special',
+    xpReward: 520,
+    hidden: true,
+    icon: 'trending-up',
+  },
+  {
+    id: 'tier_overlord',
+    title: 'Cyber Overlord',
+    description: 'Reach the highest tier there is.',
+    branch: 'ascent',
+    parent: 'legend_tier',
+    category: 'special',
+    xpReward: 1000,
+    hidden: true,
+    icon: 'crown',
+  },
+
+  // ---- Dominion: winning, and winning without giving anything back ------
+  // Concealed until a first shutout: you find this branch by doing the thing
+  // it is about.
+  {
+    id: 'streak_3',
+    title: 'On a Roll',
+    description: 'Win 3 matches in a row.',
+    branch: 'dominion',
+    category: 'mastery',
+    xpReward: 140,
+    icon: 'flame',
+  },
+  {
+    id: 'streak_5',
+    title: 'Hot Hand',
+    description: 'Win 5 matches in a row.',
+    branch: 'dominion',
+    parent: 'streak_3',
+    category: 'mastery',
+    xpReward: 260,
+    icon: 'flame',
+  },
+  {
+    id: 'streak_10',
+    title: 'Untouchable',
+    description: 'Win 10 matches in a row.',
+    branch: 'dominion',
+    parent: 'streak_5',
+    category: 'special',
+    xpReward: 520,
+    hidden: true,
+    gate: { level: 12 },
+    icon: 'flame',
+  },
+  {
+    id: 'shutout_5',
+    title: 'Miser',
+    description: 'Win 5 matches without conceding a point.',
+    branch: 'dominion',
+    category: 'mastery',
+    xpReward: 300,
+    icon: 'shield',
+  },
+  {
+    id: 'shutout_15',
+    title: 'Toll Collector',
+    description: 'Win 15 matches without conceding a point.',
+    branch: 'dominion',
+    parent: 'shutout_5',
+    category: 'special',
+    xpReward: 620,
+    hidden: true,
+    icon: 'shield',
+  },
+
+  // ---- Devotion: the time you have put in --------------------------------
+  // Concealed until level 5 — a branch about the long haul should not be
+  // visible in the first twenty minutes.
+  {
+    id: 'daily_3',
+    title: 'Back Again',
+    description: 'Play on 3 consecutive days.',
+    branch: 'devotion',
+    category: 'special',
+    xpReward: 100,
+    icon: 'flame',
+  },
+  {
+    id: 'daily_30',
+    title: 'Part of the Furniture',
+    description: 'Play on 30 consecutive days.',
+    branch: 'devotion',
+    parent: 'streak_7',
+    category: 'special',
+    xpReward: 700,
+    hidden: true,
+    icon: 'flame',
+  },
+  {
+    id: 'level_50',
+    title: 'Half a Century',
+    description: 'Reach level 50.',
+    branch: 'devotion',
+    parent: 'level_25',
+    category: 'special',
+    xpReward: 800,
+    hidden: true,
+    icon: 'crown',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -365,7 +688,11 @@ export const UNLOCKS: Record<string, GameUnlock[]> = {
   first_win: [{ kind: 'winningScore', value: 10 }],
   veteran_10: [{ kind: 'winningScore', value: 15 }],
   ai_rookie: [{ kind: 'difficulty', value: 'pro' }],
-  ai_pro: [{ kind: 'difficulty', value: 'cyber' }],
+  // Cyber used to open on a SINGLE Pro win, which a player could take in
+  // their first session — the top rung arrived before they had any feel for
+  // the middle one. It now needs ten Pro wins AND level 10, so the hardest
+  // opponent in the game is something you climb to rather than stumble into.
+  ai_pro_10: [{ kind: 'difficulty', value: 'cyber' }],
 };
 
 /** Everything available from the start, before a single achievement. */
@@ -429,25 +756,51 @@ export function ancestorsOf(id: string): Achievement[] {
 export const depthOf = (id: string): number => ancestorsOf(id).length;
 
 /**
- * Whether `id` may be unlocked given what is already earned. This is the tree
- * rule: a child stays locked until its parent is earned, so the catalogue
- * reads as a path rather than a checklist.
+ * Whether `id` may be unlocked. Three rules, all of which must hold:
+ *   - the tree rule: a child stays locked until its parent is earned;
+ *   - the branch gate: a concealed branch opens on something outside it;
+ *   - the rung's own gate: a minimum level and/or visible tier.
+ *
+ * The context is REQUIRED rather than optional on purpose. An optional one
+ * would let a caller that forgot it silently ungate every rung, which is the
+ * same class of bug as auto-granting ancestors: it fails open.
  */
-export function isUnlockable(id: string, earned: readonly string[]): boolean {
+export function isUnlockable(
+  id: string,
+  earned: readonly string[],
+  ctx: ProgressContext
+): boolean {
   const def = BY_ID.get(id);
   if (!def) return false;
-  return !def.parent || earned.includes(def.parent);
+  if (def.parent && !earned.includes(def.parent)) return false;
+  if (!isBranchRevealed(def.branch, earned, ctx)) return false;
+  return gateMet(def.gate, ctx);
 }
 
 /**
  * Whether an achievement should be shown by name. A hidden one stays a
  * silhouette until its parent is earned — or until it is earned itself, since
- * a player who has it should always be able to read what they did.
+ * a player who has it should always be able to read what they did. A rung in a
+ * concealed branch is never shown at all: the branch itself is the silhouette.
  */
-export function isRevealed(id: string, earned: readonly string[]): boolean {
+export function isRevealed(
+  id: string,
+  earned: readonly string[],
+  ctx: ProgressContext
+): boolean {
   const def = BY_ID.get(id);
   if (!def) return false;
-  if (!def.hidden) return true;
   if (earned.includes(id)) return true;
+  if (!isBranchRevealed(def.branch, earned, ctx)) return false;
+  if (!def.hidden) return true;
   return !!def.parent && earned.includes(def.parent);
 }
+
+/** Everything a player has NOT yet earned in a branch, for a progress count. */
+export const branchProgress = (
+  branch: AchievementBranch,
+  earned: readonly string[]
+): { earned: number; total: number } => {
+  const all = ALL_ACHIEVEMENTS.filter((a) => a.branch === branch);
+  return { earned: all.filter((a) => earned.includes(a.id)).length, total: all.length };
+};

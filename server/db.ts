@@ -131,6 +131,12 @@ function updatePlayerStreak(profile: PlayerProfile): void {
 interface PlayerRow {
   /** Added by migration, so an old row reads back null. */
   multiplayerWins: number | null;
+  winStreak: number | null;
+  bestWinStreak: number | null;
+  shutoutsWon: number | null;
+  rookieWins: number | null;
+  proWins: number | null;
+  cyberWins: number | null;
   id: string;
   username: string;
   level: number;
@@ -171,6 +177,12 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
     // Defaulted rather than required: a row written before the column existed
     // reads back as null under the ALTER TABLE default.
     multiplayerWins: row.multiplayerWins || 0,
+    winStreak: row.winStreak || 0,
+    bestWinStreak: row.bestWinStreak || 0,
+    shutoutsWon: row.shutoutsWon || 0,
+    rookieWins: row.rookieWins || 0,
+    proWins: row.proWins || 0,
+    cyberWins: row.cyberWins || 0,
     achievements: JSON.parse(row.achievements || '[]'),
     recoveryCode: row.recoveryCode || undefined,
     initializedAt: row.initializedAt || undefined,
@@ -239,6 +251,12 @@ class GameDatabase {
         totalPointsScored INTEGER NOT NULL,
         totalAces INTEGER NOT NULL,
         multiplayerWins INTEGER NOT NULL DEFAULT 0,
+        winStreak INTEGER NOT NULL DEFAULT 0,
+        bestWinStreak INTEGER NOT NULL DEFAULT 0,
+        shutoutsWon INTEGER NOT NULL DEFAULT 0,
+        rookieWins INTEGER NOT NULL DEFAULT 0,
+        proWins INTEGER NOT NULL DEFAULT 0,
+        cyberWins INTEGER NOT NULL DEFAULT 0,
         dailyStreak INTEGER NOT NULL,
         lastDailyDate TEXT NOT NULL,
         achievements TEXT NOT NULL,
@@ -382,6 +400,13 @@ class GameDatabase {
     addColumn('usernameChangedAt', 'usernameChangedAt TEXT');
     // The duel branch counts PvP wins on their own; matchesWon mixes in solo.
     addColumn('multiplayerWins', 'multiplayerWins INTEGER NOT NULL DEFAULT 0');
+    // Counters the expanded achievement tree is measured on. All server-side.
+    addColumn('winStreak', 'winStreak INTEGER NOT NULL DEFAULT 0');
+    addColumn('bestWinStreak', 'bestWinStreak INTEGER NOT NULL DEFAULT 0');
+    addColumn('shutoutsWon', 'shutoutsWon INTEGER NOT NULL DEFAULT 0');
+    addColumn('rookieWins', 'rookieWins INTEGER NOT NULL DEFAULT 0');
+    addColumn('proWins', 'proWins INTEGER NOT NULL DEFAULT 0');
+    addColumn('cyberWins', 'cyberWins INTEGER NOT NULL DEFAULT 0');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
     // Uniqueness is case-insensitive and applies to chosen names only:
     // uninitialized rows keep their Paddle-XXXX placeholders outside the
@@ -459,9 +484,10 @@ class GameDatabase {
   private upsertProfile(p: PlayerProfile): void {
     this.stmt(
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
-           matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins, dailyStreak, lastDailyDate,
+           matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins,
+           winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, cyberWins, dailyStreak, lastDailyDate,
            achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
@@ -470,6 +496,9 @@ class GameDatabase {
            matchesWon=excluded.matchesWon, matchesLost=excluded.matchesLost,
            highestRally=excluded.highestRally, totalPointsScored=excluded.totalPointsScored,
            totalAces=excluded.totalAces, multiplayerWins=excluded.multiplayerWins,
+           winStreak=excluded.winStreak, bestWinStreak=excluded.bestWinStreak,
+           shutoutsWon=excluded.shutoutsWon, rookieWins=excluded.rookieWins,
+           proWins=excluded.proWins, cyberWins=excluded.cyberWins,
            dailyStreak=excluded.dailyStreak,
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive,
@@ -494,6 +523,12 @@ class GameDatabase {
         p.totalPointsScored,
         p.totalAces,
         p.multiplayerWins || 0,
+        p.winStreak || 0,
+        p.bestWinStreak || 0,
+        p.shutoutsWon || 0,
+        p.rookieWins || 0,
+        p.proWins || 0,
+        p.cyberWins || 0,
         p.dailyStreak,
         p.lastDailyDate,
         JSON.stringify(p.achievements),
@@ -568,6 +603,12 @@ class GameDatabase {
         totalPointsScored: 0,
         totalAces: 0,
         multiplayerWins: 0,
+        winStreak: 0,
+        bestWinStreak: 0,
+        shutoutsWon: 0,
+        rookieWins: 0,
+        proWins: 0,
+        cyberWins: 0,
         dailyStreak: 1,
         lastDailyDate: todayStr,
         achievements: [],
@@ -696,8 +737,9 @@ class GameDatabase {
     const streak = Math.max(0, Math.floor(bestStreak || 0));
     const newAchievements: Achievement[] = [];
     let budget = achievementXpCap(profile.level);
+    const wallProgress = { level: profile.level, tier: profile.tier };
     const grantWall = (achId: string) => {
-      if (!isUnlockable(achId, profile.achievements)) return;
+      if (!isUnlockable(achId, profile.achievements, wallProgress)) return;
       if (profile.achievements.includes(achId)) return;
       const meta = achievementById(achId);
       if (!meta) return;
@@ -709,6 +751,7 @@ class GameDatabase {
     };
     if (streak >= 30) grantWall('wall_30');
     if (streak >= 90) grantWall('wall_90');
+    if (streak >= 200) grantWall('wall_200');
 
     if (earnedXp > 0 || newAchievements.length > 0) {
       if (earnedXp > 0) {
@@ -1096,6 +1139,12 @@ class GameDatabase {
       totalPointsScored: bot.totalPointsScored || 0,
       totalAces: bot.totalAces || 0,
       multiplayerWins: bot.multiplayerWins || 0,
+      winStreak: 0,
+      bestWinStreak: 0,
+      shutoutsWon: 0,
+      rookieWins: 0,
+      proWins: 0,
+      cyberWins: 0,
       dailyStreak: bot.dailyStreak || 1,
       lastDailyDate: todayStr,
       achievements: bot.achievements || [],
@@ -1211,6 +1260,18 @@ class GameDatabase {
     // the achievements being once-only.
     profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
     if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
+    // Streaks, shutouts and per-difficulty wins are derived here and only
+    // here, from the result the server just accepted — a client can report a
+    // match, never a total.
+    profile.winStreak = isWin ? profile.winStreak + 1 : 0;
+    if (profile.winStreak > profile.bestWinStreak) profile.bestWinStreak = profile.winStreak;
+    const cleanSheet = isWin && payload.opponentScore === 0 && payload.playerScore >= 5;
+    if (cleanSheet) profile.shutoutsWon += 1;
+    if (isWin && payload.mode === 'solo') {
+      if (difficulty === 'rookie') profile.rookieWins += 1;
+      else if (difficulty === 'pro') profile.proWins += 1;
+      else if (difficulty === 'cyber') profile.cyberWins += 1;
+    }
     if (payload.maxRally > profile.highestRally) {
       profile.highestRally = payload.maxRally;
     }
@@ -1231,8 +1292,12 @@ class GameDatabase {
     // Pro — a difficulty the player had never beaten. Where one result really
     // does satisfy a whole chain (a 50-hit rally is also a 25 and a 10), the
     // triggers below fire in order and each rung opens the next.
+    // Gates are measured against the profile as it stands when the batch
+    // lands — after this match's own XP and tier update, the same instant the
+    // achievement budget is measured at.
+    const progress = { level: profile.level, tier: profile.tier };
     const unlock = (achId: string) => {
-      if (!isUnlockable(achId, profile.achievements)) return;
+      if (!isUnlockable(achId, profile.achievements, progress)) return;
       grant(achId);
     };
 
@@ -1271,35 +1336,65 @@ class GameDatabase {
     if (profile.matchesPlayed >= 50) unlock('veteran_50');
     if (profile.matchesPlayed >= 200) unlock('veteran_200');
     if (profile.level >= 5) unlock('level_5');
-    if (profile.level >= 10) unlock('level_10');
-    if (profile.level >= 25) unlock('level_25');
-    if (profile.dailyStreak >= 7) unlock('streak_7');
 
-    // Rally
-    if (payload.maxRally >= 10) unlock('rally_10');
-    if (payload.maxRally >= 25) unlock('rally_25');
-    if (payload.maxRally >= 50) unlock('rally_50');
-    if (payload.maxRally >= 100) unlock('rally_100');
+    // Rally. Measured on the profile's banked best, not this match's rally,
+    // so a feat performed before a gate opened is not lost — the rung lands
+    // on the first match after the gate is met.
+    if (profile.highestRally >= 10) unlock('rally_10');
+    if (profile.highestRally >= 25) unlock('rally_25');
+    if (profile.highestRally >= 50) unlock('rally_50');
+    if (profile.highestRally >= 100) unlock('rally_100');
+    if (profile.highestRally >= 150) unlock('rally_150');
 
-    // Ladder
+    // Ladder. The rungs fire in order so a single result can climb a chain
+    // it genuinely satisfies, and each one opens the next.
     if (isWin && solo && difficulty === 'rookie') unlock('ai_rookie');
+    if (profile.rookieWins >= 10) unlock('ai_rookie_10');
     if (isWin && solo && difficulty === 'pro') unlock('ai_pro');
+    if (profile.proWins >= 10) unlock('ai_pro_10');
     if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
     if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
+    if (profile.cyberWins >= 10) unlock('cyber_10');
 
     // Duel
     if (pvp) unlock('first_duel');
     if (isWin && pvp) unlock('multiplayer_champ');
+    if (shutOut && pvp) unlock('duel_shutout');
     if (profile.multiplayerWins >= 10) unlock('duel_10');
-    if (placed && profile.rankMu >= 28) unlock('master_tier');
-    if (placed && profile.rankMu >= 34) unlock('legend_tier');
+    if (profile.multiplayerWins >= 50) unlock('duel_50');
 
     // Craft
     if (profile.totalAces >= 1) unlock('first_ace');
     if (profile.totalAces >= 5) unlock('ace_sniper');
     if (profile.totalAces >= 25) unlock('ace_25');
+    if (profile.totalAces >= 100) unlock('ace_100');
     if (profile.totalPointsScored >= 100) unlock('points_100');
     if (profile.totalPointsScored >= 500) unlock('points_500');
+    if (profile.totalPointsScored >= 2000) unlock('points_2000');
+
+    // Ascent — the ranked ladder, concealed until a first duel has happened.
+    if (placed) unlock('placed');
+    if (placed && profile.rankMu >= 22) unlock('tier_vanguard');
+    if (placed && profile.rankMu >= 25) unlock('tier_ace');
+    if (placed && profile.rankMu >= 28) unlock('master_tier');
+    if (placed && profile.rankMu >= 31) unlock('tier_grandmaster');
+    if (placed && profile.rankMu >= 34) unlock('legend_tier');
+    if (placed && profile.rankMu >= 37) unlock('tier_overlord');
+
+    // Dominion — winning, and winning without giving anything back.
+    if (profile.bestWinStreak >= 3) unlock('streak_3');
+    if (profile.bestWinStreak >= 5) unlock('streak_5');
+    if (profile.bestWinStreak >= 10) unlock('streak_10');
+    if (profile.shutoutsWon >= 5) unlock('shutout_5');
+    if (profile.shutoutsWon >= 15) unlock('shutout_15');
+
+    // Devotion — the long haul, concealed until level 5.
+    if (profile.level >= 10) unlock('level_10');
+    if (profile.level >= 25) unlock('level_25');
+    if (profile.level >= 50) unlock('level_50');
+    if (profile.dailyStreak >= 3) unlock('daily_3');
+    if (profile.dailyStreak >= 7) unlock('streak_7');
+    if (profile.dailyStreak >= 30) unlock('daily_30');
 
     // Daily mission progress rides the same server-verified match record, so
     // it can never be reported independently of an actual game.

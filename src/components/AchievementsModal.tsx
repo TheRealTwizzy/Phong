@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Achievement, AchievementBranch, LanguageCode } from '../types';
-import { BRANCHES, isRevealed, isUnlockable } from '../achievements';
+import { BRANCHES, isBranchRevealed, isRevealed, isUnlockable } from '../achievements';
+import { Tier } from '../rating';
 import { t } from '../i18n/translations';
 import {
   X,
@@ -26,6 +27,9 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   playerId: string;
+  /** Gates are measured against these — see ProgressContext in achievements.ts. */
+  level: number;
+  tier: Tier;
   language?: LanguageCode;
 }
 
@@ -45,7 +49,14 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   'trending-up': <TrendingUp className="w-5 h-5 text-emerald-300" />,
 };
 
-export const AchievementsModal: React.FC<Props> = ({ isOpen, onClose, playerId, language = 'en' }) => {
+export const AchievementsModal: React.FC<Props> = ({
+  isOpen,
+  onClose,
+  playerId,
+  level,
+  tier,
+  language = 'en',
+}) => {
   const [achievements, setAchievements] = useState<Achievement[]>([]);
   const [branch, setBranch] = useState<AchievementBranch>('foundation');
   const [isLoading, setIsLoading] = useState(false);
@@ -67,6 +78,8 @@ export const AchievementsModal: React.FC<Props> = ({ isOpen, onClose, playerId, 
 
   const unlockedCount = achievements.filter((a) => a.unlockedAt).length;
   const earned = achievements.filter((a) => a.unlockedAt).map((a) => a.id);
+  const progress = { level, tier };
+  const branchOpen = (id: AchievementBranch) => isBranchRevealed(id, earned, progress);
 
   // Depth-first walk of one branch, so a child always renders directly under
   // its parent and the connector lines line up with the tree they describe.
@@ -139,21 +152,36 @@ export const AchievementsModal: React.FC<Props> = ({ isOpen, onClose, playerId, 
               {BRANCHES.map((b) => {
                 const nodes = achievements.filter((a) => a.branch === b.id);
                 const done = nodes.filter((a) => a.unlockedAt).length;
+                // A concealed branch shows as a lock rather than a name: the
+                // whole tree is the silhouette, so finding it is the reward.
+                const open = branchOpen(b.id);
                 return (
                   <button
                     key={b.id}
                     id={`ach-branch-${b.id}`}
+                    data-locked={open ? 'false' : 'true'}
                     onClick={() => setBranch(b.id)}
-                    className={`py-1 px-3 rounded-lg text-xs font-bold whitespace-nowrap transition-colors ${
+                    className={`py-1 px-3 rounded-lg text-xs font-bold whitespace-nowrap transition-colors flex items-center gap-1 ${
                       branch === b.id
                         ? 'bg-purple-500 text-white'
-                        : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'
+                        : open
+                          ? 'bg-slate-800/80 text-slate-400 hover:text-slate-200'
+                          : 'bg-slate-900/80 text-slate-600 hover:text-slate-500'
                     }`}
                   >
-                    {t(b.titleKey, language)}
-                    <span className="ml-1.5 opacity-70 font-mono">
-                      {done}/{nodes.length}
-                    </span>
+                    {open ? (
+                      <>
+                        {t(b.titleKey, language)}
+                        <span className="ml-0.5 opacity-70 font-mono">
+                          {done}/{nodes.length}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-3 h-3" />
+                        <span className="font-mono">???</span>
+                      </>
+                    )}
                   </button>
                 );
               })}
@@ -164,11 +192,22 @@ export const AchievementsModal: React.FC<Props> = ({ isOpen, onClose, playerId, 
           <div className="p-4 overflow-y-auto flex-1 space-y-2.5">
             {isLoading ? (
               <div className="text-center py-12 text-slate-400 text-sm">Loading trophies...</div>
+            ) : !branchOpen(branch) ? (
+              <div
+                id="ach-branch-locked"
+                className="flex flex-col items-center gap-2 py-14 px-6 text-center"
+              >
+                <Lock className="w-8 h-8 text-slate-600" />
+                <p className="text-sm font-bold text-slate-400">{t('branch_locked', language)}</p>
+                <p className="text-xs text-slate-500 max-w-xs leading-relaxed">
+                  {t(BRANCHES.find((b) => b.id === branch)?.gateHintKey || 'branch_locked', language)}
+                </p>
+              </div>
             ) : (
               rows.map(({ ach, depth, lastChild }) => {
                 const isUnlocked = !!ach.unlockedAt;
-                const reachable = isUnlockable(ach.id, earned);
-                const revealed = isRevealed(ach.id, earned);
+                const reachable = isUnlockable(ach.id, earned, progress);
+                const revealed = isRevealed(ach.id, earned, progress);
                 return (
                   <div key={ach.id} className="flex items-stretch" id={`ach-row-${ach.id}`}>
                     {/* Connector rail: one rung of indentation per depth, with
@@ -241,7 +280,7 @@ export const AchievementsModal: React.FC<Props> = ({ isOpen, onClose, playerId, 
                               <Lock className="w-3 h-3" />
                               <span>
                                 {t('ach_requires', language, {
-                                  name: isRevealed(ach.parent || '', earned)
+                                  name: isRevealed(ach.parent || '', earned, progress)
                                     ? achievements.find((a) => a.id === ach.parent)?.title || ''
                                     : t('ach_hidden_title', language),
                                 })}

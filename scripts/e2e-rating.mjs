@@ -53,6 +53,9 @@ const me = (page) => page.evaluate(async () => (await fetch('/api/profile/me')).
 
 // The achievement tree gates the ladder now: a fresh player can only play
 // Rookie, so anything that needs Pro or Cyber has to earn its way there first.
+// Walk the whole ladder. Cyber is behind ten Pro wins AND level 10, so a
+// helper that just beat Pro once now leaves it locked — and the server
+// rejects a locked difficulty, which is the point of the gate.
 const openLadder = (page) =>
   page.evaluate(async () => {
     const win = (difficulty) =>
@@ -65,7 +68,11 @@ const openLadder = (page) =>
         }),
       });
     await win('rookie');
-    await win('pro');
+    for (let i = 0; i < 60; i++) {
+      const me = await (await fetch('/api/profile/me')).json();
+      if (me.achievements.includes('ai_pro_10') && me.level >= 10) break;
+      await win('pro');
+    }
   });
 
 
