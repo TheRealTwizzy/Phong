@@ -28,10 +28,8 @@ import { START_MU } from './rating';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
 import {
-  loadDailyMissions,
-  updateMissionProgress,
-  claimMission,
   getMissionsStatusSummary,
+  msUntilMissionReset,
 } from './game/missions';
 import { CourtCanvas } from './components/CourtCanvas';
 import { ScoreBoard } from './components/ScoreBoard';
@@ -97,7 +95,9 @@ export default function App() {
   const [lastMatchResult, setLastMatchResult] = useState<MatchEndResult | null>(null);
 
   // Daily Missions State
-  const [missions, setMissions] = useState<DailyMission[]>(() => loadDailyMissions());
+  // Missions are server state: progress advances only from a recorded match,
+  // and rewards are claimed by id. Nothing about them lives in this browser.
+  const [missions, setMissions] = useState<DailyMission[]>([]);
   const [isMissionsOpen, setIsMissionsOpen] = useState<boolean>(false);
 
   // Modals state
@@ -237,9 +237,29 @@ export default function App() {
       .catch((e) => console.error('Profile fetch error:', e));
   }, []);
 
+  // Today's missions come from the server, which also owns their progress.
+  const refreshMissions = useCallback(async () => {
+    try {
+      const res = await fetch('/api/missions');
+      const data = await res.json();
+      if (data && Array.isArray(data.missions)) setMissions(data.missions);
+    } catch (e) {
+      console.error('Mission fetch error:', e);
+    }
+  }, []);
+
   useEffect(() => {
     fetchProfile();
   }, [fetchProfile]);
+
+  // Refetch once the profile exists (the device cookie is set by then) and
+  // again whenever the UTC day rolls over while the tab stays open.
+  useEffect(() => {
+    if (!profile?.id) return;
+    void refreshMissions();
+    const timer = setTimeout(() => void refreshMissions(), msUntilMissionReset() + 1000);
+    return () => clearTimeout(timer);
+  }, [profile?.id, refreshMissions]);
 
   // Rename (365-day lock). Returns the typed failure so the Profile modal
   // can tell the player WHY: taken, invalid, or locked until a date.
@@ -275,22 +295,6 @@ export default function App() {
       // for them, and even if one were, nothing gets recorded.
       if (modeRef.current === 'practice' || modeRef.current === 'split') return;
 
-      // Advance daily missions: games_played, matches_won, multiplayer
-      const { missions: m1 } = updateMissionProgress('games_played', 1);
-      let updatedMissions = m1;
-
-      if (isWinner) {
-        const { missions: m2 } = updateMissionProgress('matches_won', 1);
-        updatedMissions = m2;
-      }
-
-      if (modeRef.current === 'multiplayer') {
-        const { missions: m3 } = updateMissionProgress('multiplayer', 1);
-        updatedMissions = m3;
-      }
-
-      setMissions(updatedMissions);
-
       try {
         const payload: MatchEndPayload = {
           playerId,
@@ -322,6 +326,10 @@ export default function App() {
         if (result.profile) {
           setProfile(result.profile);
         }
+        // The server advanced today's missions as part of recording the match.
+        if (result.missions) {
+          setMissions(result.missions);
+        }
 
         // Show celebrations
         if (result.leveledUp) {
@@ -347,23 +355,22 @@ export default function App() {
 
   // Daily Mission Claim Handler
   const handleClaimMissionReward = async (missionId: string) => {
-    const { missions: updated, claimedMission } = claimMission(missionId);
-    setMissions(updated);
-
-    if (claimedMission && profile) {
-      try {
-        const res = await fetch('/api/profile/me', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ xpDelta: claimedMission.xpReward }),
-        });
-        const updatedProf = await res.json();
-        if (res.ok && updatedProf && updatedProf.id) {
-          setProfile(updatedProf);
-        }
-      } catch (e) {
-        console.error('Failed to claim mission reward on profile', e);
+    try {
+      const res = await fetch('/api/missions/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ missionId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        // Already claimed or not finished — refresh so the UI matches truth.
+        void refreshMissions();
+        return;
       }
+      if (data.profile) setProfile(data.profile);
+      if (data.missions) setMissions(data.missions);
+    } catch (e) {
+      console.error('Failed to claim mission reward', e);
     }
   };
 
@@ -681,8 +688,6 @@ export default function App() {
         });
         setStats((s) => {
           const nextRally = s.rallyCount + 1;
-          const { missions: m } = updateMissionProgress('rally', nextRally);
-          setMissions(m);
           return { ...s, rallyCount: nextRally, maxRally: Math.max(s.maxRally, nextRally) };
         });
         break;
@@ -917,12 +922,8 @@ export default function App() {
           setTotalTouches((t) => t + 1);
           setStats((s) => {
             const nextRally = s.rallyCount + 1;
-            // Practice Wall returns are guaranteed, so they don't feed the
-            // rally missions — that would make the reward trivial.
-            if (currentMode !== 'practice') {
-              const { missions: m } = updateMissionProgress('rally', nextRally);
-              setMissions(m);
-            }
+            // Practice Wall and Split Screen never record a match, so their
+            // guaranteed returns still can't feed the rally mission.
             return {
               ...s,
               rallyCount: nextRally,
@@ -1068,10 +1069,6 @@ export default function App() {
         if (ob.y >= 1.05) {
           ob.active = false;
           sound.playScore();
-
-          // Advance points scored mission
-          const { missions: mPts } = updateMissionProgress('points_scored', 1);
-          setMissions(mPts);
 
           setStats((s) => {
             const nextScore = s.score + 1;

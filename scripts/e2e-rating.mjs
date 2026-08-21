@@ -163,6 +163,78 @@ if (leak.leaked.length) fail(`public profile leaks ${leak.leaked.join(', ')}`);
 if (!leak.tier) fail('public profile has no tier');
 ok(`public profile exposes tier "${leak.tier}" and no raw rating fields`);
 
+// ---- 6. Missions are server state, claimable exactly once ---------------
+// Mission progress used to live in localStorage and be claimed by POSTing the
+// reward as an `xpDelta`: wiping site data re-armed all five. Now the server
+// owns both, so neither a storage wipe nor a repeated claim pays twice.
+const questPlayer = await newPlayer('Quest');
+
+const missionsOf = (page) => page.evaluate(async () => (await fetch('/api/missions')).json());
+const start = await missionsOf(questPlayer);
+if (!start.missions?.length) fail('no missions served');
+if (start.missions.some((m) => m.current > 0 || m.claimed)) fail('a fresh day started dirty');
+ok(`server serves ${start.missions.length} missions, all at zero`);
+
+await record(questPlayer, { ...base, difficulty: 'pro', playerScore: 5, maxRally: 9 });
+const advanced = (await missionsOf(questPlayer)).missions;
+const winQuest = advanced.find((m) => m.id === 'mission_win');
+if (!winQuest || winQuest.current < winQuest.target) {
+  fail(`a recorded win did not advance mission_win: ${JSON.stringify(winQuest)}`);
+}
+ok('recording a match advances missions server-side');
+
+// Wiping browser storage must not resurrect a fresh, re-claimable set.
+await questPlayer.evaluate(() => {
+  localStorage.clear();
+  sessionStorage.clear();
+});
+await questPlayer.reload({ waitUntil: 'networkidle' });
+await questPlayer.waitForSelector('#main-menu-screen', { timeout: 8000 });
+const afterWipe = (await missionsOf(questPlayer)).missions.find((m) => m.id === 'mission_win');
+if (afterWipe.current < afterWipe.target) fail('clearing storage reset server mission progress');
+ok('clearing browser storage does not reset mission progress');
+
+// Claim through the UI, then hammer the endpoint.
+await questPlayer.click('#menu-nav-missions');
+await questPlayer.waitForSelector('#claim-mission-mission_win', { timeout: 5000 });
+const xpBefore = (await me(questPlayer)).xp;
+await questPlayer.click('#claim-mission-mission_win');
+await questPlayer.waitForFunction(
+  async () => {
+    const r = await fetch('/api/missions');
+    const d = await r.json();
+    return d.missions.find((m) => m.id === 'mission_win')?.claimed === true;
+  },
+  null,
+  { timeout: 5000 }
+).catch(() => fail('claiming through the UI never marked the mission claimed'));
+const xpAfterClaim = (await me(questPlayer)).xp;
+if (xpAfterClaim <= xpBefore) fail('claiming a completed mission paid nothing');
+ok(`claiming through the UI paid ${xpAfterClaim - xpBefore} XP once`);
+
+const replay = await questPlayer.evaluate(async () => {
+  const codes = [];
+  for (let i = 0; i < 15; i++) {
+    const r = await fetch('/api/missions/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ missionId: 'mission_win' }),
+    });
+    codes.push(r.status);
+  }
+  const bad = await fetch('/api/profile/me', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ xpDelta: 1000 }),
+  });
+  return { codes, xpDeltaStatus: bad.status };
+});
+if (replay.codes.some((c) => c === 200)) fail(`a replayed claim paid out: ${replay.codes.join(',')}`);
+if (replay.xpDeltaStatus === 200) fail('PUT /api/profile/me still accepts a raw xpDelta');
+const xpFinal = (await me(questPlayer)).xp;
+if (xpFinal !== xpAfterClaim) fail(`XP moved on replay: ${xpAfterClaim} -> ${xpFinal}`);
+ok(`15 replayed claims + a raw xpDelta all rejected (${replay.xpDeltaStatus}), XP unchanged`);
+
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 console.log('\nALL RATING E2E CHECKS PASSED');
 await browser.close();

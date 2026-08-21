@@ -1,151 +1,125 @@
-import { DailyMission } from '../types';
+import { DailyMission, MatchEndPayload, MissionType } from '../types';
 
-const STORAGE_PREFIX = 'half_pong_daily_missions_';
+// Daily mission DEFINITIONS, shared by client and server exactly like
+// profileRules.ts and rating.ts. Progress and claims live on the SERVER
+// (server/db.ts): missions used to be kept in localStorage and claimed by
+// POSTing their own reward as an `xpDelta`, which meant clearing site data
+// re-armed all five, and the raw endpoint could be called in a loop. Nothing
+// in here reads or writes storage — it is pure data plus the rules for
+// advancing progress.
 
-export function getTodayDateKey(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+export interface MissionDef {
+  id: string;
+  type: MissionType;
+  titleKey: string;
+  descKey: string;
+  target: number;
+  xpReward: number;
 }
 
-export function getDefaultMissions(): DailyMission[] {
-  return [
-    {
-      id: 'mission_games',
-      type: 'games_played',
-      titleKey: 'mission_games_title',
-      descKey: 'mission_games_desc',
-      target: 3,
-      current: 0,
-      xpReward: 120,
-      claimed: false,
-    },
-    {
-      id: 'mission_win',
-      type: 'matches_won',
-      titleKey: 'mission_win_title',
-      descKey: 'mission_win_desc',
-      target: 1,
-      current: 0,
-      xpReward: 150,
-      claimed: false,
-    },
-    {
-      id: 'mission_rally',
-      type: 'rally',
-      titleKey: 'mission_rally_title',
-      descKey: 'mission_rally_desc',
-      target: 8,
-      current: 0,
-      xpReward: 120,
-      claimed: false,
-    },
-    {
-      id: 'mission_multi',
-      type: 'multiplayer',
-      titleKey: 'mission_multi_title',
-      descKey: 'mission_multi_desc',
-      target: 1,
-      current: 0,
-      xpReward: 200,
-      claimed: false,
-    },
-    {
-      id: 'mission_points',
-      type: 'points_scored',
-      titleKey: 'mission_points_title',
-      descKey: 'mission_points_desc',
-      target: 12,
-      current: 0,
-      xpReward: 120,
-      claimed: false,
-    },
-  ];
+export const MISSION_DEFS: MissionDef[] = [
+  {
+    id: 'mission_games',
+    type: 'games_played',
+    titleKey: 'mission_games_title',
+    descKey: 'mission_games_desc',
+    target: 3,
+    xpReward: 120,
+  },
+  {
+    id: 'mission_win',
+    type: 'matches_won',
+    titleKey: 'mission_win_title',
+    descKey: 'mission_win_desc',
+    target: 1,
+    xpReward: 150,
+  },
+  {
+    id: 'mission_rally',
+    type: 'rally',
+    titleKey: 'mission_rally_title',
+    descKey: 'mission_rally_desc',
+    target: 8,
+    xpReward: 120,
+  },
+  {
+    id: 'mission_multi',
+    type: 'multiplayer',
+    titleKey: 'mission_multi_title',
+    descKey: 'mission_multi_desc',
+    target: 1,
+    xpReward: 200,
+  },
+  {
+    id: 'mission_points',
+    type: 'points_scored',
+    titleKey: 'mission_points_title',
+    descKey: 'mission_points_desc',
+    target: 12,
+    xpReward: 120,
+  },
+];
+
+/** Most XP a player can claim from missions in one day. */
+export const MISSION_DAILY_XP_CAP = MISSION_DEFS.reduce((sum, m) => sum + m.xpReward, 0);
+
+export const findMission = (id: string): MissionDef | undefined =>
+  MISSION_DEFS.find((m) => m.id === id);
+
+/**
+ * The day a mission set belongs to, in UTC. Deliberately not local time: the
+ * server owns mission state, and a local-time key would hand a player a fresh
+ * set every time they changed timezone.
+ */
+export function missionDayKey(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
 }
 
-export function loadDailyMissions(): DailyMission[] {
-  const dateKey = getTodayDateKey();
-  const storageKey = `${STORAGE_PREFIX}${dateKey}`;
+/** Milliseconds until the next UTC midnight, for the countdown in the UI. */
+export function msUntilMissionReset(now: Date = new Date()): number {
+  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return Math.max(0, next - now.getTime());
+}
 
-  try {
-    const raw = localStorage.getItem(storageKey);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn('Failed to load daily missions from storage', e);
+export function formatMissionReset(now: Date = new Date()): string {
+  const total = Math.floor(msUntilMissionReset(now) / 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
+}
+
+/**
+ * How one recorded match advances a mission. `rally` keeps the best rally of
+ * the day; everything else accumulates. Progress is never decremented, and is
+ * held at the target so a mission cannot bank surplus toward tomorrow.
+ */
+export function missionProgressDelta(def: MissionDef, match: MatchEndPayload): number {
+  switch (def.type) {
+    case 'games_played':
+      return 1;
+    case 'matches_won':
+      return match.isWinner ? 1 : 0;
+    case 'multiplayer':
+      return match.mode === 'multiplayer' ? 1 : 0;
+    case 'points_scored':
+      return Math.max(0, Math.round(match.playerScore || 0));
+    case 'rally':
+      return 0; // handled as a maximum, not a sum — see applyMatchToProgress
+    default:
+      return 0;
   }
-
-  const defaults = getDefaultMissions();
-  saveDailyMissions(defaults);
-  return defaults;
 }
 
-export function saveDailyMissions(missions: DailyMission[]): void {
-  const dateKey = getTodayDateKey();
-  const storageKey = `${STORAGE_PREFIX}${dateKey}`;
-  try {
-    localStorage.setItem(storageKey, JSON.stringify(missions));
-  } catch (e) {
-    console.warn('Failed to save daily missions', e);
-  }
-}
-
-export function updateMissionProgress(
-  eventType: 'games_played' | 'matches_won' | 'rally' | 'multiplayer' | 'points_scored',
-  amount: number = 1
-): { missions: DailyMission[]; newlyCompleted: DailyMission[] } {
-  const missions = loadDailyMissions();
-  const newlyCompleted: DailyMission[] = [];
-
-  const updated = missions.map((m) => {
-    if (m.type === eventType) {
-      const prevCompleted = m.current >= m.target;
-      let nextCurrent = m.current;
-
-      if (eventType === 'rally') {
-        // For rally, we track the max rally hit today
-        nextCurrent = Math.max(m.current, amount);
-      } else {
-        nextCurrent = m.current + amount;
-      }
-
-      const isNowCompleted = nextCurrent >= m.target;
-      if (!prevCompleted && isNowCompleted) {
-        newlyCompleted.push({ ...m, current: nextCurrent });
-      }
-
-      return {
-        ...m,
-        current: Math.min(m.target * 2, nextCurrent), // Cap reasonable display
-      };
-    }
-    return m;
-  });
-
-  saveDailyMissions(updated);
-  return { missions: updated, newlyCompleted };
-}
-
-export function claimMission(missionId: string): { missions: DailyMission[]; claimedMission: DailyMission | null } {
-  const missions = loadDailyMissions();
-  let claimedMission: DailyMission | null = null;
-
-  const updated = missions.map((m) => {
-    if (m.id === missionId && m.current >= m.target && !m.claimed) {
-      claimedMission = { ...m, claimed: true };
-      return { ...m, claimed: true };
-    }
-    return m;
-  });
-
-  saveDailyMissions(updated);
-  return { missions: updated, claimedMission };
+/** Next progress value for `def` after `match`, given `current`. */
+export function applyMatchToProgress(
+  def: MissionDef,
+  current: number,
+  match: MatchEndPayload
+): number {
+  const next =
+    def.type === 'rally'
+      ? Math.max(current, Math.max(0, Math.round(match.maxRally || 0)))
+      : current + missionProgressDelta(def, match);
+  return Math.min(def.target, next);
 }
 
 export function getMissionsStatusSummary(missions: DailyMission[]): {
@@ -169,26 +143,5 @@ export function getMissionsStatusSummary(missions: DailyMission[]): {
     }
   });
 
-  return {
-    total: missions.length,
-    completed,
-    unclaimed,
-    claimed,
-    hasUnclaimed: unclaimed > 0,
-  };
-}
-
-export function getTimeUntilNextMidnight(): { hours: number; minutes: number; seconds: number; formatted: string } {
-  const now = new Date();
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0);
-  const diffMs = Math.max(0, tomorrow.getTime() - now.getTime());
-
-  const totalSeconds = Math.floor(diffMs / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  const formatted = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-
-  return { hours, minutes, seconds, formatted };
+  return { total: missions.length, completed, unclaimed, claimed, hasUnclaimed: unclaimed > 0 };
 }
