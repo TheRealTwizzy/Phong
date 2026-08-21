@@ -370,12 +370,24 @@ export interface RTCSignalPayload {
   candidate?: RTCIceCandidateInit | null;
 }
 
+/**
+ * The terms of a duel. Owned by the ROOM, not by either phone: the host picks
+ * them in the lobby, the server normalizes and broadcasts them, and both sides
+ * play the same match. Before this existed each phone applied its own winning
+ * score and its own physics rules, so a room could be two different matches.
+ */
+export interface RoomMatchConfig {
+  winningScore: number;
+  rules: MatchRules;
+}
+
 // WebSocket Messages
 // Display names are NOT part of the protocol: the server resolves each
 // player's name from the device-cookie profile, so clients can't spoof one.
 export type WSClientMessage =
   | { type: 'join_room'; roomId: string; playerId: string }
-  | { type: 'create_room'; playerId: string }
+  | { type: 'create_room'; playerId: string; config?: RoomMatchConfig }
+  | { type: 'set_room_config'; config: RoomMatchConfig }
   | { type: 'paddle_move'; x: number }
   | { type: 'ball_cross_net'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'point_scored'; scorer: 'p1' | 'p2' }
@@ -392,7 +404,8 @@ export type WSServerMessage =
   | { type: 'opponent_paddle'; x: number }
   | { type: 'ball_incoming'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'quick_chat'; text: string; senderName: string; senderIdx: number }
-  | { type: 'game_start'; servingPlayer: 0 | 1 }
+  | { type: 'room_config'; config: RoomMatchConfig }
+  | { type: 'game_start'; servingPlayer: 0 | 1; config: RoomMatchConfig }
   | { type: 'match_prediction'; winProbability: number }
   | { type: 'score_update'; p1Score: number; p2Score: number; reason: string; nextServer: 0 | 1 }
   | { type: 'rematch_state'; votes: [boolean, boolean] }

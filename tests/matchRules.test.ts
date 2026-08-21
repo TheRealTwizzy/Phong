@@ -10,6 +10,8 @@ import {
   alteredRuleKeys,
   clampRule,
   isRankedRules,
+  isRuleRanked,
+  unrankedRuleKeys,
   normalizeRules,
 } from '../src/matchRules';
 import {
@@ -64,23 +66,53 @@ describe('match rules', () => {
     expect(r.ballSpeedMin).toBeLessThanOrEqual(r.ballSpeedMax);
   });
 
-  it('unranks a match on any physics change, but never on a presentation one', () => {
+  it('lets every slider be tuned inside its band and still rate', () => {
+    // The whole point of the bands: these are adjustments a player can
+    // actually use. A rule moved anywhere inside its window is still altered
+    // — the UI says so — but the match keeps counting for rank.
+    for (const key of PHYSICS_RULE_KEYS) {
+      const { ranked } = PHYSICS_RULES[key];
+      for (const edge of [ranked.min, ranked.max]) {
+        const tuned = normalizeRules({ ...DEFAULT_MATCH_RULES, [key]: edge });
+        expect(isRuleRanked(key, tuned[key])).toBe(true);
+        expect(isRankedRules(tuned)).toBe(true);
+      }
+    }
+  });
+
+  it('unranks a match once a slider is pushed past its band', () => {
     for (const key of PHYSICS_RULE_KEYS) {
       const spec = PHYSICS_RULES[key];
-      // Move whichever way the spec has room for. ballSpeedMin has none
-      // upward: normalization pins it under ballSpeedMax, which is correct.
-      const target =
-        spec.default - spec.step * 2 >= spec.min
-          ? spec.default - spec.step * 2
-          : spec.default + spec.step * 2;
-      const bumped = { ...DEFAULT_MATCH_RULES, [key]: clampRule(key, target) };
-      expect(isRankedRules(bumped)).toBe(false);
-      expect(alteredRuleKeys(bumped)).toEqual([key]);
+      // Step outside whichever edge the spec has room beyond.
+      const beyond =
+        spec.ranked.min - spec.step >= spec.min
+          ? spec.ranked.min - spec.step
+          : spec.ranked.max + spec.step;
+      const pushed = normalizeRules({ ...DEFAULT_MATCH_RULES, [key]: beyond });
+      expect(isRuleRanked(key, pushed[key])).toBe(false);
+      expect(isRankedRules(pushed)).toBe(false);
+      expect(unrankedRuleKeys(pushed)).toEqual([key]);
+      expect(alteredRuleKeys(pushed)).toEqual([key]);
     }
+  });
+
+  it('never unranks a match on a presentation option', () => {
     for (const key of ['opponentSonar', 'trackTelemetry', 'quickChat'] as const) {
       expect(isRankedRules({ ...DEFAULT_MATCH_RULES, [key]: false })).toBe(true);
     }
     expect(isRankedRules({ ...DEFAULT_MATCH_RULES, autoServeSeconds: 3 })).toBe(true);
+  });
+
+  it('keeps every ranked band a real window that contains stock', () => {
+    for (const key of PHYSICS_RULE_KEYS) {
+      const spec = PHYSICS_RULES[key];
+      expect(spec.ranked.min).toBeLessThanOrEqual(spec.default);
+      expect(spec.ranked.max).toBeGreaterThanOrEqual(spec.default);
+      expect(spec.ranked.max).toBeGreaterThan(spec.ranked.min);
+      // A band that swallowed the whole slider would make "unranked"
+      // unreachable, which is the opposite failure to the one we fixed.
+      expect(spec.ranked.min > spec.min || spec.ranked.max < spec.max).toBe(true);
+    }
   });
 
   it('scales the paddle and ball it is asked to', () => {

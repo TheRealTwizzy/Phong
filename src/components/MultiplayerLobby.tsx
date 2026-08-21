@@ -2,8 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { ThemeConfig } from '../game/themes';
 import { isLinkableId } from '../profileRules';
 import { t } from '../i18n/translations';
-import { LanguageCode } from '../types';
-import { Copy, Check, QrCode, Smartphone, Users, Wifi, ArrowRight, X, Play, User } from 'lucide-react';
+import { Achievement, LanguageCode, MatchRules, RoomMatchConfig } from '../types';
+import { MatchRulesPanel } from './MatchRulesPanel';
+import { DEFAULT_ROOM_CONFIG, WINNING_SCORES, normalizeRules } from '../matchRules';
+import { hasUnlock, unlockedBy } from '../achievements';
+import { Copy, Check, QrCode, Smartphone, Users, Wifi, ArrowRight, X, Play, User, Lock } from 'lucide-react';
 
 interface MultiplayerLobbyProps {
   isOpen: boolean;
@@ -27,6 +30,14 @@ interface MultiplayerLobbyProps {
   onViewProfile?: (id: string) => void;
   /** Server-computed chance THIS player wins, once the opponent has joined. */
   winProbability?: number | null;
+  /**
+   * The room's terms. The host edits them here while waiting; the guest reads
+   * them. Null before a room exists.
+   */
+  roomConfig?: RoomMatchConfig | null;
+  onUpdateRoomConfig?: (patch: Partial<RoomMatchConfig>) => void;
+  /** The host's own achievements, so the length picker gates as the menu does. */
+  earnedAchievements?: string[];
   language?: LanguageCode;
 }
 
@@ -49,6 +60,9 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   opponentId = null,
   onViewProfile,
   winProbability = null,
+  roomConfig = null,
+  onUpdateRoomConfig,
+  earnedAchievements = [],
   language = 'en',
 }) => {
   const playerName = currentUsername || 'Player';
@@ -89,6 +103,11 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   };
 
   const opponentLinkable = onViewProfile && isLinkableId(opponentId);
+  // The host owns the room's terms; the guest sees exactly the same panel
+  // with every control disabled.
+  const isHost = playerIndex === 0;
+  const config = roomConfig || DEFAULT_ROOM_CONFIG;
+  const scoreOpen = (pts: number) => hasUnlock(earnedAchievements, 'winningScore', pts);
 
   return (
     <div
@@ -255,6 +274,64 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 </span>
               </div>
             )}
+
+            {/* The room's terms. Set here, by the host, while the other phone
+                is still on its way — and readable by the guest, so nobody
+                walks into a match whose rules they have not seen. */}
+            <div id="lobby-match-settings" className="flex flex-col gap-2 pt-2 border-t border-zinc-800">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest">
+                  {t('match_settings', language)}
+                </span>
+                <span
+                  id="lobby-settings-owner"
+                  className="text-[9px] font-mono text-zinc-500"
+                >
+                  {isHost ? t('lobby_you_set_terms', language) : t('lobby_host_sets_terms', language)}
+                </span>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-mono text-zinc-400">{t('winning_score', language)}</label>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {WINNING_SCORES.map((pts) => {
+                    const open = isHost ? scoreOpen(pts) : true;
+                    const gate: Achievement | null = open ? null : unlockedBy('winningScore', pts);
+                    const selected = config.winningScore === pts;
+                    return (
+                      <button
+                        key={pts}
+                        id={`lobby-pts-${pts}`}
+                        disabled={!isHost || !open}
+                        title={gate ? `${gate.title} — ${gate.description}` : undefined}
+                        onClick={() => onUpdateRoomConfig?.({ winningScore: pts })}
+                        className={`py-1.5 rounded-lg text-[10px] font-mono border transition flex items-center justify-center gap-1 ${
+                          !open
+                            ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
+                            : selected
+                              ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
+                              : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
+                        } ${!isHost ? 'cursor-default' : ''}`}
+                      >
+                        {!open && <Lock className="w-2.5 h-2.5" />}
+                        {pts}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <MatchRulesPanel
+                rules={config.rules}
+                onUpdateRules={(patch: Partial<MatchRules>) =>
+                  onUpdateRoomConfig?.({ rules: normalizeRules({ ...config.rules, ...patch }) })
+                }
+                lang={language}
+                mode="multiplayer"
+                readOnly={!isHost}
+                idPrefix="lobby"
+              />
+            </div>
 
             {/* Action buttons */}
             <div className="flex items-center gap-2 pt-2">

@@ -29,6 +29,11 @@ interface ScoreBoardProps {
   onOpenSettings: () => void;
   onOpenProfile: () => void;
   onResetMatch: () => void;
+  /**
+   * A duel's score belongs to the room, so a local reset would only desync
+   * this phone from the other one. Hidden there; every other mode keeps it.
+   */
+  canResetMatch: boolean;
   onQuitToMenu: () => void;
   winningScore: number;
   opponentName?: string;
@@ -49,6 +54,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
   onOpenSettings,
   onOpenProfile,
   onResetMatch,
+  canResetMatch,
   onQuitToMenu,
   winningScore,
   opponentName = 'Opponent',
@@ -213,14 +219,16 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
           {soundEnabled ? <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-zinc-500" />}
         </button>
 
-        <button
-          id="btn-reset-match"
-          onClick={onResetMatch}
-          title={t('reset_match', language)}
-          className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition active:scale-95"
-        >
-          <RefreshCw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-        </button>
+        {canResetMatch && (
+          <button
+            id="btn-reset-match"
+            onClick={onResetMatch}
+            title={t('reset_match', language)}
+            className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition active:scale-95"
+          >
+            <RefreshCw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+          </button>
+        )}
 
         <button
           id="btn-open-settings"

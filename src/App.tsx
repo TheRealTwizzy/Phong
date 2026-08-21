@@ -15,6 +15,7 @@ import {
   LanguageCode,
   MatchRules,
   CourtTheme,
+  RoomMatchConfig,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
 import { postMatchRecord, flushPendingMatches } from './net/matchRecord';
@@ -39,7 +40,13 @@ import {
   bounceOffWall,
 } from './game/physics';
 import { START_MU, normalizeDifficulty } from './rating';
-import { DEFAULT_MATCH_RULES, normalizeRules, isRankedRules } from './matchRules';
+import {
+  DEFAULT_MATCH_RULES,
+  DEFAULT_ROOM_CONFIG,
+  normalizeRoomConfig,
+  normalizeRules,
+  isRankedRules,
+} from './matchRules';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
 import {
@@ -204,9 +211,20 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [pingMs, setPingMs] = useState<number>(0);
   const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
+  // The room's terms, as the server last broadcast them. Null until a room
+  // exists. In a duel this — never the local menu — decides how long the match
+  // is and how the ball behaves, so both phones play the same match.
+  const [roomConfig, setRoomConfig] = useState<RoomMatchConfig | null>(null);
   // 'relay' = via server; 'connecting' = P2P handshake running; 'p2p' = direct
   const [linkStatus, setLinkStatus] = useState<'relay' | 'connecting' | 'p2p'>('relay');
   const [p2pEnabled, setP2pEnabled] = useState<boolean>(true);
+
+  // The terms the CURRENT match is played on. A duel takes them from the room
+  // so both sides agree; every other mode takes them from the menu.
+  const activeConfig: RoomMatchConfig =
+    mode === 'multiplayer' && roomConfig
+      ? roomConfig
+      : { winningScore: settings.winningScore, rules: settings.rules };
 
   // Refs for high-speed 60fps physics loop without stale closures
   const ballRef = useRef<BallState>(ball);
@@ -217,12 +235,14 @@ export default function App() {
   const aiRef = useRef<OpponentAI>(new OpponentAI(settings.difficulty));
   // Match rules are locked in on the menu; these refs give the game loop the
   // live values without re-creating it every render.
-  const rulesRef = useRef<MatchRules>(settings.rules);
-  rulesRef.current = settings.rules;
-  const paddleWidthRef = useRef<number>(paddleWidthFor(settings.rules));
-  paddleWidthRef.current = paddleWidthFor(settings.rules);
-  const ballRadiusRef = useRef<number>(ballRadiusFor(settings.rules));
-  ballRadiusRef.current = ballRadiusFor(settings.rules);
+  const rulesRef = useRef<MatchRules>(activeConfig.rules);
+  rulesRef.current = activeConfig.rules;
+  const paddleWidthRef = useRef<number>(paddleWidthFor(activeConfig.rules));
+  paddleWidthRef.current = paddleWidthFor(activeConfig.rules);
+  const ballRadiusRef = useRef<number>(ballRadiusFor(activeConfig.rules));
+  ballRadiusRef.current = ballRadiusFor(activeConfig.rules);
+  const configRef = useRef<RoomMatchConfig>(activeConfig);
+  configRef.current = activeConfig;
   const modeRef = useRef<GameMode>(mode);
   const screenRef = useRef<'menu' | 'game'>(screen);
   const wsRef = useRef<WebSocket | null>(ws);
@@ -361,9 +381,10 @@ export default function App() {
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
           isWinner,
-          // The rules the match was played under. The server re-derives
-          // whether they were stock; it never takes a "ranked" flag on trust.
-          rules: settingsRef.current.rules,
+          // The rules the match was actually played under — the room's in a
+          // duel, the menu's otherwise. The server re-derives whether they sit
+          // inside the ranked bands; it never takes a "ranked" flag on trust.
+          rules: configRef.current.rules,
           // Lets the server cross-check this PvP result against the room
           // state it owns instead of trusting the numbers above.
           roomId: modeRef.current === 'multiplayer' ? roomId || undefined : undefined,
@@ -665,7 +686,7 @@ export default function App() {
   // down. The countdown is surfaced on the court so it never feels arbitrary.
   const [serveCountdown, setServeCountdown] = useState<number | null>(null);
   useEffect(() => {
-    const seconds = settings.rules.autoServeSeconds;
+    const seconds = activeConfig.rules.autoServeSeconds;
     const active = isServing && isPlayerServer && screen === 'game' && !winner;
     if (!active || seconds <= 0) {
       setServeCountdown(null);
@@ -682,7 +703,7 @@ export default function App() {
       }
     }, 1000);
     return () => clearInterval(tick);
-  }, [isServing, isPlayerServer, screen, winner, settings.rules.autoServeSeconds, handleServe]);
+  }, [isServing, isPlayerServer, screen, winner, activeConfig.rules.autoServeSeconds, handleServe]);
 
   // Solo only: the AI has no finger to tap with. When the rules hand it the
   // serve (the AI missed the last point), serve on its behalf after a short
@@ -717,6 +738,7 @@ export default function App() {
       myIndex: myIdx,
       playerNames,
       iceServers: rtcConfigRef.current,
+      config: configRef.current,
       sendSignal: (payload) => {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({ type: 'rtc_signal', payload }));
@@ -786,7 +808,16 @@ export default function App() {
         p2pRef.current?.handleSignal(msg.payload);
         break;
 
+      case 'room_config':
+        setRoomConfig(msg.config);
+        p2pRef.current?.setConfig(msg.config);
+        break;
+
       case 'game_start':
+        // The terms ride along with every start, so a phone can never begin a
+        // match on a ruleset it was not told about.
+        setRoomConfig(msg.config);
+        p2pRef.current?.setConfig(msg.config);
         setStats({
           score: 0,
           opponentScore: 0,
@@ -847,10 +878,10 @@ export default function App() {
             opponentScore: msg.p2Score,
             rallyCount: 0,
           }));
-          if (msg.p1Score >= settingsRef.current.winningScore) {
+          if (msg.p1Score >= configRef.current.winningScore) {
             setWinner('player');
             confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
-          } else if (msg.p2Score >= settingsRef.current.winningScore) {
+          } else if (msg.p2Score >= configRef.current.winningScore) {
             setWinner('opponent');
           } else {
             setIsPlayerServer(msg.nextServer === 0);
@@ -863,10 +894,10 @@ export default function App() {
             opponentScore: msg.p1Score,
             rallyCount: 0,
           }));
-          if (msg.p2Score >= settingsRef.current.winningScore) {
+          if (msg.p2Score >= configRef.current.winningScore) {
             setWinner('player');
             confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
-          } else if (msg.p1Score >= settingsRef.current.winningScore) {
+          } else if (msg.p1Score >= configRef.current.winningScore) {
             setWinner('opponent');
           } else {
             setIsPlayerServer(msg.nextServer === 1);
@@ -973,7 +1004,18 @@ export default function App() {
     }
     const checkAndSend = () => {
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'create_room', playerId }));
+        // The host opens the room on their own menu choices; from then on the
+        // room owns them and the lobby is where they change.
+        socket.send(
+          JSON.stringify({
+            type: 'create_room',
+            playerId,
+            config: normalizeRoomConfig({
+              winningScore: settingsRef.current.winningScore,
+              rules: settingsRef.current.rules,
+            }),
+          })
+        );
       } else {
         setTimeout(checkAndSend, 100);
       }
@@ -996,6 +1038,19 @@ export default function App() {
     checkAndSend();
   };
 
+  /**
+   * Host-only: change the room's terms from the lobby. The server re-checks
+   * both who sent it and whether a match is in progress, so this is a request,
+   * not a command — the authoritative answer comes back as room_config.
+   */
+  const handleSetRoomConfig = (patch: Partial<RoomMatchConfig>) => {
+    const next = normalizeRoomConfig({ ...(roomConfig || DEFAULT_ROOM_CONFIG), ...patch });
+    setRoomConfig(next); // optimistic; a refused edit is corrected by the echo
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'set_room_config', config: next }));
+    }
+  };
+
   const handleLeaveRoom = () => {
     p2pRef.current?.close();
     p2pRef.current = null;
@@ -1008,6 +1063,7 @@ export default function App() {
     setRoomId(null);
     setOpponentName(null);
     setOpponentId(null);
+    setRoomConfig(null);
     setMode('solo');
     setScreen('menu');
     resetMatch();
@@ -1044,7 +1100,7 @@ export default function App() {
         if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
           const atLeft = b.x - b.radius <= 0;
           b.x = atLeft ? b.radius : 1 - b.radius;
-          const bounced = bounceOffWall(b.vx, b.vy, b.spin, atLeft);
+          const bounced = bounceOffWall(b.vx, b.vy, b.spin, atLeft, rulesRef.current);
           b.vx = bounced.vx;
           b.vy = bounced.vy;
           b.spin = bounced.spin;
@@ -1149,7 +1205,7 @@ export default function App() {
             // Solo mode point for AI
             setStats((s) => {
               const nextOppScore = s.opponentScore + 1;
-              if (nextOppScore >= currentSettings.winningScore) {
+              if (nextOppScore >= configRef.current.winningScore) {
                 setWinner('opponent');
               } else {
                 setIsServing(true);
@@ -1175,7 +1231,7 @@ export default function App() {
         if (ob.x - ob.radius <= 0 || ob.x + ob.radius >= 1) {
           const atLeft = ob.x - ob.radius <= 0;
           ob.x = atLeft ? ob.radius : 1 - ob.radius;
-          const bounced = bounceOffWall(ob.vx, ob.vy, ob.spin, atLeft);
+          const bounced = bounceOffWall(ob.vx, ob.vy, ob.spin, atLeft, rulesRef.current);
           ob.vx = bounced.vx;
           ob.vy = bounced.vy;
           ob.spin = bounced.spin;
@@ -1183,7 +1239,7 @@ export default function App() {
         }
 
         // Update Opponent AI Paddle tracking
-        aiRef.current.update(ob, dt, paddleWidthRef.current);
+        aiRef.current.update(ob, dt, paddleWidthRef.current, rulesRef.current);
         setOppPaddleX(aiRef.current.paddleX);
 
         // Check Opponent Paddle Collision
@@ -1229,7 +1285,7 @@ export default function App() {
             // An ace: the player served and the opponent never got the ball
             // back over, so the rally never actually started.
             const ace = servedThisPointRef.current && s.rallyCount <= 1;
-            if (nextScore >= currentSettings.winningScore) {
+            if (nextScore >= configRef.current.winningScore) {
               setWinner('player');
               confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
             } else {
@@ -1240,7 +1296,7 @@ export default function App() {
               ...s,
               score: nextScore,
               aces: s.aces + (ace ? 1 : 0),
-              matchesWon: nextScore >= currentSettings.winningScore ? s.matchesWon + 1 : s.matchesWon,
+              matchesWon: nextScore >= configRef.current.winningScore ? s.matchesWon + 1 : s.matchesWon,
               rallyCount: 0,
             };
           });
@@ -1446,8 +1502,9 @@ export default function App() {
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenProfile={() => setIsProfileOpen(true)}
           onResetMatch={resetMatch}
+          canResetMatch={mode !== 'multiplayer'}
           onQuitToMenu={quitToMenu}
-          winningScore={settings.winningScore}
+          winningScore={activeConfig.winningScore}
           opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${settings.difficulty})`}
           onViewOpponent={
             mode === 'multiplayer' && isLinkableId(opponentId)
@@ -1462,9 +1519,9 @@ export default function App() {
         <RadarPreview
           oppBall={oppBall}
           oppPaddleX={oppPaddleX}
-          paddleWidthRatio={paddleWidthFor(settings.rules)}
+          paddleWidthRatio={paddleWidthFor(activeConfig.rules)}
           theme={currentTheme}
-          active={settings.showRadar && settings.rules.opponentSonar && mode === 'solo'}
+          active={settings.showRadar && activeConfig.rules.opponentSonar && mode === 'solo'}
         />
 
         {/* Connection badge: direct P2P vs server relay (multiplayer only) */}
@@ -1501,7 +1558,7 @@ export default function App() {
             rallyCount={stats.rallyCount}
             maxRally={stats.maxRally}
             theme={currentTheme}
-            isVisible={settings.showStatsOverlay && settings.rules.trackTelemetry}
+            isVisible={settings.showStatsOverlay && activeConfig.rules.trackTelemetry}
             onToggleVisible={() =>
               setSettings((s) => ({ ...s, showStatsOverlay: !s.showStatsOverlay }))
             }
@@ -1509,7 +1566,7 @@ export default function App() {
           />
 
           {/* Quick Chat overlay & popup tray (nobody to chat with in practice) */}
-          {mode !== 'practice' && settings.rules.quickChat && (
+          {mode !== 'practice' && activeConfig.rules.quickChat && (
             <QuickChat
               onSendMessage={handleSendQuickChat}
               activeMessages={activeChatMessages}
@@ -1527,9 +1584,9 @@ export default function App() {
             theme={currentTheme}
             isServing={isServing && isPlayerServer}
             onServe={handleServe}
-            paddleWidth={paddleWidthFor(settings.rules)}
-            serveAngleLimitDeg={SERVE_MAX_ANGLE_DEG * settings.rules.serveAngleMax}
-            autoServeSeconds={settings.rules.autoServeSeconds}
+            paddleWidth={paddleWidthFor(activeConfig.rules)}
+            serveAngleLimitDeg={SERVE_MAX_ANGLE_DEG * activeConfig.rules.serveAngleMax}
+            autoServeSeconds={activeConfig.rules.autoServeSeconds}
             serveCountdown={serveCountdown}
             isBallInOpponentCourt={
               mode !== 'practice' &&
@@ -1704,6 +1761,9 @@ export default function App() {
           opponentId={opponentId}
           onViewProfile={openPublicProfile}
           winProbability={matchPrediction}
+          roomConfig={roomConfig}
+          onUpdateRoomConfig={handleSetRoomConfig}
+          earnedAchievements={profile?.achievements || []}
           language={currentLanguage}
           onReadyToPlay={() => {
             setIsMultiplayerOpen(false);

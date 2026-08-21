@@ -295,7 +295,10 @@ export const MissionsModal: React.FC<Props> = ({
           </div>
 
           {/* Footer */}
-          <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/60 flex items-center justify-end">
+          <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/60 flex items-center justify-between gap-3">
+            <p id="missions-free-reroll-note" className="text-[10px] font-mono text-slate-500 leading-snug">
+              {t('mission_free_reroll', language)}
+            </p>
             <button
               onClick={onClose}
               className="px-4 py-1.5 text-xs font-bold text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"

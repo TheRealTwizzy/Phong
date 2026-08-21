@@ -1,15 +1,19 @@
-import { MatchRules } from './types';
+import { MatchRules, RoomMatchConfig } from './types';
 
 // Pre-match match rules, shared by client and server like profileRules.ts and
-// rating.ts. Everything here is chosen on the MainMenu before a match starts
-// and is fixed for its duration.
+// rating.ts. In a solo match these are chosen on the MainMenu; in a duel they
+// belong to the ROOM — the host sets them in the lobby and both phones play
+// the same ones (see RoomMatchConfig below).
 //
-// Paddle width, ball size and ball speed were previously hard constants that
-// could never be player-editable, for fairness. They are adjustable now, and
-// the fairness rule is preserved a different way: a match whose PHYSICS rules
-// differ from the defaults still awards XP but is **unranked** — it moves no
-// rating and no tier. Presentation and convenience options (sonar, telemetry,
-// quick chat, auto-serve) do not affect the ball, so they never unrank a match.
+// Paddle width, ball size and ball speed were once hard constants that could
+// never be player-editable, for fairness. They are adjustable now, and
+// fairness is kept a different way: every physics rule carries a RANKED BAND
+// around stock. Inside the band the match rates normally — the ladder can
+// absorb a slightly wider paddle the way it absorbs a slightly better phone.
+// Outside it the match still pays XP but moves no rating and no tier: a 60%
+// paddle against a 180% ball is a party match, not a ladder result.
+// Presentation and convenience options (sonar, telemetry, quick chat,
+// auto-serve) never touch the ball, so they never affect ranking.
 
 export interface RuleSpec {
   min: number;
@@ -17,16 +21,18 @@ export interface RuleSpec {
   step: number;
   /** Multiplier applied to the engine constant, so 1 is always "stock". */
   default: number;
+  /** The window around stock inside which a match still counts for rating. */
+  ranked: { min: number; max: number };
 }
 
 /** Rules that change the physics of the ball or paddle — these gate ranking. */
 export const PHYSICS_RULES = {
-  paddleScale: { min: 0.6, max: 1.6, step: 0.05, default: 1 },
-  ballScale: { min: 0.6, max: 1.8, step: 0.05, default: 1 },
-  ballSpeedMin: { min: 0.6, max: 1.4, step: 0.05, default: 1 },
-  ballSpeedMax: { min: 1, max: 2, step: 0.05, default: 1 },
-  serveAngleMax: { min: 0, max: 1.4, step: 0.05, default: 1 },
-  servePowerMax: { min: 0.6, max: 1.5, step: 0.05, default: 1 },
+  paddleScale: { min: 0.6, max: 1.6, step: 0.05, default: 1, ranked: { min: 0.85, max: 1.15 } },
+  ballScale: { min: 0.6, max: 1.8, step: 0.05, default: 1, ranked: { min: 0.85, max: 1.15 } },
+  ballSpeedMin: { min: 0.6, max: 1.4, step: 0.05, default: 1, ranked: { min: 0.9, max: 1.1 } },
+  ballSpeedMax: { min: 1, max: 2, step: 0.05, default: 1, ranked: { min: 1, max: 1.2 } },
+  serveAngleMax: { min: 0, max: 1.4, step: 0.05, default: 1, ranked: { min: 0.8, max: 1.2 } },
+  servePowerMax: { min: 0.6, max: 1.5, step: 0.05, default: 1, ranked: { min: 0.85, max: 1.15 } },
 } satisfies Record<string, RuleSpec>;
 
 export type PhysicsRuleKey = keyof typeof PHYSICS_RULES;
@@ -34,6 +40,10 @@ export const PHYSICS_RULE_KEYS = Object.keys(PHYSICS_RULES) as PhysicsRuleKey[];
 
 export const AUTO_SERVE_OPTIONS = [0, 1, 3, 5] as const;
 export type AutoServeSeconds = (typeof AUTO_SERVE_OPTIONS)[number];
+
+/** The match lengths the menu and the lobby offer, gated by achievements. */
+export const WINNING_SCORES = [3, 5, 10, 15] as const;
+export const DEFAULT_WINNING_SCORE = 5;
 
 export const DEFAULT_MATCH_RULES: MatchRules = {
   paddleScale: 1,
@@ -49,6 +59,8 @@ export const DEFAULT_MATCH_RULES: MatchRules = {
 };
 
 const near = (a: number, b: number) => Math.abs(a - b) < 1e-6;
+/** Inclusive with the same tolerance the step grid is snapped to. */
+const within = (v: number, lo: number, hi: number) => v >= lo - 1e-6 && v <= hi + 1e-6;
 
 /** Clamp one rule to its spec and snap it to the step grid. */
 export function clampRule(key: PhysicsRuleKey, value: number): number {
@@ -83,15 +95,57 @@ export function isStockPhysics(rules: Partial<MatchRules> | null | undefined): b
   return PHYSICS_RULE_KEYS.every((key) => near(r[key], PHYSICS_RULES[key].default));
 }
 
+/** True when one rule sits inside the window that still rates. */
+export function isRuleRanked(key: PhysicsRuleKey, value: number): boolean {
+  const { ranked } = PHYSICS_RULES[key];
+  return within(value, ranked.min, ranked.max);
+}
+
 /**
  * Whether a match played under these rules may move the player's rating.
- * Solo already never touches the rank; this is what keeps a widened paddle
- * out of the PvP tier ladder while still paying XP for the match.
+ * Every physics rule has to sit inside its ranked band; one rule pushed past
+ * its edge unranks the match on its own, because the ladder only means
+ * something if a rated result was played on something close to stock.
  */
-export const isRankedRules = isStockPhysics;
+export function isRankedRules(rules: Partial<MatchRules> | null | undefined): boolean {
+  const r = normalizeRules(rules);
+  return PHYSICS_RULE_KEYS.every((key) => isRuleRanked(key, r[key]));
+}
 
 /** The physics rules that differ from stock, for display in the UI. */
 export function alteredRuleKeys(rules: Partial<MatchRules> | null | undefined): PhysicsRuleKey[] {
   const r = normalizeRules(rules);
   return PHYSICS_RULE_KEYS.filter((key) => !near(r[key], PHYSICS_RULES[key].default));
+}
+
+/** The rules that have been pushed past their ranked band — what costs the rating. */
+export function unrankedRuleKeys(rules: Partial<MatchRules> | null | undefined): PhysicsRuleKey[] {
+  const r = normalizeRules(rules);
+  return PHYSICS_RULE_KEYS.filter((key) => !isRuleRanked(key, r[key]));
+}
+
+export function normalizeWinningScore(value: unknown): number {
+  const n = Number(value);
+  return (WINNING_SCORES as readonly number[]).includes(n) ? n : DEFAULT_WINNING_SCORE;
+}
+
+export const DEFAULT_ROOM_CONFIG: RoomMatchConfig = {
+  winningScore: DEFAULT_WINNING_SCORE,
+  rules: DEFAULT_MATCH_RULES,
+};
+
+/**
+ * The terms of a duel, normalized. Both phones read these off the room rather
+ * than off their own device: a match where each side applied its own winning
+ * score was two private matches that happened to share a ball, and the shorter
+ * one ending first left the other player stranded mid-rally.
+ */
+export function normalizeRoomConfig(
+  input: Partial<RoomMatchConfig> | null | undefined
+): RoomMatchConfig {
+  const raw = input || {};
+  return {
+    winningScore: normalizeWinningScore(raw.winningScore),
+    rules: normalizeRules(raw.rules),
+  };
 }

@@ -389,6 +389,119 @@ describe('rerolls', () => {
   });
 });
 
+describe('a completed mission deals a free replacement', () => {
+  const today = new Date('2026-08-21T12:00:00Z');
+  const held = (id: string) => db.getMissions(id, today);
+
+  /** Drive one mission all the way to its target with real recorded matches. */
+  const finish = (playerId: string, missionId: string) => {
+    const def = findMission(missionId)!;
+    for (let i = 0; i < 80; i++) {
+      const m = held(playerId).find((x) => x.id === missionId);
+      if (!m || m.current >= m.target) break;
+      db.recordMatch(
+        match(playerId, {
+          // A duel mission can say so through its type or its mode field.
+          mode: def.type === 'multiplayer' || def.mode === 'multiplayer' ? 'multiplayer' : 'solo',
+          difficulty: def.difficulty || 'pro',
+          playerScore: 5,
+          opponentScore: def.type === 'shutouts' ? 0 : 2,
+          maxRally: Math.max(def.type === 'rally' ? def.target : 9, 9),
+          aces: 8,
+          isWinner: true,
+        }),
+        {},
+        today
+      );
+    }
+    const done = held(playerId).find((x) => x.id === missionId);
+    // Guard the guard: a helper that silently stops completing would make
+    // every assertion below vacuous, which is exactly how the elite tests
+    // once passed without testing anything.
+    expect(done && done.current >= done.target).toBe(true);
+  };
+
+  it('replaces the claimed mission with a fresh one in the same slot', () => {
+    init('ar_swap', 'AutoSwap');
+    const before = held('ar_swap').map((m) => m.id);
+    const victim = held('ar_swap').find((m) => m.tier === 'regular')!;
+    finish('ar_swap', victim.id);
+
+    const res = db.claimMission('ar_swap', victim.id, today);
+    expect(res.ok).toBe(true);
+    expect(res.newMissionId).toBeTruthy();
+
+    const after = held('ar_swap');
+    expect(after).toHaveLength(before.length);
+    expect(after.map((m) => m.id)).not.toContain(victim.id);
+    expect(after.map((m) => m.id)).toContain(res.newMissionId);
+    // Genuinely fresh, not a completed one shuffled back in.
+    const dealt = after.find((m) => m.id === res.newMissionId)!;
+    expect(dealt.claimed).toBe(false);
+    expect(dealt.current).toBeLessThan(dealt.target);
+  });
+
+  it('costs neither allowance', () => {
+    init('ar_free', 'AutoFree');
+    const victim = held('ar_free').find((m) => m.tier === 'regular')!;
+    finish('ar_free', victim.id);
+    db.claimMission('ar_free', victim.id, today);
+    expect(db.rerollsRemaining('ar_free', today)).toEqual({
+      regular: REROLLS_REGULAR,
+      elite: REROLLS_ELITE,
+    });
+  });
+
+  it('keeps dealing them past the point the paid allowance would have run out', () => {
+    // The free reroll is unlimited on purpose: every one of them had to be
+    // earned by finishing something, so there is nothing to ration.
+    init('ar_many', 'AutoMany');
+    let dealt = 0;
+    for (let round = 0; round < REROLLS_REGULAR + 2; round++) {
+      const target = db
+        .getMissions('ar_many', today)
+        .find((m) => m.tier === 'regular' && !m.claimed);
+      if (!target) break;
+      finish('ar_many', target.id);
+      const res = db.claimMission('ar_many', target.id, today);
+      expect(res.ok).toBe(true);
+      if (res.newMissionId) dealt++;
+    }
+    expect(dealt).toBeGreaterThan(REROLLS_REGULAR);
+    expect(db.rerollsRemaining('ar_many', today).regular).toBe(REROLLS_REGULAR);
+  });
+
+  it('deals an elite replacement for an elite, without touching the elite allowance', () => {
+    init('ar_elite', 'AutoElite');
+    const elite = held('ar_elite').find((m) => m.tier === 'elite')!;
+    finish('ar_elite', elite.id);
+    const res = db.claimMission('ar_elite', elite.id, today);
+    expect(res.ok).toBe(true);
+    expect(res.newMissionId).toBeTruthy();
+    expect(findMission(res.newMissionId!)!.tier).toBe('elite');
+    expect(db.rerollsRemaining('ar_elite', today).elite).toBe(REROLLS_ELITE);
+    // The hand keeps its shape: still exactly one elite slot.
+    expect(held('ar_elite').filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS);
+  });
+
+  it('never deals something already held or already finished today', () => {
+    init('ar_dupes', 'AutoDupes');
+    const seen = new Set<string>();
+    for (let round = 0; round < 4; round++) {
+      const target = db
+        .getMissions('ar_dupes', today)
+        .find((m) => m.tier === 'regular' && !m.claimed);
+      if (!target) break;
+      seen.add(target.id);
+      finish('ar_dupes', target.id);
+      const res = db.claimMission('ar_dupes', target.id, today);
+      const hand = db.getMissions('ar_dupes', today).map((m) => m.id);
+      expect(new Set(hand).size).toBe(hand.length);
+      if (res.newMissionId) expect(seen.has(res.newMissionId)).toBe(false);
+    }
+  });
+});
+
 describe('elite missions are permanent unlocks', () => {
   const today = new Date('2026-08-21T12:00:00Z');
   const tomorrow = new Date('2026-08-22T12:00:00Z');
