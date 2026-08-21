@@ -1799,6 +1799,8 @@ export default function App() {
           isOpen={isAchievementsOpen}
           onClose={() => setIsAchievementsOpen(false)}
           playerId={playerId}
+          level={profile?.level || 1}
+          tier={profile?.tier || 'unranked'}
           language={currentLanguage}
         />
 

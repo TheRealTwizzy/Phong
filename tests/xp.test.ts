@@ -101,6 +101,7 @@ describe('achievement XP scales with what was actually beaten', () => {
       'ai_rookie',
       'cyber_shutout',
       'cyber_slayer',
+      'duel_shutout',
       'first_win',
       'multiplayer_champ',
       'shutout',

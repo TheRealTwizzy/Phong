@@ -60,16 +60,64 @@ await page.waitForSelector('#menu-diff-pro', { timeout: 5000 });
 if (await dis('#menu-diff-pro')) fail('beating Rookie did not open Pro');
 if (!(await dis('#menu-diff-cyber'))) fail('beating Rookie should not open Cyber');
 ok('beating Rookie opens Pro, and only Pro');
+
+// A single Pro win used to hand over Cyber in a first session. It now needs
+// ten Pro wins AND level 10 — a climb, not an accident.
+await page.evaluate(async () => {
+  await fetch('/api/match/record', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ playerScore: 5, opponentScore: 2, maxRally: 8, mode: 'solo', difficulty: 'pro', isWinner: true }) });
+});
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
+await page.click('#menu-mode-solo');
+await page.waitForSelector('#menu-diff-cyber', { timeout: 5000 });
+if (!(await dis('#menu-diff-cyber'))) fail('one Pro win should NOT open Cyber');
+ok('one Pro win does not open Cyber');
+
+const proProfile = await page.evaluate(async () => (await fetch('/api/profile/me')).json());
+for (let i = 0; i < 60; i++) {
+  const p = await page.evaluate(async () => (await fetch('/api/profile/me')).json());
+  if (p.achievements.includes('ai_pro_10')) break;
+  await page.evaluate(async () => {
+    await fetch('/api/match/record', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playerScore: 5, opponentScore: 2, maxRally: 8, mode: 'solo', difficulty: 'pro', isWinner: true }) });
+  });
+}
+const climbed = await page.evaluate(async () => (await fetch('/api/profile/me')).json());
+if (!climbed.achievements.includes('ai_pro_10')) fail('the Cyber gate never opened over 60 Pro wins');
+if (climbed.level < 10) fail(`the level gate was not enforced (level ${climbed.level})`);
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
+await page.click('#menu-mode-solo');
+await page.waitForSelector('#menu-diff-cyber', { timeout: 5000 });
+if (await dis('#menu-diff-cyber')) fail('the full climb did not open Cyber');
+ok(`Cyber opens after the climb: ${climbed.proWins} Pro wins, level ${climbed.level} (was ${proProfile.level})`);
 if (await dis('#menu-pts-10')) fail('a first win should open first-to-10');
 ok('a first win opens longer matches');
 
 // Achievement tree renders with branches and hidden rungs.
 await page.click('#menu-nav-achievements').catch(async () => { await page.click('#menu-nav-trophies'); });
 await page.waitForSelector('#ach-branch-ladder', { timeout: 5000 });
-for (const b of ['foundation','rally','ladder','duel','craft']) {
+for (const b of ['foundation','rally','ladder','duel','craft','ascent','dominion','devotion']) {
   if (!(await page.$(`#ach-branch-${b}`))) fail(`missing branch tab ${b}`);
 }
-ok('all five branch tabs render');
+ok('all eight branch tabs render');
+
+// Concealed branches: the tab is a lock, and opening it explains what to do.
+const locked = await page.$eval('#ach-branch-ascent', (el) => el.getAttribute('data-locked'));
+if (locked !== 'true') fail('Ascent should be concealed for a player who has never duelled');
+const openTab = await page.$eval('#ach-branch-ladder', (el) => el.getAttribute('data-locked'));
+if (openTab !== 'false') fail('Ladder should be open from the start');
+await page.click('#ach-branch-ascent');
+await page.waitForSelector('#ach-branch-locked', { timeout: 4000 });
+const hint = (await page.textContent('#ach-branch-locked')).trim();
+if (!/duel/i.test(hint)) fail(`the locked branch gave no usable hint: "${hint}"`);
+ok(`a concealed branch shows a lock and a hint: "${hint.split('\n').pop().trim()}"`);
+
+// Devotion is gated on level, and this profile has climbed past it.
+const devLocked = await page.$eval('#ach-branch-devotion', (el) => el.getAttribute('data-locked'));
+if (devLocked !== 'false') fail('Devotion should have opened at level 5');
+ok('the level-gated branch opened once the level was there');
 await page.click('#ach-branch-ladder');
 await page.waitForTimeout(400);
 if (!(await page.$('#ach-row-cyber_slayer'))) fail('ladder branch did not render its rows');
