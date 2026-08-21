@@ -612,6 +612,13 @@ export default function App() {
 
       case 'ball_incoming': {
         // Ball crossed the net on opponent's phone and arrived here!
+        // A ball arriving IS the signal that play is live: after every
+        // score_update both phones sit in "serving" state (which gates the
+        // physics loop), and only the serving player's tap clears it locally.
+        // Without clearing it here, the receiver's loop stays gated and the
+        // incoming serve freezes at the net.
+        setIsServing(false);
+        isServingRef.current = false;
         const inc = msg.ball;
         setBall({
           x: inc.x,
@@ -1180,7 +1187,7 @@ export default function App() {
             theme={currentTheme}
             isServing={isServing && isPlayerServer}
             onServe={handleServe}
-            isBallInOpponentCourt={oppBall?.active || (!ball.active && !isServing)}
+            isBallInOpponentCourt={oppBall?.active || (!ball.active && !(isServing && isPlayerServer))}
             oppEstimatedX={oppBall?.active ? 1 - oppBall.x : 0.5}
             rallyCount={stats.rallyCount}
             language={currentLanguage}
