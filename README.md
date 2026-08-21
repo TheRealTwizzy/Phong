@@ -6,7 +6,7 @@ The main menu offers four modes: **Solo AI** (adaptive Rookie → Chaos opponent
 
 Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server, keyed to a **server-issued device identity** (signed cookie — one profile per device, no login) with a recovery code to move your profile to a new phone.
 
-Skill is tracked with a **TrueSkill-style rating** (skill μ + uncertainty σ): the game predicts your odds before every match, scales XP by how surprising the result was, and shows a **tier badge** rather than a raw number. Solo play levels your profile and moves your hidden rating, but only 2-phone matches move your rank.
+The AI ladder is **rating-based and adaptive**: each difficulty is an anchor rating that slides part-way (60%) toward your own hidden skill, so Pro stays a genuine coin flip whatever your level and Cyber stays a stretch that becomes reachable as you improve — while Rookie always stays a warm-up. Skill is tracked with a **TrueSkill-style rating** (skill μ + uncertainty σ): the game predicts your odds before every match, scales XP by how surprising the result was, and shows a **tier badge** rather than a raw number. Solo play levels your profile and moves your hidden rating, but only 2-phone matches move your rank.
 
 Every player locks in a **unique username** on first arrival (case-insensitive, held for 365 days per change) and can upload an **avatar** (auto-cropped to 256×256). Tap any username — leaderboard, match history, lobby, or mid-match — to view that player's public profile.
 

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AI_ADAPT_BAND,
+  AI_ADAPT_STRENGTH,
+  AI_DIFFICULTIES,
   AI_RATINGS,
+  aiRating,
+  effectiveAiMu,
   PLACEMENT_GAMES,
   PVP_UPDATE,
   SOLO_UPDATE,
@@ -43,9 +48,89 @@ describe('win probability', () => {
   });
 
   it('recommends the difficulty closest to a coin flip', () => {
+    // The recommendation is a property, not a fixed name: whichever difficulty
+    // the player is pointed at must be the most even matchup available to them.
+    for (const me of [fresh(), { mu: 35, sigma: 1.5 }, { mu: 18, sigma: 1.5 }]) {
+      const pick = recommendedDifficulty(me);
+      const gap = (d: (typeof AI_DIFFICULTIES)[number]) =>
+        Math.abs(winProbability(me, aiRating(d, me.mu)) - 0.5);
+      for (const d of AI_DIFFICULTIES) {
+        expect(gap(pick)).toBeLessThanOrEqual(gap(d) + 1e-9);
+      }
+    }
     expect(recommendedDifficulty(fresh())).toBe('pro');
-    expect(recommendedDifficulty({ mu: 35, sigma: 1.5 })).toBe('cyber');
-    expect(recommendedDifficulty({ mu: 18, sigma: 1.5 })).toBe('rookie');
+  });
+});
+
+describe('adaptive AI anchors', () => {
+  it('leaves the anchors untouched for an average player', () => {
+    for (const d of AI_DIFFICULTIES) {
+      expect(effectiveAiMu(d, 25)).toBeCloseTo(AI_RATINGS[d].mu, 6);
+    }
+  });
+
+  it('slides each difficulty part-way toward the player, never all the way', () => {
+    const player = 35;
+    for (const d of AI_DIFFICULTIES) {
+      const slide = effectiveAiMu(d, player) - AI_RATINGS[d].mu;
+      expect(slide).toBeGreaterThan(0);
+      // Partial tracking: a 10-point climb must not move the AI 10 points.
+      expect(slide).toBeLessThan(player - 25);
+      expect(slide).toBeCloseTo(AI_ADAPT_STRENGTH * (player - 25), 6);
+    }
+  });
+
+  it('slides down for a struggling player', () => {
+    for (const d of AI_DIFFICULTIES) {
+      expect(effectiveAiMu(d, 15)).toBeLessThan(AI_RATINGS[d].mu);
+    }
+  });
+
+  it('keeps the rungs ordered and distinct at every skill level', () => {
+    for (const mu of [12, 18, 25, 32, 40, 55]) {
+      const order = ['rookie', 'pro', 'chaos', 'cyber'] as const;
+      for (let i = 1; i < order.length; i++) {
+        expect(effectiveAiMu(order[i], mu)).toBeGreaterThan(effectiveAiMu(order[i - 1], mu));
+      }
+      // The ladder keeps its absolute spread — it slides, it never compresses.
+      expect(effectiveAiMu('cyber', mu) - effectiveAiMu('rookie', mu)).toBeCloseTo(
+        AI_RATINGS.cyber.mu - AI_RATINGS.rookie.mu,
+        6
+      );
+    }
+  });
+
+  it('never slides further than the adaptation band', () => {
+    for (const d of AI_DIFFICULTIES) {
+      for (const mu of [-50, 0, 12, 25, 45, 80, 500]) {
+        expect(Math.abs(effectiveAiMu(d, mu) - AI_RATINGS[d].mu)).toBeLessThanOrEqual(
+          AI_ADAPT_BAND + 1e-9
+        );
+      }
+    }
+  });
+
+  it('keeps Pro a genuine contest across the whole skill range', () => {
+    for (const mu of [15, 20, 25, 30, 35, 40]) {
+      const me = { mu, sigma: 2 };
+      const adapted = winProbability(me, aiRating('pro', mu));
+      const fixed = winProbability(me, AI_RATINGS.pro);
+      // Partial tracking pulls every skill level back toward a real contest:
+      // at mu 15 the fixed ladder is a 5% hope, the adapted one about 26%.
+      expect(Math.abs(adapted - 0.5)).toBeLessThanOrEqual(Math.abs(fixed - 0.5) + 1e-9);
+      // Playable at both ends. It never reaches a flat 50/50 by design —
+      // that would be rubber-banding, and would erase the rungs entirely.
+      expect(adapted).toBeGreaterThan(0.2);
+      expect(adapted).toBeLessThan(0.92);
+    }
+  });
+
+  it('keeps Cyber a stretch that becomes reachable as the player improves', () => {
+    const weak = winProbability({ mu: 15, sigma: 2 }, aiRating('cyber', 15));
+    const strong = winProbability({ mu: 40, sigma: 2 }, aiRating('cyber', 40));
+    expect(weak).toBeLessThan(0.35);
+    expect(strong).toBeGreaterThan(weak);
+    expect(strong).toBeLessThan(0.5); // still the hardest rung, at any skill
   });
 });
 

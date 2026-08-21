@@ -82,12 +82,38 @@ export const AI_RATINGS: Record<AIDifficulty, Rating> = {
 
 export const AI_DIFFICULTIES: AIDifficulty[] = ['rookie', 'pro', 'cyber', 'chaos'];
 
+// The anchors above are the *reference* strengths, calibrated for an average
+// player (mu = START_MU). A fixed ladder cannot work for everyone: at those
+// absolute settings Pro is unreachable for a beginner and Rookie is a formality
+// for a veteran. Each difficulty therefore slides part-way toward the player's
+// own hidden rating — partial tracking, so the four rungs keep distinct
+// identities (Pro stays roughly a coin flip at any skill, Cyber stays a stretch)
+// instead of collapsing into one rubber-banded opponent.
+export const AI_ADAPT_STRENGTH = 0.6;
+/** Most a difficulty may slide from its anchor, in mu points, either way. */
+export const AI_ADAPT_BAND = 7;
+
+/**
+ * The mu the AI actually plays at for this player. This is the honest rating of
+ * the opponent they face, so prediction and XP both key off it.
+ */
+export function effectiveAiMu(difficulty: AIDifficulty, playerMu: number): number {
+  const base = AI_RATINGS[difficulty].mu;
+  const slide = AI_ADAPT_STRENGTH * (playerMu - START_MU);
+  return base + clamp(slide, -AI_ADAPT_BAND, AI_ADAPT_BAND);
+}
+
+/** The adapted anchor to rate a solo match against. */
+export function aiRating(difficulty: AIDifficulty, playerMu: number): Rating {
+  return { mu: effectiveAiMu(difficulty, playerMu), sigma: AI_RATINGS[difficulty].sigma };
+}
+
 /** The difficulty whose predicted win chance is closest to a coin flip. */
 export function recommendedDifficulty(player: Rating): AIDifficulty {
   let best: AIDifficulty = 'pro';
   let bestGap = Infinity;
   for (const d of AI_DIFFICULTIES) {
-    const gap = Math.abs(winProbability(player, AI_RATINGS[d]) - 0.5);
+    const gap = Math.abs(winProbability(player, aiRating(d, player.mu)) - 0.5);
     if (gap < bestGap) {
       bestGap = gap;
       best = d;
