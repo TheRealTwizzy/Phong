@@ -115,6 +115,61 @@ export interface PlayerProfile {
   // One-time code that reclaims this profile on a new device (rotates on use).
   // Only ever serialized to the profile's own device.
   recoveryCode?: string;
+  // Identity lifecycle: profiles are minted lazily from the device cookie and
+  // stay "uninitialized" (placeholder Paddle-XXXX name, hidden from the
+  // leaderboard, can't record matches) until the player locks in a unique
+  // username via onboarding. usernameChangedAt is the basis of the 365-day
+  // rename lock (see src/profileRules.ts).
+  initialized: boolean;
+  initializedAt?: string;
+  usernameChangedAt?: string;
+  // Avatar presence + cache-buster (epoch ms of the last upload). The image
+  // itself is served from GET /api/avatar/:playerId?v=<avatarVersion>.
+  hasAvatar: boolean;
+  avatarVersion?: number;
+}
+
+// The subset of a profile that anyone may view via GET /api/profile/:id —
+// never includes recoveryCode, lastDailyDate, or lastActive.
+export interface PublicProfile {
+  id: string;
+  username: string;
+  level: number;
+  xp: number;
+  xpNext: number;
+  eloRating: number;
+  matchesPlayed: number;
+  matchesWon: number;
+  matchesLost: number;
+  highestRally: number;
+  totalPointsScored: number;
+  totalAces: number;
+  dailyStreak: number;
+  rankTitle: string;
+  createdAt: string;
+  achievements: string[];
+  hasAvatar: boolean;
+  avatarVersion?: number;
+  isBot?: boolean;
+}
+
+// Typed error envelope for profile/avatar API failures:
+// { error: ProfileApiErrorCode, message?, unlockAt? }
+export type ProfileApiErrorCode =
+  | 'USERNAME_INVALID'
+  | 'USERNAME_TAKEN'
+  | 'USERNAME_LOCKED'
+  | 'ALREADY_INITIALIZED'
+  | 'PROFILE_NOT_INITIALIZED'
+  | 'AVATAR_INVALID'
+  | 'AVATAR_TOO_LARGE'
+  | 'NOT_FOUND'
+  | 'BAD_REQUEST';
+
+export interface UsernameCheckResponse {
+  valid: boolean;
+  available: boolean;
+  reason?: string;
 }
 
 export interface Achievement {
@@ -157,6 +212,7 @@ export interface LeaderboardEntry {
   matchesWon: number;
   winRate: number;
   highestRally: number;
+  avatarVersion?: number;
 }
 
 export interface MatchEndPayload {
@@ -189,9 +245,11 @@ export interface RTCSignalPayload {
 }
 
 // WebSocket Messages
+// Display names are NOT part of the protocol: the server resolves each
+// player's name from the device-cookie profile, so clients can't spoof one.
 export type WSClientMessage =
-  | { type: 'join_room'; roomId: string; playerId: string; playerName?: string }
-  | { type: 'create_room'; playerId: string; playerName?: string }
+  | { type: 'join_room'; roomId: string; playerId: string }
+  | { type: 'create_room'; playerId: string }
   | { type: 'paddle_move'; x: number }
   | { type: 'ball_cross_net'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'point_scored'; scorer: 'p1' | 'p2' }

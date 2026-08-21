@@ -30,20 +30,46 @@ const match = (playerId: string, overrides: Partial<MatchEndPayload> = {}): Matc
   ...overrides,
 });
 
+// Profiles must be initialized (username locked in) before they can record
+// matches — mirror the onboarding step every real player goes through.
+const init = (id: string, username: string) => {
+  db.getProfile(id);
+  const result = db.initializeProfile(id, username);
+  if (!result.ok) throw new Error(`init failed: ${result.code}`);
+  return result.profile!;
+};
+
 describe('GameDatabase', () => {
   it('creates the SQLite database file in DATA_DIR', () => {
     expect(fs.existsSync(path.join(TMP, 'phong.db'))).toBe(true);
   });
 
-  it('creates a profile on first read with the requested username', () => {
-    const p = db.getProfile('p_new', 'Fresh');
-    expect(p.username).toBe('Fresh');
+  it('mints an UNINITIALIZED profile with a placeholder name on first read', () => {
+    const p = db.getProfile('p_new');
+    expect(p.initialized).toBe(false);
+    expect(p.username.startsWith('Paddle-')).toBe(true);
     expect(p.eloRating).toBe(1200);
     expect(p.level).toBe(1);
   });
 
+  it('initializes a profile with a chosen username exactly once', () => {
+    const p = init('p_init', 'Fresh');
+    expect(p.username).toBe('Fresh');
+    expect(p.initialized).toBe(true);
+    expect(p.initializedAt).toBeTruthy();
+    expect(p.usernameChangedAt).toBeTruthy();
+    const again = db.initializeProfile('p_init', 'OtherName');
+    expect(again.ok).toBe(false);
+    expect(again.code).toBe('ALREADY_INITIALIZED');
+  });
+
+  it('refuses to record a match for an uninitialized profile', () => {
+    db.getProfile('p_uninit');
+    expect(() => db.recordMatch(match('p_uninit'))).toThrow('PROFILE_NOT_INITIALIZED');
+  });
+
   it('applies +24 ELO for a multiplayer win and -16 for a loss', () => {
-    const before = db.getProfile('p_elo', 'EloCase').eloRating;
+    const before = init('p_elo', 'EloCase').eloRating;
     const win = db.recordMatch(match('p_elo'));
     expect(win.eloDelta).toBe(24);
     expect(win.profile.eloRating).toBe(before + 24);
@@ -53,8 +79,15 @@ describe('GameDatabase', () => {
     expect(loss.profile.eloRating).toBe(before + 24 - 16);
   });
 
+  it('records matches under the profile username, ignoring the payload name', () => {
+    init('p_names', 'RealName');
+    db.recordMatch(match('p_names', { username: 'Spoofed' }));
+    const hist = db.getMatchHistory('p_names');
+    expect(hist[0].player1Name).toBe('RealName');
+  });
+
   it('never lets ELO fall below the 800 floor', () => {
-    db.getProfile('p_floor', 'FloorCase');
+    init('p_floor', 'FloorCase');
     for (let i = 0; i < 40; i++) {
       db.recordMatch(match('p_floor', { isWinner: false, playerScore: 0, maxRally: 1 }));
     }
@@ -62,6 +95,7 @@ describe('GameDatabase', () => {
   });
 
   it('unlocks first_win and multiplayer_champ on a first multiplayer win', () => {
+    init('p_ach', 'AchCase');
     const res = db.recordMatch(match('p_ach'));
     const ids = res.newAchievements.map((a) => a.id);
     expect(ids).toContain('first_win');
@@ -72,7 +106,7 @@ describe('GameDatabase', () => {
   });
 
   it('survives 50 rapid sequential match writes without losing updates', () => {
-    db.getProfile('p_burst', 'Burst');
+    init('p_burst', 'Burst');
     for (let i = 0; i < 50; i++) {
       db.recordMatch(match('p_burst', { isWinner: i % 2 === 0 }));
     }
@@ -84,6 +118,7 @@ describe('GameDatabase', () => {
   it('re-derives level when achievement XP crosses a threshold', () => {
     // A first multiplayer win grants enough achievement XP (first_serve +
     // first_win + multiplayer_champ + rally_10 = 580) to level immediately.
+    init('p_lvl', 'LevelCase');
     const res = db.recordMatch(match('p_lvl'));
     const expected = ((xp: number) => {
       let level = 1;

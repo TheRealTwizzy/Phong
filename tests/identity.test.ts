@@ -31,6 +31,14 @@ const win = (playerId: string): MatchEndPayload => ({
   isWinner: true,
 });
 
+// Onboard a device with a chosen username (matches require initialization).
+const init = (id: string, username: string) => {
+  db.getProfile(id);
+  const result = db.initializeProfile(id, username);
+  if (!result.ok) throw new Error(`init failed: ${result.code}`);
+  return result.profile!;
+};
+
 describe('device tokens', () => {
   it('mint/verify round-trips', () => {
     const id = auth.mintDeviceId();
@@ -71,7 +79,7 @@ describe('recovery codes and profile transfer', () => {
   it('claiming moves the profile, its history, and rotates the code', () => {
     const oldDevice = 'dev_111111111111111111';
     const newDevice = 'dev_222222222222222222';
-    const original = db.getProfile(oldDevice, 'Mover');
+    const original = init(oldDevice, 'Mover');
     db.recordMatch(win(oldDevice));
     const code = db.getProfile(oldDevice).recoveryCode!;
 
@@ -96,7 +104,7 @@ describe('recovery codes and profile transfer', () => {
   it('claim accepts unformatted input and rejects unknown codes', () => {
     const dev = 'dev_333333333333333333';
     const target = 'dev_444444444444444444';
-    const code = db.getProfile(dev, 'CaseTest').recoveryCode!;
+    const code = init(dev, 'CaseTest').recoveryCode!;
     const sloppy = code.toLowerCase().replace('-', ' ');
     const claimed = db.claimProfileByCode(sloppy, target);
     expect(claimed?.username).toBe('CaseTest');
@@ -106,13 +114,26 @@ describe('recovery codes and profile transfer', () => {
   it('claiming replaces the throwaway profile already on the device', () => {
     const source = 'dev_555555555555555555';
     const device = 'dev_666666666666666666';
-    db.getProfile(device, 'Throwaway');
-    const code = db.getProfile(source, 'Keeper').recoveryCode!;
+    db.getProfile(device); // uninitialized throwaway
+    const code = init(source, 'Keeper').recoveryCode!;
     const claimed = db.claimProfileByCode(code, device);
     expect(claimed!.username).toBe('Keeper');
     // The throwaway row is gone (no duplicate ids, leaderboard stays clean)
     const board = db.getLeaderboard('elo', 100);
     expect(board.filter((e) => e.id === device).length).toBe(1);
+  });
+
+  it('the avatar follows the profile on claim', () => {
+    const source = 'dev_aaaaaaaaaaaaaaaa01';
+    const device = 'dev_aaaaaaaaaaaaaaaa02';
+    init(source, 'AvatarOwner');
+    db.setAvatar(source, new Uint8Array([1, 2, 3, 4]));
+    const code = db.getProfile(source).recoveryCode!;
+
+    const claimed = db.claimProfileByCode(code, device);
+    expect(claimed!.hasAvatar).toBe(true);
+    expect(db.getAvatar(device)).not.toBeNull();
+    expect(db.getAvatar(source)).toBeNull();
   });
 
   it('never leaks recovery codes through the leaderboard', () => {

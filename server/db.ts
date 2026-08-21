@@ -3,20 +3,36 @@ import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   PlayerProfile,
+  PublicProfile,
+  ProfileApiErrorCode,
   Achievement,
   MatchRecord,
   LeaderboardEntry,
   MatchEndPayload,
   MatchEndResult,
 } from '../src/types';
+import { validateUsername, usernameLockExpiry } from '../src/profileRules';
 
 // Overridable so production can point at a persistent volume (e.g. /data on
 // the KVM); the default cwd-relative path serves local development.
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'phong.db');
-// Pre-SQLite installs stored everything in this JSON file; it is imported
-// once into SQLite on first boot and then left untouched.
-const LEGACY_JSON_FILE = path.join(DATA_DIR, 'game_database.json');
+
+// One-shot destructive migrations, keyed in the meta table so each runs at
+// most once per database. wipe_v1: the pre-launch player wipe — the game
+// relaunched with 0 players, so the first boot on an old database drops all
+// player data (including auth_secret, which retires every old device cookie).
+const WIPE_V1_KEY = 'wipe_v1';
+
+// Result of any operation that (re)names a profile. Optional fields rather
+// than a discriminated union — strictNullChecks is off in this repo, so
+// union narrowing wouldn't apply at the call sites.
+export interface UsernameResult {
+  ok: boolean;
+  profile?: PlayerProfile;
+  code?: ProfileApiErrorCode;
+  unlockAt?: string;
+}
 
 export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
@@ -197,13 +213,23 @@ interface PlayerRow {
   lastActive: string;
   rankTitle: string;
   recoveryCode: string | null;
+  initializedAt: string | null;
+  usernameChangedAt: string | null;
+  // From the LEFT JOIN on avatars; NULL when the player has no avatar.
+  avatarUpdatedAt?: string | null;
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
+  const { avatarUpdatedAt, ...rest } = row;
   return {
-    ...row,
+    ...rest,
     achievements: JSON.parse(row.achievements || '[]'),
     recoveryCode: row.recoveryCode || undefined,
+    initializedAt: row.initializedAt || undefined,
+    usernameChangedAt: row.usernameChangedAt || undefined,
+    initialized: Boolean(row.initializedAt),
+    hasAvatar: Boolean(avatarUpdatedAt),
+    avatarVersion: avatarUpdatedAt ? Date.parse(avatarUpdatedAt) : undefined,
   };
 }
 
@@ -216,6 +242,14 @@ class GameDatabase {
     }
     this.sql = new DatabaseSync(DB_FILE);
     this.sql.exec('PRAGMA journal_mode = WAL');
+    this.ensureBaseSchema();
+    this.applyWipeV1();
+    this.migrateSchema();
+  }
+
+  // Full modern schema. IF NOT EXISTS everywhere so it is safe both on a
+  // brand-new file and after the wipe drops the data tables.
+  private ensureBaseSchema(): void {
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS players (
         id TEXT PRIMARY KEY,
@@ -235,7 +269,10 @@ class GameDatabase {
         achievements TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         lastActive TEXT NOT NULL,
-        rankTitle TEXT NOT NULL
+        rankTitle TEXT NOT NULL,
+        recoveryCode TEXT,
+        initializedAt TEXT,
+        usernameChangedAt TEXT
       );
       CREATE TABLE IF NOT EXISTS matches (
         id TEXT PRIMARY KEY,
@@ -254,23 +291,65 @@ class GameDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
       CREATE INDEX IF NOT EXISTS idx_matches_p2 ON matches(player2Id);
+      CREATE TABLE IF NOT EXISTS avatars (
+        playerId TEXT PRIMARY KEY,
+        data BLOB NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
     `);
-    this.migrateSchema();
-    this.importLegacyJsonIfPresent();
-    this.seedBotsIfEmpty();
   }
 
-  // Additive schema changes for databases created by earlier builds.
+  // The one-time pre-launch player wipe. Runs exactly once per database
+  // (guarded by the wipe_v1 meta flag): drops every player, match, and
+  // avatar, and clears meta — including auth_secret, so every previously
+  // issued device cookie fails verification and each device re-onboards as
+  // a brand-new player. New databases just get the flag stamped.
+  private applyWipeV1(): void {
+    if (this.getMeta(WIPE_V1_KEY)) return;
+    const hadPlayers = this.playerCount() > 0;
+    this.sql.exec('BEGIN');
+    try {
+      this.sql.exec('DROP TABLE IF EXISTS players');
+      this.sql.exec('DROP TABLE IF EXISTS matches');
+      this.sql.exec('DROP TABLE IF EXISTS avatars');
+      this.sql.exec('DELETE FROM meta');
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    this.ensureBaseSchema();
+    this.setMeta(WIPE_V1_KEY, new Date().toISOString());
+    if (hadPlayers) {
+      console.log('wipe_v1: cleared all player data for the fresh launch (0 players)');
+    }
+  }
+
+  // Additive schema changes for databases created by earlier builds. After
+  // wipe_v1 these are no-ops on the freshly recreated tables, but they keep
+  // any straggler database shape-compatible before indexes are created.
   private migrateSchema(): void {
     const cols = this.sql.prepare('PRAGMA table_info(players)').all() as unknown as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === 'recoveryCode')) {
-      this.sql.exec('ALTER TABLE players ADD COLUMN recoveryCode TEXT');
-    }
+    const addColumn = (name: string, ddl: string) => {
+      if (!cols.some((c) => c.name === name)) {
+        this.sql.exec(`ALTER TABLE players ADD COLUMN ${ddl}`);
+      }
+    };
+    addColumn('recoveryCode', 'recoveryCode TEXT');
+    addColumn('initializedAt', 'initializedAt TEXT');
+    addColumn('usernameChangedAt', 'usernameChangedAt TEXT');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
+    // Uniqueness is case-insensitive and applies to chosen names only:
+    // uninitialized rows keep their Paddle-XXXX placeholders outside the
+    // index, and a released name frees its slot the moment the row updates.
+    this.sql.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_username
+         ON players(username COLLATE NOCASE) WHERE initializedAt IS NOT NULL`
+    );
     // Backfill codes for rows created before recovery codes existed
     const missing = this.sql
       .prepare('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -320,8 +399,8 @@ class GameDatabase {
       .prepare(
         `INSERT INTO players (id, username, level, xp, xpNext, eloRating, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, dailyStreak, lastDailyDate,
-           achievements, createdAt, lastActive, rankTitle, recoveryCode)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           achievements, createdAt, lastActive, rankTitle, recoveryCode, initializedAt, usernameChangedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            eloRating=excluded.eloRating, matchesPlayed=excluded.matchesPlayed,
@@ -330,7 +409,8 @@ class GameDatabase {
            totalAces=excluded.totalAces, dailyStreak=excluded.dailyStreak,
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive, rankTitle=excluded.rankTitle,
-           recoveryCode=excluded.recoveryCode`
+           recoveryCode=excluded.recoveryCode, initializedAt=excluded.initializedAt,
+           usernameChangedAt=excluded.usernameChangedAt`
       )
       .run(
         p.id,
@@ -351,7 +431,9 @@ class GameDatabase {
         p.createdAt,
         p.lastActive,
         p.rankTitle,
-        p.recoveryCode ?? null
+        p.recoveryCode ?? null,
+        p.initializedAt ?? null,
+        p.usernameChangedAt ?? null
       );
   }
 
@@ -379,150 +461,26 @@ class GameDatabase {
       );
   }
 
-  private importLegacyJsonIfPresent(): void {
-    if (this.playerCount() > 0 || !fs.existsSync(LEGACY_JSON_FILE)) return;
-    try {
-      const legacy = JSON.parse(fs.readFileSync(LEGACY_JSON_FILE, 'utf-8')) as {
-        players?: Record<string, PlayerProfile>;
-        matches?: MatchRecord[];
-      };
-      this.sql.exec('BEGIN');
-      try {
-        Object.values(legacy.players || {}).forEach((p) =>
-          this.upsertProfile({ ...p, recoveryCode: p.recoveryCode || this.newRecoveryCode() })
-        );
-        // Legacy matches array is newest-first; insert reversed so rowid order
-        // (our sort key) stays oldest-to-newest.
-        [...(legacy.matches || [])].reverse().forEach((m) => this.insertMatch(m));
-        this.sql.exec('COMMIT');
-        console.log(
-          `Imported legacy JSON database (${Object.keys(legacy.players || {}).length} players, ${(legacy.matches || []).length} matches) into SQLite`
-        );
-      } catch (e) {
-        this.sql.exec('ROLLBACK');
-        throw e;
-      }
-    } catch (e) {
-      console.error('Failed to import legacy game_database.json, starting fresh:', e);
-    }
-  }
-
-  private seedBotsIfEmpty() {
-    if (this.playerCount() > 0) return;
-    const bots: Partial<PlayerProfile>[] = [
-      {
-        id: 'bot-pro-01',
-        username: 'NeonViper',
-        level: 12,
-        xp: 6200,
-        eloRating: 1540,
-        matchesPlayed: 48,
-        matchesWon: 39,
-        matchesLost: 9,
-        highestRally: 34,
-        totalPointsScored: 240,
-        totalAces: 22,
-        dailyStreak: 5,
-        achievements: ['first_serve', 'rally_10', 'rally_25', 'first_win', 'level_5', 'level_10', 'rating_1400'],
-      },
-      {
-        id: 'bot-pro-02',
-        username: 'PulseEcho',
-        level: 9,
-        xp: 4100,
-        eloRating: 1420,
-        matchesPlayed: 32,
-        matchesWon: 24,
-        matchesLost: 8,
-        highestRally: 28,
-        totalPointsScored: 165,
-        totalAces: 14,
-        dailyStreak: 3,
-        achievements: ['first_serve', 'rally_10', 'rally_25', 'first_win', 'level_5', 'rating_1400'],
-      },
-      {
-        id: 'bot-pro-03',
-        username: 'AeroZen',
-        level: 6,
-        xp: 2300,
-        eloRating: 1310,
-        matchesPlayed: 20,
-        matchesWon: 13,
-        matchesLost: 7,
-        highestRally: 21,
-        totalPointsScored: 98,
-        totalAces: 8,
-        dailyStreak: 2,
-        achievements: ['first_serve', 'rally_10', 'first_win', 'level_5'],
-      },
-      {
-        id: 'bot-pro-04',
-        username: 'CyberStriker',
-        level: 15,
-        xp: 9800,
-        eloRating: 1680,
-        matchesPlayed: 75,
-        matchesWon: 62,
-        matchesLost: 13,
-        highestRally: 46,
-        totalPointsScored: 380,
-        totalAces: 35,
-        dailyStreak: 12,
-        achievements: ['first_serve', 'rally_10', 'rally_25', 'first_win', 'shutout', 'cyber_slayer', 'level_5', 'level_10', 'rating_1400'],
-      },
-    ];
-
-    const now = new Date().toISOString();
-    const todayStr = now.slice(0, 10);
-    this.sql.exec('BEGIN');
-    try {
-      bots.forEach((b) => {
-        const { level, xpNext } = calculateLevelFromXp(b.xp || 0);
-        const full: PlayerProfile = {
-          id: b.id!,
-          username: b.username!,
-          level,
-          xp: b.xp || 0,
-          xpNext,
-          eloRating: b.eloRating || 1200,
-          matchesPlayed: b.matchesPlayed || 0,
-          matchesWon: b.matchesWon || 0,
-          matchesLost: b.matchesLost || 0,
-          highestRally: b.highestRally || 0,
-          totalPointsScored: b.totalPointsScored || 0,
-          totalAces: b.totalAces || 0,
-          dailyStreak: b.dailyStreak || 1,
-          lastDailyDate: todayStr,
-          achievements: b.achievements || [],
-          createdAt: now,
-          lastActive: now,
-          rankTitle: calculateRankTitle(level, b.eloRating || 1200),
-          recoveryCode: this.newRecoveryCode(),
-        };
-        this.upsertProfile(full);
-      });
-      this.sql.exec('COMMIT');
-    } catch (e) {
-      this.sql.exec('ROLLBACK');
-      throw e;
-    }
-  }
-
   private readProfile(id: string): PlayerProfile | null {
-    const row = this.sql.prepare('SELECT * FROM players WHERE id = ?').get(id) as unknown as
-      | PlayerRow
-      | undefined;
+    const row = this.sql
+      .prepare(
+        `SELECT p.*, a.updatedAt AS avatarUpdatedAt
+           FROM players p LEFT JOIN avatars a ON a.playerId = p.id
+          WHERE p.id = ?`
+      )
+      .get(id) as unknown as PlayerRow | undefined;
     return row ? rowToProfile(row) : null;
   }
 
-  public getProfile(id: string, defaultUsername?: string): PlayerProfile {
+  public getProfile(id: string): PlayerProfile {
     const existing = this.readProfile(id);
     if (!existing) {
       const now = new Date().toISOString();
       const todayStr = now.slice(0, 10);
-      // Use the END of the id: device ids share a dev_ prefix, so the head
-      // would name every new player identically.
-      const username = defaultUsername || `Paddle-${id.slice(-4).toUpperCase()}`;
+      // Placeholder name until onboarding locks in a real one. Use the END of
+      // the id: device ids share a dev_ prefix, so the head would name every
+      // new player identically.
+      const username = `Paddle-${id.slice(-4).toUpperCase()}`;
       const newPlayer: PlayerProfile = {
         id,
         username,
@@ -543,6 +501,8 @@ class GameDatabase {
         lastActive: now,
         rankTitle: 'Rookie',
         recoveryCode: this.newRecoveryCode(),
+        initialized: false,
+        hasAvatar: false,
       };
       this.upsertProfile(newPlayer);
       return newPlayer;
@@ -557,16 +517,192 @@ class GameDatabase {
     return existing;
   }
 
-  public updateUsername(id: string, username: string): PlayerProfile {
+  // True when no INITIALIZED profile other than `forId` holds `username`
+  // (case-insensitive). Placeholder names on uninitialized rows don't count.
+  public isUsernameAvailable(username: string, forId?: string): boolean {
+    const row = this.sql
+      .prepare(
+        'SELECT id FROM players WHERE username = ? COLLATE NOCASE AND initializedAt IS NOT NULL'
+      )
+      .get(username) as unknown as { id: string } | undefined;
+    return !row || row.id === forId;
+  }
+
+  /**
+   * First-arrival onboarding: locks in the player's chosen unique username
+   * and stamps initializedAt / usernameChangedAt (the 365-day lock starts
+   * now). One-shot — an initialized profile can't initialize again.
+   */
+  public initializeProfile(id: string, username: string, nowIso?: string): UsernameResult {
+    const now = nowIso || new Date().toISOString();
+    const check = validateUsername(username);
+    if (!check.ok) return { ok: false, code: 'USERNAME_INVALID' };
     const profile = this.getProfile(id);
-    profile.username = username.trim().slice(0, 18) || profile.username;
+    if (profile.initializedAt) return { ok: false, code: 'ALREADY_INITIALIZED' };
+    if (!this.isUsernameAvailable(username, id)) return { ok: false, code: 'USERNAME_TAKEN' };
+
+    profile.username = username;
+    profile.initializedAt = now;
+    profile.usernameChangedAt = now;
+    profile.lastActive = now;
+    try {
+      this.upsertProfile(profile);
+    } catch {
+      // Unique-index race: someone claimed the name between check and write.
+      return { ok: false, code: 'USERNAME_TAKEN' };
+    }
+    return { ok: true, profile: this.readProfile(id)! };
+  }
+
+  /**
+   * Rename an initialized profile. Enforces the 365-day lock from the last
+   * change (== initialization for first-timers); the old name is released
+   * for anyone else the moment the row updates. `nowIso` is injectable so
+   * tests can travel through time.
+   */
+  public changeUsername(id: string, username: string, nowIso?: string): UsernameResult {
+    const now = nowIso || new Date().toISOString();
+    const profile = this.getProfile(id);
+    if (!profile.initializedAt) return { ok: false, code: 'PROFILE_NOT_INITIALIZED' };
+    if (username === profile.username) return { ok: true, profile }; // no-op
+
+    const check = validateUsername(username);
+    if (!check.ok) return { ok: false, code: 'USERNAME_INVALID' };
+
+    const lockBasis = profile.usernameChangedAt || profile.initializedAt;
+    const unlockAt = usernameLockExpiry(lockBasis);
+    if (Date.parse(now) < unlockAt.getTime()) {
+      return { ok: false, code: 'USERNAME_LOCKED', unlockAt: unlockAt.toISOString() };
+    }
+    if (!this.isUsernameAvailable(username, id)) return { ok: false, code: 'USERNAME_TAKEN' };
+
+    profile.username = username;
+    profile.usernameChangedAt = now;
+    profile.lastActive = now;
+    try {
+      this.upsertProfile(profile);
+    } catch {
+      return { ok: false, code: 'USERNAME_TAKEN' };
+    }
+    return { ok: true, profile: this.readProfile(id)! };
+  }
+
+  // Client-trusted XP grant (daily mission rewards). Clamped small so the
+  // endpoint can't be used to speed-level; level/rank re-derive from XP.
+  public grantXp(id: string, amount: number): PlayerProfile {
+    const clamped = Math.max(1, Math.min(1000, Math.round(amount)));
+    const profile = this.getProfile(id);
+    profile.xp += clamped;
+    const { level, xpNext } = calculateLevelFromXp(profile.xp);
+    profile.level = level;
+    profile.xpNext = xpNext;
+    profile.rankTitle = calculateRankTitle(profile.level, profile.eloRating);
     profile.lastActive = new Date().toISOString();
     this.upsertProfile(profile);
-    return profile;
+    return this.readProfile(id)!;
+  }
+
+  // ---- Avatars: exactly 256x256 PNGs, validated in server/image.ts before
+  // they get here. Returns the new avatarVersion (epoch ms cache-buster).
+  public setAvatar(playerId: string, data: Uint8Array): number {
+    const now = new Date().toISOString();
+    this.sql
+      .prepare(
+        `INSERT INTO avatars (playerId, data, updatedAt) VALUES (?, ?, ?)
+         ON CONFLICT(playerId) DO UPDATE SET data=excluded.data, updatedAt=excluded.updatedAt`
+      )
+      .run(playerId, data, now);
+    return Date.parse(now);
+  }
+
+  public getAvatar(playerId: string): { data: Uint8Array; updatedAt: string } | null {
+    const row = this.sql
+      .prepare('SELECT data, updatedAt FROM avatars WHERE playerId = ?')
+      .get(playerId) as unknown as { data: Uint8Array; updatedAt: string } | undefined;
+    return row || null;
+  }
+
+  public deleteAvatar(playerId: string): void {
+    this.sql.prepare('DELETE FROM avatars WHERE playerId = ?').run(playerId);
+  }
+
+  // The world-readable view of a profile. Uninitialized profiles don't exist
+  // publicly; recoveryCode / lastDailyDate / lastActive never leave the DB.
+  public getPublicProfile(id: string): PublicProfile | null {
+    const p = this.readProfile(id);
+    if (!p || !p.initializedAt) return null;
+    return {
+      id: p.id,
+      username: p.username,
+      level: p.level,
+      xp: p.xp,
+      xpNext: p.xpNext,
+      eloRating: p.eloRating,
+      matchesPlayed: p.matchesPlayed,
+      matchesWon: p.matchesWon,
+      matchesLost: p.matchesLost,
+      highestRally: p.highestRally,
+      totalPointsScored: p.totalPointsScored,
+      totalAces: p.totalAces,
+      dailyStreak: p.dailyStreak,
+      rankTitle: p.rankTitle,
+      createdAt: p.createdAt,
+      achievements: p.achievements,
+      hasAvatar: p.hasAvatar,
+      avatarVersion: p.avatarVersion,
+      isBot: p.id.startsWith('bot-') || undefined,
+    };
+  }
+
+  /**
+   * Insert a bot profile (id must start with "bot-"). Bots are initialized
+   * so they hold their usernames and appear on the leaderboard when
+   * requested. This is the seam for the future bot roster — nothing seeds
+   * automatically since the wipe_v1 fresh launch.
+   */
+  public insertBot(bot: Partial<PlayerProfile> & { id: string; username: string }): PlayerProfile {
+    if (!bot.id.startsWith('bot-')) {
+      throw new Error('Bot ids must start with "bot-"');
+    }
+    const now = new Date().toISOString();
+    const todayStr = now.slice(0, 10);
+    const { level, xpNext } = calculateLevelFromXp(bot.xp || 0);
+    const full: PlayerProfile = {
+      id: bot.id,
+      username: bot.username,
+      level,
+      xp: bot.xp || 0,
+      xpNext,
+      eloRating: bot.eloRating || 1200,
+      matchesPlayed: bot.matchesPlayed || 0,
+      matchesWon: bot.matchesWon || 0,
+      matchesLost: bot.matchesLost || 0,
+      highestRally: bot.highestRally || 0,
+      totalPointsScored: bot.totalPointsScored || 0,
+      totalAces: bot.totalAces || 0,
+      dailyStreak: bot.dailyStreak || 1,
+      lastDailyDate: todayStr,
+      achievements: bot.achievements || [],
+      createdAt: now,
+      lastActive: now,
+      rankTitle: calculateRankTitle(level, bot.eloRating || 1200),
+      recoveryCode: this.newRecoveryCode(),
+      initialized: true,
+      initializedAt: now,
+      usernameChangedAt: now,
+      hasAvatar: false,
+    };
+    this.upsertProfile(full);
+    return this.readProfile(bot.id)!;
   }
 
   public recordMatch(payload: MatchEndPayload): MatchEndResult {
-    const profile = this.getProfile(payload.playerId, payload.username);
+    const profile = this.getProfile(payload.playerId);
+    // Names come from the profile, never the payload — backstop for the
+    // route-level 403 so no code path records under an unclaimed identity.
+    if (!profile.initializedAt) {
+      throw new Error('PROFILE_NOT_INITIALIZED');
+    }
     const prevLevel = profile.level;
     const isWin = payload.isWinner;
 
@@ -648,11 +784,11 @@ class GameDatabase {
     const matchRecord: MatchRecord = {
       id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       player1Id: payload.playerId,
-      player1Name: payload.username,
+      player1Name: profile.username,
       player2Id: payload.opponentId || (payload.mode === 'solo' ? `AI-${payload.difficulty || 'Pro'}` : 'Player 2'),
       player2Name: payload.opponentName || (payload.mode === 'solo' ? `AI (${payload.difficulty || 'Pro'})` : 'Opponent'),
       winnerId: isWin ? payload.playerId : (payload.opponentId || 'opponent'),
-      winnerName: isWin ? payload.username : (payload.opponentName || 'Opponent'),
+      winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
       scoreP1: payload.playerScore,
       scoreP2: payload.opponentScore,
       maxRally: payload.maxRally,
@@ -697,7 +833,7 @@ class GameDatabase {
       | PlayerRow
       | undefined;
     if (!row) return null;
-    if (row.id === newDeviceId) return rowToProfile(row);
+    if (row.id === newDeviceId) return this.readProfile(row.id);
 
     this.sql.exec('BEGIN');
     try {
@@ -708,6 +844,10 @@ class GameDatabase {
       this.sql.prepare('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, row.id);
       this.sql.prepare('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, row.id);
       this.sql.prepare('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, row.id);
+      // The avatar moves with the profile; whatever throwaway avatar the
+      // claiming device had is replaced.
+      this.sql.prepare('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
+      this.sql.prepare('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, row.id);
       this.sql.exec('COMMIT');
     } catch (e) {
       this.sql.exec('ROLLBACK');
@@ -728,8 +868,15 @@ class GameDatabase {
       elo: 'eloRating DESC',
     }[sortBy];
 
+    // Only initialized profiles compete — players who never finished
+    // onboarding hold placeholder names and stay invisible.
     const rows = this.sql
-      .prepare(`SELECT * FROM players ORDER BY ${orderBy}`)
+      .prepare(
+        `SELECT p.*, a.updatedAt AS avatarUpdatedAt
+           FROM players p LEFT JOIN avatars a ON a.playerId = p.id
+          WHERE p.initializedAt IS NOT NULL
+          ORDER BY ${orderBy}`
+      )
       .all() as unknown as PlayerRow[];
 
     // Ranks count human players only, so a human's number is identical
@@ -755,6 +902,7 @@ class GameDatabase {
         matchesWon: p.matchesWon,
         winRate,
         highestRally: p.highestRally,
+        avatarVersion: p.avatarVersion,
       });
     }
     return out;

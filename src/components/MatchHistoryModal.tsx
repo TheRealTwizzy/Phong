@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MatchRecord } from '../types';
 import { ThemeConfig } from '../game/themes';
+import { isLinkableId } from '../profileRules';
 import {
   X,
   History,
@@ -23,6 +24,9 @@ interface MatchHistoryModalProps {
   onClose: () => void;
   playerId: string;
   theme: ThemeConfig;
+  // Tapping an opponent's username opens their public profile (only offered
+  // for real player ids — AI pseudo-opponents have none).
+  onViewProfile?: (id: string) => void;
 }
 
 export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
@@ -30,6 +34,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
   onClose,
   playerId,
   theme,
+  onViewProfile,
 }) => {
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -229,6 +234,8 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                 const playerScore = isP1 ? match.scoreP1 : match.scoreP2;
                 const opponentScore = isP1 ? match.scoreP2 : match.scoreP1;
                 const opponentDisplayName = isP1 ? match.player2Name : match.player1Name;
+                const opponentPlayerId = isP1 ? match.player2Id : match.player1Id;
+                const opponentLinkable = onViewProfile && isLinkableId(opponentPlayerId);
 
                 return (
                   <div
@@ -283,9 +290,20 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                     <div className="flex items-center justify-between px-1">
                       <div className="flex flex-col min-w-0">
                         <span className="text-xs text-slate-400">Opponent</span>
-                        <span className="text-sm font-bold text-slate-200 truncate max-w-[200px]">
-                          {opponentDisplayName || 'Anonymous'}
-                        </span>
+                        {opponentLinkable ? (
+                          <button
+                            id={`btn-history-opponent-${match.id || idx}`}
+                            onClick={() => onViewProfile!(opponentPlayerId)}
+                            className="text-sm font-bold text-cyan-300 hover:text-cyan-200 underline decoration-dotted underline-offset-2 truncate max-w-[200px] text-left transition"
+                            title="View profile"
+                          >
+                            {opponentDisplayName || 'Anonymous'}
+                          </button>
+                        ) : (
+                          <span className="text-sm font-bold text-slate-200 truncate max-w-[200px]">
+                            {opponentDisplayName || 'Anonymous'}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3">

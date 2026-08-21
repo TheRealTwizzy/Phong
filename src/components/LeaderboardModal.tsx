@@ -1,17 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LeaderboardEntry } from '../types';
-import { X, Trophy, Flame, Crown, Medal, TrendingUp, RefreshCw, Zap } from 'lucide-react';
+import { AvatarImage } from './AvatarImage';
+import { X, Trophy, Crown, Medal, RefreshCw } from 'lucide-react';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   currentPlayerId: string;
+  // Tapping any row opens that player's public profile.
+  onViewProfile?: (id: string) => void;
 }
 
 type SortCategory = 'elo' | 'level' | 'rally' | 'wins';
 
-export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlayerId }) => {
+export const LeaderboardModal: React.FC<Props> = ({
+  isOpen,
+  onClose,
+  currentPlayerId,
+  onViewProfile,
+}) => {
   const [category, setCategory] = useState<SortCategory>('elo');
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -182,16 +190,26 @@ export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlay
               entries.map((entry) => {
                 const isMe = entry.id === currentPlayerId;
                 return (
-                  <div
+                  <button
                     key={entry.id}
-                    className={`flex items-center justify-between p-3 rounded-2xl border transition-all ${
+                    id={`leaderboard-row-${entry.id}`}
+                    onClick={() => onViewProfile?.(entry.id)}
+                    className={`w-full text-left flex items-center justify-between p-3 rounded-2xl border transition-all active:scale-[0.99] ${
                       isMe
                         ? 'bg-amber-500/10 border-amber-400/50 shadow-md shadow-amber-500/10'
                         : 'bg-slate-800/40 border-slate-800 hover:bg-slate-800/70'
                     }`}
+                    title="View profile"
                   >
                     <div className="flex items-center gap-3 min-w-0">
                       {renderRankBadge(entry.rank)}
+                      <AvatarImage
+                        playerId={entry.id}
+                        hasAvatar={Boolean(entry.avatarVersion)}
+                        avatarVersion={entry.avatarVersion}
+                        size={32}
+                        className="rounded-lg border border-white/10"
+                      />
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className={`text-sm font-bold truncate ${isMe ? 'text-amber-300' : 'text-white'}`}>
@@ -244,7 +262,7 @@ export const LeaderboardModal: React.FC<Props> = ({ isOpen, onClose, currentPlay
                         </div>
                       )}
                     </div>
-                  </div>
+                  </button>
                 );
               })
             )}

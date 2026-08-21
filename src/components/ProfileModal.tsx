@@ -1,22 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { PlayerProfile, MatchRecord, PlayerStatus } from '../types';
+import { PlayerProfile, MatchRecord, PlayerStatus, LanguageCode } from '../types';
+import { USERNAME_MAX, isLinkableId } from '../profileRules';
+import { processAvatarFile, uploadAvatar, deleteAvatar } from '../media/avatar';
+import { AvatarImage } from './AvatarImage';
+import { t } from '../i18n/translations';
 import {
   X,
-  User,
   Trophy,
   Flame,
   Zap,
-  TrendingUp,
   Award,
   Check,
   Edit2,
-  Calendar,
-  Swords,
-  ShieldAlert,
-  Radio,
   KeyRound,
   Copy,
+  ImagePlus,
+  Trash2,
 } from 'lucide-react';
 
 interface Props {
@@ -24,8 +24,12 @@ interface Props {
   onClose: () => void;
   profile: PlayerProfile | null;
   playerStatus?: PlayerStatus;
-  onUpdateUsername: (newName: string) => Promise<void>;
+  onUpdateUsername: (
+    newName: string
+  ) => Promise<{ ok: boolean; error?: string; unlockAt?: string }>;
   onRefreshProfile: () => void;
+  onViewProfile?: (id: string) => void;
+  language?: LanguageCode;
 }
 
 export const ProfileModal: React.FC<Props> = ({
@@ -35,12 +39,43 @@ export const ProfileModal: React.FC<Props> = ({
   playerStatus = 'online',
   onUpdateUsername,
   onRefreshProfile,
+  onViewProfile,
+  language = 'en',
 }) => {
   const [isEditingName, setIsEditingName] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
   const [claimCode, setClaimCode] = useState('');
   const [claimBusy, setClaimBusy] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handlePickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || avatarBusy) return;
+    setAvatarBusy(true);
+    try {
+      const blob = await processAvatarFile(file);
+      const result = await uploadAvatar(blob);
+      if (result.ok) onRefreshProfile();
+    } catch {
+      // Undecodable file — leave the current avatar untouched
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const handleRemoveAvatar = async () => {
+    if (avatarBusy) return;
+    setAvatarBusy(true);
+    try {
+      if (await deleteAvatar()) onRefreshProfile();
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
 
   const copyRecoveryCode = () => {
     if (!profile?.recoveryCode) return;
@@ -77,7 +112,6 @@ export const ProfileModal: React.FC<Props> = ({
         setClaimError(data.error || 'Could not restore profile');
         return;
       }
-      localStorage.setItem('half_pong_player_name', data.username);
       // Identity swapped server-side; reload so every view reflects it
       window.location.reload();
     } catch {
@@ -116,9 +150,26 @@ export const ProfileModal: React.FC<Props> = ({
   const handleSaveName = async () => {
     if (!tempName.trim()) return;
     setIsSaving(true);
+    setNameError(null);
     try {
-      await onUpdateUsername(tempName.trim());
-      setIsEditingName(false);
+      const result = await onUpdateUsername(tempName.trim());
+      if (result.ok) {
+        setIsEditingName(false);
+      } else if (result.error === 'USERNAME_LOCKED' && result.unlockAt) {
+        setNameError(
+          t('username_locked_until', language, {
+            date: new Date(result.unlockAt).toLocaleDateString(language, {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+            }),
+          })
+        );
+      } else if (result.error === 'USERNAME_TAKEN') {
+        setNameError(t('username_taken', language));
+      } else {
+        setNameError(t('username_invalid', language));
+      }
     } finally {
       setIsSaving(false);
     }
@@ -157,43 +208,87 @@ export const ProfileModal: React.FC<Props> = ({
 
             <div className="flex items-center gap-4">
               <div className="relative">
-                <div className="w-18 h-18 rounded-2xl bg-gradient-to-tr from-cyan-500 to-indigo-500 p-0.5 shadow-lg shadow-cyan-500/20">
-                  <div className="w-full h-full bg-slate-950 rounded-[14px] flex items-center justify-center">
-                    <User className="w-8 h-8 text-cyan-400" />
-                  </div>
-                </div>
+                <AvatarImage
+                  playerId={profile.id}
+                  hasAvatar={profile.hasAvatar}
+                  avatarVersion={profile.avatarVersion}
+                  size={72}
+                  className="rounded-2xl border-2 border-cyan-500/40 shadow-lg shadow-cyan-500/20"
+                />
                 <div className="absolute -bottom-2 -right-2 bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-black text-xs px-2 py-0.5 rounded-full shadow border border-slate-900">
                   LV {profile.level}
                 </div>
+                {/* Avatar change / remove controls */}
+                <div className="absolute -top-2 -right-2 flex gap-1">
+                  <button
+                    id="btn-change-avatar"
+                    onClick={() => avatarInputRef.current?.click()}
+                    disabled={avatarBusy}
+                    title={profile.hasAvatar ? t('change_avatar', language) : t('upload_avatar', language)}
+                    className="p-1 rounded-lg bg-slate-800/95 hover:bg-slate-700 text-cyan-300 border border-slate-600 shadow transition active:scale-95 disabled:opacity-50"
+                  >
+                    <ImagePlus className="w-3 h-3" />
+                  </button>
+                  {profile.hasAvatar && (
+                    <button
+                      id="btn-remove-avatar"
+                      onClick={handleRemoveAvatar}
+                      disabled={avatarBusy}
+                      title={t('remove_avatar', language)}
+                      className="p-1 rounded-lg bg-slate-800/95 hover:bg-slate-700 text-rose-300 border border-slate-600 shadow transition active:scale-95 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+                <input
+                  ref={avatarInputRef}
+                  id="input-avatar-file"
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handlePickAvatar}
+                />
               </div>
 
               <div className="flex-1 min-w-0">
                 {isEditingName ? (
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      maxLength={18}
-                      value={tempName}
-                      onChange={(e) => setTempName(e.target.value)}
-                      className="bg-slate-800 border border-cyan-400/60 rounded-lg px-3 py-1 text-sm text-white font-bold focus:outline-none focus:ring-2 focus:ring-cyan-400"
-                      autoFocus
-                    />
-                    <button
-                      onClick={handleSaveName}
-                      disabled={isSaving}
-                      className="p-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded-lg"
-                    >
-                      <Check className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => {
-                        setTempName(profile.username);
-                        setIsEditingName(false);
-                      }}
-                      className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        maxLength={USERNAME_MAX}
+                        value={tempName}
+                        onChange={(e) => {
+                          setTempName(e.target.value);
+                          setNameError(null);
+                        }}
+                        className="bg-slate-800 border border-cyan-400/60 rounded-lg px-3 py-1 text-sm text-white font-bold focus:outline-none focus:ring-2 focus:ring-cyan-400 min-w-0"
+                        autoFocus
+                      />
+                      <button
+                        onClick={handleSaveName}
+                        disabled={isSaving}
+                        className="p-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded-lg"
+                      >
+                        <Check className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setTempName(profile.username);
+                          setIsEditingName(false);
+                          setNameError(null);
+                        }}
+                        className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                    {nameError && (
+                      <p id="username-edit-error" className="text-[10px] font-mono text-rose-400">
+                        {nameError}
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="flex items-center gap-2">
@@ -425,6 +520,10 @@ export const ProfileModal: React.FC<Props> = ({
                 ) : (
                   matches.map((m) => {
                     const isWin = m.winnerId === profile.id;
+                    const opponentIsP2 = m.player1Id === profile.id;
+                    const oppName = opponentIsP2 ? m.player2Name : m.player1Name;
+                    const oppId = opponentIsP2 ? m.player2Id : m.player1Id;
+                    const oppLinkable = onViewProfile && isLinkableId(oppId);
                     return (
                       <div
                         key={m.id}
@@ -442,7 +541,18 @@ export const ProfileModal: React.FC<Props> = ({
                           </div>
                           <div>
                             <div className="text-sm font-bold text-white">
-                              vs {m.player1Id === profile.id ? m.player2Name : m.player1Name}
+                              vs{' '}
+                              {oppLinkable ? (
+                                <button
+                                  onClick={() => onViewProfile!(oppId)}
+                                  className="text-cyan-300 hover:text-cyan-200 underline decoration-dotted underline-offset-2 transition"
+                                  title={t('view_profile', language)}
+                                >
+                                  {oppName}
+                                </button>
+                              ) : (
+                                oppName
+                              )}
                             </div>
                             <div className="text-[11px] text-slate-400 flex items-center gap-2">
                               <span>Score: {m.scoreP1} - {m.scoreP2}</span>

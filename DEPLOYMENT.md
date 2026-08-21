@@ -4,6 +4,8 @@ Phong is a single Node service: Express serves the built client, the `ws` relay 
 
 Capacity note: the relay comfortably exceeds the "5 concurrent matches" requirement — the included load test (`node scripts/load-test.mjs`) drives 10 simultaneous matches (12,000+ messages over 20s) with 0% loss and ~1ms p95 relay latency on modest hardware.
 
+> **One-time player wipe (`wipe_v1`)**: the first deploy of this version clears ALL existing player data on the volume — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). This runs exactly once, flagged in the DB `meta` table; later deploys never wipe. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.
+
 **Pick your path by what already runs on the box:**
 
 - The KVM already runs **Dokploy** (or any PaaS/proxy holding ports 80/443, e.g. Traefik, CloudPanel) → use [Deploying with Dokploy](#primary-path-deploying-with-dokploy) below. Do **not** run the bundled compose stack — its Caddy will fail with `Bind for :80 failed: port is already allocated` because the existing proxy owns those ports.
@@ -19,7 +21,7 @@ The too-many-coins.com KVM runs Dokploy, whose Traefik terminates TLS for every 
    - Create a project (e.g. `phong`) → **Application**.
    - **Source**: this GitHub repository, branch `main`. Build type: **Dockerfile**.
    - **Environment**: nothing required — the Dockerfile defaults `NODE_ENV=production`, `PORT=3000`, `DATA_DIR=/data`. (Add `TURN_URL`/`TURN_STATIC_SECRET` here later if you enable TURN.)
-   - **Advanced → Mounts**: add a **Volume Mount**, name `phong-data`, mount path `/data`. **This is the step that keeps player data across deploys** — skip it and every deploy silently resets profiles, ELO, and history to the seeded bots.
+   - **Advanced → Mounts**: add a **Volume Mount**, name `phong-data`, mount path `/data`. **This is the step that keeps player data across deploys** — skip it and every deploy silently resets profiles, ELO, and history.
    - **Domains**: add `phong.too-many-coins.com`, container port **3000**, HTTPS on (Let's Encrypt).
    - **Deploy.** Optionally enable auto-deploy on push (Dokploy sets up the GitHub webhook).
 

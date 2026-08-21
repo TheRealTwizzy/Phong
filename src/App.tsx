@@ -49,6 +49,9 @@ import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
 import { TutorialModal } from './components/TutorialModal';
+import { OnboardingModal } from './components/OnboardingModal';
+import { PublicProfileModal } from './components/PublicProfileModal';
+import { isLinkableId } from './profileRules';
 import confetti from 'canvas-confetti';
 import { Trophy, RefreshCw, Home } from 'lucide-react';
 
@@ -104,6 +107,9 @@ export default function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
   const [isTutorialOpen, setIsTutorialOpen] = useState<boolean>(false);
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
+  // Any tapped username opens this player's public profile (z-[60], above
+  // whichever modal spawned it). null = closed.
+  const [publicProfileId, setPublicProfileId] = useState<string | null>(null);
 
   // Quick Chat State
   const [activeChatMessages, setActiveChatMessages] = useState<ChatMessage[]>([]);
@@ -211,17 +217,16 @@ export default function App() {
 
   const currentLanguage: LanguageCode = settings.language || 'en';
 
-  // Fetch Player Profile from Server
+  // Fetch Player Profile from Server. Usernames are server-owned now: the
+  // profile arrives uninitialized on first contact and the OnboardingModal
+  // gates the app until the player locks one in.
   const fetchProfile = useCallback(() => {
-    const savedName = localStorage.getItem('half_pong_player_name') || undefined;
-    const url = `/api/profile/me${savedName ? `?username=${encodeURIComponent(savedName)}` : ''}`;
-    fetch(url)
+    fetch('/api/profile/me')
       .then((res) => res.json())
       .then((data) => {
         if (data && data.id) {
           setProfile(data);
           setPlayerId(data.id);
-          localStorage.setItem('half_pong_player_name', data.username);
         }
       })
       .catch((e) => console.error('Profile fetch error:', e));
@@ -231,8 +236,11 @@ export default function App() {
     fetchProfile();
   }, [fetchProfile]);
 
-  // Update Callsign / Username
-  const handleUpdateUsername = async (newName: string) => {
+  // Rename (365-day lock). Returns the typed failure so the Profile modal
+  // can tell the player WHY: taken, invalid, or locked until a date.
+  const handleUpdateUsername = async (
+    newName: string
+  ): Promise<{ ok: boolean; error?: string; unlockAt?: string }> => {
     try {
       const res = await fetch('/api/profile/me', {
         method: 'PUT',
@@ -240,13 +248,19 @@ export default function App() {
         body: JSON.stringify({ username: newName }),
       });
       const data = await res.json();
-      if (data && data.id) {
+      if (res.ok && data && data.id) {
         setProfile(data);
-        localStorage.setItem('half_pong_player_name', data.username);
+        return { ok: true };
       }
+      return { ok: false, error: data?.error || 'USERNAME_INVALID', unlockAt: data?.unlockAt };
     } catch (e) {
       console.error('Failed to update username:', e);
+      return { ok: false, error: 'NETWORK' };
     }
+  };
+
+  const openPublicProfile = (id: string | null | undefined) => {
+    if (isLinkableId(id)) setPublicProfileId(id as string);
   };
 
   // Record Match Result to Server Database and Track Daily Missions
@@ -330,14 +344,13 @@ export default function App() {
 
     if (claimedMission && profile) {
       try {
-        const nextXp = profile.currentXp + claimedMission.xpReward;
         const res = await fetch('/api/profile/me', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ currentXp: nextXp }),
+          body: JSON.stringify({ xpDelta: claimedMission.xpReward }),
         });
         const updatedProf = await res.json();
-        if (updatedProf && updatedProf.id) {
+        if (res.ok && updatedProf && updatedProf.id) {
           setProfile(updatedProf);
         }
       } catch (e) {
@@ -782,20 +795,16 @@ export default function App() {
     return socket;
   }, []);
 
-  const handleCreateRoom = (name: string) => {
+  // Display names ride the device cookie server-side; the client never sends
+  // one (usernames are unique identities, not free-text callsigns).
+  const handleCreateRoom = () => {
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
     }
     const checkAndSend = () => {
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(
-          JSON.stringify({
-            type: 'create_room',
-            playerId,
-            playerName: name || profile?.username || 'Player 1',
-          })
-        );
+        socket.send(JSON.stringify({ type: 'create_room', playerId }));
       } else {
         setTimeout(checkAndSend, 100);
       }
@@ -803,21 +812,14 @@ export default function App() {
     checkAndSend();
   };
 
-  const handleJoinRoom = (code: string, name: string) => {
+  const handleJoinRoom = (code: string) => {
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
     }
     const checkAndSend = () => {
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(
-          JSON.stringify({
-            type: 'join_room',
-            roomId: code,
-            playerId,
-            playerName: name || profile?.username || 'Player 2',
-          })
-        );
+        socket.send(JSON.stringify({ type: 'join_room', roomId: code, playerId }));
       } else {
         setTimeout(checkAndSend, 100);
       }
@@ -1148,6 +1150,26 @@ export default function App() {
           }}
         />
 
+        {/* Mandatory first-arrival onboarding: gates EVERYTHING until the
+            player locks in their unique username (or restores a profile) */}
+        <OnboardingModal
+          isOpen={Boolean(profile && !profile.initialized)}
+          theme={currentTheme}
+          language={currentLanguage}
+          onInitialized={(p) => {
+            setProfile(p);
+            setPlayerId(p.id);
+          }}
+        />
+
+        {/* Public profile viewer — opened by tapping any username */}
+        <PublicProfileModal
+          playerId={publicProfileId}
+          onClose={() => setPublicProfileId(null)}
+          theme={currentTheme}
+          language={currentLanguage}
+        />
+
         {/* Out-of-match hub: mode select + pre-match settings + navigation */}
         {screen === 'menu' && (
           <MainMenu
@@ -1197,6 +1219,11 @@ export default function App() {
           onQuitToMenu={quitToMenu}
           winningScore={settings.winningScore}
           opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${settings.difficulty})`}
+          onViewOpponent={
+            mode === 'multiplayer' && isLinkableId(opponentId)
+              ? () => openPublicProfile(opponentId)
+              : undefined
+          }
           language={currentLanguage}
         />
 
@@ -1425,6 +1452,9 @@ export default function App() {
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
           onLeaveRoom={handleLeaveRoom}
+          opponentId={opponentId}
+          onViewProfile={openPublicProfile}
+          language={currentLanguage}
           onReadyToPlay={() => {
             setIsMultiplayerOpen(false);
             setIsServing(true);
@@ -1442,6 +1472,8 @@ export default function App() {
           playerStatus={playerStatus}
           onUpdateUsername={handleUpdateUsername}
           onRefreshProfile={fetchProfile}
+          onViewProfile={openPublicProfile}
+          language={currentLanguage}
         />
 
         {/* Global Leaderboard Modal */}
@@ -1449,6 +1481,7 @@ export default function App() {
           isOpen={isLeaderboardOpen}
           onClose={() => setIsLeaderboardOpen(false)}
           currentPlayerId={playerId}
+          onViewProfile={openPublicProfile}
         />
 
         {/* Achievements & Trophies Modal */}
@@ -1464,6 +1497,7 @@ export default function App() {
           onClose={() => setIsHistoryOpen(false)}
           playerId={playerId}
           theme={currentTheme}
+          onViewProfile={openPublicProfile}
         />
       </div>
     </MobileGatekeeper>
