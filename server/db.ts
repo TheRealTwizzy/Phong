@@ -12,6 +12,33 @@ import {
   MatchEndResult,
 } from '../src/types';
 import { validateUsername, usernameLockExpiry } from '../src/profileRules';
+import {
+  Rating,
+  Tier,
+  AI_RATINGS,
+  newRating,
+  winProbability,
+  updateRating,
+  tierFor,
+  isPlaced,
+  matchXp,
+  levelFromXp,
+  SOLO_UPDATE,
+  PVP_UPDATE,
+  PLACEMENT_GAMES,
+} from '../src/rating';
+
+// Bots are hand-rated and never uncertain.
+const BOT_SIGMA = 1.0;
+
+// Extra context the server can supply for a PvP result it has verified
+// against its own room state (TrueSkill-2 style signals). Solo never gets
+// these — solo stats are self-reported and would be a free rating dial.
+export interface RecordMatchContext {
+  opponentRating?: Rating;
+  /** 0.5..1.5 weight from margin of victory / rally quality. */
+  performanceWeight?: number;
+}
 
 // Overridable so production can point at a persistent volume (e.g. /data on
 // the KVM); the default cwd-relative path serves local development.
@@ -40,7 +67,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'First Impact',
     description: 'Complete your first cross-net volley.',
     category: 'beginner',
-    xpReward: 50,
+    xpReward: 25,
     icon: 'zap',
   },
   {
@@ -48,7 +75,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Rally Apprentice',
     description: 'Sustain a rally of 10 or more hits in a single point.',
     category: 'mastery',
-    xpReward: 100,
+    xpReward: 60,
     icon: 'activity',
   },
   {
@@ -72,7 +99,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'First Blood',
     description: 'Win your first full match in any mode.',
     category: 'beginner',
-    xpReward: 80,
+    xpReward: 50,
     icon: 'trophy',
   },
   {
@@ -134,33 +161,15 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'rating_1400',
     title: 'Elite Contender',
-    description: 'Surpass an ELO rating of 1400.',
+    description: 'Reach the Master tier in ranked play.',
     category: 'special',
     xpReward: 500,
     icon: 'trending-up',
   },
 ];
 
-function calculateRankTitle(level: number, elo: number): string {
-  if (level >= 20 || elo >= 1800) return 'Cyber Overlord';
-  if (level >= 15 || elo >= 1650) return 'Legend';
-  if (level >= 10 || elo >= 1500) return 'Grandmaster';
-  if (level >= 7 || elo >= 1400) return 'Master';
-  if (level >= 5 || elo >= 1300) return 'Ace';
-  if (level >= 3 || elo >= 1200) return 'Vanguard';
-  if (level >= 2) return 'Contender';
-  return 'Rookie';
-}
-
 function calculateLevelFromXp(xp: number): { level: number; xpNext: number } {
-  // Level curve: Level L requires 120 * L^1.6 XP
-  let level = 1;
-  let xpForNext = 120;
-  while (xp >= xpForNext) {
-    level++;
-    xpForNext = Math.round(120 * Math.pow(level, 1.6));
-  }
-  return { level, xpNext: xpForNext };
+  return levelFromXp(xp);
 }
 
 function updatePlayerStreak(profile: PlayerProfile): void {
@@ -199,7 +208,12 @@ interface PlayerRow {
   level: number;
   xp: number;
   xpNext: number;
-  eloRating: number;
+  eloRating: number | null; // legacy column, no longer used
+  mmrMu: number;
+  mmrSigma: number;
+  rankMu: number;
+  rankSigma: number;
+  rankedGames: number;
   matchesPlayed: number;
   matchesWon: number;
   matchesLost: number;
@@ -211,7 +225,7 @@ interface PlayerRow {
   achievements: string;
   createdAt: string;
   lastActive: string;
-  rankTitle: string;
+  rankTitle: string | null; // legacy column, superseded by the derived tier
   recoveryCode: string | null;
   initializedAt: string | null;
   usernameChangedAt: string | null;
@@ -220,9 +234,12 @@ interface PlayerRow {
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
-  const { avatarUpdatedAt, ...rest } = row;
+  // eloRating/rankTitle are dead columns kept for old databases; strip them so
+  // no raw rating number can leak into a profile payload.
+  const { avatarUpdatedAt, eloRating, rankTitle, ...rest } = row;
   return {
     ...rest,
+    tier: tierFor(row.rankMu, row.rankedGames, row.rankSigma),
     achievements: JSON.parse(row.achievements || '[]'),
     recoveryCode: row.recoveryCode || undefined,
     initializedAt: row.initializedAt || undefined,
@@ -257,7 +274,12 @@ class GameDatabase {
         level INTEGER NOT NULL,
         xp INTEGER NOT NULL,
         xpNext INTEGER NOT NULL,
-        eloRating INTEGER NOT NULL,
+        eloRating INTEGER,
+        mmrMu REAL NOT NULL DEFAULT 25,
+        mmrSigma REAL NOT NULL DEFAULT 8.3333,
+        rankMu REAL NOT NULL DEFAULT 25,
+        rankSigma REAL NOT NULL DEFAULT 8.3333,
+        rankedGames INTEGER NOT NULL DEFAULT 0,
         matchesPlayed INTEGER NOT NULL,
         matchesWon INTEGER NOT NULL,
         matchesLost INTEGER NOT NULL,
@@ -269,7 +291,7 @@ class GameDatabase {
         achievements TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         lastActive TEXT NOT NULL,
-        rankTitle TEXT NOT NULL,
+        rankTitle TEXT,
         recoveryCode TEXT,
         initializedAt TEXT,
         usernameChangedAt TEXT
@@ -340,6 +362,12 @@ class GameDatabase {
       }
     };
     addColumn('recoveryCode', 'recoveryCode TEXT');
+    // TrueSkill-style ratings replaced the old fixed-delta ELO.
+    addColumn('mmrMu', 'mmrMu REAL NOT NULL DEFAULT 25');
+    addColumn('mmrSigma', 'mmrSigma REAL NOT NULL DEFAULT 8.3333');
+    addColumn('rankMu', 'rankMu REAL NOT NULL DEFAULT 25');
+    addColumn('rankSigma', 'rankSigma REAL NOT NULL DEFAULT 8.3333');
+    addColumn('rankedGames', 'rankedGames INTEGER NOT NULL DEFAULT 0');
     addColumn('initializedAt', 'initializedAt TEXT');
     addColumn('usernameChangedAt', 'usernameChangedAt TEXT');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
@@ -397,18 +425,20 @@ class GameDatabase {
   private upsertProfile(p: PlayerProfile): void {
     this.sql
       .prepare(
-        `INSERT INTO players (id, username, level, xp, xpNext, eloRating, matchesPlayed, matchesWon,
+        `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, dailyStreak, lastDailyDate,
-           achievements, createdAt, lastActive, rankTitle, recoveryCode, initializedAt, usernameChangedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
-           eloRating=excluded.eloRating, matchesPlayed=excluded.matchesPlayed,
+           mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
+           rankSigma=excluded.rankSigma, rankedGames=excluded.rankedGames,
+           matchesPlayed=excluded.matchesPlayed,
            matchesWon=excluded.matchesWon, matchesLost=excluded.matchesLost,
            highestRally=excluded.highestRally, totalPointsScored=excluded.totalPointsScored,
            totalAces=excluded.totalAces, dailyStreak=excluded.dailyStreak,
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
-           createdAt=excluded.createdAt, lastActive=excluded.lastActive, rankTitle=excluded.rankTitle,
+           createdAt=excluded.createdAt, lastActive=excluded.lastActive,
            recoveryCode=excluded.recoveryCode, initializedAt=excluded.initializedAt,
            usernameChangedAt=excluded.usernameChangedAt`
       )
@@ -418,7 +448,11 @@ class GameDatabase {
         p.level,
         p.xp,
         p.xpNext,
-        p.eloRating,
+        p.mmrMu,
+        p.mmrSigma,
+        p.rankMu,
+        p.rankSigma,
+        p.rankedGames,
         p.matchesPlayed,
         p.matchesWon,
         p.matchesLost,
@@ -430,7 +464,6 @@ class GameDatabase {
         JSON.stringify(p.achievements),
         p.createdAt,
         p.lastActive,
-        p.rankTitle,
         p.recoveryCode ?? null,
         p.initializedAt ?? null,
         p.usernameChangedAt ?? null
@@ -486,8 +519,12 @@ class GameDatabase {
         username,
         level: 1,
         xp: 0,
-        xpNext: 120,
-        eloRating: 1200,
+        xpNext: 250,
+        mmrMu: newRating().mu,
+        mmrSigma: newRating().sigma,
+        rankMu: newRating().mu,
+        rankSigma: newRating().sigma,
+        rankedGames: 0,
         matchesPlayed: 0,
         matchesWon: 0,
         matchesLost: 0,
@@ -499,7 +536,7 @@ class GameDatabase {
         achievements: [],
         createdAt: now,
         lastActive: now,
-        rankTitle: 'Rookie',
+        tier: 'unranked',
         recoveryCode: this.newRecoveryCode(),
         initialized: false,
         hasAvatar: false,
@@ -596,7 +633,6 @@ class GameDatabase {
     const { level, xpNext } = calculateLevelFromXp(profile.xp);
     profile.level = level;
     profile.xpNext = xpNext;
-    profile.rankTitle = calculateRankTitle(profile.level, profile.eloRating);
     profile.lastActive = new Date().toISOString();
     this.upsertProfile(profile);
     return this.readProfile(id)!;
@@ -637,7 +673,6 @@ class GameDatabase {
       level: p.level,
       xp: p.xp,
       xpNext: p.xpNext,
-      eloRating: p.eloRating,
       matchesPlayed: p.matchesPlayed,
       matchesWon: p.matchesWon,
       matchesLost: p.matchesLost,
@@ -645,7 +680,8 @@ class GameDatabase {
       totalPointsScored: p.totalPointsScored,
       totalAces: p.totalAces,
       dailyStreak: p.dailyStreak,
-      rankTitle: p.rankTitle,
+      tier: p.tier,
+      rankedGames: p.rankedGames,
       createdAt: p.createdAt,
       achievements: p.achievements,
       hasAvatar: p.hasAvatar,
@@ -660,20 +696,28 @@ class GameDatabase {
    * requested. This is the seam for the future bot roster — nothing seeds
    * automatically since the wipe_v1 fresh launch.
    */
-  public insertBot(bot: Partial<PlayerProfile> & { id: string; username: string }): PlayerProfile {
+  public insertBot(
+    bot: Partial<PlayerProfile> & { id: string; username: string; mu?: number }
+  ): PlayerProfile {
     if (!bot.id.startsWith('bot-')) {
       throw new Error('Bot ids must start with "bot-"');
     }
     const now = new Date().toISOString();
     const todayStr = now.slice(0, 10);
     const { level, xpNext } = calculateLevelFromXp(bot.xp || 0);
+    const botMu = bot.mu ?? bot.rankMu ?? 25;
     const full: PlayerProfile = {
       id: bot.id,
       username: bot.username,
       level,
       xp: bot.xp || 0,
       xpNext,
-      eloRating: bot.eloRating || 1200,
+      mmrMu: botMu,
+      mmrSigma: BOT_SIGMA,
+      rankMu: botMu,
+      rankSigma: BOT_SIGMA,
+      // Bots are pre-placed so they carry a real tier on the leaderboard.
+      rankedGames: bot.rankedGames ?? PLACEMENT_GAMES,
       matchesPlayed: bot.matchesPlayed || 0,
       matchesWon: bot.matchesWon || 0,
       matchesLost: bot.matchesLost || 0,
@@ -685,7 +729,7 @@ class GameDatabase {
       achievements: bot.achievements || [],
       createdAt: now,
       lastActive: now,
-      rankTitle: calculateRankTitle(level, bot.eloRating || 1200),
+      tier: tierFor(botMu, bot.rankedGames ?? PLACEMENT_GAMES, BOT_SIGMA),
       recoveryCode: this.newRecoveryCode(),
       initialized: true,
       initializedAt: now,
@@ -696,7 +740,9 @@ class GameDatabase {
     return this.readProfile(bot.id)!;
   }
 
-  public recordMatch(payload: MatchEndPayload): MatchEndResult {
+  public recordMatch(payload: MatchEndPayload, context: RecordMatchContext = {}): MatchEndResult {
+    const opponentRating = context.opponentRating;
+    const performance = context.performanceWeight ?? 1;
     const profile = this.getProfile(payload.playerId);
     // Names come from the profile, never the payload — backstop for the
     // route-level 403 so no code path records under an unclaimed identity.
@@ -706,33 +752,62 @@ class GameDatabase {
     const prevLevel = profile.level;
     const isWin = payload.isWinner;
 
-    // 1. Calculate XP Earned
-    let xpBase = payload.playerScore * 15;
-    xpBase += payload.maxRally * 6;
-    if (isWin) xpBase += 60;
-    if (payload.difficulty === 'cyber') xpBase = Math.round(xpBase * 1.35);
-    if (payload.difficulty === 'chaos') xpBase = Math.round(xpBase * 1.5);
-    if (payload.mode === 'multiplayer') xpBase = Math.round(xpBase * 1.4);
+    // 1. Predict the matchup BEFORE scoring it. Hidden MMR vs the opponent's
+    // rating decides both how much the rating moves and how much XP is paid,
+    // so difficulty scaling is implicit — there is no per-difficulty table.
+    const isPvp = payload.mode === 'multiplayer';
+    const myMmr: Rating = { mu: profile.mmrMu, sigma: profile.mmrSigma };
+    const oppRating: Rating = isPvp
+      ? opponentRating || { mu: profile.mmrMu, sigma: profile.mmrSigma }
+      : AI_RATINGS[payload.difficulty || 'pro'];
+    const winProb = winProbability(myMmr, oppRating);
 
-    const earnedXp = Math.max(20, xpBase);
+    // 2. Experience — always positive, never subtracted: levels can't regress.
+    const earnedXp = matchXp({
+      playerScore: payload.playerScore,
+      maxRally: payload.maxRally,
+      won: isWin,
+      winProb,
+      mode: payload.mode,
+    });
     profile.xp += earnedXp;
 
-    // Recalculate Level & Next XP threshold
     const { level, xpNext } = calculateLevelFromXp(profile.xp);
     const leveledUp = level > prevLevel;
     profile.level = level;
     profile.xpNext = xpNext;
 
-    // 2. Calculate ELO Rating Change
-    let eloDelta = 0;
-    if (payload.mode === 'multiplayer') {
-      eloDelta = isWin ? 24 : -16;
-    } else {
-      const difficultyMultiplier = { rookie: 8, pro: 16, cyber: 24, chaos: 32 }[payload.difficulty || 'pro'] || 16;
-      eloDelta = isWin ? difficultyMultiplier : -Math.round(difficultyMultiplier / 2);
+    // 3. Skill rating. Hidden MMR moves on EVERY match; the ranked rating that
+    // drives the visible tier moves on PvP ONLY, so solo results can never
+    // change a player's rank.
+    const previousTier = profile.tier;
+    const soloOpts = {
+      ...SOLO_UPDATE,
+      // A solo win can't push mu past the anchor it beat: farming a weak
+      // difficulty converges on that difficulty and stops.
+      cap: AI_RATINGS[payload.difficulty || 'pro'].mu,
+    };
+    const nextMmr = updateRating(
+      myMmr,
+      oppRating,
+      isWin,
+      isPvp ? { ...PVP_UPDATE, performance } : soloOpts
+    );
+    profile.mmrMu = nextMmr.mu;
+    profile.mmrSigma = nextMmr.sigma;
+
+    if (isPvp) {
+      const nextRank = updateRating(
+        { mu: profile.rankMu, sigma: profile.rankSigma },
+        oppRating,
+        isWin,
+        { ...PVP_UPDATE, performance }
+      );
+      profile.rankMu = nextRank.mu;
+      profile.rankSigma = nextRank.sigma;
+      profile.rankedGames += 1;
     }
-    profile.eloRating = Math.max(800, profile.eloRating + eloDelta);
-    profile.rankTitle = calculateRankTitle(profile.level, profile.eloRating);
+    profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma);
 
     // 3. Update Match Statistics
     profile.matchesPlayed += 1;
@@ -772,13 +847,12 @@ class GameDatabase {
     if (profile.matchesPlayed >= 10) unlock('veteran_10');
     if (profile.level >= 5) unlock('level_5');
     if (profile.level >= 10) unlock('level_10');
-    if (profile.eloRating >= 1400) unlock('rating_1400');
+    if (isPlaced(profile.rankedGames, profile.rankSigma) && profile.rankMu >= 28) unlock('rating_1400');
 
     // Achievement XP can push the profile over a level threshold too
     const finalLevel = calculateLevelFromXp(profile.xp);
     profile.level = finalLevel.level;
     profile.xpNext = finalLevel.xpNext;
-    profile.rankTitle = calculateRankTitle(profile.level, profile.eloRating);
 
     // 5. Store match record
     const matchRecord: MatchRecord = {
@@ -815,7 +889,10 @@ class GameDatabase {
       profile,
       earnedXp,
       leveledUp,
-      eloDelta,
+      winProbability: winProb,
+      previousTier: isPvp ? previousTier : null,
+      tier: isPvp ? profile.tier : null,
+      tierChanged: isPvp && profile.tier !== previousTier,
       newAchievements,
     };
   }
@@ -865,7 +942,7 @@ class GameDatabase {
       level: 'xp DESC',
       rally: 'highestRally DESC',
       wins: 'matchesWon DESC',
-      elo: 'eloRating DESC',
+      elo: '(rankedGames >= 5 AND rankSigma <= 4.0) DESC, rankMu DESC',
     }[sortBy];
 
     // Only initialized profiles compete — players who never finished
@@ -895,7 +972,8 @@ class GameDatabase {
         isBot: isBot || undefined,
         id: p.id,
         username: p.username,
-        eloRating: p.eloRating,
+        tier: p.tier,
+        rankedGames: p.rankedGames,
         level: p.level,
         xp: p.xp,
         matchesPlayed: p.matchesPlayed,

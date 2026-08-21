@@ -19,7 +19,7 @@ export function getDefaultMissions(): DailyMission[] {
       descKey: 'mission_games_desc',
       target: 3,
       current: 0,
-      xpReward: 50,
+      xpReward: 120,
       claimed: false,
     },
     {
@@ -29,7 +29,7 @@ export function getDefaultMissions(): DailyMission[] {
       descKey: 'mission_win_desc',
       target: 1,
       current: 0,
-      xpReward: 75,
+      xpReward: 150,
       claimed: false,
     },
     {
@@ -39,7 +39,7 @@ export function getDefaultMissions(): DailyMission[] {
       descKey: 'mission_rally_desc',
       target: 8,
       current: 0,
-      xpReward: 60,
+      xpReward: 120,
       claimed: false,
     },
     {
@@ -49,7 +49,7 @@ export function getDefaultMissions(): DailyMission[] {
       descKey: 'mission_multi_desc',
       target: 1,
       current: 0,
-      xpReward: 100,
+      xpReward: 200,
       claimed: false,
     },
     {
@@ -59,7 +59,7 @@ export function getDefaultMissions(): DailyMission[] {
       descKey: 'mission_points_desc',
       target: 12,
       current: 0,
-      xpReward: 60,
+      xpReward: 120,
       claimed: false,
     },
   ];

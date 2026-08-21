@@ -25,6 +25,8 @@ interface MultiplayerLobbyProps {
   onToggleP2P?: (enabled: boolean) => void;
   opponentId?: string | null;
   onViewProfile?: (id: string) => void;
+  /** Server-computed chance THIS player wins, once the opponent has joined. */
+  winProbability?: number | null;
   language?: LanguageCode;
 }
 
@@ -46,6 +48,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   onOpenTutorial,
   opponentId = null,
   onViewProfile,
+  winProbability = null,
   language = 'en',
 }) => {
   const playerName = currentUsername || 'Player';
@@ -224,6 +227,34 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 )}
               </div>
             </div>
+
+            {/* Pre-match prediction, straight from the server */}
+            {opponentName && winProbability !== null && (
+              <div
+                id="lobby-prediction"
+                className="flex items-center justify-between pt-2 border-t border-zinc-800 text-xs font-mono"
+              >
+                <span className="text-zinc-400">{t('win_chance', language)}</span>
+                <span
+                  className={`font-bold ${
+                    winProbability >= 0.6
+                      ? 'text-emerald-400'
+                      : winProbability >= 0.4
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                  }`}
+                >
+                  {Math.round(winProbability * 100)}%
+                  <span className="ml-1.5 text-[10px] text-zinc-500">
+                    {winProbability >= 0.55
+                      ? t('favoured', language)
+                      : winProbability <= 0.45
+                        ? t('underdog', language)
+                        : t('even_match', language)}
+                  </span>
+                </span>
+              </div>
+            )}
 
             {/* Action buttons */}
             <div className="flex items-center gap-2 pt-2">

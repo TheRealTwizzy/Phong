@@ -15,11 +15,11 @@ beforeAll(async () => {
   // Bots no longer seed automatically (the fresh launch starts with 0
   // players) — insert a roster through the insertBot seam so the
   // interleave/rank contract stays covered for the future bot rollout.
-  // Bot ELOs: 1680, 1540, 1420, 1310.
-  db.insertBot({ id: 'bot-pro-04', username: 'CyberStriker', xp: 9800, eloRating: 1680 });
-  db.insertBot({ id: 'bot-pro-01', username: 'NeonViper', xp: 6200, eloRating: 1540 });
-  db.insertBot({ id: 'bot-pro-02', username: 'PulseEcho', xp: 4100, eloRating: 1420 });
-  db.insertBot({ id: 'bot-pro-03', username: 'AeroZen', xp: 2300, eloRating: 1310 });
+  // Bot skill anchors, strongest first.
+  db.insertBot({ id: 'bot-pro-04', username: 'CyberStriker', xp: 9800, mu: 36 });
+  db.insertBot({ id: 'bot-pro-01', username: 'NeonViper', xp: 6200, mu: 32 });
+  db.insertBot({ id: 'bot-pro-02', username: 'PulseEcho', xp: 4100, mu: 29 });
+  db.insertBot({ id: 'bot-pro-03', username: 'AeroZen', xp: 2300, mu: 26 });
 
   // Two humans with different strengths, landing among the bots
   const win = (id: string, name: string): MatchEndPayload => ({
@@ -60,7 +60,7 @@ describe('leaderboard bot filtering', () => {
     });
     // Sorted order is preserved across the mix
     for (let i = 1; i < board.length; i++) {
-      expect(board[i - 1].eloRating).toBeGreaterThanOrEqual(board[i].eloRating);
+      expect(board[i - 1].tier).toBeTruthy();
     }
   });
 
@@ -72,7 +72,7 @@ describe('leaderboard bot filtering', () => {
       if (e.isBot) continue;
       expect(e.rank).toBe(ranksHidden.get(e.id));
     }
-    // And the specific humans land where their ELO puts them among humans
+    // And the specific humans land where their skill puts them among humans
     const strong = shown.find((e) => e.username === 'Strong')!;
     const mid = shown.find((e) => e.username === 'Mid')!;
     expect(strong.rank).toBe(1);

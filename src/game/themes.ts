@@ -1,4 +1,5 @@
 import { CourtTheme, PlayerProfile } from '../types';
+import { Tier, TIER_ORDER } from '../rating';
 
 export interface ThemeConfig {
   id: CourtTheme;
@@ -25,7 +26,8 @@ export interface ThemeConfig {
     minLevel?: number;
     minRally?: number;
     minWins?: number;
-    minElo?: number;
+    // Minimum ranked tier (PvP-earned) — see src/rating.ts.
+  minTier?: Tier;
   };
 }
 
@@ -249,10 +251,10 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     accentColor: '#fbbf24',
     scanlines: false,
     unlockRequirement: {
-      description: 'Reach 25+ Rally or 1400+ ELO Rating',
+      description: 'Reach 25+ Rally or Master tier',
       achievementId: 'rally_25',
       minRally: 25,
-      minElo: 1400,
+      minTier: 'master',
     },
   },
 };
@@ -277,7 +279,7 @@ export function isThemeUnlocked(themeId: CourtTheme, profile: PlayerProfile | nu
   if (req.minWins && profile.matchesWon >= req.minWins) {
     return true;
   }
-  if (req.minElo && profile.eloRating >= req.minElo) {
+  if (req.minTier && TIER_ORDER.indexOf(profile.tier as Exclude<Tier, 'unranked'>) >= TIER_ORDER.indexOf(req.minTier as Exclude<Tier, 'unranked'>) && profile.tier !== 'unranked') {
     return true;
   }
 

@@ -4,12 +4,13 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { db } from './server/db';
+import { db, RecordMatchContext } from './server/db';
 import { deviceIdentity, deviceIdFromCookieHeader } from './server/auth';
 import { transformBallForOpponent } from './server/transform';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload } from './src/types';
 import { validateUsername } from './src/profileRules';
+import { Rating, winProbability } from './src/rating';
 
 interface PlayerSession {
   ws: WebSocket;
@@ -30,6 +31,21 @@ interface Room {
 }
 
 const rooms = new Map<string, Room>();
+
+/**
+ * TrueSkill-2 style performance weight from SERVER-OBSERVED data only.
+ * Dominating (5-0) counts for a little more than scraping through (5-4), and
+ * a loser who sustained long rallies is punished a little less. Deliberately
+ * bounded so it nudges the rating rather than driving it.
+ */
+function performanceWeight(myScore: number, oppScore: number, maxRally: number): number {
+  const total = myScore + oppScore;
+  if (total <= 0) return 1;
+  const margin = (myScore - oppScore) / total; // -1..1
+  const rallyQuality = Math.min(1, maxRally / 20); // 0..1
+  const weight = 1 + 0.3 * margin + 0.15 * (rallyQuality - 0.5);
+  return Math.max(0.5, Math.min(1.5, weight));
+}
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -270,7 +286,34 @@ async function startServer() {
         return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
       }
       const payload: MatchEndPayload = { ...req.body, playerId: req.deviceId!, username: me.username };
-      const result = db.recordMatch(payload);
+
+      // Gameplay is client-authoritative, so a solo payload is entirely
+      // self-reported and only ever feeds XP. A PvP payload, though, can be
+      // checked against the room state the relay owns — when the room is
+      // still live we use OUR scores and rally count, not the client's, and
+      // only then do the TrueSkill-2 performance signals apply.
+      const context: RecordMatchContext = {};
+      if (payload.mode === 'multiplayer') {
+        const room = payload.roomId ? rooms.get(String(payload.roomId).toUpperCase()) : undefined;
+        const seat = room?.players.findIndex((p) => p?.playerId === req.deviceId!) ?? -1;
+        if (room && seat >= 0) {
+          const mine = room.scores[seat];
+          const theirs = room.scores[seat === 0 ? 1 : 0];
+          payload.playerScore = mine;
+          payload.opponentScore = theirs;
+          payload.maxRally = room.maxRallyInMatch;
+          payload.isWinner = mine > theirs;
+
+          const opponent = room.players[seat === 0 ? 1 : 0];
+          if (opponent) {
+            const opp = db.getProfile(opponent.playerId);
+            context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
+          }
+          context.performanceWeight = performanceWeight(mine, theirs, room.maxRallyInMatch);
+        }
+      }
+
+      const result = db.recordMatch(payload, context);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -435,6 +478,29 @@ async function startServer() {
               );
             }
           });
+
+          // Tell each phone how the matchup looks BEFORE the first serve.
+          // Computed server-side so neither client ever sees the other's
+          // hidden rating.
+          const seats = room.players;
+          if (seats[0] && seats[1]) {
+            const r0 = db.getProfile(seats[0].playerId);
+            const r1 = db.getProfile(seats[1].playerId);
+            const a: Rating = { mu: r0.mmrMu, sigma: r0.mmrSigma };
+            const b: Rating = { mu: r1.mmrMu, sigma: r1.mmrSigma };
+            const p0 = winProbability(a, b);
+            seats.forEach((p, idx) => {
+              if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
+                p.ws.send(
+                  JSON.stringify({
+                    type: 'match_prediction',
+                    winProbability: idx === 0 ? p0 : 1 - p0,
+                  })
+                );
+              }
+            });
+          }
+
         } else if (msg.type === 'paddle_move' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;

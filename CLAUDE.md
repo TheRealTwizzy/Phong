@@ -91,6 +91,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
     ├── App.tsx                # Game controller, loop, WS client, all state
     ├── types.ts               # Shared types incl. WSClientMessage/WSServerMessage
     ├── profileRules.ts        # Username/avatar rules shared by client & server
+    ├── rating.ts              # TrueSkill-style rating, tiers, prediction & XP (shared)
     ├── index.css              # Tailwind 4 entry + base styles
     ├── net/p2p.ts             # WebRTC DataChannel link (P2P play + fallback)
     ├── media/avatar.ts        # Client avatar pipeline: crop → 256×256 → PNG → upload
@@ -102,7 +103,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
     ├── i18n/translations.ts   # 7-language dictionary (en es ja de fr pt zh) + t()
     └── components/            # MainMenu, CourtCanvas, ScoreBoard,
                                # MultiplayerLobby, SplitScreenMatch,
-                               # RadarPreview, QuickChat, AvatarImage,
+                               # RadarPreview, QuickChat, AvatarImage, TierBadge,
                                # Onboarding/PublicProfile/Profile/Leaderboard/
                                # MatchHistory/Missions/Achievements/Settings/
                                # Tutorial modals, etc.
@@ -164,13 +165,29 @@ Entirely procedural Web Audio API:
 
 The `AudioContext` must be unlocked lazily from a user gesture — never play audio before `sound.unlock()`/`initCtx()` has run (iOS Safari silently discards it otherwise).
 
-## 7. Progression, ELO & Unlockables
+## 7. Progression, Skill Rating & Unlockables
 
-- **ELO** (`server/db.ts`): fixed deltas, not a FIDE expected-score formula. Multiplayer: **+24 win / −16 loss**. Solo: difficulty-scaled (rookie 8, pro 16, cyber 24, chaos 32 for a win; half that, rounded, for a loss). Floor at **800**. New players start at 1200.
-- **XP**: points×15 + maxRally×6 + 60 win bonus; multipliers for cyber/chaos difficulty and multiplayer; minimum 20 per match. Levels derive from cumulative XP.
+**Two separate currencies.** XP/levels are the time-invested track; the skill tier is the how-good-are-you track. They never substitute for each other.
+
+| | Experience / Level | Skill Tier |
+|---|---|---|
+| Driven by | XP | ranked μ |
+| Earned from | **every** match (solo + PvP), quests, achievements | **PvP only** |
+| Direction | monotonic — never decreases | up and down |
+
+- **Rating** (`src/rating.ts`, shared client+server): TrueSkill-style Gaussian pairs, replacing the old fixed-delta ELO. Each profile carries **two**:
+  - `mmrMu`/`mmrSigma` — hidden MMR, moved by *every* match including solo. Drives the pre-match win prediction, the XP surprise multiplier, and the recommended AI difficulty. Never rendered as a number; only ever sent to the profile's own device.
+  - `rankMu`/`rankSigma`/`rankedGames` — moved by **PvP only**, drives the visible tier. Solo results can therefore never change a player's rank.
+  - Prediction: `P(win) = Φ((μₐ − μᵦ) / √(2β² + σₐ² + σᵦ²))`, β = 4.1667, τ = 0.0833, start μ=25 σ=8.33, σ floor 0.6. `erf` is approximated in-module — **no new runtime deps**.
+- **AI anchors**: the four difficulties are fixed opponents (Rookie μ18, Pro μ25, Chaos μ32, Cyber μ35, σ=0.5), mapped from the real `physics.ts` parameters. This is why *no per-difficulty XP or rating table exists anywhere* — difficulty is encoded in the anchor, and surprise falls out of the math.
+- **Mode asymmetry** (PvP is always heavier than AI): solo uses a 0.35× μ step, half the σ shrink, and a **cap** — a solo win can never push μ past the anchor it beat, so farming a weak difficulty converges on it and stops.
+- **TrueSkill-2 signals** are applied to PvP only and only from data the relay owns (`room.scores`, `room.maxRallyInMatch`): margin of victory and rally quality, bounded to a 0.5–1.5 weight. Solo stats are self-reported (client-authoritative physics) and feed XP only — never rating.
+- **Tiers**: `unranked` until **5 ranked games and σ ≤ 4.0**, then keyed on `rankMu` — Rookie <19 · Contender 19 · Vanguard 22 · Ace 25 · Master 28 · Grandmaster 31 · Legend 34 · Cyber Overlord ≥37. Deliberately **not** μ−3σ: a conservative rating drifts an average player two tiers upward as σ shrinks, with no change in skill.
+- **XP**: `points×12 + maxRally×4 + 40 win bonus`, scaled by the surprise multiplier (win `0.6 + 1.4×(1−P)`, loss `0.20 + 0.55×(1−P)`), ×1.5 for PvP, floor 15. **Never negative — levels cannot regress.**
+- **Level curve**: `band(L) = 250 + 60×(L−1)` (~2–4 matches per level). The old `120 × L^1.6` had a 120 XP first band that a single match overshot outright.
 - **Daily streak**: consecutive active days tracked on the profile.
-- **Themes** (`src/game/themes.ts`) — unlocked by default: `neon`, `retro-crt`, `midnight`, `cyberpunk`, `tennis`. Earned: `emerald-matrix` (first cross-net volley), `solar-flare` (10+ rally), `hyper-violet` (first match win), `monochrome-noir` (level 5), `quantum-gold` (25+ rally or 1400+ ELO).
-- **Achievements**: defined in `ALL_ACHIEVEMENTS` (`server/db.ts`); awarded once, never re-awarded, XP rewards attached.
+- **Themes** (`src/game/themes.ts`) — unlocked by default: `neon`, `retro-crt`, `midnight`, `cyberpunk`, `tennis`. Earned: `emerald-matrix` (first cross-net volley), `solar-flare` (10+ rally), `hyper-violet` (first match win), `monochrome-noir` (level 5), `quantum-gold` (25+ rally or Master tier).
+- **Achievements**: defined in `ALL_ACHIEVEMENTS` (`server/db.ts`); awarded once, never re-awarded, XP rewards attached. First-session values are deliberately small so match 1 can't skip levels.
 
 ## 8. Commands
 

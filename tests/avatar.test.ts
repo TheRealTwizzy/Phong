@@ -98,6 +98,13 @@ describe('public profiles', () => {
     expect('recoveryCode' in pub).toBe(false);
     expect('lastDailyDate' in pub).toBe(false);
     expect('lastActive' in pub).toBe(false);
+    // Raw skill numbers are private: a public profile carries a tier only.
+    expect('mmrMu' in pub).toBe(false);
+    expect('mmrSigma' in pub).toBe(false);
+    expect('rankMu' in pub).toBe(false);
+    expect('rankSigma' in pub).toBe(false);
+    expect('eloRating' in pub).toBe(false);
+    expect(pub.tier).toBeTruthy();
   });
 
   it('hides uninitialized profiles and unknown ids', () => {
@@ -107,7 +114,7 @@ describe('public profiles', () => {
   });
 
   it('marks bots', () => {
-    db.insertBot({ id: 'bot-test-01', username: 'TestBot', eloRating: 1400 });
+    db.insertBot({ id: 'bot-test-01', username: 'TestBot', mu: 30 });
     const pub = db.getPublicProfile('bot-test-01')!;
     expect(pub.isBot).toBe(true);
     expect(pub.username).toBe('TestBot');

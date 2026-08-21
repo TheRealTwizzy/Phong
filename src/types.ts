@@ -1,3 +1,5 @@
+import type { Tier } from './rating';
+
 export type GameMode = 'solo' | 'multiplayer' | 'split' | 'practice';
 
 export type AIDifficulty = 'rookie' | 'pro' | 'cyber' | 'chaos';
@@ -99,7 +101,15 @@ export interface PlayerProfile {
   level: number;
   xp: number;
   xpNext: number;
-  eloRating: number;
+  // Hidden matchmaking rating (TrueSkill-style). Moved by EVERY match,
+  // solo included; drives win prediction and the XP surprise multiplier.
+  // Only ever serialized to the profile's own device.
+  mmrMu: number;
+  mmrSigma: number;
+  // Ranked rating — moved by PvP ONLY; drives the visible tier badge.
+  rankMu: number;
+  rankSigma: number;
+  rankedGames: number;
   matchesPlayed: number;
   matchesWon: number;
   matchesLost: number;
@@ -111,7 +121,8 @@ export interface PlayerProfile {
   achievements: string[]; // achievement IDs
   createdAt: string;
   lastActive: string;
-  rankTitle: string;
+  // Visible skill tier, derived from rankMu once placed (see src/rating.ts).
+  tier: Tier;
   // One-time code that reclaims this profile on a new device (rotates on use).
   // Only ever serialized to the profile's own device.
   recoveryCode?: string;
@@ -137,7 +148,6 @@ export interface PublicProfile {
   level: number;
   xp: number;
   xpNext: number;
-  eloRating: number;
   matchesPlayed: number;
   matchesWon: number;
   matchesLost: number;
@@ -145,7 +155,9 @@ export interface PublicProfile {
   totalPointsScored: number;
   totalAces: number;
   dailyStreak: number;
-  rankTitle: string;
+  // Tier only — a public profile never exposes raw mu/sigma numbers.
+  tier: Tier;
+  rankedGames: number;
   createdAt: string;
   achievements: string[];
   hasAvatar: boolean;
@@ -205,7 +217,8 @@ export interface LeaderboardEntry {
   isBot?: boolean;
   id: string;
   username: string;
-  eloRating: number;
+  tier: Tier;
+  rankedGames: number;
   level: number;
   xp: number;
   matchesPlayed: number;
@@ -226,13 +239,21 @@ export interface MatchEndPayload {
   mode: GameMode;
   difficulty?: AIDifficulty;
   isWinner: boolean;
+  // PvP only: lets the server cross-check the reported result against the
+  // room state it owns, so scores/rallies can't be forged.
+  roomId?: string;
 }
 
 export interface MatchEndResult {
   profile: PlayerProfile;
   earnedXp: number;
   leveledUp: boolean;
-  eloDelta: number;
+  // Pre-match predicted win chance the XP multiplier was derived from.
+  winProbability: number;
+  // Tier movement (ranked/PvP matches only; both null for solo).
+  previousTier: Tier | null;
+  tier: Tier | null;
+  tierChanged: boolean;
   newAchievements: Achievement[];
 }
 
@@ -267,6 +288,7 @@ export type WSServerMessage =
   | { type: 'ball_incoming'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'quick_chat'; text: string; senderName: string; senderIdx: number }
   | { type: 'game_start'; servingPlayer: 0 | 1 }
+  | { type: 'match_prediction'; winProbability: number }
   | { type: 'score_update'; p1Score: number; p2Score: number; reason: string; nextServer: 0 | 1 }
   | { type: 'rematch_state'; votes: [boolean, boolean] }
   | { type: 'rtc_signal'; payload: RTCSignalPayload; fromIdx: 0 | 1 }

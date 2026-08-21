@@ -3,6 +3,7 @@ import { GameMode, PlayerStats, PlayerProfile, PlayerStatus, LanguageCode } from
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
+import { TierBadge } from './TierBadge';
 import {
   Volume2,
   VolumeX,
@@ -105,9 +106,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
             </span>
           </div>
           <div className="flex items-center gap-1.5 leading-none mt-0.5">
-            <span className="text-[8px] sm:text-[9px] text-cyan-300/80 font-mono">
-              {profile?.eloRating || 1200} ELO
-            </span>
+            <TierBadge tier={profile?.tier || 'unranked'} language={language} />
           </div>
         </div>
       </button>

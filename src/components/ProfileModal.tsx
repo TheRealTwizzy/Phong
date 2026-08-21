@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { PlayerProfile, MatchRecord, PlayerStatus, LanguageCode } from '../types';
 import { USERNAME_MAX, isLinkableId } from '../profileRules';
+import { PLACEMENT_GAMES, xpForLevel } from '../rating';
 import { processAvatarFile, uploadAvatar, deleteAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
+import { TierBadge } from './TierBadge';
 import { t } from '../i18n/translations';
 import {
   X,
@@ -181,7 +183,7 @@ export const ProfileModal: React.FC<Props> = ({
       : 0;
 
   // XP calculation for current level slice
-  const xpCurrentLevelBase = Math.round(120 * Math.pow(Math.max(1, profile.level - 1), 1.6));
+  const xpCurrentLevelBase = xpForLevel(profile.level);
   const xpCurrentLevelProgress = Math.max(0, profile.xp - xpCurrentLevelBase);
   const xpNeededForLevel = Math.max(1, profile.xpNext - xpCurrentLevelBase);
   const xpPercent = Math.min(100, Math.round((xpCurrentLevelProgress / xpNeededForLevel) * 100));
@@ -325,12 +327,15 @@ export const ProfileModal: React.FC<Props> = ({
                 )}
 
                 <div className="flex items-center gap-2 mt-1 flex-wrap">
-                  <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
-                    {profile.rankTitle}
-                  </span>
-                  <span className="text-xs text-slate-400">
-                    Rating: <strong className="text-white">{profile.eloRating}</strong>
-                  </span>
+                  <TierBadge tier={profile.tier} language={language} size="md" />
+                  {profile.tier === 'unranked' && (
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {t('placement_progress', language, {
+                        played: String(profile.rankedGames),
+                        total: String(PLACEMENT_GAMES),
+                      })}
+                    </span>
+                  )}
                   {/* Daily Streak Header Badge */}
                   <span
                     id="profile-streak-badge"
