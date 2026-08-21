@@ -6,6 +6,8 @@ import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { db, RecordMatchContext } from './server/db';
 import { deviceIdentity, deviceIdFromCookieHeader } from './server/auth';
+import { hasUnlock } from './src/achievements';
+import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload } from './src/types';
@@ -280,6 +282,15 @@ async function startServer() {
         return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
       }
       const payload: MatchEndPayload = { ...req.body, playerId: req.deviceId!, username: me.username };
+
+      // The achievement tree gates the ladder, so the gate is enforced here
+      // too — the menu hides a locked difficulty, but the menu is the client.
+      if (payload.mode === 'solo') {
+        const difficulty = normalizeDifficulty(payload.difficulty);
+        if (!hasUnlock(me.achievements, 'difficulty', difficulty)) {
+          return res.status(403).json({ error: 'DIFFICULTY_LOCKED', difficulty });
+        }
+      }
 
       // Gameplay is client-authoritative, so a solo payload is entirely
       // self-reported and only ever feeds XP. A PvP payload, though, can be

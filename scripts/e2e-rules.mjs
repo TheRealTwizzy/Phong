@@ -35,6 +35,24 @@ async function newPlayer(prefix) {
 }
 const me = (p) => p.evaluate(async () => (await fetch('/api/profile/me')).json());
 
+// The achievement tree gates the ladder now: a fresh player can only play
+// Rookie, so anything that needs Pro or Cyber has to earn its way there first.
+const openLadder = (page) =>
+  page.evaluate(async () => {
+    const win = (difficulty) =>
+      fetch('/api/match/record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerScore: 5, opponentScore: 1, maxRally: 6,
+          mode: 'solo', difficulty, isWinner: true,
+        }),
+      });
+    await win('rookie');
+    await win('pro');
+  });
+
+
 // ---- 1. Rules panel and the ranked/unranked badge ------------------------
 const page = await newPlayer('Rules');
 await page.click('#menu-mode-solo');
@@ -97,6 +115,7 @@ ok(`custom-rules win: +${custom.earnedXp} XP, rankedGames unchanged at ${afterCu
 
 // ---- 3. Every match is progression: a loss pays real XP ------------------
 const loser = await newPlayer('Loser');
+await openLadder(loser);
 const before = (await me(loser)).xp;
 const loss = await loser.evaluate(async () => (await fetch('/api/match/record', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },

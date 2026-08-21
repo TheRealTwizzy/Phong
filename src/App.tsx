@@ -219,6 +219,9 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(ws);
   const isServingRef = useRef<boolean>(isServing);
   const statsRef = useRef<PlayerStats>(stats);
+  // Who served the point currently in play — an ace is a point won directly
+  // off your own serve, so the winner alone doesn't identify one.
+  const servedThisPointRef = useRef<boolean>(true);
   const settingsRef = useRef<GameSettings>(settings);
   const profileRef = useRef<PlayerProfile | null>(profile);
 
@@ -344,6 +347,7 @@ export default function App() {
           playerScore: statsRef.current.score,
           opponentScore: statsRef.current.opponentScore,
           maxRally: statsRef.current.maxRally,
+          aces: statsRef.current.aces,
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
           isWinner,
@@ -586,6 +590,7 @@ export default function App() {
         rules
       );
 
+      servedThisPointRef.current = isPlayerServer;
       if (isPlayerServer) {
         // Serve starts from player's paddle heading UP towards net
         setBall({
@@ -1187,6 +1192,9 @@ export default function App() {
 
           setStats((s) => {
             const nextScore = s.score + 1;
+            // An ace: the player served and the opponent never got the ball
+            // back over, so the rally never actually started.
+            const ace = servedThisPointRef.current && s.rallyCount <= 1;
             if (nextScore >= currentSettings.winningScore) {
               setWinner('player');
               confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
@@ -1197,6 +1205,7 @@ export default function App() {
             return {
               ...s,
               score: nextScore,
+              aces: s.aces + (ace ? 1 : 0),
               matchesWon: nextScore >= currentSettings.winningScore ? s.matchesWon + 1 : s.matchesWon,
               rallyCount: 0,
             };
@@ -1682,6 +1691,7 @@ export default function App() {
           isOpen={isAchievementsOpen}
           onClose={() => setIsAchievementsOpen(false)}
           playerId={playerId}
+          language={currentLanguage}
         />
 
         {/* Match History Modal */}

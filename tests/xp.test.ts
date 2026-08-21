@@ -95,7 +95,16 @@ describe('level curve', () => {
 describe('achievement XP scales with what was actually beaten', () => {
   it('flags exactly the win-based achievements as scaled', () => {
     const scaled = ALL_ACHIEVEMENTS.filter((a) => a.scaled).map((a) => a.id).sort();
-    expect(scaled).toEqual(['cyber_slayer', 'first_win', 'multiplayer_champ', 'shutout']);
+    // Everything that means "you beat something", and nothing else.
+    expect(scaled).toEqual([
+      'ai_pro',
+      'ai_rookie',
+      'cyber_shutout',
+      'cyber_slayer',
+      'first_win',
+      'multiplayer_champ',
+      'shutout',
+    ]);
   });
 
   it('leaves rally achievements flat — a stronger AI returns MORE balls', () => {
