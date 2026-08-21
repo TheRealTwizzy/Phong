@@ -327,6 +327,22 @@ async function startServer() {
     }
   });
 
+  // Practice Wall: no match is recorded and no rating moves; the client
+  // reports the streak it reached and the server decides what it is worth.
+  app.post('/api/practice/record', (req, res) => {
+    try {
+      const me = db.getProfile(req.deviceId!);
+      if (!me.initialized) return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+      const streak = Number(req.body?.bestStreak);
+      if (!Number.isFinite(streak) || streak < 0) {
+        return res.status(400).json({ error: 'BAD_REQUEST' });
+      }
+      res.json(db.recordPractice(req.deviceId!, streak));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Daily missions. Progress is advanced server-side by /api/match/record, so
   // these two routes only read state and pay out a completed mission once.
   app.get('/api/missions', (req, res) => {

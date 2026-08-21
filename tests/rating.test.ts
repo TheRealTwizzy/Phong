@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   AI_ADAPT_BAND,
+  AI_ADAPT_DOWN_BAND,
+  AI_ADAPT_DOWN_STRENGTH,
   AI_ADAPT_STRENGTH,
   AI_DIFFICULTIES,
   AI_RATINGS,
@@ -86,6 +88,24 @@ describe('adaptive AI anchors', () => {
     }
   });
 
+  it('follows a falling player all the way down', () => {
+    // The regression this exists for: partial tracking left a residual gap of
+    // (1 - strength) x deviation, and the band capped the slide, so a player
+    // losing to Pro fell to mu 13 while Pro stalled at 18 — their odds went
+    // 50% -> 22% and every further loss made it worse. Losing must never make
+    // the ladder harder.
+    let worst = 1;
+    for (const mu of [25, 22, 19, 16, 13, 10, 7]) {
+      const p = winProbability({ mu, sigma: 2 }, aiRating('pro', mu));
+      expect(p).toBeGreaterThan(0.45);
+      worst = Math.min(worst, p);
+    }
+    expect(worst).toBeGreaterThan(0.45);
+    // Full downward tracking means the gap closes entirely, not partially.
+    expect(effectiveAiMu('pro', 10)).toBeCloseTo(AI_RATINGS.pro.mu - 15, 6);
+    expect(AI_ADAPT_DOWN_STRENGTH).toBe(1);
+  });
+
   it('keeps the rungs ordered and distinct at every skill level', () => {
     for (const mu of [12, 18, 25, 32, 40, 55]) {
       const order = ['rookie', 'pro', 'chaos', 'cyber'] as const;
@@ -100,14 +120,21 @@ describe('adaptive AI anchors', () => {
     }
   });
 
-  it('never slides further than the adaptation band', () => {
+  it('never slides further than the adaptation bands', () => {
     for (const d of AI_DIFFICULTIES) {
       for (const mu of [-50, 0, 12, 25, 45, 80, 500]) {
-        expect(Math.abs(effectiveAiMu(d, mu) - AI_RATINGS[d].mu)).toBeLessThanOrEqual(
-          AI_ADAPT_BAND + 1e-9
-        );
+        const slide = effectiveAiMu(d, mu) - AI_RATINGS[d].mu;
+        expect(slide).toBeLessThanOrEqual(AI_ADAPT_BAND + 1e-9);
+        expect(slide).toBeGreaterThanOrEqual(-AI_ADAPT_DOWN_BAND - 1e-9);
       }
     }
+  });
+
+  it('stays partial upward so a strong player can outgrow the low rungs', () => {
+    const slide = effectiveAiMu('rookie', 40) - AI_RATINGS.rookie.mu;
+    expect(slide).toBeGreaterThan(0);
+    expect(slide).toBeLessThan(40 - 25); // never full tracking upward
+    expect(AI_ADAPT_STRENGTH).toBeLessThan(1);
   });
 
   it('keeps Pro a genuine contest across the whole skill range', () => {
@@ -120,7 +147,7 @@ describe('adaptive AI anchors', () => {
       expect(Math.abs(adapted - 0.5)).toBeLessThanOrEqual(Math.abs(fixed - 0.5) + 1e-9);
       // Playable at both ends. It never reaches a flat 50/50 by design —
       // that would be rubber-banding, and would erase the rungs entirely.
-      expect(adapted).toBeGreaterThan(0.2);
+      expect(adapted).toBeGreaterThan(0.45);
       expect(adapted).toBeLessThan(0.92);
     }
   });

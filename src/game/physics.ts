@@ -1,4 +1,5 @@
-import { AIDifficulty, BallState } from '../types';
+import { AIDifficulty, BallState, MatchRules } from '../types';
+import { normalizeRules } from '../matchRules';
 import { AI_RATINGS, START_MU, effectiveAiMu } from '../rating';
 
 export const PADDLE_Y = 0.92;
@@ -10,7 +11,57 @@ export const BALL_BASE_RADIUS = 0.022;
 export const BASE_BALL_SPEED = 0.85; // units per second
 export const MAX_BALL_SPEED = 2.4;
 
+// Serve aiming. The player sets direction and power on every serve; these
+// bound what the aim can ask for, and the pre-match rules scale them.
+export const SERVE_MAX_ANGLE_DEG = 55;
+export const SERVE_MIN_POWER = 0.72;
+export const SERVE_MAX_POWER = 1.35;
+
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+
+// ---------------------------------------------------------------------------
+// Match rules applied to the engine constants
+// ---------------------------------------------------------------------------
+// The constants above are the stock game. A match may scale them (see
+// src/matchRules.ts); doing so costs the match its rating, never its XP.
+
+export const paddleWidthFor = (rules?: Partial<MatchRules>): number =>
+  PADDLE_WIDTH_RATIO * normalizeRules(rules).paddleScale;
+
+export const ballRadiusFor = (rules?: Partial<MatchRules>): number =>
+  BALL_BASE_RADIUS * normalizeRules(rules).ballScale;
+
+export const minBallSpeedFor = (rules?: Partial<MatchRules>): number =>
+  BASE_BALL_SPEED * 0.55 * normalizeRules(rules).ballSpeedMin;
+
+export const maxBallSpeedFor = (rules?: Partial<MatchRules>): number =>
+  MAX_BALL_SPEED * normalizeRules(rules).ballSpeedMax;
+
+/** Hold a speed inside the band this match is played under. */
+export function clampBallSpeed(speed: number, rules?: Partial<MatchRules>): number {
+  return clamp(speed, minBallSpeedFor(rules), maxBallSpeedFor(rules));
+}
+
+export interface ServeAim {
+  /** -1 hard left .. 0 straight .. +1 hard right, before the rule scale. */
+  angle: number;
+  /** 0 softest .. 1 hardest, before the rule scale. */
+  power: number;
+}
+
+/** Turn an aim into a launch velocity, bounded by the match rules. */
+export function serveVelocity(
+  aim: ServeAim | null | undefined,
+  rules?: Partial<MatchRules>
+): { vx: number; vy: number } {
+  const r = normalizeRules(rules);
+  const angleFrac = clamp(aim?.angle ?? 0, -1, 1);
+  const powerFrac = clamp(aim?.power ?? 0.5, 0, 1);
+  const radians = (angleFrac * SERVE_MAX_ANGLE_DEG * r.serveAngleMax * Math.PI) / 180;
+  const power = lerp(SERVE_MIN_POWER, SERVE_MAX_POWER * r.servePowerMax, powerFrac);
+  const speed = clampBallSpeed(BASE_BALL_SPEED * power, rules);
+  return { vx: Math.sin(radians) * speed, vy: -Math.abs(Math.cos(radians) * speed) };
+}
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
 /** Standard normal sample (Box-Muller). */

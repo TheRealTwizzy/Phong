@@ -13,18 +13,28 @@ import {
   PlayerStatus,
   DailyMission,
   LanguageCode,
+  MatchRules,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
+import { postMatchRecord, flushPendingMatches } from './net/matchRecord';
 import { THEMES, ThemeConfig } from './game/themes';
 import {
   PADDLE_Y,
   PADDLE_HEIGHT,
   PADDLE_WIDTH_RATIO,
+  BALL_BASE_RADIUS,
   BASE_BALL_SPEED,
   checkPaddleCollision,
   OpponentAI,
+  ServeAim,
+  serveVelocity,
+  paddleWidthFor,
+  ballRadiusFor,
+  clampBallSpeed,
+  SERVE_MAX_ANGLE_DEG,
 } from './game/physics';
 import { START_MU } from './rating';
+import { DEFAULT_MATCH_RULES, normalizeRules, isRankedRules } from './matchRules';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
 import {
@@ -70,6 +80,7 @@ const DEFAULT_SETTINGS: GameSettings = {
   showTrails: true,
   difficulty: 'pro',
   winningScore: 5,
+  rules: DEFAULT_MATCH_RULES,
   theme: 'neon',
   language: 'en',
 };
@@ -79,11 +90,10 @@ export default function App() {
     const saved = localStorage.getItem('half_pong_settings');
     if (!saved) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(saved);
-    // Paddle width & ball speed were briefly user-tunable; they are fixed
-    // engine constants now, so stored values are dropped on load.
+    // Legacy loose settings from before match rules were a single object.
     delete parsed.ballSpeedFactor;
     delete parsed.paddleWidthRatio;
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    return { ...DEFAULT_SETTINGS, ...parsed, rules: normalizeRules(parsed.rules) };
   });
 
   // Player identity is server-issued (signed device cookie); the id arrives
@@ -129,6 +139,10 @@ export default function App() {
   // Toast notifications
   const [toastAchievement, setToastAchievement] = useState<Achievement | null>(null);
   const [toastLevelUp, setToastLevelUp] = useState<number | null>(null);
+  // A match that failed to reach the server is parked on the device; the
+  // player is told rather than left looking at an untracked result.
+  const [toastRecordFailed, setToastRecordFailed] = useState<boolean>(false);
+  const [toastPracticeXp, setToastPracticeXp] = useState<number | null>(null);
 
   // 'menu' = out-of-match navigation hub; 'game' = a match is on court.
   const [screen, setScreen] = useState<'menu' | 'game'>('menu');
@@ -148,7 +162,7 @@ export default function App() {
     y: 0.82,
     vx: 0.3,
     vy: -BASE_BALL_SPEED,
-    radius: 0.022,
+    radius: BALL_BASE_RADIUS,
     active: true,
   });
 
@@ -181,6 +195,14 @@ export default function App() {
   const prevPaddleXRef = useRef<number>(paddleX);
   const paddleVxRef = useRef<number>(0);
   const aiRef = useRef<OpponentAI>(new OpponentAI(settings.difficulty));
+  // Match rules are locked in on the menu; these refs give the game loop the
+  // live values without re-creating it every render.
+  const rulesRef = useRef<MatchRules>(settings.rules);
+  rulesRef.current = settings.rules;
+  const paddleWidthRef = useRef<number>(paddleWidthFor(settings.rules));
+  paddleWidthRef.current = paddleWidthFor(settings.rules);
+  const ballRadiusRef = useRef<number>(ballRadiusFor(settings.rules));
+  ballRadiusRef.current = ballRadiusFor(settings.rules);
   const modeRef = useRef<GameMode>(mode);
   const screenRef = useRef<'menu' | 'game'>(screen);
   const wsRef = useRef<WebSocket | null>(ws);
@@ -256,6 +278,10 @@ export default function App() {
   // again whenever the UTC day rolls over while the tab stays open.
   useEffect(() => {
     if (!profile?.id) return;
+    // Replay anything an earlier session couldn't deliver, then refresh.
+    void flushPendingMatches().then((recovered) => {
+      if (recovered > 0) fetchProfile();
+    });
     void refreshMissions();
     const timer = setTimeout(() => void refreshMissions(), msUntilMissionReset() + 1000);
     return () => clearTimeout(timer);
@@ -310,19 +336,22 @@ export default function App() {
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
           isWinner,
+          // The rules the match was played under. The server re-derives
+          // whether they were stock; it never takes a "ranked" flag on trust.
+          rules: settingsRef.current.rules,
           // Lets the server cross-check this PvP result against the room
           // state it owns instead of trusting the numbers above.
           roomId: modeRef.current === 'multiplayer' ? roomId || undefined : undefined,
         };
 
-        const res = await fetch('/api/match/record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-
-        const result: MatchEndResult = await res.json();
+        const result = await postMatchRecord(payload);
+        if (!result) {
+          // Queued for replay; tell the player rather than silently losing it.
+          setToastRecordFailed(true);
+          return;
+        }
         setLastMatchResult(result);
+        setToastRecordFailed(false);
         if (result.profile) {
           setProfile(result.profile);
         }
@@ -341,6 +370,7 @@ export default function App() {
         }
       } catch (e) {
         console.error('Failed to record match on server:', e);
+        setToastRecordFailed(true);
       }
     },
     [playerId, opponentId, opponentName, roomId]
@@ -514,42 +544,74 @@ export default function App() {
   }, []);
 
   // Serve the ball
-  const handleServe = useCallback(() => {
-    if (!isServingRef.current) return;
-    setIsServing(false);
-    isServingRef.current = false;
-    setWinner(null);
-    setLastMatchResult(null);
+  const handleServe = useCallback(
+    (aim?: ServeAim) => {
+      if (!isServingRef.current) return;
+      setIsServing(false);
+      isServingRef.current = false;
+      setWinner(null);
+      setLastMatchResult(null);
 
-    const speed = BASE_BALL_SPEED;
-    const initialVx = (Math.random() - 0.5) * 0.7;
+      const rules = rulesRef.current;
+      // A plain tap keeps the old feel: a little random drift, medium power.
+      const launch = serveVelocity(
+        aim ?? { angle: (Math.random() - 0.5) * 0.5, power: 0.5 },
+        rules
+      );
 
-    if (isPlayerServer) {
-      // Serve starts from player's paddle heading UP towards net
-      setBall({
-        x: paddleXRef.current,
-        y: PADDLE_Y - 0.05,
-        vx: initialVx,
-        vy: -speed,
-        radius: 0.022,
-        active: true,
-      });
-      setOppBall(null);
-    } else {
-      // Opponent is serving: Ball starts in opponent's half
-      setBall((b) => ({ ...b, active: false }));
-      if (modeRef.current === 'solo') {
-        setOppBall({
-          x: 0.5,
+      if (isPlayerServer) {
+        // Serve starts from player's paddle heading UP towards net
+        setBall({
+          x: paddleXRef.current,
           y: PADDLE_Y - 0.05,
-          vx: (Math.random() - 0.5) * 0.7,
-          vy: -speed,
-          radius: 0.022,
+          vx: launch.vx,
+          vy: launch.vy,
+          radius: ballRadiusRef.current,
           active: true,
         });
+        setOppBall(null);
+      } else {
+        // Opponent is serving: Ball starts in opponent's half
+        setBall((b) => ({ ...b, active: false }));
+        if (modeRef.current === 'solo') {
+          const aiLaunch = serveVelocity({ angle: (Math.random() - 0.5) * 0.5, power: 0.5 }, rules);
+          setOppBall({
+            x: 0.5,
+            y: PADDLE_Y - 0.05,
+            vx: aiLaunch.vx,
+            vy: aiLaunch.vy,
+            radius: ballRadiusRef.current,
+            active: true,
+          });
+        }
       }
+    },
+    [isPlayerServer]
+  );
+
+  // Auto-serve: when the rules set a timer, a serve the player is sitting on
+  // fires by itself so a PvP match can't stall on someone who put their phone
+  // down. The countdown is surfaced on the court so it never feels arbitrary.
+  const [serveCountdown, setServeCountdown] = useState<number | null>(null);
+  useEffect(() => {
+    const seconds = settings.rules.autoServeSeconds;
+    const active = isServing && isPlayerServer && screen === 'game' && !winner;
+    if (!active || seconds <= 0) {
+      setServeCountdown(null);
+      return;
     }
-  }, [isPlayerServer]);
+    setServeCountdown(seconds);
+    let left = seconds;
+    const tick = setInterval(() => {
+      left -= 1;
+      setServeCountdown(left);
+      if (left <= 0) {
+        clearInterval(tick);
+        handleServe();
+      }
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [isServing, isPlayerServer, screen, winner, settings.rules.autoServeSeconds, handleServe]);
 
   // Solo only: the AI has no finger to tap with. When the rules hand it the
   // serve (the AI missed the last point), serve on its behalf after a short
@@ -682,7 +744,7 @@ export default function App() {
           y: 0.02,
           vx: inc.vx,
           vy: inc.vy,
-          radius: 0.022,
+          radius: ballRadiusRef.current,
           active: true,
           speedMultiplier: inc.speedMultiplier,
         });
@@ -909,13 +971,15 @@ export default function App() {
         const hitResult = checkPaddleCollision(
           b,
           paddleXRef.current,
-          PADDLE_WIDTH_RATIO,
+          paddleWidthRef.current,
           paddleVxRef.current
         );
 
         if (hitResult.hit && hitResult.angle !== undefined && hitResult.speed !== undefined) {
-          b.vy = -Math.abs(hitResult.speed * Math.cos(hitResult.angle));
-          b.vx = hitResult.speed * Math.sin(hitResult.angle);
+          // Hold the rally inside the speed band this match is played under.
+          const hitSpeed = clampBallSpeed(hitResult.speed, rulesRef.current);
+          b.vy = -Math.abs(hitSpeed * Math.cos(hitResult.angle));
+          b.vx = hitSpeed * Math.sin(hitResult.angle);
           b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
 
           sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
@@ -1029,14 +1093,14 @@ export default function App() {
         }
 
         // Update Opponent AI Paddle tracking
-        aiRef.current.update(ob, dt, PADDLE_WIDTH_RATIO);
+        aiRef.current.update(ob, dt, paddleWidthRef.current);
         setOppPaddleX(aiRef.current.paddleX);
 
         // Check Opponent Paddle Collision
         const oppHit = checkPaddleCollision(
           ob,
           aiRef.current.paddleX,
-          PADDLE_WIDTH_RATIO,
+          paddleWidthRef.current,
           aiRef.current.paddleVx
         );
 
@@ -1118,7 +1182,7 @@ export default function App() {
       y: 0.82,
       vx: 0.3,
       vy: -BASE_BALL_SPEED,
-      radius: 0.022,
+      radius: ballRadiusRef.current,
       active: true,
     });
     setOppBall(null);
@@ -1134,10 +1198,34 @@ export default function App() {
 
   // Court → menu, from the HUD home button or the winner overlay. Multiplayer
   // additionally tears the room down (handleLeaveRoom returns to menu itself).
+  // Practice Wall banks its best return streak when the player leaves. No
+  // match is recorded and no rating moves — the server decides what the streak
+  // is worth and holds a daily cap, since a guaranteed-return drill would
+  // otherwise be the fastest XP in the game.
+  const submitPracticeSession = useCallback(async (bestStreak: number) => {
+    if (bestStreak < 3) return;
+    try {
+      const res = await fetch('/api/practice/record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bestStreak }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.profile) setProfile(data.profile);
+      if (data.earnedXp > 0) setToastPracticeXp(data.earnedXp);
+    } catch (e) {
+      console.error('Failed to bank practice session:', e);
+    }
+  }, []);
+
   const quitToMenu = () => {
     if (mode === 'multiplayer') {
       handleLeaveRoom();
       return;
+    }
+    if (mode === 'practice') {
+      void submitPracticeSession(statsRef.current.maxRally);
     }
     setScreen('menu');
     resetMatch();
@@ -1165,6 +1253,26 @@ export default function App() {
             setToastLevelUp(null);
           }}
         />
+
+        {toastPracticeXp !== null && (
+          <button
+            id="toast-practice-xp"
+            onClick={() => setToastPracticeXp(null)}
+            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-cyan-950/90 border border-cyan-500/60 text-cyan-200 font-mono text-[11px] shadow-lg"
+          >
+            {t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp })}
+          </button>
+        )}
+
+        {toastRecordFailed && (
+          <button
+            id="toast-record-failed"
+            onClick={() => setToastRecordFailed(false)}
+            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-amber-950/90 border border-amber-500/60 text-amber-200 font-mono text-[11px] shadow-lg"
+          >
+            {t('match_not_saved', currentLanguage)}
+          </button>
+        )}
 
         {/* Mandatory first-arrival onboarding: gates EVERYTHING until the
             player locks in their unique username (or restores a profile) */}
@@ -1248,9 +1356,9 @@ export default function App() {
         <RadarPreview
           oppBall={oppBall}
           oppPaddleX={oppPaddleX}
-          paddleWidthRatio={PADDLE_WIDTH_RATIO}
+          paddleWidthRatio={paddleWidthFor(settings.rules)}
           theme={currentTheme}
-          active={settings.showRadar && mode === 'solo'}
+          active={settings.showRadar && settings.rules.opponentSonar && mode === 'solo'}
         />
 
         {/* Connection badge: direct P2P vs server relay (multiplayer only) */}
@@ -1287,7 +1395,7 @@ export default function App() {
             rallyCount={stats.rallyCount}
             maxRally={stats.maxRally}
             theme={currentTheme}
-            isVisible={settings.showStatsOverlay}
+            isVisible={settings.showStatsOverlay && settings.rules.trackTelemetry}
             onToggleVisible={() =>
               setSettings((s) => ({ ...s, showStatsOverlay: !s.showStatsOverlay }))
             }
@@ -1295,7 +1403,7 @@ export default function App() {
           />
 
           {/* Quick Chat overlay & popup tray (nobody to chat with in practice) */}
-          {mode !== 'practice' && (
+          {mode !== 'practice' && settings.rules.quickChat && (
             <QuickChat
               onSendMessage={handleSendQuickChat}
               activeMessages={activeChatMessages}
@@ -1313,6 +1421,10 @@ export default function App() {
             theme={currentTheme}
             isServing={isServing && isPlayerServer}
             onServe={handleServe}
+            paddleWidth={paddleWidthFor(settings.rules)}
+            serveAngleLimitDeg={SERVE_MAX_ANGLE_DEG * settings.rules.serveAngleMax}
+            autoServeSeconds={settings.rules.autoServeSeconds}
+            serveCountdown={serveCountdown}
             isBallInOpponentCourt={
               mode !== 'practice' &&
               (oppBall?.active || (!ball.active && !(isServing && isPlayerServer)))

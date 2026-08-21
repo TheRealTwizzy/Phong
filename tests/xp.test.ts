@@ -121,3 +121,43 @@ describe('achievement XP scales with what was actually beaten', () => {
     }
   });
 });
+
+describe('every match is progression', () => {
+  it('pays a meaningful amount for a loss, not the bare floor', () => {
+    // A loss used to land on XP_FLOOR (15) — about 25 losses to a level, which
+    // reads as no progression at all. It must now be a real fraction of a band.
+    const band = levelBand(3);
+    for (const winProb of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+      const xp = matchXp({ playerScore: 1, maxRally: 5, won: false, winProb, mode: 'solo' });
+      expect(xp).toBeGreaterThan(XP_FLOOR - 1);
+      expect(band / xp).toBeLessThan(12); // fewer than 12 losses per level
+    }
+  });
+
+  it('never pays zero, even for a 0-point loss with no rally at all', () => {
+    const xp = matchXp({ playerScore: 0, maxRally: 0, won: false, winProb: 0.99, mode: 'solo' });
+    expect(xp).toBeGreaterThanOrEqual(XP_FLOOR);
+  });
+
+  it('still pays a win more than a loss at the same prediction', () => {
+    for (const winProb of [0.1, 0.5, 0.9]) {
+      const win = matchXp({ playerScore: 5, maxRally: 9, won: true, winProb, mode: 'solo' });
+      const loss = matchXp({ playerScore: 5, maxRally: 9, won: false, winProb, mode: 'solo' });
+      expect(win).toBeGreaterThan(loss);
+    }
+  });
+
+  it('keeps a single easy win under one level band', () => {
+    // The pacing complaint that started this: one Rookie win must not skip a
+    // level on its own.
+    const xp = matchXp({ playerScore: 3, maxRally: 10, won: true, winProb: 0.87, mode: 'solo' });
+    expect(xp).toBeLessThan(levelBand(1));
+  });
+
+  it('keeps PvP heavier than solo for the same result', () => {
+    const args = { playerScore: 3, maxRally: 8, won: false, winProb: 0.5 } as const;
+    expect(matchXp({ ...args, mode: 'multiplayer' })).toBeGreaterThan(
+      matchXp({ ...args, mode: 'solo' })
+    );
+  });
+});

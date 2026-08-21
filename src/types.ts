@@ -35,6 +35,26 @@ export interface DailyMission {
   claimed: boolean;
 }
 
+/**
+ * Rules locked in before a match starts. The six numeric fields are
+ * multipliers on the engine constants — 1 means stock — and any non-stock
+ * value makes the match unranked (see src/matchRules.ts). The four flags are
+ * presentation and convenience only and never affect ranking.
+ */
+export interface MatchRules {
+  paddleScale: number;
+  ballScale: number;
+  ballSpeedMin: number;
+  ballSpeedMax: number;
+  serveAngleMax: number;
+  servePowerMax: number;
+  opponentSonar: boolean;
+  trackTelemetry: boolean;
+  quickChat: boolean;
+  /** 0 = off; otherwise seconds before a held serve fires by itself. */
+  autoServeSeconds: number;
+}
+
 export interface GameSettings {
   soundEnabled: boolean;
   sfxVolume: number; // 0 to 100
@@ -52,6 +72,9 @@ export interface GameSettings {
   // fixed constants in game/physics.ts and must never be player-editable.
   difficulty: AIDifficulty;
   winningScore: number;
+  // Pre-match only, like difficulty and winningScore: chosen on the menu and
+  // never editable once a match is running.
+  rules: MatchRules;
   theme: CourtTheme;
   language: LanguageCode;
 }
@@ -248,6 +271,9 @@ export interface MatchEndPayload {
   mode: GameMode;
   difficulty?: AIDifficulty;
   isWinner: boolean;
+  // Rules the match was played under. Non-stock physics means XP but no
+  // rating movement — the server re-derives this, never trusting a flag.
+  rules?: Partial<MatchRules>;
   // PvP only: lets the server cross-check the reported result against the
   // room state it owns, so scores/rallies can't be forged.
   roomId?: string;
@@ -263,6 +289,8 @@ export interface MatchEndResult {
   previousTier: Tier | null;
   tier: Tier | null;
   tierChanged: boolean;
+  /** False when the match ran on non-stock physics: XP paid, rating untouched. */
+  ranked: boolean;
   newAchievements: Achievement[];
   // Today's missions after this match advanced them — server-owned, so the
   // client never computes mission progress itself.

@@ -13,6 +13,7 @@ import {
   DailyMission,
 } from '../src/types';
 import { validateUsername, usernameLockExpiry } from '../src/profileRules';
+import { isRankedRules } from '../src/matchRules';
 import {
   Rating,
   Tier,
@@ -29,6 +30,8 @@ import {
   PVP_UPDATE,
   PLACEMENT_GAMES,
   surpriseMultiplier,
+  practiceXp,
+  PRACTICE_XP_DAILY_CAP,
 } from '../src/rating';
 import {
   MISSION_DEFS,
@@ -349,6 +352,13 @@ class GameDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_daily_missions_player
         ON daily_missions (playerId, dayKey);
+      -- Practice Wall XP paid per UTC day, so the daily cap survives restarts.
+      CREATE TABLE IF NOT EXISTS daily_practice (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        xpAwarded INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, dayKey)
+      );
     `);
   }
 
@@ -653,6 +663,54 @@ class GameDatabase {
 
   // Client-trusted XP grant (daily mission rewards). Clamped small so the
   // endpoint can't be used to speed-level; level/rank re-derive from XP.
+  /**
+   * Award XP for a Practice Wall session. The client reports the streak it
+   * reached; the server decides what that is worth and how much of the daily
+   * allowance is left, so nothing here takes an XP amount from the caller.
+   * Practice records no match, moves no rating, and feeds no missions.
+   */
+  public recordPractice(
+    playerId: string,
+    bestStreak: number,
+    now: Date = new Date()
+  ): { earnedXp: number; dailyRemaining: number; profile: PlayerProfile } {
+    const profile = this.getProfile(playerId);
+    if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
+
+    const dayKey = missionDayKey(now);
+    const row = this.sql
+      .prepare(`SELECT xpAwarded FROM daily_practice WHERE playerId = ? AND dayKey = ?`)
+      .get(playerId, dayKey) as { xpAwarded: number } | undefined;
+    const alreadyPaid = row?.xpAwarded ?? 0;
+
+    const earnedXp = Math.max(
+      0,
+      Math.min(practiceXp(bestStreak), PRACTICE_XP_DAILY_CAP - alreadyPaid)
+    );
+
+    if (earnedXp > 0) {
+      this.sql
+        .prepare(
+          `INSERT INTO daily_practice (playerId, dayKey, xpAwarded) VALUES (?, ?, ?)
+           ON CONFLICT(playerId, dayKey) DO UPDATE SET xpAwarded = xpAwarded + excluded.xpAwarded`
+        )
+        .run(playerId, dayKey, earnedXp);
+
+      profile.xp += earnedXp;
+      const { level, xpNext } = calculateLevelFromXp(profile.xp);
+      profile.level = level;
+      profile.xpNext = xpNext;
+      profile.lastActive = now.toISOString();
+      this.upsertProfile(profile);
+    }
+
+    return {
+      earnedXp,
+      dailyRemaining: Math.max(0, PRACTICE_XP_DAILY_CAP - alreadyPaid - earnedXp),
+      profile: this.readProfile(playerId)!,
+    };
+  }
+
   // ---- Daily missions -----------------------------------------------------
   // Server-owned in full. Progress advances only from recordMatch, and a claim
   // is guarded by the (playerId, dayKey, missionId) primary key, so replaying
@@ -888,6 +946,11 @@ class GameDatabase {
     // 3. Skill rating. Hidden MMR moves on EVERY match; the ranked rating that
     // drives the visible tier moves on PvP ONLY, so solo results can never
     // change a player's rank.
+    // A match played on non-stock physics (a wider paddle, a bigger ball, a
+    // different speed band) still pays XP but must not move the rating: the
+    // tier ladder only means something if every ranked match used one ruleset.
+    // Re-derived from the rules themselves, never from a client-set flag.
+    const ranked = isRankedRules(payload.rules);
     const previousTier = profile.tier;
     const soloOpts = {
       ...SOLO_UPDATE,
@@ -897,16 +960,18 @@ class GameDatabase {
       // the player would be circular and let solo lift mu without limit.
       cap: AI_RATINGS[payload.difficulty || 'pro'].mu,
     };
-    const nextMmr = updateRating(
-      myMmr,
-      oppRating,
-      isWin,
-      isPvp ? { ...PVP_UPDATE, performance } : soloOpts
-    );
-    profile.mmrMu = nextMmr.mu;
-    profile.mmrSigma = nextMmr.sigma;
+    if (ranked) {
+      const nextMmr = updateRating(
+        myMmr,
+        oppRating,
+        isWin,
+        isPvp ? { ...PVP_UPDATE, performance } : soloOpts
+      );
+      profile.mmrMu = nextMmr.mu;
+      profile.mmrSigma = nextMmr.sigma;
+    }
 
-    if (isPvp) {
+    if (isPvp && ranked) {
       const nextRank = updateRating(
         { mu: profile.rankMu, sigma: profile.rankSigma },
         oppRating,
@@ -1013,9 +1078,10 @@ class GameDatabase {
       earnedXp,
       leveledUp,
       winProbability: winProb,
-      previousTier: isPvp ? previousTier : null,
-      tier: isPvp ? profile.tier : null,
-      tierChanged: isPvp && profile.tier !== previousTier,
+      previousTier: isPvp && ranked ? previousTier : null,
+      tier: isPvp && ranked ? profile.tier : null,
+      tierChanged: isPvp && ranked && profile.tier !== previousTier,
+      ranked,
       newAchievements,
       missions: this.getMissions(payload.playerId),
     };

@@ -5,6 +5,8 @@ import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
 import { aiRating, winProbability, recommendedDifficulty } from '../rating';
+import { normalizeRules } from '../matchRules';
+import { MatchRulesPanel } from './MatchRulesPanel';
 import {
   Bot,
   Dumbbell,
@@ -307,6 +309,15 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                         </div>
                       </div>
                     )}
+
+                    <MatchRulesPanel
+                      settings={settings}
+                      onUpdateRules={(patch) =>
+                        onUpdateSettings({ rules: normalizeRules({ ...settings.rules, ...patch }) })
+                      }
+                      lang={lang}
+                      mode={m.id}
+                    />
 
                     <button
                       id={`menu-start-${m.id}`}

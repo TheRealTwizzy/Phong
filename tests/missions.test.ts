@@ -10,6 +10,7 @@ import {
   missionDayKey,
   msUntilMissionReset,
 } from '../src/game/missions';
+import { practiceXp, PRACTICE_XP_DAILY_CAP, PRACTICE_XP_SESSION_CAP } from '../src/rating';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-missions-test-'));
 process.env.DATA_DIR = TMP;
@@ -167,5 +168,54 @@ describe('server-owned mission state', () => {
     const res = db.recordMatch(match('m_result'));
     expect(res.missions).toHaveLength(MISSION_DEFS.length);
     expect(res.missions.find((m) => m.id === 'mission_games')!.current).toBe(1);
+  });
+});
+
+describe('Practice Wall XP', () => {
+  it('pays nothing for a couple of taps', () => {
+    expect(practiceXp(0)).toBe(0);
+    expect(practiceXp(2)).toBe(0);
+    expect(practiceXp(3)).toBeGreaterThan(0);
+  });
+
+  it('rises with the streak but flattens, so grinding cannot beat real matches', () => {
+    const short = practiceXp(5);
+    const long = practiceXp(50);
+    expect(long).toBeGreaterThan(short);
+    // A 10x longer streak must not pay 10x — the curve is deliberately concave.
+    expect(long).toBeLessThan(short * 10);
+    expect(practiceXp(100000)).toBeLessThanOrEqual(PRACTICE_XP_SESSION_CAP);
+  });
+
+  it('caps what a day of drilling can pay, and survives a restart', () => {
+    init('p_drill', 'Driller');
+    let total = 0;
+    for (let i = 0; i < 40; i++) {
+      total += db.recordPractice('p_drill', 500).earnedXp;
+    }
+    expect(total).toBe(PRACTICE_XP_DAILY_CAP);
+    expect(db.recordPractice('p_drill', 500).earnedXp).toBe(0);
+  });
+
+  it('records no match, moves no rating, and feeds no missions', () => {
+    init('p_drill2', 'Driller2');
+    const before = db.getProfile('p_drill2');
+    db.recordPractice('p_drill2', 30);
+    const after = db.getProfile('p_drill2');
+    expect(after.xp).toBeGreaterThan(before.xp);
+    expect(after.matchesPlayed).toBe(before.matchesPlayed);
+    expect(after.mmrMu).toBe(before.mmrMu);
+    expect(after.rankMu).toBe(before.rankMu);
+    expect(db.getMissions('p_drill2').every((m) => m.current === 0)).toBe(true);
+    expect(db.getMatchHistory('p_drill2')).toHaveLength(0);
+  });
+
+  it('refills the allowance on the next UTC day', () => {
+    init('p_drill3', 'Driller3');
+    const today = new Date('2026-08-21T12:00:00Z');
+    const tomorrow = new Date('2026-08-22T12:00:00Z');
+    for (let i = 0; i < 40; i++) db.recordPractice('p_drill3', 500, today);
+    expect(db.recordPractice('p_drill3', 500, today).earnedXp).toBe(0);
+    expect(db.recordPractice('p_drill3', 500, tomorrow).earnedXp).toBeGreaterThan(0);
   });
 });
