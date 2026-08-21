@@ -117,6 +117,12 @@ describe('recovery codes and profile transfer', () => {
     const device = 'dev_666666666666666666';
     db.getProfile(device); // uninitialized throwaway
     const code = init(source, 'Keeper').recoveryCode!;
+    // Played once, so the claimed profile qualifies for the board — which is
+    // what makes the no-duplicate-rows assertion below mean something.
+    db.recordMatch({
+      playerId: source, username: 'Keeper', playerScore: 5, opponentScore: 1,
+      maxRally: 4, mode: 'multiplayer', isWinner: true,
+    } as never);
     const claimed = db.claimProfileByCode(code, device);
     expect(claimed!.username).toBe('Keeper');
     // The throwaway row is gone (no duplicate ids, leaderboard stays clean)

@@ -185,14 +185,34 @@ await alice.click('#btn-view-opponent-profile');
 await alice.waitForSelector('#public-profile-username', { timeout: 5000 });
 const pubName = await alice.textContent('#public-profile-username');
 if (pubName.trim() !== 'PlayerTwo') fail(`public profile shows "${pubName}"`);
-const pubHasCode = await alice.evaluate(async () => {
+// Boards refuse rows of zeros, so PlayerTwo has to have actually played
+// something before either leaderboard scene below can find them.
+await bob.evaluate(async () => {
+  await fetch('/api/match/record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      playerScore: 5, opponentScore: 3, maxRally: 9, mode: 'multiplayer', isWinner: true,
+    }),
+  });
+});
+const boardChecks = await alice.evaluate(async () => {
   const me = await (await fetch('/api/profile/me')).json();
   const opp = await (await fetch(`/api/leaderboard?limit=50`)).json();
   const other = opp.leaderboard.find((e) => e.id !== me.id);
-  const pub = await (await fetch(`/api/profile/${other.id}`)).json();
-  return 'recoveryCode' in (pub.profile || {});
+  const pub = other ? await (await fetch(`/api/profile/${other.id}`)).json() : null;
+  return {
+    foundOther: !!other,
+    leaksCode: pub ? 'recoveryCode' in (pub.profile || {}) : false,
+    // Alice has recorded nothing: onboarded, but with no progress at all,
+    // she must not be on the board herself.
+    selfListed: opp.leaderboard.some((e) => e.id === me.id),
+  };
 });
-if (pubHasCode) fail('public profile leaks recoveryCode');
+if (!boardChecks.foundOther) fail('PlayerTwo (who has played) missing from the leaderboard');
+if (boardChecks.leaksCode) fail('public profile leaks recoveryCode');
+if (boardChecks.selfListed) fail('a player with zero progress appears on the leaderboard');
+ok('a zero-progress player stays off the board; a played one is on it');
 ok('in-match opponent tap opens sanitized public profile of PlayerTwo');
 await alice.click('#btn-close-public-profile');
 

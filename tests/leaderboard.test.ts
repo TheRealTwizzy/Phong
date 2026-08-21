@@ -35,7 +35,15 @@ beforeAll(async () => {
   db.initializeProfile('dev_777777777777777777', 'Strong');
   for (let i = 0; i < 20; i++) db.recordMatch(win('dev_777777777777777777', 'Strong')); // 1200+20*24 = 1680
   db.getProfile('dev_888888888888888888');
-  db.initializeProfile('dev_888888888888888888', 'Mid'); // stays at 1200
+  db.initializeProfile('dev_888888888888888888', 'Mid');
+  // One ranked loss: enough progress to be ON the skill board, without a
+  // rating to speak of — the boards now refuse rows of zeros outright.
+  db.recordMatch({
+    ...win('dev_888888888888888888', 'Mid'),
+    playerScore: 0,
+    opponentScore: 5,
+    isWinner: false,
+  });
 });
 
 afterAll(() => {
@@ -88,5 +96,73 @@ describe('leaderboard bot filtering', () => {
     db.getProfile('dev_999999999999999999'); // never onboards
     const board = db.getLeaderboard('elo', 100, true);
     expect(board.some((e) => e.id === 'dev_999999999999999999')).toBe(false);
+  });
+});
+
+describe('a board only lists players with progress on what it measures', () => {
+  const BOARDS = ['elo', 'level', 'rally', 'wins'] as const;
+
+  it('keeps a freshly onboarded profile off every board', () => {
+    // Onboarding is identity, not progress. A row of zeros is not "last
+    // place" — it is not on the board yet.
+    db.getProfile('dev_555555555555555555');
+    db.initializeProfile('dev_555555555555555555', 'IdleOne');
+    for (const sort of BOARDS) {
+      const board = db.getLeaderboard(sort, 100, true);
+      expect(board.some((e) => e.id === 'dev_555555555555555555')).toBe(false);
+    }
+  });
+
+  it('keeps a solo-only career off the skill board but on the others', () => {
+    db.getProfile('dev_444444444444444444');
+    db.initializeProfile('dev_444444444444444444', 'SoloOnly');
+    db.recordMatch({
+      playerId: 'dev_444444444444444444',
+      username: 'SoloOnly',
+      playerScore: 5,
+      opponentScore: 2,
+      maxRally: 12,
+      mode: 'solo',
+      difficulty: 'rookie',
+      isWinner: true,
+    });
+    const on = (sort: (typeof BOARDS)[number]) =>
+      db.getLeaderboard(sort, 100).some((e) => e.id === 'dev_444444444444444444');
+    // The skill board is a PvP ladder; a solo career has no ranked progress.
+    expect(on('elo')).toBe(false);
+    expect(on('level')).toBe(true);
+    expect(on('wins')).toBe(true);
+    expect(on('rally')).toBe(true);
+  });
+
+  it('puts a player on exactly the boards their record has touched', () => {
+    // One ranked PvP LOSS: on the skill board (the climb has begun), and on
+    // the level board (every match pays XP) — but with zero wins and the
+    // rally board untouched, not on those.
+    db.getProfile('dev_333333333333333333');
+    db.initializeProfile('dev_333333333333333333', 'FirstLoss');
+    db.recordMatch({
+      playerId: 'dev_333333333333333333',
+      username: 'FirstLoss',
+      playerScore: 0,
+      opponentScore: 5,
+      maxRally: 0,
+      mode: 'multiplayer',
+      isWinner: false,
+    });
+    const on = (sort: (typeof BOARDS)[number]) =>
+      db.getLeaderboard(sort, 100).some((e) => e.id === 'dev_333333333333333333');
+    expect(on('elo')).toBe(true);
+    expect(on('level')).toBe(true);
+    expect(on('wins')).toBe(false);
+    expect(on('rally')).toBe(false);
+  });
+
+  it('keeps the curated bot roster on the boards regardless', () => {
+    // Bots are inserted deliberately — a display roster, not idle players.
+    for (const sort of BOARDS) {
+      const bots = db.getLeaderboard(sort, 100, true).filter((e) => e.isBot);
+      expect(bots.length).toBe(4);
+    }
   });
 });
