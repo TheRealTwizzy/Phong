@@ -41,11 +41,9 @@ describe('win probability', () => {
     const me = fresh();
     const rookie = winProbability(me, AI_RATINGS.rookie);
     const pro = winProbability(me, AI_RATINGS.pro);
-    const chaos = winProbability(me, AI_RATINGS.chaos);
     const cyber = winProbability(me, AI_RATINGS.cyber);
     expect(rookie).toBeGreaterThan(pro);
-    expect(pro).toBeGreaterThan(chaos);
-    expect(chaos).toBeGreaterThan(cyber);
+    expect(pro).toBeGreaterThan(cyber);
     expect(pro).toBeCloseTo(0.5, 1); // Pro is the average-skill anchor
   });
 
@@ -108,7 +106,7 @@ describe('adaptive AI anchors', () => {
 
   it('keeps the rungs ordered and distinct at every skill level', () => {
     for (const mu of [12, 18, 25, 32, 40, 55]) {
-      const order = ['rookie', 'pro', 'chaos', 'cyber'] as const;
+      const order = ['rookie', 'pro', 'cyber'] as const;
       for (let i = 1; i < order.length; i++) {
         expect(effectiveAiMu(order[i], mu)).toBeGreaterThan(effectiveAiMu(order[i - 1], mu));
       }
@@ -152,12 +150,26 @@ describe('adaptive AI anchors', () => {
     }
   });
 
-  it('keeps Cyber a stretch that becomes reachable as the player improves', () => {
-    const weak = winProbability({ mu: 15, sigma: 2 }, aiRating('cyber', 15));
-    const strong = winProbability({ mu: 40, sigma: 2 }, aiRating('cyber', 40));
-    expect(weak).toBeLessThan(0.35);
-    expect(strong).toBeGreaterThan(weak);
-    expect(strong).toBeLessThan(0.5); // still the hardest rung, at any skill
+  it('keeps Cyber the hardest rung at every skill level', () => {
+    // Cyber is the ceiling, not a wall. Since the anchor came down to 29 a
+    // strong player is EXPECTED to beat it more often than not — that is what
+    // lowering the ceiling means. What must never change is its position: it
+    // stays the hardest thing available, whoever is playing.
+    for (const mu of [12, 18, 25, 32, 40]) {
+      const me = { mu, sigma: 2 };
+      const cyber = winProbability(me, aiRating('cyber', mu));
+      const pro = winProbability(me, aiRating('pro', mu));
+      const rookie = winProbability(me, aiRating('rookie', mu));
+      expect(cyber).toBeLessThan(pro);
+      expect(pro).toBeLessThan(rookie);
+    }
+  });
+
+  it('still makes Cyber a real stretch for an average player', () => {
+    const average = winProbability({ mu: 25, sigma: 2 }, aiRating('cyber', 25));
+    expect(average).toBeLessThan(0.42);
+    // ...and reachable once they improve.
+    expect(winProbability({ mu: 40, sigma: 2 }, aiRating('cyber', 40))).toBeGreaterThan(average);
   });
 });
 

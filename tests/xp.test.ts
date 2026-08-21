@@ -3,10 +3,10 @@ import { ALL_ACHIEVEMENTS } from '../server/db';
 import {
   XP_FLOOR,
   levelBand,
+  xpForLevel,
   levelFromXp,
   matchXp,
   surpriseMultiplier,
-  xpForLevel,
 } from '../src/rating';
 
 const match = (winProb: number, won: boolean, mode: 'solo' | 'multiplayer' = 'solo') =>
@@ -159,5 +159,30 @@ describe('every match is progression', () => {
     expect(matchXp({ ...args, mode: 'multiplayer' })).toBeGreaterThan(
       matchXp({ ...args, mode: 'solo' })
     );
+  });
+});
+
+describe('level progress is reported consistently', () => {
+  it('never reports progress past the band it belongs to', () => {
+    // The Profile bar shows progress within the CURRENT level. Its numeric
+    // readout used to show the cumulative totals instead, so the fill and the
+    // caption disagreed at every level above 1.
+    for (const xp of [0, 100, 249, 250, 560, 700, 1360, 5000, 25000]) {
+      const { level, xpNext } = levelFromXp(xp);
+      const base = xpForLevel(level);
+      const progress = xp - base;
+      const needed = xpNext - base;
+      expect(progress).toBeGreaterThanOrEqual(0);
+      expect(progress).toBeLessThan(needed);
+      expect(needed).toBe(levelBand(level));
+    }
+  });
+
+  it('rolls the level exactly at the band boundary', () => {
+    for (let level = 1; level <= 12; level++) {
+      const boundary = xpForLevel(level + 1);
+      expect(levelFromXp(boundary - 1).level).toBe(level);
+      expect(levelFromXp(boundary).level).toBe(level + 1);
+    }
   });
 });

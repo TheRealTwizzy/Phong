@@ -4,7 +4,7 @@ import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
-import { aiRating, winProbability, recommendedDifficulty } from '../rating';
+import { AI_DIFFICULTIES, aiRating, winProbability, recommendedDifficulty } from '../rating';
 import { normalizeRules } from '../matchRules';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import {
@@ -243,7 +243,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                           </span>
                         </label>
                         <div className="grid grid-cols-4 gap-1.5">
-                          {(['rookie', 'pro', 'cyber', 'chaos'] as AIDifficulty[]).map((diff) => {
+                          {AI_DIFFICULTIES.map((diff) => {
                             // Pre-match prediction from hidden MMR vs this AI
                             // anchor — the same number that scales match XP.
                             const chance = Math.round(winProbability(myRating, aiRating(diff, myRating.mu)) * 100);

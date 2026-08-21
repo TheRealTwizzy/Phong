@@ -140,9 +140,19 @@ export function checkPaddleCollision(
 // unwinnable, not merely hard. The fix is that a competent AI still misreads
 // the ball; it just misreads it by less.
 
-/** Competence 0 (flailing) .. 1 (near-perfect) for an AI playing at `mu`. */
+/**
+ * Competence 0 (flailing) .. 1 (near-perfect) for an AI playing at `mu`.
+ *
+ * The slope is unchanged — the floor must not move, and Rookie (mu 18) and Pro
+ * (mu 25) sit exactly where they did. Only the CEILING came down: the clamp
+ * was 0.9, which let an adapted Cyber return 93% of balls, close enough to a
+ * wall that the top rung stopped being a contest and became a lottery on the
+ * AI's own error. At 0.66 the hardest thing in the game returns ~85%.
+ */
+export const MAX_AI_COMPETENCE = 0.66;
+
 export function competenceForMu(mu: number): number {
-  return clamp((mu - 12) / 29, 0.05, 0.9);
+  return clamp((mu - 12) / 29, 0.05, MAX_AI_COMPETENCE);
 }
 
 interface AIStyle {
@@ -155,8 +165,7 @@ interface AIStyle {
 const AI_STYLES: Record<AIDifficulty, AIStyle> = {
   rookie: { volatility: 0.06, aggression: 0.15 },
   pro: { volatility: 0.08, aggression: 0.45 },
-  chaos: { volatility: 0.22, aggression: 0.85 },
-  cyber: { volatility: 0.03, aggression: 1.0 },
+  cyber: { volatility: 0.04, aggression: 0.9 },
 };
 
 interface AIParams {
@@ -188,6 +197,67 @@ function paramsForCompetence(c: number): AIParams {
     bounceSkill: clamp((c - 0.1) / 0.6, 0, 1),
     lapseChance: lerp(0.14, 0, c),
     jitter: lerp(0.05, 0.008, c),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// AI serving
+// ---------------------------------------------------------------------------
+// The AI has no finger to tap with, so it serves itself. It used to do so on a
+// flat 900ms timer with a random angle and fixed power — a metronome that
+// served nowhere in particular. Both are now expressions of how good it is.
+
+export const AI_SERVE_DELAY_MIN = 0.6;
+export const AI_SERVE_DELAY_MAX = 1.15;
+
+/** How the match is going for the player, 0 (being crushed) .. 1 (cruising). */
+export interface MatchPressure {
+  playerScore: number;
+  opponentScore: number;
+  /** Best rally this match — a proxy for how well the player is hanging on. */
+  maxRally: number;
+}
+
+export function playerPressure(state: MatchPressure): number {
+  const total = state.playerScore + state.opponentScore;
+  const lead = total > 0 ? (state.playerScore - state.opponentScore) / total : 0;
+  // A long rally means the player is competing even when the score says not.
+  const rally = clamp((state.maxRally || 0) / 14, 0, 1);
+  return clamp(0.5 + lead * 0.4 + (rally - 0.5) * 0.2, 0, 1);
+}
+
+/**
+ * Seconds the AI waits before serving. A weak AI dawdles; a strong one is
+ * brisk, and gets brisker still while the player is winning — the pressure
+ * term is what makes a comeback feel like the opponent is bearing down.
+ */
+export function aiServeDelay(competence: number, pressure = 0.5): number {
+  const skill = clamp(competence / MAX_AI_COMPETENCE, 0, 1);
+  const base = lerp(AI_SERVE_DELAY_MAX, AI_SERVE_DELAY_MIN, skill);
+  const urgency = (clamp(pressure, 0, 1) - 0.5) * 0.18;
+  const jitter = (Math.random() - 0.5) * 0.12;
+  return clamp(base - urgency + jitter, AI_SERVE_DELAY_MIN, AI_SERVE_DELAY_MAX);
+}
+
+/**
+ * How the AI aims its serve. It plays away from where the player is standing,
+ * and commits harder the better it is: a Rookie serve is barely more than
+ * noise, a Cyber serve is a deliberate corner at pace.
+ *
+ * `playerPaddleX` is in the PLAYER's coordinates; the cross-net transform
+ * mirrors x, so the AI targets the mirror of where the player is not.
+ */
+export function aiServeAim(competence: number, playerPaddleX: number): ServeAim {
+  const skill = clamp(competence / MAX_AI_COMPETENCE, 0, 1);
+  // Where the player stands, seen from the AI's own half.
+  const playerInAiCoords = 1 - clamp(playerPaddleX, 0, 1);
+  // Serve to the side the player has left open.
+  const direction = playerInAiCoords > 0.5 ? -1 : 1;
+  const commitment = skill * 0.85;
+  const noise = (Math.random() - 0.5) * 2 * (1 - skill) * 0.8;
+  return {
+    angle: clamp(direction * commitment + noise, -1, 1),
+    power: clamp(0.35 + skill * 0.5 + (Math.random() - 0.5) * 0.2, 0, 1),
   };
 }
 
@@ -238,6 +308,11 @@ export class OpponentAI {
     return effectiveAiMu(this.difficulty, this.playerMu);
   }
 
+  /** Its competence right now, for serve timing and aim. */
+  public competence(): number {
+    return competenceForMu(this.effectiveMu());
+  }
+
   public reset() {
     this.paddleX = 0.5;
     this.targetX = 0.5;
@@ -250,7 +325,7 @@ export class OpponentAI {
   private beginRally(oppBall: BallState) {
     const style = AI_STYLES[this.difficulty];
     const base = competenceForMu(this.effectiveMu());
-    const c = clamp(base + (Math.random() - 0.5) * 2 * style.volatility, 0.05, 0.97);
+    const c = clamp(base + (Math.random() - 0.5) * 2 * style.volatility, 0.05, MAX_AI_COMPETENCE);
     const p = paramsForCompetence(c);
     this.params = p;
 

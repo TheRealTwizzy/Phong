@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import crypto from 'crypto';
 import type { MatchEndPayload } from '../src/types';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-identity-test-'));
@@ -139,5 +140,44 @@ describe('recovery codes and profile transfer', () => {
   it('never leaks recovery codes through the leaderboard', () => {
     const rows = db.getLeaderboard('elo', 100) as unknown as Array<Record<string, unknown>>;
     expect(rows.every((r) => !('recoveryCode' in r))).toBe(true);
+  });
+});
+
+describe('a rotated signing secret retires every device cookie', () => {
+  it('refuses a cookie signed with a different secret', () => {
+    // This is the failure behind "my match was not saved". The device cookie
+    // is an HMAC over a secret held in the database's meta table, so a reset —
+    // or a deploy that loses the data volume — rotates it. The browser keeps
+    // sending the old cookie and it stops verifying.
+    const deviceId = 'dev_aaaaaaaaaaaaaaaaaa';
+    expect(auth.verifyToken(auth.mintToken(deviceId))).toBe(deviceId);
+
+    // Same device id, signed with what a previous secret would have produced.
+    const stale = crypto.createHmac('sha256', 'a-previous-secret').update(deviceId).digest('base64url');
+    expect(auth.verifyToken(`v1.${deviceId}.${stale}`)).toBeNull();
+  });
+
+  it('mints a fresh, UNINITIALIZED identity for an unverifiable cookie', () => {
+    // The important half: the replacement identity has no username, so
+    // /api/match/record answers 403 PROFILE_NOT_INITIALIZED rather than
+    // silently recording against a stranger's profile. The client has to
+    // notice that and re-onboard — otherwise every match is lost while the
+    // UI still shows the old cached profile.
+    expect(auth.deviceIdFromCookieHeader('phong_device=v1.dev_aaaaaaaaaaaaaaaaaa.bogus')).toBeNull();
+
+    const minted = auth.mintDeviceId();
+    expect(db.getProfile(minted).initialized).toBe(false);
+    expect(() =>
+      db.recordMatch({
+        playerId: minted,
+        username: 'Ghost',
+        playerScore: 5,
+        opponentScore: 1,
+        maxRally: 8,
+        mode: 'solo',
+        difficulty: 'pro',
+        isWinner: true,
+      })
+    ).toThrow('PROFILE_NOT_INITIALIZED');
   });
 });

@@ -76,11 +76,24 @@ export function winProbability(a: Rating, b: Rating): number {
 export const AI_RATINGS: Record<AIDifficulty, Rating> = {
   rookie: { mu: 18, sigma: 0.5 },
   pro: { mu: 25, sigma: 0.5 },
-  cyber: { mu: 35, sigma: 0.5 },
-  chaos: { mu: 32, sigma: 0.5 },
+  cyber: { mu: 29, sigma: 0.5 },
 };
 
-export const AI_DIFFICULTIES: AIDifficulty[] = ['rookie', 'pro', 'cyber', 'chaos'];
+export const AI_DIFFICULTIES: AIDifficulty[] = ['rookie', 'pro', 'cyber'];
+
+/**
+ * Coerce anything that claims to be a difficulty into one that still exists.
+ * Retired names map to the nearest surviving rung rather than silently
+ * becoming the default, so a stored 'chaos' still means "the hard one" and an
+ * old match-history row still renders.
+ */
+const RETIRED_DIFFICULTIES: Record<string, AIDifficulty> = { chaos: 'cyber' };
+
+export function normalizeDifficulty(value: unknown): AIDifficulty {
+  const key = typeof value === 'string' ? value.toLowerCase() : '';
+  if ((AI_DIFFICULTIES as string[]).includes(key)) return key as AIDifficulty;
+  return RETIRED_DIFFICULTIES[key] || 'pro';
+}
 
 // The anchors above are the *reference* strengths, calibrated for an average
 // player (mu = START_MU). A fixed ladder cannot work for everyone: at those
