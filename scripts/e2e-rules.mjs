@@ -57,41 +57,58 @@ const openLadder = (page) =>
 const page = await newPlayer('Rules');
 await page.click('#menu-mode-solo');
 await page.waitForSelector('#menu-rules-toggle', { timeout: 5000 });
+const RATES = (s) => /counts for rank/i.test(s);
+const NO_RATE = (s) => /Past ranked/i.test(s);
 let status = (await page.textContent('#menu-rules-status')).trim();
-if (!/ranked/i.test(status) || /unranked/i.test(status)) fail(`fresh menu should read ranked, got "${status}"`);
+if (!RATES(status)) fail(`fresh menu should read ranked, got "${status}"`);
 ok(`default rules show as ranked: "${status}"`);
 
 await page.click('#menu-rules-toggle');
 await page.waitForSelector('#menu-rules-panel', { timeout: 4000 });
 for (const key of ['paddleScale','ballScale','ballSpeedMin','ballSpeedMax','serveAngleMax','servePowerMax']) {
-  if (!(await page.$(`#rule-slider-${key}`))) fail(`missing slider for ${key}`);
+  if (!(await page.$(`#menu-rule-slider-${key}`))) fail(`missing slider for ${key}`);
 }
 for (const key of ['opponentSonar','trackTelemetry']) {
-  if (!(await page.$(`#rule-toggle-${key}`))) fail(`missing toggle for ${key}`);
+  if (!(await page.$(`#menu-rule-toggle-${key}`))) fail(`missing toggle for ${key}`);
 }
 ok('all six physics sliders and the presentation toggles render');
 
-// Widen the paddle -> unranked.
-await page.$eval('#rule-slider-paddleScale', (el) => {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(el, '1.5');
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
-});
-await page.waitForTimeout(400);
-status = (await page.textContent('#menu-rules-status')).trim();
-if (!/unranked/i.test(status)) fail(`widening the paddle should unrank, got "${status}"`);
-ok(`a widened paddle flips the badge: "${status}"`);
+const setSlider = async (key, value) => {
+  await page.$eval(
+    `#menu-rule-slider-${key}`,
+    (el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, String(v));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    },
+    value
+  );
+  await page.waitForTimeout(400);
+  return (await page.textContent('#menu-rules-status')).trim();
+};
+
+// A paddle tuned INSIDE its ranked band keeps the match rated: that is the
+// whole point of the bands, and the reason these are usable settings rather
+// than a novelty that costs you the ladder.
+status = await setSlider('paddleScale', 1.15);
+if (!RATES(status)) fail(`a paddle at the band edge should still rate, got "${status}"`);
+ok(`a paddle tuned inside its band still counts for rank: "${status}"`);
+
+// Pushed past the band, it does not.
+status = await setSlider('paddleScale', 1.5);
+if (!NO_RATE(status)) fail(`a 150% paddle should stop rating, got "${status}"`);
+ok(`a paddle past its band flips the badge: "${status}"`);
 
 // A presentation toggle must NOT unrank.
-await page.click('#rule-toggle-trackTelemetry');
+await page.click('#menu-rule-toggle-trackTelemetry');
 await page.waitForTimeout(300);
 await page.click('#menu-rules-reset');
 await page.waitForTimeout(300);
-await page.click('#rule-toggle-opponentSonar');
+await page.click('#menu-rule-toggle-opponentSonar');
 await page.waitForTimeout(300);
 status = (await page.textContent('#menu-rules-status')).trim();
-if (/unranked/i.test(status)) fail(`turning sonar off must not unrank: "${status}"`);
+if (NO_RATE(status)) fail(`turning sonar off must not unrank: "${status}"`);
 ok('presentation toggles never cost the match its rating');
 
 // ---- 2. A custom-rules match pays XP but moves no rating -----------------
@@ -112,6 +129,25 @@ if (!(custom.earnedXp > 0)) fail('a custom-rules match paid no XP');
 if (afterCustom.rankedGames !== beforeCustom.rankedGames) fail('custom rules moved the rank');
 if (afterCustom.xp <= beforeCustom.xp) fail('custom rules paid no XP to the profile');
 ok(`custom-rules win: +${custom.earnedXp} XP, rankedGames unchanged at ${afterCustom.rankedGames}`);
+
+// ---- 2b. Rules tuned INSIDE their bands still move the rating ------------
+// The bands are what make these settings usable: a player can adjust the feel
+// of a match without dropping out of the ladder. Only the extremes cost it.
+const tuner = await newPlayer('Tuner');
+const beforeTuned = await me(tuner);
+const tuned = await tuner.evaluate(async () => (await fetch('/api/match/record', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    playerScore: 5, opponentScore: 3, maxRally: 14, mode: 'multiplayer', isWinner: true,
+    rules: { paddleScale: 1.15, ballScale: 0.85, ballSpeedMax: 1.2, servePowerMax: 1.15 },
+  }),
+})).json());
+const afterTuned = await me(tuner);
+if (tuned.ranked !== true) fail('a match tuned inside the bands reported itself unranked');
+if (afterTuned.rankedGames !== beforeTuned.rankedGames + 1) {
+  fail(`a tuned match did not count for rank (${beforeTuned.rankedGames} -> ${afterTuned.rankedGames})`);
+}
+ok(`four rules tuned inside their bands still counted: rankedGames ${beforeTuned.rankedGames} -> ${afterTuned.rankedGames}`);
 
 // ---- 3. Every match is progression: a loss pays real XP ------------------
 const loser = await newPlayer('Loser');

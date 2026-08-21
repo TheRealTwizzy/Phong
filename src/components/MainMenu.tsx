@@ -339,7 +339,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                     )}
 
                     <MatchRulesPanel
-                      settings={settings}
+                      rules={settings.rules}
                       onUpdateRules={(patch) =>
                         onUpdateSettings({ rules: normalizeRules({ ...settings.rules, ...patch }) })
                       }

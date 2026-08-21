@@ -822,6 +822,38 @@ class GameDatabase {
   }
 
   /**
+   * Put the next mission along in this player's deal order into one slot.
+   * Skips anything they already hold, and anything they have already finished
+   * today — a slot filled with a mission that is complete before it arrives
+   * would be dead weight. Returns the new mission id, or null when that pool
+   * has nothing left to give.
+   */
+  private fillSlot(
+    playerId: string,
+    dayKey: string,
+    slot: number,
+    tier: 'regular' | 'elite',
+    slots: { slot: number; missionId: string }[]
+  ): string | null {
+    const isElite = tier === 'elite';
+    const pool = isElite ? ELITE_POOL : MISSION_POOL;
+    const order = dealOrder(pool, playerId, dayKey, isElite ? 'elite' : 'regular');
+    const held = new Set(slots.map((sl) => sl.missionId));
+    const rows = this.missionRows(playerId, dayKey);
+    const finished = (id: string) => {
+      const def = findMission(id);
+      const row = rows.get(id);
+      return !!row?.claimedAt || (def ? (row?.progress ?? 0) >= def.target : false);
+    };
+    const replacement = order.find((id) => !held.has(id) && !finished(id));
+    if (!replacement) return null;
+
+    this.stmt(`UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`)
+      .run(replacement, playerId, dayKey, slot);
+    return replacement;
+  }
+
+  /**
    * Swap one mission for the next unused one from its own pool, spending a
    * reroll of that tier. A completed mission cannot be rerolled — there is
    * nothing to gain and a reward to lose.
@@ -856,16 +888,11 @@ class GameDatabase {
     const allowance = isElite ? REROLLS_ELITE : REROLLS_REGULAR;
     if ((isElite ? used.elite : used.regular) >= allowance) return { ok: false, code: 'NO_REROLLS' };
 
-    // The next mission along in this player's deal order that they are not
-    // already holding — so a reroll always produces something new.
-    const pool = isElite ? ELITE_POOL : MISSION_POOL;
-    const order = dealOrder(pool, playerId, dayKey, isElite ? 'elite' : 'regular');
-    const held = new Set(slots.map((s) => s.missionId));
-    const replacement = order.find((id) => !held.has(id));
+    // The next mission along in this player's deal order — so a reroll always
+    // produces something new. Only charged if one was actually found.
+    const replacement = this.fillSlot(playerId, dayKey, target.slot, def.tier, slots);
     if (!replacement) return { ok: false, code: 'POOL_EXHAUSTED' };
 
-    this.stmt(`UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`)
-      .run(replacement, playerId, dayKey, target.slot);
     this.stmt(
         `INSERT INTO daily_rerolls (playerId, dayKey, regularUsed, eliteUsed) VALUES (?, ?, ?, ?)
          ON CONFLICT(playerId, dayKey) DO UPDATE SET
@@ -918,6 +945,8 @@ class GameDatabase {
     earnedXp?: number;
     /** Permanent unlock banked by this claim, if it was a first-ever elite. */
     unlocked?: string;
+    /** The free replacement dealt into the slot this claim emptied. */
+    newMissionId?: string;
   } {
     const def: MissionDef | undefined = findMission(missionId);
     if (!def) return { ok: false, code: 'MISSION_UNKNOWN' };
@@ -958,12 +987,25 @@ class GameDatabase {
     profile.lastActive = now.toISOString();
     this.upsertProfile(profile);
 
+    // Finishing a mission hands you another one, free and without limit. The
+    // daily allowances exist for missions you did NOT want; completing one is
+    // the opposite of that, so it must not cost an allowance — nor is it
+    // capped, since every free reroll had to be earned by finishing something.
+    // The pool is finite, so an unusually productive day can run it dry; the
+    // claimed mission then simply stays in its slot.
+    const slots = this.ensureSlots(playerId, dayKey);
+    const mine = slots.find((sl) => sl.missionId === def.id);
+    const newMissionId = mine
+      ? this.fillSlot(playerId, dayKey, mine.slot, def.tier, slots) ?? undefined
+      : undefined;
+
     return {
       ok: true,
       profile: this.readProfile(playerId)!,
       missions: this.getMissions(playerId, now),
       earnedXp: def.xpReward,
       unlocked,
+      newMissionId,
     };
   }
 

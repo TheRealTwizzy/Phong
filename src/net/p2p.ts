@@ -1,4 +1,5 @@
-import { RTCSignalPayload, WSClientMessage, WSServerMessage } from '../types';
+import { RoomMatchConfig, RTCSignalPayload, WSClientMessage, WSServerMessage } from '../types';
+import { DEFAULT_ROOM_CONFIG } from '../matchRules';
 import { transformBallForOpponent } from '../../server/transform';
 
 // Peer-to-peer game link over WebRTC DataChannels.
@@ -31,6 +32,8 @@ interface P2POptions {
   onMessage: (msg: WSServerMessage) => void;
   onStatus: (status: P2PStatus) => void;
   iceServers?: RTCIceServer[];
+  /** The room's terms, as last broadcast by the relay. */
+  config?: RoomMatchConfig;
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -50,11 +53,17 @@ export class P2PGameLink {
   private scores: [number, number] = [0, 0];
   private servingPlayer: 0 | 1 = 0;
   private rematchVotes: [boolean, boolean] = [false, false];
+  private matchOver = false;
+  // The room's terms still come from the relay — the lobby is always relayed,
+  // and the config is fixed for the match once it starts. Held here so the
+  // replicated rules end the match on the same number the server would.
+  private config: RoomMatchConfig = DEFAULT_ROOM_CONFIG;
 
   public status: P2PStatus = 'connecting';
 
   constructor(opts: P2POptions) {
     this.opts = opts;
+    if (opts.config) this.config = opts.config;
     this.pc = new RTCPeerConnection({
       iceServers: opts.iceServers?.length
         ? opts.iceServers
@@ -119,11 +128,17 @@ export class P2PGameLink {
     return this.status === 'p2p' && this.gameChannel?.readyState === 'open';
   }
 
+  /** Keep the replica's terms in step with the relay's room_config. */
+  public setConfig(config: RoomMatchConfig): void {
+    this.config = config;
+  }
+
   /** Reset replicated match state; call on every game_start. */
   public resetMatchState(servingPlayer: 0 | 1): void {
     this.scores = [0, 0];
     this.servingPlayer = servingPlayer;
     this.rematchVotes = [false, false];
+    this.matchOver = false;
   }
 
   /**
@@ -155,6 +170,8 @@ export class P2PGameLink {
       this.gameChannel!.send(JSON.stringify(msg));
       if (msg.type === 'point_scored') this.applyPointScored(msg.scorer);
       if (msg.type === 'rematch_request') this.applyRematchVote(this.opts.myIndex);
+      // Note: a rematch_request sent before the replica saw the final point is
+      // dropped on BOTH sides by the same rule, so the two stay in step.
       return true;
     }
 
@@ -225,6 +242,10 @@ export class P2PGameLink {
     this.scores[scorerIndex]++;
     const nextServer: 0 | 1 = scorerIndex === 0 ? 1 : 0;
     this.servingPlayer = nextServer;
+    if (this.scores[scorerIndex] >= this.config.winningScore) {
+      this.matchOver = true;
+      this.rematchVotes = [false, false];
+    }
     this.opts.onMessage({
       type: 'score_update',
       p1Score: this.scores[0],
@@ -236,11 +257,14 @@ export class P2PGameLink {
 
   // Identical rules to the relay server's rematch_request handler.
   private applyRematchVote(voterIdx: 0 | 1): void {
+    // Same rule as the relay: a vote counts only once the replica agrees the
+    // match is decided, so a stray press mid-rally cannot bank a vote.
+    if (!this.matchOver) return;
     this.rematchVotes[voterIdx] = true;
     if (this.rematchVotes[0] && this.rematchVotes[1]) {
       const nextServer: 0 | 1 = this.servingPlayer === 0 ? 1 : 0;
       this.resetMatchState(nextServer);
-      this.opts.onMessage({ type: 'game_start', servingPlayer: nextServer });
+      this.opts.onMessage({ type: 'game_start', servingPlayer: nextServer, config: this.config });
     } else {
       this.opts.onMessage({ type: 'rematch_state', votes: [...this.rematchVotes] });
     }

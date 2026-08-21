@@ -10,7 +10,8 @@ import { hasUnlock } from './src/achievements';
 import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import { validateAvatarPng } from './server/image';
-import { MatchEndPayload } from './src/types';
+import { MatchEndPayload, RoomMatchConfig } from './src/types';
+import { DEFAULT_ROOM_CONFIG, normalizeRoomConfig } from './src/matchRules';
 import { validateUsername } from './src/profileRules';
 import { Rating, winProbability } from './src/rating';
 
@@ -29,10 +30,50 @@ interface Room {
   maxRallyInMatch: number;
   servingPlayer: 0 | 1;
   rematchVotes: [boolean, boolean];
+  /**
+   * The terms both phones play by. The host owns them; the server normalizes
+   * whatever arrives and is the only thing either client reads them from.
+   */
+  config: RoomMatchConfig;
+  /**
+   * Whether the room's current match has been decided. The server can tell,
+   * now that it owns the winning score — which is what lets it refuse a
+   * rematch vote from a match still in progress and re-open the settings
+   * between matches.
+   */
+  matchOver: boolean;
+  /**
+   * Whether a ball has actually been put in play since the last start. The
+   * match "begins" when the guest joins, but nobody has served yet — so the
+   * lobby is still open and the host can keep setting the terms. The first
+   * ball over the net locks them.
+   */
+  inPlay: boolean;
   lastActive: number;
 }
 
 const rooms = new Map<string, Room>();
+
+function broadcast(room: Room, payload: unknown): void {
+  const json = JSON.stringify(payload);
+  room.players.forEach((p) => {
+    if (p?.ws && p.ws.readyState === WebSocket.OPEN) p.ws.send(json);
+  });
+}
+
+/** Start (or restart) the room's match on terms both phones can see. */
+function startMatch(room: Room, servingPlayer: 0 | 1): void {
+  room.scores = [0, 0];
+  room.rallyCount = 0;
+  room.maxRallyInMatch = 0;
+  room.rematchVotes = [false, false];
+  room.servingPlayer = servingPlayer;
+  room.matchOver = false;
+  room.inPlay = false;
+  // The config rides along with every start: a phone can never begin a match
+  // on terms it has not been told, however it arrived in the room.
+  broadcast(room, { type: 'game_start', servingPlayer, config: room.config });
+}
 
 /**
  * TrueSkill-2 style performance weight from SERVER-OBSERVED data only.
@@ -383,6 +424,9 @@ async function startServer() {
         missions: result.missions,
         earnedXp: result.earnedXp,
         unlocked: result.unlocked,
+        // The free replacement dealt into the slot this claim emptied. It
+        // costs neither allowance, which is why `rerolls` below is unchanged.
+        newMissionId: result.newMissionId,
         rerolls: db.rerollsRemaining(req.deviceId!),
       });
     } catch (e: any) {
@@ -482,6 +526,9 @@ async function startServer() {
             maxRallyInMatch: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],
+            config: normalizeRoomConfig(msg.config || DEFAULT_ROOM_CONFIG),
+            matchOver: false,
+            inPlay: false,
             lastActive: Date.now(),
           };
 
@@ -496,6 +543,7 @@ async function startServer() {
               playerIndex: 0,
             })
           );
+          ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
         } else if (msg.type === 'join_room') {
           const code = (msg.roomId || '').toUpperCase().trim();
           const room = rooms.get(code);
@@ -534,6 +582,10 @@ async function startServer() {
             })
           );
 
+          // The guest plays the host's match, so they are told its terms before
+          // the first serve — and can read them in the lobby.
+          ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+
           // Notify host
           if (room.players[0]?.ws && room.players[0].ws.readyState === WebSocket.OPEN) {
             room.players[0].ws.send(
@@ -546,18 +598,7 @@ async function startServer() {
           }
 
           // Start the game!
-          const startingServer: 0 | 1 = 0;
-          room.servingPlayer = startingServer;
-          room.players.forEach((p) => {
-            if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
-              p.ws.send(
-                JSON.stringify({
-                  type: 'game_start',
-                  servingPlayer: startingServer,
-                })
-              );
-            }
-          });
+          startMatch(room, 0);
 
           // Tell each phone how the matchup looks BEFORE the first serve.
           // Computed server-side so neither client ever sees the other's
@@ -601,6 +642,8 @@ async function startServer() {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
+          // A ball over the net is the moment the terms stop being editable.
+          room.inPlay = true;
           room.rallyCount++;
           if (room.rallyCount > room.maxRallyInMatch) {
             room.maxRallyInMatch = room.rallyCount;
@@ -623,6 +666,9 @@ async function startServer() {
           if (!room) return;
           room.lastActive = Date.now();
 
+          // A point can be won off a serve that never crossed, so this is the
+          // other way a match becomes live.
+          room.inPlay = true;
           // msg.scorer is either 'p1' or 'p2'
           const scorerIndex = msg.scorer === 'p1' ? 0 : 1;
           room.scores[scorerIndex]++;
@@ -631,19 +677,20 @@ async function startServer() {
           // Next server
           const nextServer: 0 | 1 = scorerIndex === 0 ? 1 : 0;
           room.servingPlayer = nextServer;
+          // Both phones end the match on this same number, so neither is left
+          // playing on alone. Votes from before the final point are dropped:
+          // a rematch is agreed about a match that is actually finished.
+          if (room.scores[scorerIndex] >= room.config.winningScore) {
+            room.matchOver = true;
+            room.rematchVotes = [false, false];
+          }
 
-          room.players.forEach((p) => {
-            if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
-              p.ws.send(
-                JSON.stringify({
-                  type: 'score_update',
-                  p1Score: room.scores[0],
-                  p2Score: room.scores[1],
-                  reason: `Point to ${room.players[scorerIndex]?.playerName || `Player ${scorerIndex + 1}`}`,
-                  nextServer,
-                })
-              );
-            }
+          broadcast(room, {
+            type: 'score_update',
+            p1Score: room.scores[0],
+            p2Score: room.scores[1],
+            reason: `Point to ${room.players[scorerIndex]?.playerName || `Player ${scorerIndex + 1}`}`,
+            nextServer,
           });
         } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
@@ -685,40 +732,34 @@ async function startServer() {
               })
             );
           }
+        } else if (msg.type === 'set_room_config' && currentRoomId && playerIndex !== null) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          room.lastActive = Date.now();
+          // The host owns the terms, and only while nothing is being played:
+          // the guest cannot edit them, and neither side can change the ball
+          // out from under a rally. Before the first serve and after the last
+          // point, the settings are open.
+          const between = !room.inPlay || room.matchOver;
+          if (playerIndex !== 0 || !between) {
+            ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+            return;
+          }
+          room.config = normalizeRoomConfig(msg.config);
+          broadcast(room, { type: 'room_config', config: room.config });
         } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
+          // A vote only means anything once the room agrees the match is done.
+          if (!room.matchOver) return;
           room.rematchVotes[playerIndex] = true;
 
           if (room.rematchVotes[0] && room.rematchVotes[1] && room.players[0] && room.players[1]) {
-            // Both agreed: fresh match, loser of the coin toss last time serves first now
-            room.scores = [0, 0];
-            room.rallyCount = 0;
-            room.maxRallyInMatch = 0;
-            room.rematchVotes = [false, false];
-            room.servingPlayer = room.servingPlayer === 0 ? 1 : 0;
-            room.players.forEach((p) => {
-              if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(
-                  JSON.stringify({
-                    type: 'game_start',
-                    servingPlayer: room.servingPlayer,
-                  })
-                );
-              }
-            });
+            // Both agreed: fresh match, the other side opens this time.
+            startMatch(room, room.servingPlayer === 0 ? 1 : 0);
           } else {
-            room.players.forEach((p) => {
-              if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(
-                  JSON.stringify({
-                    type: 'rematch_state',
-                    votes: room.rematchVotes,
-                  })
-                );
-              }
-            });
+            broadcast(room, { type: 'rematch_state', votes: room.rematchVotes });
           }
         } else if (msg.type === 'ping') {
           ws.send(JSON.stringify({ type: 'pong', timestamp: msg.timestamp }));

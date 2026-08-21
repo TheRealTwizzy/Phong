@@ -110,6 +110,15 @@ export const DRIVE_SPEED_GAIN = 0.16;
 export const SPIN_REBOUND_DEG = 18;
 /** How far full spin tilts the angle a ball leaves a SIDE WALL at, in degrees. */
 export const SPIN_WALL_TILT_DEG = 16;
+/**
+ * How much pace full spin adds to — or scrubs off — a rebound. Signed by
+ * whether the spin runs WITH the direction the ball leaves in: a ball spinning
+ * the way it is going skids on, one spinning against itself is checked. Spin
+ * therefore costs or buys pace at every surface instead of being free angle.
+ */
+export const SPIN_WALL_SPEED_GAIN = 0.12;
+/** The same trade at a paddle contact, where the swing already adds its own. */
+export const SPIN_PADDLE_SPEED_GAIN = 0.1;
 /** Spin kept, and reversed, across a side-wall rebound. */
 export const SPIN_WALL_RETENTION = -0.55;
 /** Incoming spin retained through a paddle contact, reversed with the ball. */
@@ -135,26 +144,50 @@ function rotate(vx: number, vy: number, radians: number): { vx: number; vy: numb
 }
 
 /**
+ * How spin trades against pace at a contact: +1 when the ball spins the way it
+ * is leaving (it skids on), -1 when it spins against itself (it is checked).
+ *
+ * Mirroring the court flips BOTH the spin and the horizontal velocity
+ * (server/transform.ts), so this product is the same on either half — the two
+ * phones cannot disagree about whether a ball sped up.
+ */
+function spinPace(spinNorm: number, outgoingVx: number): number {
+  return spinNorm * (Math.sign(outgoingVx) || 1);
+}
+
+/**
  * Rebound off a side wall. Spin does NOT bend the ball in flight — it is
- * stored on the ball and spends itself on impacts, tilting the angle the ball
- * leaves a surface at. Here that means a spinning ball kicks off the wall
- * shallower or steeper than the mirror angle, and the spin reverses and damps.
+ * stored on the ball and spends itself on impacts, changing the angle AND the
+ * speed the ball leaves a surface with. Here that means a spinning ball kicks
+ * off the wall shallower or steeper than the mirror angle and skids on or is
+ * scrubbed by it, while the spin itself reverses and damps.
  */
 export function bounceOffWall(
   vx: number,
   vy: number,
   spin: number | undefined,
-  atLeftWall: boolean
+  atLeftWall: boolean,
+  rules?: Partial<MatchRules>
 ): { vx: number; vy: number; spin: number } {
   const flipped = atLeftWall ? Math.abs(vx) : -Math.abs(vx);
-  const tilt =
-    (clamp(spin || 0, -SPIN_MAX, SPIN_MAX) / SPIN_MAX) * ((SPIN_WALL_TILT_DEG * Math.PI) / 180);
+  const spinNorm = clamp(spin || 0, -SPIN_MAX, SPIN_MAX) / SPIN_MAX;
+  const tilt = spinNorm * ((SPIN_WALL_TILT_DEG * Math.PI) / 180);
   // The tilt is applied about the wall normal, so it opens or closes the
   // rebound rather than turning the ball back into the wall.
   const turned = rotate(flipped, vy, atLeftWall ? tilt : -tilt);
+
+  // Then pace. Held inside the match's own speed band so a ball cannot be
+  // spun faster and faster off alternating walls.
+  const speed = Math.hypot(turned.vx, turned.vy);
+  const paced = clampBallSpeed(
+    speed * (1 + spinPace(spinNorm, turned.vx) * SPIN_WALL_SPEED_GAIN),
+    rules
+  );
+  const scale = speed > 1e-9 ? paced / speed : 1;
+
   return {
-    vx: turned.vx,
-    vy: turned.vy,
+    vx: turned.vx * scale,
+    vy: turned.vy * scale,
     spin: clamp((spin || 0) * SPIN_WALL_RETENTION, -SPIN_MAX, SPIN_MAX),
   };
 }
@@ -169,7 +202,8 @@ export function bounceOffWall(
  */
 export function predictLanding(
   ball: Pick<BallState, 'x' | 'vx' | 'vy' | 'radius'> & { y: number; spin?: number },
-  spinFactor: number = 1
+  spinFactor: number = 1,
+  rules?: Partial<MatchRules>
 ): number {
   if (ball.vy <= 0) return ball.x;
   const dt = 1 / 120;
@@ -187,7 +221,7 @@ export function predictLanding(
     if (x - radius <= 0 || x + radius >= 1) {
       const atLeft = x - radius <= 0;
       x = atLeft ? radius : 1 - radius;
-      const bounced = bounceOffWall(vx, vy, spin, atLeft);
+      const bounced = bounceOffWall(vx, vy, spin, atLeft, rules);
       vx = bounced.vx;
       vy = Math.abs(bounced.vy) || vy;
       spin = bounced.spin;
@@ -241,9 +275,16 @@ export function checkPaddleCollision(
       );
 
       const currentSpeed = Math.hypot(ball.vx, ball.vy);
-      // Speed up slightly on each hit up to cap; driving through adds pace.
+      // Speed up slightly on each hit up to cap; driving through adds pace,
+      // and the spin the ball arrived with adds or scrubs its own — measured
+      // against the direction the ball is about to leave in, which the rebound
+      // angle has just decided.
+      const outgoingVx = Math.sin(angle);
       const newSpeed = Math.min(
-        currentSpeed * (1.04 + Math.abs(drive) * DRIVE_SPEED_GAIN),
+        currentSpeed *
+          (1.04 +
+            Math.abs(drive) * DRIVE_SPEED_GAIN +
+            spinPace(incoming, outgoingVx) * SPIN_PADDLE_SPEED_GAIN),
         MAX_BALL_SPEED
       );
 
@@ -421,6 +462,7 @@ export class OpponentAI {
   public difficulty: AIDifficulty;
   private playerMu: number = START_MU;
   private reactionDelayTimer: number = 0;
+  private rules: Partial<MatchRules> | undefined;
   private targetX: number = 0.5;
 
   // Per-rally state: the AI decides how it is going to read *this* ball once,
@@ -502,7 +544,14 @@ export class OpponentAI {
    * @param dt Delta time in seconds
    * @param paddleWidth Opponent paddle width
    */
-  public update(oppBall: BallState | null, dt: number, paddleWidth: number) {
+  public update(
+    oppBall: BallState | null,
+    dt: number,
+    paddleWidth: number,
+    rules?: Partial<MatchRules>
+  ) {
+    // The AI predicts under the same speed band the ball is actually held to.
+    this.rules = rules;
     if (!oppBall || !oppBall.active || oppBall.vy <= 0) {
       // Return gently toward center when ball is not on AI's side
       this.rallyActive = false;
@@ -526,7 +575,7 @@ export class OpponentAI {
           // Same rules the ball obeys, with this AI's reading of the spin. An
           // AI that reads none of it expects the plain mirror angle off the
           // wall; one that reads it expects the kick.
-          predicted = predictLanding(oppBall, this.spinRead);
+          predicted = predictLanding(oppBall, this.spinRead, this.rules);
         } else {
           // Missed the wall read: keeps chasing the line straight into the wall.
           predicted = clamp(oppBall.x + oppBall.vx * timeToPaddle, 0.02, 0.98);

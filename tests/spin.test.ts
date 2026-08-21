@@ -5,6 +5,7 @@ import {
   HEAD_ON_COUPLING,
   PADDLE_REFERENCE_SPEED,
   PADDLE_WIDTH_RATIO,
+  MAX_BALL_SPEED,
   PADDLE_Y,
   SPIN_MAX,
   SPIN_WALL_RETENTION,
@@ -117,12 +118,76 @@ describe('spin acts on impacts, never on the flight', () => {
     );
   });
 
-  it('preserves speed across a wall rebound', () => {
-    for (const spin of [-SPIN_MAX, -0.5, 0, 0.5, SPIN_MAX]) {
-      const before = Math.hypot(-0.6, 0.9);
-      const after = bounceOffWall(-0.6, 0.9, spin, true);
-      expect(Math.hypot(after.vx, after.vy)).toBeCloseTo(before, 6);
+  it('preserves speed across a wall rebound when there is no spin to spend', () => {
+    const before = Math.hypot(-0.6, 0.9);
+    const after = bounceOffWall(-0.6, 0.9, 0, true);
+    expect(Math.hypot(after.vx, after.vy)).toBeCloseTo(before, 6);
+  });
+
+  it('trades spin for pace off a wall, in both directions', () => {
+    // Spin does not only shape the angle: a ball spinning the way it comes off
+    // the wall skids on, one spinning against itself is scrubbed. Both are the
+    // same impact — the flight either side of it is still perfectly straight.
+    const before = Math.hypot(-0.6, 0.9);
+    const speedOf = (spin: number) => {
+      const r = bounceOffWall(-0.6, 0.9, spin, true);
+      return Math.hypot(r.vx, r.vy);
+    };
+    // Off the LEFT wall the ball leaves rightward, so positive spin runs with it.
+    expect(speedOf(SPIN_MAX)).toBeGreaterThan(before);
+    expect(speedOf(-SPIN_MAX)).toBeLessThan(before);
+    expect(speedOf(SPIN_MAX)).toBeGreaterThan(speedOf(0.5));
+    expect(speedOf(-SPIN_MAX)).toBeLessThan(speedOf(-0.5));
+  });
+
+  it('changes pace by the same amount on either half of the court', () => {
+    // server/transform.ts mirrors x and flips both vx and spin across the net.
+    // The pace trade has to survive that, or the two phones would disagree
+    // about how fast the ball is now travelling.
+    const here = bounceOffWall(-0.6, 0.9, 0.8, true);
+    const mirrored = bounceOffWall(0.6, 0.9, -0.8, false);
+    expect(Math.hypot(mirrored.vx, mirrored.vy)).toBeCloseTo(
+      Math.hypot(here.vx, here.vy),
+      10
+    );
+  });
+
+  it('cannot be spun faster and faster off alternating walls', () => {
+    // Every rebound is held inside the match's own speed band, so a ball with
+    // the maximum spin converges on the cap instead of running away.
+    let vx = -0.6;
+    let vy = 0.9;
+    for (let i = 0; i < 40; i++) {
+      const atLeft = vx < 0;
+      // Re-spin to the maximum in the helpful direction every single time:
+      // the worst case a player could ever produce, and still bounded.
+      const spin = atLeft ? SPIN_MAX : -SPIN_MAX;
+      const r = bounceOffWall(vx, vy, spin, atLeft);
+      expect(Math.hypot(r.vx, r.vy)).toBeLessThanOrEqual(MAX_BALL_SPEED + 1e-9);
+      // Send it straight back at the other wall for the next rebound.
+      vx = -r.vx;
+      vy = r.vy;
     }
+  });
+
+  it('trades spin for pace at the paddle too', () => {
+    // Same rule at the other surface, measured against the direction the
+    // rebound angle sends the ball. Caught off-centre so it leaves sideways.
+    const arriving = (spin: number) => ({
+      x: 0.5 + PADDLE_WIDTH_RATIO * 0.3,
+      y: PADDLE_Y,
+      vx: 0,
+      vy: 0.9,
+      radius: 0.022,
+      active: true,
+      spin,
+    });
+    const plain = checkPaddleCollision(arriving(0), 0.5, PADDLE_WIDTH_RATIO, 0);
+    const with_ = checkPaddleCollision(arriving(SPIN_MAX), 0.5, PADDLE_WIDTH_RATIO, 0);
+    const against = checkPaddleCollision(arriving(-SPIN_MAX), 0.5, PADDLE_WIDTH_RATIO, 0);
+    expect(with_.speed!).toBeGreaterThan(plain.speed!);
+    expect(against.speed!).toBeLessThan(plain.speed!);
+    expect(with_.speed!).toBeLessThanOrEqual(MAX_BALL_SPEED);
   });
 
   it('always turns the ball away from the wall it hit', () => {
