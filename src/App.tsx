@@ -24,6 +24,7 @@ import {
   checkPaddleCollision,
   OpponentAI,
 } from './game/physics';
+import { START_MU } from './rating';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
 import {
@@ -430,6 +431,12 @@ export default function App() {
     sound.setBgmVolume((settings.bgmVolume ?? 50) / 100);
     aiRef.current.setDifficulty(settings.difficulty);
   }, [settings]);
+
+  // Feed the AI the player's hidden rating so each difficulty slides part-way
+  // toward them — Pro stays a real contest at any skill instead of a wall.
+  useEffect(() => {
+    aiRef.current.setPlayerSkill(profile?.mmrMu ?? START_MU);
+  }, [profile?.mmrMu]);
 
   // Track Player Status (Online / Idle / Offline)
   useEffect(() => {

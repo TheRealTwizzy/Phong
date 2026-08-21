@@ -70,6 +70,41 @@ ok(`win chance shown per difficulty and correctly ordered: ${JSON.stringify(odds
 if (!(await alice.$('#menu-diff-balanced'))) fail('no BALANCED badge on any difficulty');
 ok('BALANCED badge marks the closest-to-even difficulty');
 
+// ---- 1b. The ladder slides with the player's hidden rating ---------------
+// A fixed ladder is what made Pro unreachable for a beginner and Rookie a
+// formality for a veteran; the odds shown must move as the player's mu moves.
+const oddsAfterSoloRun = async (page) => {
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
+  await page.click('#menu-mode-solo');
+  await page.waitForSelector('#menu-diff-cyber-odds', { timeout: 5000 });
+  const out = {};
+  for (const d of ['rookie', 'pro', 'cyber', 'chaos']) {
+    out[d] = parseInt(await page.textContent(`#menu-diff-${d}-odds`), 10);
+  }
+  return out;
+};
+
+const climber = await newPlayer('Climb');
+const oddsBefore = await oddsAfterSoloRun(climber);
+for (let i = 0; i < 8; i++) {
+  await record(climber, {
+    playerScore: 5, opponentScore: 0, maxRally: 22,
+    mode: 'solo', difficulty: 'cyber', isWinner: true,
+  });
+}
+const oddsAfter = await oddsAfterSoloRun(climber);
+if (oddsAfter.rookie <= oddsBefore.rookie) {
+  fail(`beating Cyber 8x did not raise the player's odds vs Rookie (${oddsBefore.rookie}% -> ${oddsAfter.rookie}%)`);
+}
+if (oddsAfter.cyber >= 60) {
+  fail(`Cyber stopped being a stretch after a solo run (${oddsAfter.cyber}%)`);
+}
+if (!(oddsAfter.rookie > oddsAfter.pro && oddsAfter.pro > oddsAfter.chaos && oddsAfter.chaos > oddsAfter.cyber)) {
+  fail(`the ladder lost its ordering after adapting: ${JSON.stringify(oddsAfter)}`);
+}
+ok(`ladder slides with skill and keeps its order: ${JSON.stringify(oddsBefore)} -> ${JSON.stringify(oddsAfter)}`);
+
 // ---- 2. No raw rating numbers anywhere -----------------------------------
 const badge = await alice.textContent('#tier-badge-unranked').catch(() => null);
 if (!badge) fail('menu pill does not show a tier badge');

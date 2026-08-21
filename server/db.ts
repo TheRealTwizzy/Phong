@@ -16,6 +16,7 @@ import {
   Rating,
   Tier,
   AI_RATINGS,
+  aiRating,
   newRating,
   winProbability,
   updateRating,
@@ -759,7 +760,9 @@ class GameDatabase {
     const myMmr: Rating = { mu: profile.mmrMu, sigma: profile.mmrSigma };
     const oppRating: Rating = isPvp
       ? opponentRating || { mu: profile.mmrMu, sigma: profile.mmrSigma }
-      : AI_RATINGS[payload.difficulty || 'pro'];
+      // The AI slides part-way toward the player's own rating, so the anchor
+      // to rate against is the strength they actually faced, not the label.
+      : aiRating(payload.difficulty || 'pro', profile.mmrMu);
     const winProb = winProbability(myMmr, oppRating);
 
     // 2. Experience — always positive, never subtracted: levels can't regress.
@@ -784,7 +787,9 @@ class GameDatabase {
     const soloOpts = {
       ...SOLO_UPDATE,
       // A solo win can't push mu past the anchor it beat: farming a weak
-      // difficulty converges on that difficulty and stops.
+      // difficulty converges on that difficulty and stops. Deliberately the
+      // BASE anchor, not the adapted one — capping at a target that rises with
+      // the player would be circular and let solo lift mu without limit.
       cap: AI_RATINGS[payload.difficulty || 'pro'].mu,
     };
     const nextMmr = updateRating(

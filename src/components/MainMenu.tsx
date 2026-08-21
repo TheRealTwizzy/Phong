@@ -4,7 +4,7 @@ import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
-import { AI_RATINGS, winProbability, recommendedDifficulty } from '../rating';
+import { aiRating, winProbability, recommendedDifficulty } from '../rating';
 import {
   Bot,
   Dumbbell,
@@ -244,7 +244,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                           {(['rookie', 'pro', 'cyber', 'chaos'] as AIDifficulty[]).map((diff) => {
                             // Pre-match prediction from hidden MMR vs this AI
                             // anchor — the same number that scales match XP.
-                            const chance = Math.round(winProbability(myRating, AI_RATINGS[diff]) * 100);
+                            const chance = Math.round(winProbability(myRating, aiRating(diff, myRating.mu)) * 100);
                             return (
                               <button
                                 key={diff}
