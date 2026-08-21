@@ -382,6 +382,22 @@ export const LEVEL_STEP = 60;
 
 export const levelBand = (level: number): number => LEVEL_BASE + LEVEL_STEP * (level - 1);
 
+/**
+ * Most of a level band any ONE achievement may hand over.
+ *
+ * Achievement rewards are flat constants but level bands grow, so a reward
+ * sized for the mid game lands as a windfall early: `level_10` paid 750 into a
+ * 790-wide band, awarding almost the whole of the level it was celebrating,
+ * and a scaled achievement multiplied by a 1.9 surprise could beat that. The
+ * cap makes "an achievement never hands you most of a level" true by
+ * construction rather than by keeping thirteen constants in sync by hand.
+ */
+export const ACHIEVEMENT_BAND_CAP = 0.6;
+
+/** The most an achievement may pay a player at `level`. */
+export const achievementXpCap = (level: number): number =>
+  Math.round(levelBand(level) * ACHIEVEMENT_BAND_CAP);
+
 /** Cumulative XP required to REACH `level`. */
 export function xpForLevel(level: number): number {
   let total = 0;

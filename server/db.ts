@@ -32,6 +32,7 @@ import {
   surpriseMultiplier,
   normalizeDifficulty,
   practiceXp,
+  achievementXpCap,
   PRACTICE_XP_DAILY_CAP,
 } from '../src/rating';
 import {
@@ -103,7 +104,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Sonic Speed',
     description: 'Sustain a lightning-fast rally of 25 or more hits.',
     category: 'mastery',
-    xpReward: 250,
+    xpReward: 200,
     icon: 'flame',
   },
   {
@@ -111,7 +112,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Quantum Reflexes',
     description: 'Reach a legendary 50-hit rally without missing.',
     category: 'mastery',
-    xpReward: 600,
+    xpReward: 450,
     icon: 'shield',
   },
   {
@@ -119,7 +120,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'First Blood',
     description: 'Win your first full match in any mode.',
     category: 'beginner',
-    xpReward: 50,
+    xpReward: 60,
     scaled: true,
     icon: 'trophy',
   },
@@ -128,7 +129,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Clean Sheet',
     description: 'Win a match without conceding a single point (5-0 or better).',
     category: 'mastery',
-    xpReward: 300,
+    xpReward: 200,
     scaled: true,
     icon: 'star',
   },
@@ -137,7 +138,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Cyber Slayer',
     description: 'Defeat the Cyber difficulty AI in Solo mode.',
     category: 'mastery',
-    xpReward: 400,
+    xpReward: 260,
     scaled: true,
     icon: 'cpu',
   },
@@ -146,7 +147,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Twin Link Master',
     description: 'Win a 2-device online multiplayer match across the net.',
     category: 'online',
-    xpReward: 350,
+    xpReward: 240,
     scaled: true,
     icon: 'smartphone',
   },
@@ -155,7 +156,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Ace Sniper',
     description: 'Score 5 or more career aces directly on serve.',
     category: 'special',
-    xpReward: 200,
+    xpReward: 150,
     icon: 'target',
   },
   {
@@ -163,7 +164,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Paddle Veteran',
     description: 'Complete 10 total matches.',
     category: 'beginner',
-    xpReward: 150,
+    xpReward: 120,
     icon: 'award',
   },
   {
@@ -171,7 +172,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Rising Star',
     description: 'Reach Player Level 5.',
     category: 'special',
-    xpReward: 250,
+    xpReward: 120,
     icon: 'sparkles',
   },
   {
@@ -179,7 +180,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Grandmaster',
     description: 'Reach Player Level 10.',
     category: 'special',
-    xpReward: 750,
+    xpReward: 200,
     icon: 'crown',
   },
   {
@@ -187,7 +188,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     title: 'Elite Contender',
     description: 'Reach the Master tier in ranked play.',
     category: 'special',
-    xpReward: 500,
+    xpReward: 400,
     icon: 'trending-up',
   },
 ];
@@ -1048,14 +1049,22 @@ class GameDatabase {
     // player for one they take rarely. Same multiplier the match XP uses, so
     // there is still no per-difficulty table anywhere.
     const achievementMultiplier = surpriseMultiplier(winProb, isWin);
+    let achievementBudget = achievementXpCap(profile.level);
     const unlock = (achId: string) => {
       if (!profile.achievements.includes(achId)) {
         profile.achievements.push(achId);
         const meta = ALL_ACHIEVEMENTS.find((a) => a.id === achId);
         if (meta) {
-          const awardedXp = meta.scaled
+          const scaled = meta.scaled
             ? Math.max(1, Math.round(meta.xpReward * achievementMultiplier))
             : meta.xpReward;
+          // Never hand over most of a level — see the cap's note in rating.ts.
+          // The budget is for everything this match unlocks, so several
+          // achievements landing together cannot stack into a free level. It
+          // is measured against the level the player is on as the batch lands,
+          // which is after this match's own XP has been applied.
+          const awardedXp = Math.max(0, Math.min(scaled, achievementBudget));
+          achievementBudget -= awardedXp;
           newAchievements.push({ ...meta, unlockedAt: new Date().toISOString(), awardedXp });
           profile.xp += awardedXp;
         }
