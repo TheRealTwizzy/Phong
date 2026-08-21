@@ -10,6 +10,7 @@ import {
   LeaderboardEntry,
   MatchEndPayload,
   MatchEndResult,
+  DailyMission,
 } from '../src/types';
 import { validateUsername, usernameLockExpiry } from '../src/profileRules';
 import {
@@ -27,7 +28,15 @@ import {
   SOLO_UPDATE,
   PVP_UPDATE,
   PLACEMENT_GAMES,
+  surpriseMultiplier,
 } from '../src/rating';
+import {
+  MISSION_DEFS,
+  MissionDef,
+  applyMatchToProgress,
+  findMission,
+  missionDayKey,
+} from '../src/game/missions';
 
 // Bots are hand-rated and never uncertain.
 const BOT_SIGMA = 1.0;
@@ -101,6 +110,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     description: 'Win your first full match in any mode.',
     category: 'beginner',
     xpReward: 50,
+    scaled: true,
     icon: 'trophy',
   },
   {
@@ -109,6 +119,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     description: 'Win a match without conceding a single point (5-0 or better).',
     category: 'mastery',
     xpReward: 300,
+    scaled: true,
     icon: 'star',
   },
   {
@@ -117,6 +128,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     description: 'Defeat the Cyber or Chaos difficulty AI in Solo mode.',
     category: 'mastery',
     xpReward: 400,
+    scaled: true,
     icon: 'cpu',
   },
   {
@@ -125,6 +137,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     description: 'Win a 2-device online multiplayer match across the net.',
     category: 'online',
     xpReward: 350,
+    scaled: true,
     icon: 'smartphone',
   },
   {
@@ -323,6 +336,19 @@ class GameDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      -- Daily mission progress, one row per player/day/mission. Server-owned:
+      -- progress only ever advances from a recorded match, and the PRIMARY KEY
+      -- is what makes a claim idempotent.
+      CREATE TABLE IF NOT EXISTS daily_missions (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        missionId TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        claimedAt TEXT,
+        PRIMARY KEY (playerId, dayKey, missionId)
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_missions_player
+        ON daily_missions (playerId, dayKey);
     `);
   }
 
@@ -627,16 +653,95 @@ class GameDatabase {
 
   // Client-trusted XP grant (daily mission rewards). Clamped small so the
   // endpoint can't be used to speed-level; level/rank re-derive from XP.
-  public grantXp(id: string, amount: number): PlayerProfile {
-    const clamped = Math.max(1, Math.min(1000, Math.round(amount)));
-    const profile = this.getProfile(id);
-    profile.xp += clamped;
+  // ---- Daily missions -----------------------------------------------------
+  // Server-owned in full. Progress advances only from recordMatch, and a claim
+  // is guarded by the (playerId, dayKey, missionId) primary key, so replaying
+  // a claim — or clearing browser storage — grants nothing.
+
+  private missionRows(playerId: string, dayKey: string): Map<string, { progress: number; claimedAt: string | null }> {
+    const rows = this.sql
+      .prepare(`SELECT missionId, progress, claimedAt FROM daily_missions WHERE playerId = ? AND dayKey = ?`)
+      .all(playerId, dayKey) as { missionId: string; progress: number; claimedAt: string | null }[];
+    return new Map(rows.map((r) => [r.missionId, { progress: r.progress, claimedAt: r.claimedAt }]));
+  }
+
+  /** Today's missions for a player, defaulting to zero progress. */
+  public getMissions(playerId: string, now: Date = new Date()): DailyMission[] {
+    const dayKey = missionDayKey(now);
+    const rows = this.missionRows(playerId, dayKey);
+    return MISSION_DEFS.map((def) => {
+      const row = rows.get(def.id);
+      return {
+        id: def.id,
+        type: def.type,
+        titleKey: def.titleKey,
+        descKey: def.descKey,
+        target: def.target,
+        xpReward: def.xpReward,
+        current: Math.min(def.target, row?.progress ?? 0),
+        claimed: !!row?.claimedAt,
+      };
+    });
+  }
+
+  /** Advance every mission this match touches. Called from recordMatch only. */
+  private advanceMissions(playerId: string, payload: MatchEndPayload, now: Date): void {
+    const dayKey = missionDayKey(now);
+    const rows = this.missionRows(playerId, dayKey);
+    const upsert = this.sql.prepare(
+      `INSERT INTO daily_missions (playerId, dayKey, missionId, progress)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(playerId, dayKey, missionId) DO UPDATE SET progress = excluded.progress`
+    );
+    for (const def of MISSION_DEFS) {
+      const current = rows.get(def.id)?.progress ?? 0;
+      const next = applyMatchToProgress(def, current, payload);
+      if (next !== current) upsert.run(playerId, dayKey, def.id, next);
+    }
+  }
+
+  /**
+   * Claim one mission's reward. The XP amount comes from the definition table,
+   * never from the caller, and the row is stamped claimed in the same step.
+   */
+  public claimMission(
+    playerId: string,
+    missionId: string,
+    now: Date = new Date()
+  ): { ok: boolean; code?: 'MISSION_UNKNOWN' | 'MISSION_INCOMPLETE' | 'MISSION_CLAIMED'; profile?: PlayerProfile; missions?: DailyMission[]; earnedXp?: number } {
+    const def: MissionDef | undefined = findMission(missionId);
+    if (!def) return { ok: false, code: 'MISSION_UNKNOWN' };
+
+    const dayKey = missionDayKey(now);
+    const row = this.missionRows(playerId, dayKey).get(def.id);
+    const progress = row?.progress ?? 0;
+    if (row?.claimedAt) return { ok: false, code: 'MISSION_CLAIMED' };
+    if (progress < def.target) return { ok: false, code: 'MISSION_INCOMPLETE' };
+
+    // Stamp the claim FIRST and only pay out if this call is the one that
+    // stamped it, so two concurrent claims cannot both award the reward.
+    const stamped = this.sql
+      .prepare(
+        `UPDATE daily_missions SET claimedAt = ?
+         WHERE playerId = ? AND dayKey = ? AND missionId = ? AND claimedAt IS NULL`
+      )
+      .run(now.toISOString(), playerId, dayKey, def.id);
+    if (!stamped.changes) return { ok: false, code: 'MISSION_CLAIMED' };
+
+    const profile = this.getProfile(playerId);
+    profile.xp += def.xpReward;
     const { level, xpNext } = calculateLevelFromXp(profile.xp);
     profile.level = level;
     profile.xpNext = xpNext;
-    profile.lastActive = new Date().toISOString();
+    profile.lastActive = now.toISOString();
     this.upsertProfile(profile);
-    return this.readProfile(id)!;
+
+    return {
+      ok: true,
+      profile: this.readProfile(playerId)!,
+      missions: this.getMissions(playerId, now),
+      earnedXp: def.xpReward,
+    };
   }
 
   // ---- Avatars: exactly 256x256 PNGs, validated in server/image.ts before
@@ -829,13 +934,22 @@ class GameDatabase {
 
     // 4. Check & Unlock Achievements
     const newAchievements: Achievement[] = [];
+    // Achievements that mean "you beat something" are worth what that something
+    // was actually worth. The AI adapts to the player, so a flat reward would
+    // pay a mu-40 player the same for a Cyber win they take often as a mu-25
+    // player for one they take rarely. Same multiplier the match XP uses, so
+    // there is still no per-difficulty table anywhere.
+    const achievementMultiplier = surpriseMultiplier(winProb, isWin);
     const unlock = (achId: string) => {
       if (!profile.achievements.includes(achId)) {
         profile.achievements.push(achId);
         const meta = ALL_ACHIEVEMENTS.find((a) => a.id === achId);
         if (meta) {
-          newAchievements.push({ ...meta, unlockedAt: new Date().toISOString() });
-          profile.xp += meta.xpReward;
+          const awardedXp = meta.scaled
+            ? Math.max(1, Math.round(meta.xpReward * achievementMultiplier))
+            : meta.xpReward;
+          newAchievements.push({ ...meta, unlockedAt: new Date().toISOString(), awardedXp });
+          profile.xp += awardedXp;
         }
       }
     };
@@ -853,6 +967,10 @@ class GameDatabase {
     if (profile.level >= 5) unlock('level_5');
     if (profile.level >= 10) unlock('level_10');
     if (isPlaced(profile.rankedGames, profile.rankSigma) && profile.rankMu >= 28) unlock('rating_1400');
+
+    // Daily mission progress rides the same server-verified match record, so
+    // it can never be reported independently of an actual game.
+    this.advanceMissions(payload.playerId, payload, new Date());
 
     // Achievement XP can push the profile over a level threshold too
     const finalLevel = calculateLevelFromXp(profile.xp);
@@ -899,6 +1017,7 @@ class GameDatabase {
       tier: isPvp ? profile.tier : null,
       tierChanged: isPvp && profile.tier !== previousTier,
       newAchievements,
+      missions: this.getMissions(payload.playerId),
     };
   }
 

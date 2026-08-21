@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ALL_ACHIEVEMENTS } from '../server/db';
 import {
   XP_FLOOR,
   levelBand,
@@ -88,5 +89,35 @@ describe('level curve', () => {
     // Match XP plus the trimmed first-session achievement bundle.
     const firstMatch = match(0.75, true) + 25 + 50 + 60;
     expect(levelFromXp(firstMatch).level).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('achievement XP scales with what was actually beaten', () => {
+  it('flags exactly the win-based achievements as scaled', () => {
+    const scaled = ALL_ACHIEVEMENTS.filter((a) => a.scaled).map((a) => a.id).sort();
+    expect(scaled).toEqual(['cyber_slayer', 'first_win', 'multiplayer_champ', 'shutout']);
+  });
+
+  it('leaves rally achievements flat — a stronger AI returns MORE balls', () => {
+    // Scaling these by surprise would be backwards: a harder opponent keeps the
+    // ball alive longer, so long rallies get *easier* as difficulty rises.
+    for (const id of ['rally_10', 'rally_25', 'rally_50', 'first_serve']) {
+      expect(ALL_ACHIEVEMENTS.find((a) => a.id === id)!.scaled).toBeFalsy();
+    }
+  });
+
+  it('pays a scaled achievement more for the harder win', () => {
+    const meta = ALL_ACHIEVEMENTS.find((a) => a.id === 'cyber_slayer')!;
+    const longShot = Math.round(meta.xpReward * surpriseMultiplier(0.08, true));
+    const routine = Math.round(meta.xpReward * surpriseMultiplier(0.6, true));
+    expect(longShot).toBeGreaterThan(routine);
+    // And a flat reward would have paid both the same.
+    expect(longShot).not.toBe(meta.xpReward);
+  });
+
+  it('keeps a scaled award positive even for a certain win', () => {
+    for (const a of ALL_ACHIEVEMENTS.filter((x) => x.scaled)) {
+      expect(Math.max(1, Math.round(a.xpReward * surpriseMultiplier(1, true)))).toBeGreaterThan(0);
+    }
   });
 });

@@ -22,9 +22,11 @@ export type PlayerStatus = 'online' | 'idle' | 'offline';
 
 export type LanguageCode = 'en' | 'es' | 'ja' | 'de' | 'fr' | 'pt' | 'zh';
 
+export type MissionType = 'games_played' | 'matches_won' | 'rally' | 'multiplayer' | 'points_scored';
+
 export interface DailyMission {
   id: string;
-  type: 'games_played' | 'matches_won' | 'rally' | 'multiplayer' | 'points_scored';
+  type: MissionType;
   titleKey: string;
   descKey: string;
   target: number;
@@ -189,9 +191,16 @@ export interface Achievement {
   title: string;
   description: string;
   category: 'beginner' | 'mastery' | 'online' | 'special';
+  // Base reward. Achievements flagged `scaled` pay this multiplied by the
+  // match's surprise multiplier, so a moving-target difficulty (the AI adapts
+  // to the player) cannot be worth a fixed amount — see server/db.ts.
   xpReward: number;
+  scaled?: boolean;
   icon: string;
   unlockedAt?: string;
+  // XP actually granted when this achievement was unlocked. Only set on the
+  // achievements returned from a match; absent on the static catalogue.
+  awardedXp?: number;
 }
 
 export interface MatchRecord {
@@ -255,6 +264,9 @@ export interface MatchEndResult {
   tier: Tier | null;
   tierChanged: boolean;
   newAchievements: Achievement[];
+  // Today's missions after this match advanced them — server-owned, so the
+  // client never computes mission progress itself.
+  missions: DailyMission[];
 }
 
 // WebRTC signaling payload relayed verbatim between the two peers in a room.

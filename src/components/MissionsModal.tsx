@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { DailyMission, LanguageCode } from '../types';
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
-import { getTimeUntilNextMidnight } from '../game/missions';
+import { formatMissionReset } from '../game/missions';
 import { sound } from '../audio/soundEffects';
 import confetti from 'canvas-confetti';
 import {
@@ -41,8 +41,7 @@ export const MissionsModal: React.FC<Props> = ({
 
   useEffect(() => {
     const updateCountdown = () => {
-      const { formatted } = getTimeUntilNextMidnight();
-      setCountdown(formatted);
+      setCountdown(formatMissionReset());
     };
 
     updateCountdown();

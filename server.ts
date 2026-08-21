@@ -151,19 +151,13 @@ async function startServer() {
     }
   });
 
-  // Rename (365-day lock) and/or claim mission XP.
+  // Rename (365-day lock). XP is never accepted from the client: mission
+  // rewards are claimed by id at /api/missions/claim and paid from the server's
+  // own definition table.
   app.put('/api/profile/me', (req, res) => {
     try {
-      const { username, xpDelta } = req.body ?? {};
+      const { username } = req.body ?? {};
       let profile = null;
-
-      if (xpDelta !== undefined) {
-        const amount = Number(xpDelta);
-        if (!Number.isInteger(amount) || amount < 1 || amount > 1000) {
-          return res.status(400).json({ error: 'BAD_REQUEST' });
-        }
-        profile = db.grantXp(req.deviceId!, amount);
-      }
 
       if (username !== undefined) {
         if (typeof username !== 'string') {
@@ -328,6 +322,33 @@ async function startServer() {
       const includeBots = req.query.bots === '1' || req.query.bots === 'true';
       const leaderboard = db.getLeaderboard(sort, limit, includeBots);
       res.json({ leaderboard });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Daily missions. Progress is advanced server-side by /api/match/record, so
+  // these two routes only read state and pay out a completed mission once.
+  app.get('/api/missions', (req, res) => {
+    try {
+      res.json({ missions: db.getMissions(req.deviceId!) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/missions/claim', (req, res) => {
+    try {
+      const { missionId } = req.body ?? {};
+      if (typeof missionId !== 'string') {
+        return res.status(400).json({ error: 'BAD_REQUEST' });
+      }
+      const result = db.claimMission(req.deviceId!, missionId);
+      if (!result.ok) {
+        const status = result.code === 'MISSION_UNKNOWN' ? 404 : 409;
+        return res.status(status).json({ error: result.code });
+      }
+      res.json({ profile: result.profile, missions: result.missions, earnedXp: result.earnedXp });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
