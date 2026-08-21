@@ -75,6 +75,125 @@ export interface HitResult {
   angle?: number;
   speed?: number;
   offset?: number;
+  /** Spin imparted by this contact. Positive curves the ball to the right. */
+  spin?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Spin and paddle drive
+// ---------------------------------------------------------------------------
+//
+// The paddle used to be a wall with a bounce angle: `checkPaddleCollision` took
+// a paddleVx argument and never read it, and BallState.spin was carried across
+// the net, mirrored by server/transform.ts, and hardcoded to 0 by the client.
+// So the only input a player had was WHERE the ball hit. Now the paddle's own
+// motion is an input too, and it produces spin that curves the flight.
+//
+// Two rules give the mechanic its shape:
+//   - Contact point decides how much of the paddle's motion couples into the
+//     ball. Head-on contact is a clean rebound and barely carries; an edge
+//     brushes, and carries most.
+//   - Paddle speed decides the magnitude. A stationary paddle plays exactly
+//     like the old one, so nothing about the game is taken away.
+
+/** Paddle speed, in court widths per second, that counts as a full swing. */
+export const PADDLE_REFERENCE_SPEED = 2.2;
+/** How much of the paddle's motion couples in on a dead-centre hit. */
+export const HEAD_ON_COUPLING = 0.22;
+export const SPIN_FROM_DRIVE = 1.35;
+export const SPIN_MAX = 1.6;
+/** Extra deflection a full swing adds to the rebound angle, in degrees. */
+export const DRIVE_ANGLE_DEG = 14;
+/** Extra pace a full swing adds. */
+export const DRIVE_SPEED_GAIN = 0.16;
+/** How far full spin tilts the angle a ball leaves the PADDLE at, in degrees. */
+export const SPIN_REBOUND_DEG = 18;
+/** How far full spin tilts the angle a ball leaves a SIDE WALL at, in degrees. */
+export const SPIN_WALL_TILT_DEG = 16;
+/** Spin kept, and reversed, across a side-wall rebound. */
+export const SPIN_WALL_RETENTION = -0.55;
+/** Incoming spin retained through a paddle contact, reversed with the ball. */
+export const SPIN_PADDLE_CARRY = -0.35;
+/** No AI ever fully reads spin — it has to stay worth using at the top. */
+export const MAX_SPIN_READ = 0.85;
+
+/**
+ * How strongly this contact couples the paddle's motion into the ball:
+ * 0 at rest, toward 1 for a fast swing caught on the edge.
+ */
+export function driveCoupling(paddleVx: number, hitOffset: number): number {
+  const swing = clamp(paddleVx / PADDLE_REFERENCE_SPEED, -1, 1);
+  const edge = Math.min(1, Math.abs(hitOffset));
+  return swing * (HEAD_ON_COUPLING + (1 - HEAD_ON_COUPLING) * edge);
+}
+
+/** Rotate a velocity by `radians`, preserving speed. */
+function rotate(vx: number, vy: number, radians: number): { vx: number; vy: number } {
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return { vx: vx * cos - vy * sin, vy: vx * sin + vy * cos };
+}
+
+/**
+ * Rebound off a side wall. Spin does NOT bend the ball in flight — it is
+ * stored on the ball and spends itself on impacts, tilting the angle the ball
+ * leaves a surface at. Here that means a spinning ball kicks off the wall
+ * shallower or steeper than the mirror angle, and the spin reverses and damps.
+ */
+export function bounceOffWall(
+  vx: number,
+  vy: number,
+  spin: number | undefined,
+  atLeftWall: boolean
+): { vx: number; vy: number; spin: number } {
+  const flipped = atLeftWall ? Math.abs(vx) : -Math.abs(vx);
+  const tilt =
+    (clamp(spin || 0, -SPIN_MAX, SPIN_MAX) / SPIN_MAX) * ((SPIN_WALL_TILT_DEG * Math.PI) / 180);
+  // The tilt is applied about the wall normal, so it opens or closes the
+  // rebound rather than turning the ball back into the wall.
+  const turned = rotate(flipped, vy, atLeftWall ? tilt : -tilt);
+  return {
+    vx: turned.vx,
+    vy: turned.vy,
+    spin: clamp((spin || 0) * SPIN_WALL_RETENTION, -SPIN_MAX, SPIN_MAX),
+  };
+}
+
+/**
+ * Where a ball will cross the paddle line, folding side-wall rebounds. Shared
+ * with the AI so its prediction uses the same rules the ball does.
+ *
+ * `spinFactor` scales how much of spin's effect on those rebounds is accounted
+ * for: 1 is the true landing point, 0 ignores spin entirely and lands where an
+ * unspun ball would have. That is exactly the AI's read of the ball.
+ */
+export function predictLanding(
+  ball: Pick<BallState, 'x' | 'vx' | 'vy' | 'radius'> & { y: number; spin?: number },
+  spinFactor: number = 1
+): number {
+  if (ball.vy <= 0) return ball.x;
+  const dt = 1 / 120;
+  const factor = clamp(spinFactor, 0, 1);
+  let x = ball.x;
+  let y = ball.y;
+  let vx = ball.vx;
+  let vy = ball.vy;
+  let spin = (ball.spin || 0) * factor;
+  const radius = ball.radius || BALL_BASE_RADIUS;
+
+  for (let step = 0; step < 4000 && y < PADDLE_Y; step++) {
+    x += vx * dt;
+    y += vy * dt;
+    if (x - radius <= 0 || x + radius >= 1) {
+      const atLeft = x - radius <= 0;
+      x = atLeft ? radius : 1 - radius;
+      const bounced = bounceOffWall(vx, vy, spin, atLeft);
+      vx = bounced.vx;
+      vy = Math.abs(bounced.vy) || vy;
+      spin = bounced.spin;
+    }
+  }
+  return clamp(x, 0, 1);
 }
 
 /**
@@ -103,19 +222,43 @@ export function checkPaddleCollision(
       const rawOffset = (ball.x - paddleX) / (paddleWidth / 2);
       const hitOffset = Math.max(-1.1, Math.min(1.1, rawOffset));
 
-      // Calculate rebound angle (max ~60 degrees)
+      // How much of the paddle's own motion this contact carries.
+      const drive = driveCoupling(paddleVx, hitOffset);
+      // Spin the ball ARRIVED with tilts the angle it leaves at. This is the
+      // whole of what spin does: it never bends the flight, it spends itself
+      // on impacts.
+      const incoming = clamp(ball.spin || 0, -SPIN_MAX, SPIN_MAX) / SPIN_MAX;
+
+      // Calculate rebound angle (max ~60 degrees), plus what the swing and the
+      // incoming spin add.
       const maxAngle = (Math.PI / 180) * 62;
-      const angle = hitOffset * maxAngle;
+      const angle = clamp(
+        hitOffset * maxAngle +
+          (drive * DRIVE_ANGLE_DEG * Math.PI) / 180 +
+          (incoming * SPIN_REBOUND_DEG * Math.PI) / 180,
+        -maxAngle,
+        maxAngle
+      );
 
       const currentSpeed = Math.hypot(ball.vx, ball.vy);
-      // Speed up slightly on each hit up to cap
-      const newSpeed = Math.min(currentSpeed * 1.04, MAX_BALL_SPEED);
+      // Speed up slightly on each hit up to cap; driving through adds pace.
+      const newSpeed = Math.min(
+        currentSpeed * (1.04 + Math.abs(drive) * DRIVE_SPEED_GAIN),
+        MAX_BALL_SPEED
+      );
 
       return {
         hit: true,
         angle,
         speed: newSpeed,
         offset: hitOffset,
+        // What the ball leaves with: the swing's own spin, plus whatever of
+        // the incoming spin survived the contact (reversed, as the ball is).
+        spin: clamp(
+          drive * SPIN_FROM_DRIVE + (ball.spin || 0) * SPIN_PADDLE_CARRY,
+          -SPIN_MAX,
+          SPIN_MAX
+        ),
       };
     }
   }
@@ -176,6 +319,7 @@ interface AIParams {
   bounceSkill: number;
   lapseChance: number;
   jitter: number;
+  spinRead: number;
 }
 
 // Calibrated by simulating rallies through the real checkPaddleCollision above.
@@ -197,6 +341,13 @@ function paramsForCompetence(c: number): AIParams {
     bounceSkill: clamp((c - 0.1) / 0.6, 0, 1),
     lapseChance: lerp(0.14, 0, c),
     jitter: lerp(0.05, 0.008, c),
+    // How much of the ball's curve it accounts for. A weak AI reads a spinning
+    // ball as if it were travelling straight and arrives where the ball would
+    // have been — the most natural way for an AI to be beaten, and a better
+    // difficulty lever than raw aim error. Deliberately capped below 1: an AI
+    // that read curve perfectly would make spin worthless against the top
+    // rung, which is exactly where a player most needs another option.
+    spinRead: clamp((c - 0.08) / 0.72, 0, MAX_SPIN_READ),
   };
 }
 
@@ -283,6 +434,7 @@ export class OpponentAI {
   private aimShift: number = 0;
   private lapsed: boolean = false;
   private readsBounce: boolean = true;
+  private spinRead: number = 1;
   private params: AIParams = paramsForCompetence(competenceForMu(AI_RATINGS.pro.mu));
 
   constructor(difficulty: AIDifficulty = 'pro', playerMu: number = START_MU) {
@@ -334,6 +486,9 @@ export class OpponentAI {
     this.contactBias = gaussian() * p.contactError;
     this.readBias = gaussian() * p.readError;
     this.readsBounce = Math.random() < p.bounceSkill;
+    // Rolled per rally like everything else: an AI commits to one reading of
+    // this ball. Re-deciding every tick would average out to a perfect read.
+    this.spinRead = clamp(p.spinRead * (0.75 + Math.random() * 0.5), 0, 1);
     this.lapsed = Math.random() < p.lapseChance;
     // Deliberate off-centre contact to return at a sharper angle. Bounded to
     // the paddle's own half-width so ambition never becomes a guaranteed whiff.
@@ -366,17 +521,15 @@ export class OpponentAI {
 
       const timeToPaddle = (PADDLE_Y - oppBall.y) / oppBall.vy;
       if (timeToPaddle > 0) {
-        const raw = oppBall.x + oppBall.vx * timeToPaddle;
         let predicted: number;
         if (this.readsBounce) {
-          predicted = raw;
-          while (predicted < 0 || predicted > 1) {
-            if (predicted < 0) predicted = -predicted;
-            if (predicted > 1) predicted = 2 - predicted;
-          }
+          // Same rules the ball obeys, with this AI's reading of the spin. An
+          // AI that reads none of it expects the plain mirror angle off the
+          // wall; one that reads it expects the kick.
+          predicted = predictLanding(oppBall, this.spinRead);
         } else {
           // Missed the wall read: keeps chasing the line straight into the wall.
-          predicted = clamp(raw, 0.02, 0.98);
+          predicted = clamp(oppBall.x + oppBall.vx * timeToPaddle, 0.02, 0.98);
         }
 
         // How far down its half the ball has come: the early misread fades,

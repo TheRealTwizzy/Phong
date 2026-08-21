@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { BallState, GameSettings, Particle, Ripple, LanguageCode } from '../types';
 import { ThemeConfig } from '../game/themes';
-import { PADDLE_Y, PADDLE_HEIGHT, ServeAim } from '../game/physics';
+import { PADDLE_Y, PADDLE_HEIGHT, SPIN_MAX, ServeAim } from '../game/physics';
 import { sound } from '../audio/soundEffects';
 import { t } from '../i18n/translations';
 
@@ -611,11 +611,28 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         ctx.arc(ballPx, ballPy, ballPr, 0, Math.PI * 2);
         ctx.fill();
 
-        // Inner bright core
+        // Inner bright core, offset toward the way the ball is curving so a
+        // spinning ball reads as spinning rather than as a mystery drift. On a
+        // blind half-court the receiver never sees the stroke that produced
+        // the spin, so the ball itself has to carry the tell.
+        const spin = ball.spin || 0;
+        const spinAmount = Math.max(-1, Math.min(1, spin / SPIN_MAX));
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.arc(ballPx, ballPy, ballPr * 0.5, 0, Math.PI * 2);
+        ctx.arc(ballPx + spinAmount * ballPr * 0.42, ballPy, ballPr * 0.5, 0, Math.PI * 2);
         ctx.fill();
+
+        if (Math.abs(spinAmount) > 0.06) {
+          // A short arc on the side the ball is being pulled toward, spun by
+          // wall-clock so it reads as rotation rather than a static crescent.
+          const sweep = Math.min(1.5, 0.5 + Math.abs(spinAmount) * 1.6);
+          const phase = (time / 260) * Math.sign(spinAmount);
+          ctx.strokeStyle = theme.ballGlow;
+          ctx.lineWidth = Math.max(1.5, ballPr * 0.34);
+          ctx.beginPath();
+          ctx.arc(ballPx, ballPy, ballPr * 1.5, phase, phase + sweep);
+          ctx.stroke();
+        }
         ctx.restore();
       }
 
