@@ -12,8 +12,16 @@ let db: typeof import('../server/db').db;
 
 beforeAll(async () => {
   ({ db } = await import('../server/db'));
-  // Two humans with different strengths, landing among the seeded bots
-  // (bot ELOs: 1680, 1540, 1420, 1310)
+  // Bots no longer seed automatically (the fresh launch starts with 0
+  // players) — insert a roster through the insertBot seam so the
+  // interleave/rank contract stays covered for the future bot rollout.
+  // Bot ELOs: 1680, 1540, 1420, 1310.
+  db.insertBot({ id: 'bot-pro-04', username: 'CyberStriker', xp: 9800, eloRating: 1680 });
+  db.insertBot({ id: 'bot-pro-01', username: 'NeonViper', xp: 6200, eloRating: 1540 });
+  db.insertBot({ id: 'bot-pro-02', username: 'PulseEcho', xp: 4100, eloRating: 1420 });
+  db.insertBot({ id: 'bot-pro-03', username: 'AeroZen', xp: 2300, eloRating: 1310 });
+
+  // Two humans with different strengths, landing among the bots
   const win = (id: string, name: string): MatchEndPayload => ({
     playerId: id,
     username: name,
@@ -23,9 +31,11 @@ beforeAll(async () => {
     mode: 'multiplayer',
     isWinner: true,
   });
-  db.getProfile('dev_777777777777777777', 'Strong');
+  db.getProfile('dev_777777777777777777');
+  db.initializeProfile('dev_777777777777777777', 'Strong');
   for (let i = 0; i < 20; i++) db.recordMatch(win('dev_777777777777777777', 'Strong')); // 1200+20*24 = 1680
-  db.getProfile('dev_888888888888888888', 'Mid'); // stays at 1200
+  db.getProfile('dev_888888888888888888');
+  db.initializeProfile('dev_888888888888888888', 'Mid'); // stays at 1200
 });
 
 afterAll(() => {
@@ -72,5 +82,11 @@ describe('leaderboard bot filtering', () => {
   it('respects the row limit across the mixed view', () => {
     const board = db.getLeaderboard('elo', 3, true);
     expect(board.length).toBe(3);
+  });
+
+  it('excludes uninitialized profiles entirely', () => {
+    db.getProfile('dev_999999999999999999'); // never onboards
+    const board = db.getLeaderboard('elo', 100, true);
+    expect(board.some((e) => e.id === 'dev_999999999999999999')).toBe(false);
   });
 });

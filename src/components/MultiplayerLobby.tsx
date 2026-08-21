@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ThemeConfig } from '../game/themes';
-import { Copy, Check, QrCode, Smartphone, Users, Wifi, ArrowRight, X, Play } from 'lucide-react';
+import { isLinkableId } from '../profileRules';
+import { t } from '../i18n/translations';
+import { LanguageCode } from '../types';
+import { Copy, Check, QrCode, Smartphone, Users, Wifi, ArrowRight, X, Play, User } from 'lucide-react';
 
 interface MultiplayerLobbyProps {
   isOpen: boolean;
@@ -10,14 +13,19 @@ interface MultiplayerLobbyProps {
   playerIndex: 0 | 1 | null;
   opponentName: string | null;
   isConnected: boolean;
+  // The locked-in profile username — matches always play under it; there is
+  // no free-text callsign anymore.
   currentUsername?: string;
-  onCreateRoom: (playerName: string) => void;
-  onJoinRoom: (roomId: string, playerName: string) => void;
+  onCreateRoom: () => void;
+  onJoinRoom: (roomId: string) => void;
   onLeaveRoom: () => void;
   onReadyToPlay: () => void;
   onOpenTutorial?: () => void;
   p2pEnabled?: boolean;
   onToggleP2P?: (enabled: boolean) => void;
+  opponentId?: string | null;
+  onViewProfile?: (id: string) => void;
+  language?: LanguageCode;
 }
 
 export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
@@ -36,23 +44,14 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   onLeaveRoom,
   onReadyToPlay,
   onOpenTutorial,
+  opponentId = null,
+  onViewProfile,
+  language = 'en',
 }) => {
-  const [playerName, setPlayerName] = useState<string>(() => {
-    return currentUsername || localStorage.getItem('half_pong_player_name') || `Player ${Math.floor(Math.random() * 900 + 100)}`;
-  });
-
-  useEffect(() => {
-    if (currentUsername) {
-      setPlayerName(currentUsername);
-    }
-  }, [currentUsername]);
+  const playerName = currentUsername || 'Player';
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
   const [showQR, setShowQR] = useState<boolean>(false);
-
-  useEffect(() => {
-    localStorage.setItem('half_pong_player_name', playerName);
-  }, [playerName]);
 
   // Check URL query parameters for auto room join (?room=CODE)
   useEffect(() => {
@@ -77,14 +76,16 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   };
 
   const handleCreate = () => {
-    onCreateRoom(playerName.trim() || 'Player 1');
+    onCreateRoom();
   };
 
   const handleJoin = (e: React.FormEvent) => {
     e.preventDefault();
     if (!joinCodeInput.trim()) return;
-    onJoinRoom(joinCodeInput.trim().toUpperCase(), playerName.trim() || 'Player 2');
+    onJoinRoom(joinCodeInput.trim().toUpperCase());
   };
+
+  const opponentLinkable = onViewProfile && isLinkableId(opponentId);
 
   return (
     <div
@@ -130,18 +131,14 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
           </div>
         </div>
 
-        {/* Player Name Input */}
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-mono text-zinc-400">YOUR CALLSIGN / NICKNAME</label>
-          <input
-            id="input-player-name"
-            type="text"
-            maxLength={14}
-            value={playerName}
-            onChange={(e) => setPlayerName(e.target.value)}
-            placeholder="Enter your name..."
-            className="w-full px-3.5 py-2 rounded-xl bg-zinc-900/90 border border-zinc-700 text-white font-mono text-sm focus:outline-none focus:border-cyan-400 transition"
-          />
+        {/* Locked identity — matches always play under the profile username */}
+        <div
+          id="lobby-playing-as"
+          className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-zinc-900/90 border border-zinc-800"
+        >
+          <User className="w-4 h-4 text-cyan-400 shrink-0" />
+          <span className="text-xs font-mono text-zinc-400">{t('playing_as', language)}</span>
+          <span className="text-sm font-mono font-bold text-white truncate">{playerName}</span>
         </div>
 
         {/* Active Room View */}
@@ -188,23 +185,43 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
               </div>
             )}
 
-            {/* Players Status in Room */}
+            {/* Players Status in Room (opponent name taps to their profile) */}
             <div className="flex flex-col gap-2 pt-2 border-t border-zinc-800 text-xs font-mono">
               <div className="flex items-center justify-between">
                 <span className="text-zinc-400">Device 1 (Host / Bottom):</span>
-                <span className="font-semibold text-emerald-400">
-                  {playerIndex === 0 ? `${playerName} (You)` : opponentName || 'Player 1'}
-                </span>
+                {playerIndex !== 0 && opponentLinkable ? (
+                  <button
+                    id="btn-lobby-view-opponent"
+                    onClick={() => onViewProfile!(opponentId!)}
+                    className="font-semibold text-cyan-300 underline decoration-dotted underline-offset-2 active:scale-95 transition"
+                  >
+                    {opponentName || 'Player 1'}
+                  </button>
+                ) : (
+                  <span className="font-semibold text-emerald-400">
+                    {playerIndex === 0 ? `${playerName} (You)` : opponentName || 'Player 1'}
+                  </span>
+                )}
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-zinc-400">Device 2 (Opponent / Top):</span>
-                <span className={`font-semibold ${opponentName || playerIndex === 1 ? 'text-emerald-400' : 'text-amber-400 animate-pulse'}`}>
-                  {playerIndex === 1
-                    ? `${playerName} (You)`
-                    : opponentName
-                    ? opponentName
-                    : 'Waiting for 2nd phone...'}
-                </span>
+                {playerIndex !== 1 && opponentName && opponentLinkable ? (
+                  <button
+                    id="btn-lobby-view-opponent-2"
+                    onClick={() => onViewProfile!(opponentId!)}
+                    className="font-semibold text-cyan-300 underline decoration-dotted underline-offset-2 active:scale-95 transition"
+                  >
+                    {opponentName}
+                  </button>
+                ) : (
+                  <span className={`font-semibold ${opponentName || playerIndex === 1 ? 'text-emerald-400' : 'text-amber-400 animate-pulse'}`}>
+                    {playerIndex === 1
+                      ? `${playerName} (You)`
+                      : opponentName
+                      ? opponentName
+                      : 'Waiting for 2nd phone...'}
+                  </span>
+                )}
               </div>
             </div>
 

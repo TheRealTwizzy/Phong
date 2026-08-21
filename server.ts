@@ -4,10 +4,12 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { db, ALL_ACHIEVEMENTS } from './server/db';
+import { db } from './server/db';
 import { deviceIdentity, deviceIdFromCookieHeader } from './server/auth';
 import { transformBallForOpponent } from './server/transform';
+import { validateAvatarPng } from './server/image';
 import { MatchEndPayload } from './src/types';
+import { validateUsername } from './src/profileRules';
 
 interface PlayerSession {
   ws: WebSocket;
@@ -91,25 +93,136 @@ async function startServer() {
 
   // Player Profile API
   // The profile belongs to the device identity in the signed cookie; clients
-  // can no longer name (or forge) a player id.
+  // can no longer name (or forge) a player id. Profiles are minted lazily in
+  // an UNINITIALIZED state — onboarding (POST /api/profile/initialize) locks
+  // in the unique username before the player can record matches.
   app.get('/api/profile/me', (req, res) => {
     try {
-      const defaultUsername = (req.query.username as string) || undefined;
-      const profile = db.getProfile(req.deviceId!, defaultUsername);
+      const profile = db.getProfile(req.deviceId!);
       res.json(profile);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
+  // First-arrival onboarding: claim a unique username (starts the 365-day
+  // rename lock). One-shot per profile.
+  app.post('/api/profile/initialize', (req, res) => {
+    try {
+      const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+      const result = db.initializeProfile(req.deviceId!, username);
+      if (!result.ok) {
+        const status = result.code === 'USERNAME_INVALID' ? 400 : 409;
+        return res.status(status).json({ error: result.code });
+      }
+      res.json(result.profile);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Live availability probe for the onboarding / rename forms.
+  app.get('/api/username-check', (req, res) => {
+    try {
+      const u = typeof req.query.u === 'string' ? req.query.u.trim() : '';
+      const check = validateUsername(u);
+      if (!check.ok) {
+        return res.json({ valid: false, available: false, reason: check.reason });
+      }
+      res.json({ valid: true, available: db.isUsernameAvailable(u, req.deviceId!) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Rename (365-day lock) and/or claim mission XP.
   app.put('/api/profile/me', (req, res) => {
     try {
-      const { username } = req.body;
-      if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
+      const { username, xpDelta } = req.body ?? {};
+      let profile = null;
+
+      if (xpDelta !== undefined) {
+        const amount = Number(xpDelta);
+        if (!Number.isInteger(amount) || amount < 1 || amount > 1000) {
+          return res.status(400).json({ error: 'BAD_REQUEST' });
+        }
+        profile = db.grantXp(req.deviceId!, amount);
       }
-      const updated = db.updateUsername(req.deviceId!, username);
-      res.json(updated);
+
+      if (username !== undefined) {
+        if (typeof username !== 'string') {
+          return res.status(400).json({ error: 'USERNAME_INVALID' });
+        }
+        const result = db.changeUsername(req.deviceId!, username.trim());
+        if (!result.ok) {
+          const status =
+            result.code === 'USERNAME_INVALID' ? 400 : result.code === 'USERNAME_TAKEN' ? 409 : 403;
+          return res.status(status).json({ error: result.code, unlockAt: result.unlockAt });
+        }
+        profile = result.profile;
+      }
+
+      if (!profile) {
+        return res.status(400).json({ error: 'BAD_REQUEST' });
+      }
+      res.json(profile);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Avatar upload: the client sends a pre-cropped 256×256 PNG as the raw
+  // body. The parser is scoped to this route so the global JSON limit stays
+  // untouched; validation is dependency-free (see server/image.ts).
+  app.post(
+    '/api/profile/me/avatar',
+    express.raw({ type: 'image/png', limit: '600kb' }),
+    (req, res) => {
+      try {
+        const me = db.getProfile(req.deviceId!);
+        if (!me.initialized) {
+          return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+        }
+        const buf = req.body as Buffer;
+        if (!Buffer.isBuffer(buf) || buf.length === 0) {
+          return res
+            .status(400)
+            .json({ error: 'AVATAR_INVALID', message: 'Send a PNG body with Content-Type: image/png' });
+        }
+        const check = validateAvatarPng(buf);
+        if (!check.ok) {
+          return res
+            .status(check.code === 'AVATAR_TOO_LARGE' ? 413 : 400)
+            .json({ error: check.code, message: check.message });
+        }
+        const avatarVersion = db.setAvatar(req.deviceId!, buf);
+        res.json({ hasAvatar: true, avatarVersion });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    }
+  );
+
+  app.delete('/api/profile/me/avatar', (req, res) => {
+    try {
+      db.deleteAvatar(req.deviceId!);
+      res.json({ hasAvatar: false });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Public, cacheable avatar image. The client cache-busts with
+  // ?v=<avatarVersion> so immutable caching is safe.
+  app.get('/api/avatar/:playerId', (req, res) => {
+    try {
+      const avatar = db.getAvatar(req.params.playerId);
+      if (!avatar) {
+        return res.status(404).end();
+      }
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      res.send(Buffer.from(avatar.data));
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -133,10 +246,30 @@ async function startServer() {
     }
   });
 
+  // Public profile view — anyone can look up any player by id (tapping a
+  // username in the UI). Sanitized server-side: no recovery code, no
+  // activity timestamps. MUST stay registered after every literal
+  // /api/profile/<segment> route so ":id" never shadows them.
+  app.get('/api/profile/:id', (req, res) => {
+    try {
+      const profile = db.getPublicProfile(req.params.id);
+      if (!profile) {
+        return res.status(404).json({ error: 'NOT_FOUND' });
+      }
+      res.json({ profile });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Match Result & Stats Recording API
   app.post('/api/match/record', (req, res) => {
     try {
-      const payload: MatchEndPayload = { ...req.body, playerId: req.deviceId! };
+      const me = db.getProfile(req.deviceId!);
+      if (!me.initialized) {
+        return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+      }
+      const payload: MatchEndPayload = { ...req.body, playerId: req.deviceId!, username: me.username };
       const result = db.recordMatch(payload);
       res.json(result);
     } catch (e: any) {
@@ -207,13 +340,16 @@ async function startServer() {
           }
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
+          // Display names come from the cookie-verified profile, never from
+          // the message — usernames are unique identities now.
+          const hostName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 1';
           const room: Room = {
             id: code,
             players: [
               {
                 ws,
                 playerId: currentPlayerId,
-                playerName: msg.playerName || 'Player 1',
+                playerName: hostName,
                 playerIndex: 0,
               },
               null,
@@ -252,10 +388,11 @@ async function startServer() {
           }
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
+          const guestName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 2';
           room.players[1] = {
             ws,
             playerId: currentPlayerId,
-            playerName: msg.playerName || 'Player 2',
+            playerName: guestName,
             playerIndex: 1,
           };
           room.rematchVotes = [false, false];
@@ -370,7 +507,9 @@ async function startServer() {
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           const sender = room.players[playerIndex];
-          const senderName = msg.senderName || sender?.playerName || `Player ${playerIndex + 1}`;
+          // Sender name from server-side session state only — a client
+          // message can't impersonate another username.
+          const senderName = sender?.playerName || `Player ${playerIndex + 1}`;
 
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             opponent.ws.send(

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AIDifficulty, GameMode, GameSettings, PlayerProfile, PlayerStatus } from '../types';
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
+import { AvatarImage } from './AvatarImage';
 import {
   Bot,
   Dumbbell,
@@ -126,9 +127,13 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           className="self-start flex items-center gap-2 p-1.5 pr-3 rounded-2xl bg-slate-900/80 hover:bg-slate-800/80 border border-slate-700/80 transition active:scale-95"
         >
           <div className="relative">
-            <div className="w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-400/40 flex items-center justify-center text-cyan-300">
-              <User className="w-4 h-4" />
-            </div>
+            <AvatarImage
+              playerId={profile?.id}
+              hasAvatar={profile?.hasAvatar}
+              avatarVersion={profile?.avatarVersion}
+              size={32}
+              className="rounded-xl border border-cyan-400/40"
+            />
             <span
               className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-slate-900 ${
                 playerStatus === 'online'

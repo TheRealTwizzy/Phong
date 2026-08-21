@@ -37,10 +37,26 @@ async function passGatekeeper(page) {
   if (sim) await sim.click();
 }
 
+// Every fresh device must onboard (unique username) before anything else.
+let nameCounter = 0;
+const uniqueName = (prefix) => `${prefix}${Date.now().toString(36).slice(-4)}${nameCounter++}`;
+
+async function onboard(page, prefix = 'E2E') {
+  const modal = await page
+    .waitForSelector('#onboarding-modal-overlay', { timeout: 4000 })
+    .catch(() => null);
+  if (!modal) return; // already onboarded (same context revisiting)
+  await page.fill('#input-onboarding-username', uniqueName(prefix));
+  await page.waitForSelector('#username-status-available', { timeout: 5000 });
+  await page.click('#btn-onboarding-submit');
+  await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
+}
+
 async function hostCreateRoom(page, { p2p }) {
   await page.goto(BASE, { waitUntil: 'networkidle' });
   await passGatekeeper(page);
-  await page.click('#btn-multiplayer-lobby');
+  await onboard(page, 'Host');
+  await page.click('#menu-mode-multiplayer');
   await page.waitForSelector('#btn-create-room', { timeout: 5000 });
   if (!p2p) {
     await page.click('#toggle-p2p input, #toggle-p2p');
@@ -62,6 +78,7 @@ async function hostCreateRoom(page, { p2p }) {
 async function guestJoin(page, code) {
   await page.goto(`${BASE}/?room=${code}`, { waitUntil: 'networkidle' });
   await passGatekeeper(page);
+  await onboard(page, 'Guest');
   await page.waitForSelector('#btn-join-room-submit', { timeout: 5000 });
   const input = await page.$('#input-room-code');
   const val = await input.inputValue();
@@ -89,8 +106,16 @@ async function waitBadge(page, expected, ms) {
 }
 
 async function enterCourt(page) {
-  const btn = await page.$('#btn-ready-play');
+  // Wait for the button to ENABLE (host's stays disabled until the opponent
+  // joins) and for the lobby modal to actually leave the DOM — a lingering
+  // overlay would swallow the court taps below.
+  const btn = await page
+    .waitForSelector('#btn-ready-play:not([disabled])', { timeout: 8000 })
+    .catch(() => null);
   if (btn) await btn.click().catch(() => {});
+  await page
+    .waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 5000 })
+    .catch(() => {});
 }
 
 async function canvasBox(page) {
@@ -105,26 +130,34 @@ async function tapServe(page) {
   await page.mouse.click(box.x + box.width / 2, box.y + box.height * 0.9);
 }
 
-// Park the paddle at the far left so a center serve is guaranteed to miss
-async function movePaddleAside(page) {
-  const box = await canvasBox(page);
-  const y = box.y + box.height * 0.9;
-  await page.mouse.move(box.x + box.width * 0.5, y);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.06, y, { steps: 5 });
-  await page.mouse.up();
+// Keyboard paddle parking (the window-level A/D handler works in every
+// state, while a pointer drag's pointerdown races the serve/lobby state
+// machine). Held, not tapped: the ball can be returned off a parked corner,
+// so paddles stay pinned until the point resolves.
+const parkLeft = (page) => page.keyboard.down('KeyA');
+const unpark = (page) => page.keyboard.up('KeyA');
+
+async function scores(page) {
+  const me = await page.$eval('#score-player', (el) => parseInt(el.textContent, 10)).catch(() => NaN);
+  const opp = await page.$eval('#score-opponent', (el) => parseInt(el.textContent, 10)).catch(() => NaN);
+  return { me, opp };
 }
 
-async function waitScore(page, selector, value, ms, label) {
+// Wait until the two scoreboard numbers sum to `total` (someone scored).
+async function waitTotalPoints(page, total, ms, label) {
   try {
     await page.waitForFunction(
-      ({ sel, v }) => document.querySelector(sel)?.textContent.trim() === v,
-      { sel: selector, v: value },
+      (t) => {
+        const me = parseInt(document.querySelector('#score-player')?.textContent || '', 10);
+        const opp = parseInt(document.querySelector('#score-opponent')?.textContent || '', 10);
+        return me + opp === t;
+      },
+      total,
       { timeout: ms }
     );
   } catch {
-    const cur = await page.$eval(selector, (el) => el.textContent.trim()).catch(() => '?');
-    fail(`${label}: expected ${selector}=${value}, still ${cur} after ${ms}ms`);
+    const s = await scores(page);
+    fail(`${label}: expected ${total} total points, still ${s.me}:${s.opp} after ${ms}ms`);
   }
 }
 
@@ -143,25 +176,51 @@ const guest = await newPage();
 }
 
 // ---- Scenario 2: play two points over P2P; serve hands to the misser ----
+// The serve's horizontal drift is random, so which side eventually misses
+// is not deterministic (a parked corner can still return a lucky serve).
+// What IS invariant, and what this scenario proves: play starts from the
+// server's tap, the point resolves, BOTH scoreboards agree exactly, and the
+// misser holds the next serve (their tap — and only theirs — starts point 2;
+// the pre-fix freeze bug times out here).
 {
   await enterCourt(host);
   await enterCourt(guest);
   await host.waitForSelector('#half-court-canvas');
   await guest.waitForSelector('#half-court-canvas');
 
-  // Point 1: guest parks aside, host serves, guest misses → 1-0
-  await movePaddleAside(guest);
+  // Point 1: park the guest, host serves, then park the host too so the
+  // rally must end.
+  await parkLeft(guest);
   await tapServe(host);
-  await waitScore(host, '#score-player', '1', 12000, 'point 1 (host view)');
-  await waitScore(guest, '#score-opponent', '1', 4000, 'point 1 (guest view)');
-  console.log('point 1 OK — host scored, both scoreboards agree 1-0');
+  await parkLeft(host);
+  await waitTotalPoints(host, 1, 20000, 'point 1 (host view)');
+  await waitTotalPoints(guest, 1, 4000, 'point 1 (guest view)');
+  const h1 = await scores(host);
+  const g1 = await scores(guest);
+  if (g1.me !== h1.opp || g1.opp !== h1.me) {
+    fail(`scoreboards disagree after point 1: host ${h1.me}:${h1.opp} vs guest ${g1.me}:${g1.opp}`);
+  }
+  const guestMissed = h1.me === 1;
+  console.log(`point 1 OK — ${guestMissed ? 'host' : 'guest'} scored, both scoreboards agree`);
+  await unpark(host);
+  await unpark(guest);
 
-  // Point 2: the guest missed, so the guest must now hold the serve.
-  await movePaddleAside(host);
-  await tapServe(guest);
-  await waitScore(guest, '#score-player', '1', 12000, 'point 2 (guest view)');
-  await waitScore(host, '#score-opponent', '1', 4000, 'point 2 (host view)');
-  console.log('point 2 OK — misser served, host missed, both agree 1-1');
+  // Point 2: the misser now holds the serve — their tap must start play.
+  const misser = guestMissed ? guest : host;
+  const other = guestMissed ? host : guest;
+  await parkLeft(other);
+  await tapServe(misser);
+  await parkLeft(misser);
+  await waitTotalPoints(host, 2, 20000, 'point 2 (host view)');
+  await waitTotalPoints(guest, 2, 4000, 'point 2 (guest view)');
+  const h2 = await scores(host);
+  const g2 = await scores(guest);
+  if (g2.me !== h2.opp || g2.opp !== h2.me) {
+    fail(`scoreboards disagree after point 2: host ${h2.me}:${h2.opp} vs guest ${g2.me}:${g2.opp}`);
+  }
+  console.log('point 2 OK — misser held the serve and play continued to 2 points');
+  await unpark(host);
+  await unpark(guest);
 
   await host.context().close();
   await guest.context().close();
@@ -194,14 +253,15 @@ const guest = await newPage();
     if (!frame) fail(`${vp.label}: no #phone-frame rendered`);
     const wall = await page.$('#simulate-smartphone-btn');
     if (wall) fail(`${vp.label}: lock screen still present`);
-    await page.waitForSelector('#half-court-canvas', { timeout: 5000 }).catch(() => fail(`${vp.label}: game canvas missing`));
-    // The full HUD must be interactable without any zooming
-    await page.waitForSelector('#btn-multiplayer-lobby', { timeout: 5000 }).catch(() => fail(`${vp.label}: lobby button missing`));
-    const box = await (await page.$('#btn-multiplayer-lobby')).boundingBox();
-    if (!box || box.width < 20) fail(`${vp.label}: lobby button not reasonably sized (${box && box.width}px)`);
-    await page.click('#btn-multiplayer-lobby');
+    await onboard(page, 'Frame');
+    await page.waitForSelector('#main-menu-screen', { timeout: 5000 }).catch(() => fail(`${vp.label}: main menu missing`));
+    // The menu must be interactable without any zooming
+    await page.waitForSelector('#menu-mode-multiplayer', { timeout: 5000 }).catch(() => fail(`${vp.label}: multiplayer card missing`));
+    const box = await (await page.$('#menu-mode-multiplayer')).boundingBox();
+    if (!box || box.width < 20) fail(`${vp.label}: multiplayer card not reasonably sized (${box && box.width}px)`);
+    await page.click('#menu-mode-multiplayer');
     await page.waitForSelector('#btn-create-room', { timeout: 5000 }).catch(() => fail(`${vp.label}: lobby did not open`));
-    console.log(`scenario 4 OK — ${vp.label}: framed, playable, HUD at full size`);
+    console.log(`scenario 4 OK — ${vp.label}: framed, playable, menu at full size`);
     await ctx.close();
   }
 }
@@ -214,53 +274,58 @@ const guest = await newPage();
   const a = await ctxA.newPage();
   a.on('dialog', (d) => d.accept().catch(() => {}));
   await a.goto(BASE, { waitUntil: 'networkidle' });
+  // Onboarding locks in a distinctive unique name (renames are 365d-locked,
+  // so the name is chosen here, not via PUT)
+  const keeperName = uniqueName('Keeper');
+  await a.fill('#input-onboarding-username', keeperName);
+  await a.waitForSelector('#username-status-available', { timeout: 5000 });
+  await a.click('#btn-onboarding-submit');
+  await a.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
   const profA1 = await me(a);
   if (!/^dev_[0-9a-f]{18}$/.test(profA1.id)) fail(`server-issued id malformed: ${profA1.id}`);
   if (!/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(profA1.recoveryCode)) fail(`bad recovery code: ${profA1.recoveryCode}`);
+  if (profA1.username !== keeperName) fail(`onboarding did not set username: ${profA1.username}`);
 
   // localStorage wipe must NOT re-roll identity (the cookie is the anchor)
   await a.evaluate(() => localStorage.clear());
   await a.reload({ waitUntil: 'networkidle' });
   const profA2 = await me(a);
   if (profA2.id !== profA1.id) fail(`identity re-rolled after localStorage clear: ${profA1.id} -> ${profA2.id}`);
+  if (!profA2.initialized) fail('initialized profile lost onboarding state after localStorage clear');
   console.log('scenario 5a OK — identity survives localStorage wipe');
 
-  // Give A's profile a distinctive name so the move is provable
-  await a.evaluate(() =>
-    fetch('/api/profile/me', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'KeeperA' }),
-    }).then((r) => r.json())
-  );
-
-  // Second device gets its own profile; claiming A's code moves A's profile over
+  // Second device claims A's code straight from the onboarding modal (the
+  // restore path is the onboarding bypass for returning players)
   const ctxB = await browser.newContext({ ...devices['iPhone 13'] });
   const b = await ctxB.newPage();
   b.on('dialog', (d) => d.accept().catch(() => {}));
   await b.goto(BASE, { waitUntil: 'networkidle' });
   const profB1 = await me(b);
   if (profB1.id === profA1.id) fail('two devices shared an identity');
+  if (profB1.initialized) fail('fresh device arrived pre-initialized');
 
-  await b.click('#btn-open-profile');
-  await b.waitForSelector('#input-claim-code', { timeout: 5000 });
-  await b.fill('#input-claim-code', profA1.recoveryCode);
+  await b.waitForSelector('#btn-onboarding-show-restore', { timeout: 5000 });
+  await b.click('#btn-onboarding-show-restore');
+  await b.fill('#input-onboarding-claim-code', profA1.recoveryCode);
   await Promise.all([
     b.waitForNavigation({ waitUntil: 'networkidle' }).catch(() => {}),
-    b.click('#btn-claim-profile'),
+    b.click('#btn-onboarding-claim'),
   ]);
   const profB2 = await me(b);
-  if (profB2.username !== 'KeeperA') fail(`claim did not move profile: got ${profB2.username}`);
+  if (profB2.username !== keeperName) fail(`claim did not move profile: got ${profB2.username}`);
   if (profB2.id !== profB1.id) fail('device id changed on claim');
   if (profB2.recoveryCode === profA1.recoveryCode) fail('recovery code did not rotate on use');
+  if (!profB2.initialized) fail('claimed profile lost its initialized state');
 
   // The old device unlinks: same device id, but a brand-new profile row
+  // that must onboard again
   await a.reload({ waitUntil: 'networkidle' });
   const profA3 = await me(a);
   if (profA3.createdAt === profA1.createdAt) fail('old device still holds the moved profile');
   if (profA3.recoveryCode === profA1.recoveryCode || profA3.recoveryCode === profB2.recoveryCode)
     fail('fresh profile did not get its own recovery code');
   if (profA3.matchesPlayed !== 0) fail('old device profile not fresh');
+  if (profA3.initialized) fail('old device fresh profile should be uninitialized');
   console.log('scenario 5b OK — recovery code transfers the profile and rotates');
 
   await ctxA.close();

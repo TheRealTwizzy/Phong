@@ -2,6 +2,7 @@ import React from 'react';
 import { GameMode, PlayerStats, PlayerProfile, PlayerStatus, LanguageCode } from '../types';
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
+import { AvatarImage } from './AvatarImage';
 import {
   Volume2,
   VolumeX,
@@ -30,6 +31,9 @@ interface ScoreBoardProps {
   onQuitToMenu: () => void;
   winningScore: number;
   opponentName?: string;
+  // Provided only when the opponent has a real public profile (multiplayer
+  // with a linkable id) — makes their name a tap target.
+  onViewOpponent?: () => void;
   language?: LanguageCode;
 }
 
@@ -47,6 +51,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
   onQuitToMenu,
   winningScore,
   opponentName = 'Opponent',
+  onViewOpponent,
   language = 'en',
 }) => {
   const isHighRally = stats.rallyCount >= 5;
@@ -69,9 +74,13 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
         title={`Player Profile (${playerStatus.toUpperCase()})`}
       >
         <div className="relative">
-          <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-cyan-500/20 border border-cyan-400/40 flex items-center justify-center text-cyan-300">
-            <User className="w-3.5 h-3.5" />
-          </div>
+          <AvatarImage
+            playerId={profile?.id}
+            hasAvatar={profile?.hasAvatar}
+            avatarVersion={profile?.avatarVersion}
+            size={26}
+            className="rounded-lg border border-cyan-400/40"
+          />
           {/* Status Indicator Dot */}
           <span
             id="player-status-dot"
@@ -134,11 +143,22 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
         </div>
       ) : (
         <div className="flex items-center gap-2 sm:gap-3.5 font-mono">
-          {/* Opponent Side Score */}
+          {/* Opponent Side Score (name taps through to their public profile
+              when they have one) */}
           <div className="flex flex-col items-center">
-            <span className="text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tight truncate max-w-[45px] sm:max-w-[70px]">
-              {opponentName}
-            </span>
+            {onViewOpponent ? (
+              <button
+                id="btn-view-opponent-profile"
+                onClick={onViewOpponent}
+                className="text-[8px] sm:text-[9px] text-cyan-300 underline decoration-dotted underline-offset-2 uppercase tracking-tight truncate max-w-[45px] sm:max-w-[70px] active:scale-95 transition"
+              >
+                {opponentName}
+              </button>
+            ) : (
+              <span className="text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tight truncate max-w-[45px] sm:max-w-[70px]">
+                {opponentName}
+              </span>
+            )}
             <span
               id="score-opponent"
               className="text-lg sm:text-2xl font-black leading-none"

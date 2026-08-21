@@ -18,13 +18,15 @@ This document is the working guide to **Phong**, an arcade sports web app with a
 
 **Navigation**: the app opens on a **MainMenu** screen (`screen: 'menu' | 'game'` in `App.tsx`). Match settings — AI difficulty and winning score — are locked in on the menu **before** a match starts and are not editable mid-match; the in-game Settings modal carries device/presentation preferences only. The in-match HUD keeps just sound/reset/settings/home; the winner overlay offers Play Again (or Rematch) and Main Menu.
 
+**Player identity**: profiles are minted lazily from the device cookie in an *uninitialized* state and a blocking **OnboardingModal** gates everything until the player locks in a **unique username** (case-insensitive, 3–16 chars `[A-Za-z0-9][A-Za-z0-9_-]*`, `Paddle-` prefix reserved for placeholders; rules shared client/server via `src/profileRules.ts`). The username then can't change for **365 days** from initialization (and from each later change); a released name returns to the pool. Optional **avatars** are exactly 256×256 PNGs — the client center-crops/resizes any image (`src/media/avatar.ts`), the server validates dimensions dependency-free (`server/image.ts`). Tapping any username (leaderboard, match history, lobby, in-match opponent) opens the sanitized **PublicProfileModal** backed by `GET /api/profile/:id`. Uninitialized profiles can't record matches and never appear on the leaderboard.
+
 ## 2. Tech Stack
 
 - **Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 4 (CSS-first — configured in `src/index.css`, no `tailwind.config.js`), Motion (`motion/react`), Lucide React icons, Canvas Confetti.
 - **Server**: Express 4 (`server.ts`) + **`ws`** for the WebSocket relay (no Socket.IO), Node 22. One process serves the client and the relay on one port, dev (Vite middleware) and prod (static `dist/`) alike. Runtime dependencies are only `express` + `ws`; everything else is dev tooling.
 - **P2P mode**: private matches connect the two phones directly over **WebRTC DataChannels** (`src/net/p2p.ts`), with the relay as automatic fallback — see §5.
 - **Audio**: procedural Web Audio API synthesis in `src/audio/soundEffects.ts` — zero audio assets.
-- **Persistence**: **SQLite** via Node's built-in `node:sqlite` (no native deps) at `DATA_DIR/phong.db` (default `./data`), WAL mode, managed by `server/db.ts`. A legacy `game_database.json` in `DATA_DIR` is imported once on first boot. Client keeps a localStorage fallback for offline solo play.
+- **Persistence**: **SQLite** via Node's built-in `node:sqlite` (no native deps) at `DATA_DIR/phong.db` (default `./data`), WAL mode, managed by `server/db.ts`. Avatars live in a separate `avatars` BLOB table (kept out of `SELECT *` hot paths). One-shot destructive migrations are flagged in the `meta` table: `wipe_v1` wiped all pre-launch player data (including `auth_secret`, retiring every old device cookie) exactly once; there is no legacy-JSON import and no automatic bot seeding (`db.insertBot()` is the seam for the future bot roster). `npm run db:reset -- --yes` is the manual full reset (server stopped first).
 
 ## 3. Normalized Coordinate & Physics Model
 
@@ -78,16 +80,20 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── server.ts                  # Express + ws relay + REST API + Vite middleware
 ├── tsconfig.json
 ├── vite.config.ts
+├── scripts/db-reset.mjs       # Manual full player-data reset (npm run db:reset -- --yes)
 ├── server/
-│   ├── db.ts                  # SQLite store: profiles, ELO, XP, achievements, history
+│   ├── db.ts                  # SQLite store: profiles, ELO, XP, achievements, history, avatars
+│   ├── image.ts               # Dep-free 256×256 PNG avatar validation
 │   └── transform.ts           # Cross-net ball transform (unit-tested, shared with client)
 ├── tests/                     # Vitest: transform, physics, db invariants, legacy import
 └── src/
     ├── main.tsx               # React bootstrap
     ├── App.tsx                # Game controller, loop, WS client, all state
     ├── types.ts               # Shared types incl. WSClientMessage/WSServerMessage
+    ├── profileRules.ts        # Username/avatar rules shared by client & server
     ├── index.css              # Tailwind 4 entry + base styles
     ├── net/p2p.ts             # WebRTC DataChannel link (P2P play + fallback)
+    ├── media/avatar.ts        # Client avatar pipeline: crop → 256×256 → PNG → upload
     ├── audio/soundEffects.ts  # Procedural SFX, chiptune BGM, soundscapes
     ├── game/
     │   ├── physics.ts         # Ball movement, collisions, spin, AI opponent
@@ -96,9 +102,10 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
     ├── i18n/translations.ts   # 7-language dictionary (en es ja de fr pt zh) + t()
     └── components/            # MainMenu, CourtCanvas, ScoreBoard,
                                # MultiplayerLobby, SplitScreenMatch,
-                               # RadarPreview, QuickChat,
-                               # Profile/Leaderboard/MatchHistory/Missions/
-                               # Achievements/Settings/Tutorial modals, etc.
+                               # RadarPreview, QuickChat, AvatarImage,
+                               # Onboarding/PublicProfile/Profile/Leaderboard/
+                               # MatchHistory/Missions/Achievements/Settings/
+                               # Tutorial modals, etc.
 ```
 
 ## 5. Real-Time Protocol (`server.ts`, path `/ws`)
@@ -138,9 +145,9 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 | `pong` | `timestamp` | Latency reply |
 | `error` | `message` | Join failures etc. |
 
-**REST API** (same origin): `GET /api/health`, `GET /api/rtc-config` (STUN list + time-limited TURN creds when `TURN_URL`/`TURN_STATIC_SECRET` are set), `GET /api/room/:roomId`, `GET|PUT /api/profile/me`, `POST /api/profile/claim` (recovery-code transfer), `POST /api/match/record`, `GET /api/leaderboard?sort=elo|level|rally|wins`, `GET /api/achievements`, `GET /api/matches/me`.
+**REST API** (same origin): `GET /api/health`, `GET /api/rtc-config` (STUN list + time-limited TURN creds when `TURN_URL`/`TURN_STATIC_SECRET` are set), `GET /api/room/:roomId`, `GET|PUT /api/profile/me` (PUT takes `{username?}` — 409 `USERNAME_TAKEN` / 403 `USERNAME_LOCKED {unlockAt}` — and/or `{xpDelta?}` for mission claims), `POST /api/profile/initialize` (one-shot onboarding username claim), `GET /api/username-check?u=`, `POST|DELETE /api/profile/me/avatar` (raw 256×256 PNG body, route-scoped 600kb limit), `GET /api/avatar/:playerId` (immutable-cached, `?v=avatarVersion` busts), `POST /api/profile/claim` (recovery-code transfer), `GET /api/profile/:id` (sanitized public profile — registered LAST so `me`/`claim` etc. match first), `POST /api/match/record` (403 for uninitialized profiles), `GET /api/leaderboard?sort=elo|level|rally|wins` (initialized profiles only), `GET /api/achievements`, `GET /api/matches/me`.
 
-**Device identity** (`server/auth.ts`): the server issues each browser a signed HttpOnly cookie (`phong_device`) on first API contact — HMAC-SHA256 over a random device id, secret auto-generated and persisted in the DB `meta` table. All profile/match/achievement routes resolve the player from the verified cookie; client-sent player ids are never trusted (the WS relay also prefers the cookie identity). One cookie jar = one profile, which is as close to "one profile per device" as the web allows. Each profile carries a `recoveryCode` (shown only to its own device in the Profile modal); `POST /api/profile/claim` moves the profile to the claiming device and rotates the code.
+**Device identity** (`server/auth.ts`): the server issues each browser a signed HttpOnly cookie (`phong_device`) on first API contact — HMAC-SHA256 over a random device id, secret auto-generated and persisted in the DB `meta` table. All profile/match/achievement routes resolve the player from the verified cookie; client-sent player ids are never trusted, and the WS relay resolves display names from the cookie's profile (clients no longer send `playerName` at all). One cookie jar = one profile, which is as close to "one profile per device" as the web allows. Each profile carries a `recoveryCode` (shown only to its own device in the Profile modal); `POST /api/profile/claim` moves the profile — avatar included — to the claiming device and rotates the code.
 
 **P2P mode** (`src/net/p2p.ts`): the host offers a WebRTC session when the guest joins (lobby toggle, default on); signaling rides `rtc_signal` over the relay. Gameplay starts relayed and hands over when the DataChannels open — "fast" (unordered, no retransmit) carries `paddle_move`, "game" (reliable ordered) carries everything else. Peers exchange the same client-message shapes and each side synthesizes the server-shaped equivalents locally, replicating the room rules (score, serve rotation, rematch votes) deterministically and reusing `server/transform.ts` for the net cross. If the link never opens or dies, play continues on the relay (the HUD badge shows `P2P` / `RELAY`). Adding a gameplay message means handling it in **both** `server.ts` and `src/net/p2p.ts`.
 
@@ -186,6 +193,7 @@ Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.exa
 5. **Icons**: lucide-react. **Styling**: Tailwind utility classes; inline styles only for dynamic canvas/theme color bindings.
 6. **Keep the client origin-relative**: derive WS and API URLs from `window.location` (this is what makes dev, tunnels, and production work unchanged).
 7. **Match settings are pre-match only**: mode, AI difficulty, and winning score are chosen on the MainMenu before play; the in-game Settings modal is device preferences only. Paddle width and ball speed are engine constants, never settings (see §3).
+8. **Username & avatar rules live in `src/profileRules.ts`** and nowhere else — both sides import them. Usernames enter the system only through `initializeProfile`/`changeUsername` (never via query params, match payloads, or WS messages).
 
 ## 10. Deployment
 

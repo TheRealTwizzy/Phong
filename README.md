@@ -6,6 +6,10 @@ The main menu offers four modes: **Solo AI** (adaptive Rookie → Chaos opponent
 
 Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server, keyed to a **server-issued device identity** (signed cookie — one profile per device, no login) with a recovery code to move your profile to a new phone.
 
+Every player locks in a **unique username** on first arrival (case-insensitive, held for 365 days per change) and can upload an **avatar** (auto-cropped to 256×256). Tap any username — leaderboard, match history, lobby, or mid-match — to view that player's public profile.
+
+> **Note:** the next deploy of this version performs a **one-time player wipe** (`wipe_v1`) — the game relaunches with 0 players; bots return later. `npm run db:reset -- --yes` (server stopped) is the manual equivalent.
+
 ## Quick start
 
 ```bash
