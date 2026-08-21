@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { BallState, GameSettings, Particle, Ripple, LanguageCode } from '../types';
 import { ThemeConfig } from '../game/themes';
-import { PADDLE_Y, PADDLE_HEIGHT, PADDLE_WIDTH_RATIO } from '../game/physics';
+import { PADDLE_Y, PADDLE_HEIGHT, ServeAim } from '../game/physics';
 import { sound } from '../audio/soundEffects';
 import { t } from '../i18n/translations';
 
@@ -20,7 +20,15 @@ interface CourtCanvasProps {
   settings: GameSettings;
   theme: ThemeConfig;
   isServing: boolean;
-  onServe: () => void;
+  onServe: (aim?: ServeAim) => void;
+  /** Live paddle width for this match (rules can scale it). */
+  paddleWidth: number;
+  /** Max serve deflection in degrees under this match's rules. */
+  serveAngleLimitDeg: number;
+  /** 0 = no auto-serve; otherwise the configured seconds. */
+  autoServeSeconds: number;
+  /** Seconds left before an auto-serve fires, or null when not counting. */
+  serveCountdown: number | null;
   isBallInOpponentCourt: boolean;
   oppEstimatedX?: number;
   rallyCount: number;
@@ -39,6 +47,10 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   theme,
   isServing,
   onServe,
+  paddleWidth,
+  serveAngleLimitDeg,
+  autoServeSeconds,
+  serveCountdown,
   isBallInOpponentCourt,
   oppEstimatedX = 0.5,
   rallyCount,
@@ -81,7 +93,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         // gamma is left-to-right tilt in degrees (-90 to +90)
         const tilt = Math.max(-30, Math.min(30, e.gamma));
         const normalizedX = 0.5 + (tilt / 30) * 0.45;
-        const halfP = PADDLE_WIDTH_RATIO / 2;
+        const halfP = paddleWidthRef.current / 2;
         const clampedX = Math.max(halfP, Math.min(1 - halfP, normalizedX));
         onPaddleMove(clampedX);
       }
@@ -120,7 +132,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         if (keysPressed.has('ArrowRight') || keysPressed.has('KeyD')) delta += 0.025;
 
         if (delta !== 0) {
-          const halfP = PADDLE_WIDTH_RATIO / 2;
+          const halfP = paddleWidthRef.current / 2;
           const nextX = Math.max(halfP, Math.min(1 - halfP, paddleXRef.current + delta));
           onPaddleMove(nextX);
         }
@@ -239,10 +251,52 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     onImpact,
   ]);
 
+  // Serve aiming: while the serve prompt is up, a drag from the paddle sets
+  // direction and power. A plain tap still serves, so the old one-tap feel is
+  // intact for anyone who does not want to aim.
+  const paddleWidthRef = useRef(paddleWidth);
+  paddleWidthRef.current = paddleWidth;
+  const aimStartRef = useRef<{ x: number; y: number } | null>(null);
+  const [aim, setAim] = useState<ServeAim | null>(null);
+  const aimRef = useRef<ServeAim | null>(null);
+  aimRef.current = aim;
+
+  // Drag distance, in fractions of the court, that counts as a full pull.
+  // How far the aim arrow may swing, mirroring what the match rules allow.
+  const serveAngleLimitRef = useRef(serveAngleLimitDeg);
+  serveAngleLimitRef.current = serveAngleLimitDeg;
+
+  const AIM_FULL_PULL = 0.22;
+  const AIM_DEADZONE = 0.02;
+
+  const aimFromEvent = (e: React.PointerEvent<HTMLCanvasElement>): ServeAim | null => {
+    const canvas = canvasRef.current;
+    const start = aimStartRef.current;
+    if (!canvas || !start) return null;
+    const rect = canvas.getBoundingClientRect();
+    const dx = (e.clientX - rect.left) / rect.width - start.x;
+    const dy = (e.clientY - rect.top) / rect.height - start.y;
+    if (Math.hypot(dx, dy) < AIM_DEADZONE) return null;
+    // Pull back (downward) for power, sideways for direction — a slingshot.
+    const power = Math.max(0, Math.min(1, dy / AIM_FULL_PULL));
+    const angle = Math.max(-1, Math.min(1, -dx / AIM_FULL_PULL));
+    return { angle, power };
+  };
+
   // Pointer drag event handlers for mouse/touch
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (isServing) {
-      onServe();
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        aimStartRef.current = {
+          x: (e.clientX - rect.left) / rect.width,
+          y: (e.clientY - rect.top) / rect.height,
+        };
+        try {
+          (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        } catch {}
+      }
       return;
     }
     isDraggingRef.current = true;
@@ -251,12 +305,27 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (aimStartRef.current) {
+      setAim(aimFromEvent(e));
+      return;
+    }
     if (isDraggingRef.current || e.buttons === 1) {
       updatePaddleFromEvent(e);
     }
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (aimStartRef.current) {
+      const finalAim = aimFromEvent(e);
+      aimStartRef.current = null;
+      setAim(null);
+      try {
+        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {}
+      // A tap with no meaningful drag serves the default way.
+      onServe(finalAim || undefined);
+      return;
+    }
     isDraggingRef.current = false;
     try {
       (e.target as HTMLElement).releasePointerCapture(e.pointerId);
@@ -268,7 +337,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const rawX = (e.clientX - rect.left) / rect.width;
-    const halfP = PADDLE_WIDTH_RATIO / 2;
+    const halfP = paddleWidth / 2;
     const clampedX = Math.max(halfP, Math.min(1 - halfP, rawX));
     onPaddleMove(clampedX);
   };
@@ -550,7 +619,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       // ==========================================
       // PLAYER PADDLE (AT BOTTOM OF HALF COURT)
       // ==========================================
-      const paddleW = PADDLE_WIDTH_RATIO * width;
+      const paddleW = paddleWidth * width;
       const paddleH = PADDLE_HEIGHT * height;
       const paddleCenterPx = paddleXRef.current * width;
       const paddleLeftPx = paddleCenterPx - paddleW / 2;
@@ -572,14 +641,63 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       ctx.fillRect(paddleCenterPx - 3, paddleTopPx + 2, 6, paddleH - 4);
       ctx.restore();
 
-      // Serve Prompt Overlay
+      // Serve Prompt Overlay, and the aim indicator once a drag starts.
       if (isServing) {
-        const pulse = (Math.sin(time / 200) + 1) / 2;
+        const liveAim = aimRef.current;
         ctx.save();
-        ctx.fillStyle = `rgba(255, 255, 255, ${0.7 + pulse * 0.3})`;
-        ctx.font = 'bold 13px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(t('tap_to_serve', language), width / 2, height * 0.75);
+        if (liveAim) {
+          // Slingshot readout: an arrow from the paddle showing the launch
+          // direction, its length showing power.
+          const originX = paddleCenterPx;
+          const originY = paddleTopPx;
+          const radians = (liveAim.angle * serveAngleLimitRef.current * Math.PI) / 180;
+          const reach = height * (0.10 + 0.28 * liveAim.power);
+          const tipX = originX + Math.sin(radians) * reach;
+          const tipY = originY - Math.cos(radians) * reach;
+
+          ctx.strokeStyle = theme.accent;
+          ctx.lineWidth = 3;
+          ctx.setLineDash([7, 5]);
+          ctx.beginPath();
+          ctx.moveTo(originX, originY);
+          ctx.lineTo(tipX, tipY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Arrow head
+          const head = 9;
+          ctx.beginPath();
+          ctx.moveTo(tipX, tipY);
+          ctx.lineTo(tipX - Math.sin(radians - 0.45) * head, tipY + Math.cos(radians - 0.45) * head);
+          ctx.lineTo(tipX - Math.sin(radians + 0.45) * head, tipY + Math.cos(radians + 0.45) * head);
+          ctx.closePath();
+          ctx.fillStyle = theme.accent;
+          ctx.fill();
+
+          // Power bar along the bottom
+          const barW = width * 0.42;
+          const barX = (width - barW) / 2;
+          const barY = height * 0.955;
+          ctx.fillStyle = 'rgba(255,255,255,0.18)';
+          ctx.fillRect(barX, barY, barW, 5);
+          ctx.fillStyle = theme.accent;
+          ctx.fillRect(barX, barY, barW * liveAim.power, 5);
+        } else {
+          const pulse = (Math.sin(time / 200) + 1) / 2;
+          ctx.fillStyle = `rgba(255, 255, 255, ${0.7 + pulse * 0.3})`;
+          ctx.font = 'bold 13px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(t('drag_to_aim', language), width / 2, height * 0.75);
+          if (autoServeSeconds > 0 && serveCountdown !== null) {
+            ctx.font = 'bold 11px monospace';
+            ctx.fillStyle = 'rgba(255,255,255,0.55)';
+            ctx.fillText(
+              t('auto_serve_in', language, { s: serveCountdown }),
+              width / 2,
+              height * 0.79
+            );
+          }
+        }
         ctx.restore();
       }
 
@@ -598,6 +716,10 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     oppEstimatedX,
     language,
     netLabel,
+    aim,
+    autoServeSeconds,
+    serveCountdown,
+    paddleWidth,
   ]);
 
   return (

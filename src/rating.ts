@@ -90,8 +90,19 @@ export const AI_DIFFICULTIES: AIDifficulty[] = ['rookie', 'pro', 'cyber', 'chaos
 // identities (Pro stays roughly a coin flip at any skill, Cyber stays a stretch)
 // instead of collapsing into one rubber-banded opponent.
 export const AI_ADAPT_STRENGTH = 0.6;
-/** Most a difficulty may slide from its anchor, in mu points, either way. */
+/** Most a difficulty may slide UP from its anchor, in mu points. */
 export const AI_ADAPT_BAND = 7;
+/**
+ * Downward the ladder follows the player all the way, and the band is wide
+ * enough never to strand them. Partial tracking leaves a residual gap of
+ * (1 - strength) x deviation, which is fine above average — it is what lets a
+ * player feel themselves outgrow Rookie — but below average it compounds: a
+ * player losing to Pro fell to mu 13 while Pro stalled at the band edge of 18,
+ * so their odds went 50% -> 22% and every further loss widened the gap. The
+ * ladder must never get harder because you are losing.
+ */
+export const AI_ADAPT_DOWN_STRENGTH = 1;
+export const AI_ADAPT_DOWN_BAND = 20;
 
 /**
  * The mu the AI actually plays at for this player. This is the honest rating of
@@ -99,8 +110,11 @@ export const AI_ADAPT_BAND = 7;
  */
 export function effectiveAiMu(difficulty: AIDifficulty, playerMu: number): number {
   const base = AI_RATINGS[difficulty].mu;
-  const slide = AI_ADAPT_STRENGTH * (playerMu - START_MU);
-  return base + clamp(slide, -AI_ADAPT_BAND, AI_ADAPT_BAND);
+  const deviation = playerMu - START_MU;
+  // Asymmetric on purpose: full tracking down, partial up.
+  return deviation < 0
+    ? base + clamp(AI_ADAPT_DOWN_STRENGTH * deviation, -AI_ADAPT_DOWN_BAND, 0)
+    : base + clamp(AI_ADAPT_STRENGTH * deviation, 0, AI_ADAPT_BAND);
 }
 
 /** The adapted anchor to rate a solo match against. */
@@ -285,19 +299,25 @@ export const XP_PER_POINT = 12;
 export const XP_PER_RALLY = 4;
 export const XP_WIN_BONUS = 40;
 export const XP_PVP_MULTIPLIER = 1.5;
-export const XP_FLOOR = 15;
+// Every finished match is progression, win or lose. Playing one is the part
+// that costs the player time, so it is paid for on its own before anything
+// about the result is considered.
+export const XP_PLAY_BONUS = 35;
+export const XP_FLOOR = 45;
 
 /**
  * Multiplier from the pre-match prediction. `winProb` is the player's own
  * predicted chance of winning.
  *  - win:  0.60 (certain win) .. 2.00 (certain upset)
- *  - loss: 0.20 (lost while heavily favoured) .. 0.75 (lost to a giant)
+ *  - loss: 0.40 (lost while heavily favoured) .. 0.95 (lost to a giant)
  * Difficulty scaling is implicit: winProb already encodes opponent strength,
- * so there is no per-difficulty XP table anywhere.
+ * so there is no per-difficulty XP table anywhere. The loss floor is well
+ * above zero deliberately: a loss used to pay the raw XP_FLOOR, about 25
+ * losses to a level, which reads as no progression at all.
  */
 export function surpriseMultiplier(winProb: number, won: boolean): number {
   const p = clamp(winProb, 0, 1);
-  return won ? 0.6 + 1.4 * (1 - p) : 0.2 + 0.55 * (1 - p);
+  return won ? 0.6 + 1.4 * (1 - p) : 0.4 + 0.55 * (1 - p);
 }
 
 export function matchXp(params: {
@@ -308,12 +328,37 @@ export function matchXp(params: {
   mode: GameMode;
 }): number {
   const base =
+    XP_PLAY_BONUS +
     params.playerScore * XP_PER_POINT +
     params.maxRally * XP_PER_RALLY +
     (params.won ? XP_WIN_BONUS : 0);
   const modeMult = params.mode === 'multiplayer' ? XP_PVP_MULTIPLIER : 1;
   const xp = base * surpriseMultiplier(params.winProb, params.won) * modeMult;
   return Math.max(XP_FLOOR, Math.round(xp));
+}
+
+// ---------------------------------------------------------------------------
+// Practice Wall
+// ---------------------------------------------------------------------------
+//
+// Practice has no opponent and the return line gives the ball back every time,
+// so a streak is a measure of endurance, not of beating anyone. It pays real
+// but deliberately thin XP, keyed on the best streak of the session, and is
+// capped per day: without a cap it would be the fastest XP in the game by a
+// wide margin precisely because it cannot be lost.
+
+export const PRACTICE_XP_PER_RETURN = 2;
+export const PRACTICE_XP_SESSION_CAP = 90;
+export const PRACTICE_XP_DAILY_CAP = 300;
+
+/** XP for one Practice Wall session, from its best return streak. */
+export function practiceXp(bestStreak: number): number {
+  const streak = Math.max(0, Math.floor(bestStreak || 0));
+  if (streak < 3) return 0; // a couple of taps is not a session
+  // Square-root shaped: early returns are worth the most, so a long grind
+  // cannot out-earn simply playing real matches.
+  const raw = PRACTICE_XP_PER_RETURN * Math.sqrt(streak) * 3;
+  return Math.min(PRACTICE_XP_SESSION_CAP, Math.round(raw));
 }
 
 // Level curve: each level costs a bit more than the last, growing linearly
