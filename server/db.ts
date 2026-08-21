@@ -1497,12 +1497,26 @@ class GameDatabase {
       elo: '(rankedGames >= 5 AND rankSigma <= 4.0) DESC, rankMu DESC',
     }[sortBy];
 
+    // A board only lists players with progress on the thing IT measures.
+    // Rows of zeros are noise: a freshly onboarded profile is not "last
+    // place", it simply is not on the board yet — and the skill board is a
+    // PvP ladder, so a solo-only career belongs on the level, wins and rally
+    // boards instead. Bots are exempt: they are a curated roster, inserted
+    // deliberately, not idle players.
+    const progress = {
+      level: 'p.xp > 0',
+      rally: 'p.highestRally > 0',
+      wins: 'p.matchesWon > 0',
+      elo: 'p.rankedGames > 0',
+    }[sortBy];
+
     // Only initialized profiles compete — players who never finished
     // onboarding hold placeholder names and stay invisible.
     const rows = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
+            AND (${progress} OR p.id LIKE 'bot-%')
           ORDER BY ${orderBy}`
       )
       .all() as unknown as PlayerRow[];
