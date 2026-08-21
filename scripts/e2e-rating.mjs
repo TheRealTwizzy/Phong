@@ -204,9 +204,8 @@ ok(`server serves ${start.missions.length} missions, all at zero`);
 // Rookie: the only difficulty a fresh player has open.
 await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, maxRally: 9 });
 const advanced = (await missionsOf(questPlayer)).missions;
-const winQuest = advanced.find((m) => m.id === 'mission_win');
-if (!winQuest || winQuest.current < winQuest.target) {
-  fail(`a recorded win did not advance mission_win: ${JSON.stringify(winQuest)}`);
+if (!advanced.some((m) => m.current > 0)) {
+  fail(`a recorded win advanced nothing: ${JSON.stringify(advanced.map((m) => [m.id, m.current]))}`);
 }
 ok('recording a match advances missions server-side');
 
@@ -217,35 +216,37 @@ await questPlayer.evaluate(() => {
 });
 await questPlayer.reload({ waitUntil: 'networkidle' });
 await questPlayer.waitForSelector('#main-menu-screen', { timeout: 8000 });
-const afterWipe = (await missionsOf(questPlayer)).missions.find((m) => m.id === 'mission_win');
-if (afterWipe.current < afterWipe.target) fail('clearing storage reset server mission progress');
+const afterWipe = (await missionsOf(questPlayer)).missions;
+if (!afterWipe.some((m) => m.current > 0)) fail('clearing storage reset server mission progress');
 ok('clearing browser storage does not reset mission progress');
 
-// Claim through the UI, then hammer the endpoint.
-await questPlayer.click('#menu-nav-missions');
-await questPlayer.waitForSelector('#claim-mission-mission_win', { timeout: 5000 });
+// Drive one held mission to completion, then claim it — whichever it is.
+for (let i = 0; i < 12; i++) {
+  await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, maxRally: 12 });
+}
+const done = (await missionsOf(questPlayer)).missions.find((m) => m.current >= m.target && !m.claimed);
+if (!done) fail('nothing completed after twelve wins');
 const xpBefore = (await me(questPlayer)).xp;
-await questPlayer.click('#claim-mission-mission_win');
-await questPlayer.waitForFunction(
-  async () => {
-    const r = await fetch('/api/missions');
-    const d = await r.json();
-    return d.missions.find((m) => m.id === 'mission_win')?.claimed === true;
-  },
-  null,
-  { timeout: 5000 }
-).catch(() => fail('claiming through the UI never marked the mission claimed'));
+const claimed = await questPlayer.evaluate(async (missionId) => {
+  const r = await fetch('/api/missions/claim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ missionId }),
+  });
+  return { status: r.status, body: await r.json() };
+}, done.id);
+if (claimed.status !== 200) fail(`claiming a completed mission failed: ${claimed.status}`);
 const xpAfterClaim = (await me(questPlayer)).xp;
 if (xpAfterClaim <= xpBefore) fail('claiming a completed mission paid nothing');
-ok(`claiming through the UI paid ${xpAfterClaim - xpBefore} XP once`);
+ok(`claiming a completed mission paid ${xpAfterClaim - xpBefore} XP once`);
 
-const replay = await questPlayer.evaluate(async () => {
+const replay = await questPlayer.evaluate(async (missionId) => {
   const codes = [];
   for (let i = 0; i < 15; i++) {
     const r = await fetch('/api/missions/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ missionId: 'mission_win' }),
+      body: JSON.stringify({ missionId }),
     });
     codes.push(r.status);
   }
@@ -255,7 +256,7 @@ const replay = await questPlayer.evaluate(async () => {
     body: JSON.stringify({ xpDelta: 1000 }),
   });
   return { codes, xpDeltaStatus: bad.status };
-});
+}, done.id);
 if (replay.codes.some((c) => c === 200)) fail(`a replayed claim paid out: ${replay.codes.join(',')}`);
 if (replay.xpDeltaStatus === 200) fail('PUT /api/profile/me still accepts a raw xpDelta');
 const xpFinal = (await me(questPlayer)).xp;

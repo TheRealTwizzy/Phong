@@ -16,14 +16,16 @@ import {
   CheckCircle2,
   Clock,
   Sparkles,
-  Zap,
-} from 'lucide-react';
+  Zap, RefreshCw } from 'lucide-react';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   missions: DailyMission[];
   onClaimReward: (missionId: string) => Promise<void>;
+  onReroll: (missionId: string) => Promise<void>;
+  /** Rerolls left today, per tier. Both reset with the UTC day. */
+  rerolls: { regular: number; elite: number };
   theme: ThemeConfig;
   language: LanguageCode;
 }
@@ -33,10 +35,23 @@ export const MissionsModal: React.FC<Props> = ({
   onClose,
   missions,
   onClaimReward,
+  onReroll,
+  rerolls,
   theme,
   language,
 }) => {
   const [claimingId, setClaimingId] = useState<string | null>(null);
+  const [rerollingId, setRerollingId] = useState<string | null>(null);
+
+  const handleReroll = async (missionId: string) => {
+    if (rerollingId) return;
+    setRerollingId(missionId);
+    try {
+      await onReroll(missionId);
+    } finally {
+      setRerollingId(null);
+    }
+  };
   const [countdown, setCountdown] = useState<string>('');
 
   useEffect(() => {
@@ -162,6 +177,11 @@ export const MissionsModal: React.FC<Props> = ({
               const isClaimed = mission.claimed;
               const isClaimable = isDone && !isClaimed;
               const pct = Math.min(100, Math.round((mission.current / mission.target) * 100));
+              const isElite = mission.tier === 'elite';
+              const left = isElite ? rerolls.elite : rerolls.regular;
+              // A finished mission cannot be rerolled: nothing to gain, and a
+              // reward to lose.
+              const canReroll = left > 0 && !isDone && !isClaimed;
 
               return (
                 <div
@@ -172,6 +192,8 @@ export const MissionsModal: React.FC<Props> = ({
                       ? 'bg-slate-950/40 border-slate-800/60 opacity-65'
                       : isClaimable
                       ? 'bg-cyan-950/20 border-cyan-500/50 shadow-lg shadow-cyan-950/30'
+                      : isElite
+                      ? 'bg-amber-950/20 border-amber-500/40'
                       : 'bg-slate-800/40 border-slate-700/60'
                   }`}
                 >
@@ -185,10 +207,25 @@ export const MissionsModal: React.FC<Props> = ({
                           <h3 className="text-sm font-bold text-white truncate">
                             {t(mission.titleKey, language)}
                           </h3>
+                          {isElite && (
+                            <span
+                              id={`mission-elite-${mission.id}`}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono font-black bg-amber-400/20 text-amber-300 border border-amber-400/40"
+                            >
+                              {t('mission_elite', language)}
+                            </span>
+                          )}
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
                             +{mission.xpReward} XP
                           </span>
                         </div>
+                        {isElite && mission.unlocks && (
+                          <p className="text-[10px] font-mono text-amber-300/90 mt-1">
+                            {mission.unlockOwned
+                              ? t('mission_unlock_owned', language)
+                              : t('mission_unlock_reward', language)}
+                          </p>
+                        )}
                         <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
                           {t(mission.descKey, language)}
                         </p>
@@ -232,9 +269,23 @@ export const MissionsModal: React.FC<Props> = ({
                             : t('claim_reward', language, { xp: mission.xpReward })}
                         </button>
                       ) : (
-                        <span className="text-xs font-mono font-medium text-slate-500 px-2 py-1 bg-slate-900 rounded-lg border border-slate-800">
-                          {pct}%
-                        </span>
+                        <div className="flex flex-col items-end gap-1.5">
+                          <span className="text-xs font-mono font-medium text-slate-500 px-2 py-1 bg-slate-900 rounded-lg border border-slate-800">
+                            {pct}%
+                          </span>
+                          <button
+                            id={`reroll-mission-${mission.id}`}
+                            onClick={() => handleReroll(mission.id)}
+                            disabled={!canReroll || rerollingId === mission.id}
+                            title={t('mission_reroll_left', language, { n: left })}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-mono transition disabled:opacity-40 disabled:cursor-not-allowed border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+                          >
+                            <RefreshCw
+                              className={`w-3 h-3 ${rerollingId === mission.id ? 'animate-spin' : ''}`}
+                            />
+                            {left}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>

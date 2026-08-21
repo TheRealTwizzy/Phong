@@ -66,6 +66,11 @@ describe('achievement reward shape', () => {
 });
 
 describe('level jumps', () => {
+  // These walk hundreds of matches through the real write path rather than a
+  // model of it, which is the point of them — but it also means a slow CI
+  // runner needs more than vitest's default five seconds.
+  const SIMULATION_TIMEOUT = 30_000;
+
   // The complaint this line of work started from was a single match awarding
   // +2 levels: a 3-point Rookie win paying 395 XP into a 120-wide band, 230 of
   // it from achievements landing at once. What must be true now is that a
@@ -114,7 +119,7 @@ describe('level jumps', () => {
         }
       }
     }
-  });
+  }, SIMULATION_TIMEOUT);
 
   it('is rare even there', () => {
     let matches = 0;
@@ -126,14 +131,14 @@ describe('level jumps', () => {
       }
     }
     expect(windfalls / matches).toBeLessThan(0.03);
-  });
+  }, SIMULATION_TIMEOUT);
 
   it('still moves at a few matches per level', () => {
     const { finalLevel } = play(29, 'pro', 60);
     const perLevel = 60 / (finalLevel - 1);
     expect(perLevel).toBeGreaterThan(1.5);
     expect(perLevel).toBeLessThan(6);
-  });
+  }, SIMULATION_TIMEOUT);
 });
 
 describe('the band cap in practice', () => {

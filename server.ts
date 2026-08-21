@@ -358,7 +358,10 @@ async function startServer() {
   // these two routes only read state and pay out a completed mission once.
   app.get('/api/missions', (req, res) => {
     try {
-      res.json({ missions: db.getMissions(req.deviceId!) });
+      res.json({
+        missions: db.getMissions(req.deviceId!),
+        rerolls: db.rerollsRemaining(req.deviceId!),
+      });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -375,7 +378,36 @@ async function startServer() {
         const status = result.code === 'MISSION_UNKNOWN' ? 404 : 409;
         return res.status(status).json({ error: result.code });
       }
-      res.json({ profile: result.profile, missions: result.missions, earnedXp: result.earnedXp });
+      res.json({
+        profile: result.profile,
+        missions: result.missions,
+        earnedXp: result.earnedXp,
+        unlocked: result.unlocked,
+        rerolls: db.rerollsRemaining(req.deviceId!),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Reroll one mission for another from its own pool. Allowances are per UTC
+  // day and expire with it — they never bank up.
+  app.post('/api/missions/reroll', (req, res) => {
+    try {
+      const { missionId } = req.body ?? {};
+      if (typeof missionId !== 'string') {
+        return res.status(400).json({ error: 'BAD_REQUEST' });
+      }
+      const result = db.rerollMission(req.deviceId!, missionId);
+      if (!result.ok) {
+        const status = result.code === 'MISSION_UNKNOWN' ? 404 : 409;
+        return res.status(status).json({ error: result.code, rerolls: db.rerollsRemaining(req.deviceId!) });
+      }
+      res.json({
+        missions: result.missions,
+        rerolls: result.rerolls,
+        newMissionId: result.newMissionId,
+      });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

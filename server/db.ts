@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
 import {
   PlayerProfile,
   PublicProfile,
@@ -37,9 +37,15 @@ import {
   PRACTICE_XP_DAILY_CAP,
 } from '../src/rating';
 import {
-  MISSION_DEFS,
+  MISSION_POOL,
+  ELITE_POOL,
+  REGULAR_SLOTS,
+  ELITE_SLOTS,
+  REROLLS_REGULAR,
+  REROLLS_ELITE,
   MissionDef,
   applyMatchToProgress,
+  dealOrder,
   findMission,
   missionDayKey,
 } from '../src/game/missions';
@@ -177,6 +183,22 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
 
 class GameDatabase {
   private sql: DatabaseSync;
+  /**
+   * Compiled statements keyed by their SQL. Compiling is the expensive half of
+   * a small query, and the write path repeats the same dozen statements on
+   * every recorded match, so each one is compiled once and reused. SQLite
+   * re-prepares a cached statement itself if the schema changes underneath it.
+   */
+  private statements = new Map<string, StatementSync>();
+
+  private stmt(sql: string): StatementSync {
+    let cached = this.statements.get(sql);
+    if (!cached) {
+      cached = this.sql.prepare(sql);
+      this.statements.set(sql, cached);
+    }
+    return cached;
+  }
 
   constructor() {
     if (!fs.existsSync(DATA_DIR)) {
@@ -184,6 +206,11 @@ class GameDatabase {
     }
     this.sql = new DatabaseSync(DB_FILE);
     this.sql.exec('PRAGMA journal_mode = WAL');
+    // The companion setting to WAL: commits stop fsync-ing the log every time,
+    // which is most of the cost of recording a match. A crashed process still
+    // recovers fully; only a power loss can drop the last few commits, which
+    // for match history and XP is a trade worth making.
+    this.sql.exec('PRAGMA synchronous = NORMAL');
     this.ensureBaseSchema();
     this.applyWipeV1();
     this.migrateSchema();
@@ -262,6 +289,33 @@ class GameDatabase {
       CREATE INDEX IF NOT EXISTS idx_daily_missions_player
         ON daily_missions (playerId, dayKey);
       -- Practice Wall XP paid per UTC day, so the daily cap survives restarts.
+      -- Which missions a player actually holds today. Rerolling swaps the
+      -- mission in a slot; keyed by dayKey so the hand resets with the day.
+      CREATE TABLE IF NOT EXISTS daily_mission_slots (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        slot INTEGER NOT NULL,
+        missionId TEXT NOT NULL,
+        PRIMARY KEY (playerId, dayKey, slot)
+      );
+      -- Rerolls spent today. Also dayKey'd, which is the whole mechanism by
+      -- which unused rerolls expire rather than banking up.
+      CREATE TABLE IF NOT EXISTS daily_rerolls (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        regularUsed INTEGER NOT NULL DEFAULT 0,
+        eliteUsed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, dayKey)
+      );
+      -- PERMANENT, deliberately not dayKey'd: the first time an elite mission
+      -- is ever completed it banks an unlock that is kept for good.
+      CREATE TABLE IF NOT EXISTS elite_completions (
+        playerId TEXT NOT NULL,
+        missionId TEXT NOT NULL,
+        unlockId TEXT NOT NULL,
+        completedAt TEXT NOT NULL,
+        PRIMARY KEY (playerId, missionId)
+      );
       CREATE TABLE IF NOT EXISTS daily_practice (
         playerId TEXT NOT NULL,
         dayKey TEXT NOT NULL,
@@ -290,6 +344,9 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS matches');
       this.sql.exec('DROP TABLE IF EXISTS avatars');
       this.sql.exec('DROP TABLE IF EXISTS daily_missions');
+      this.sql.exec('DROP TABLE IF EXISTS daily_mission_slots');
+      this.sql.exec('DROP TABLE IF EXISTS daily_rerolls');
+      this.sql.exec('DROP TABLE IF EXISTS elite_completions');
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
@@ -340,20 +397,17 @@ class GameDatabase {
     this.renameAchievement('rating_1400', 'master_tier');
 
     // Backfill codes for rows created before recovery codes existed
-    const missing = this.sql
-      .prepare('SELECT id FROM players WHERE recoveryCode IS NULL')
+    const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
       .all() as unknown as Array<{ id: string }>;
     for (const row of missing) {
-      this.sql
-        .prepare('UPDATE players SET recoveryCode = ? WHERE id = ?')
+      this.stmt('UPDATE players SET recoveryCode = ? WHERE id = ?')
         .run(this.newRecoveryCode(), row.id);
     }
   }
 
   /** Rewrite a stored achievement id across every profile that holds it. */
   private renameAchievement(from: string, to: string): void {
-    const rows = this.sql
-      .prepare(`SELECT id, achievements FROM players WHERE achievements LIKE ?`)
+    const rows = this.stmt(`SELECT id, achievements FROM players WHERE achievements LIKE ?`)
       .all(`%"${from}"%`) as unknown as Array<{ id: string; achievements: string }>;
     for (const row of rows) {
       let list: string[];
@@ -365,22 +419,20 @@ class GameDatabase {
       if (!Array.isArray(list) || !list.includes(from)) continue;
       // Map then de-duplicate, in case both ids somehow ended up stored.
       const renamed = Array.from(new Set(list.map((a) => (a === from ? to : a))));
-      this.sql
-        .prepare('UPDATE players SET achievements = ? WHERE id = ?')
+      this.stmt('UPDATE players SET achievements = ? WHERE id = ?')
         .run(JSON.stringify(renamed), row.id);
     }
   }
 
   public getMeta(key: string): string | null {
-    const row = this.sql.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
+    const row = this.stmt('SELECT value FROM meta WHERE key = ?').get(key) as
       | { value: string }
       | undefined;
     return row ? row.value : null;
   }
 
   public setMeta(key: string, value: string): void {
-    this.sql
-      .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    this.stmt('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run(key, value);
   }
 
@@ -394,19 +446,18 @@ class GameDatabase {
         code += alphabet[Math.floor(Math.random() * alphabet.length)];
         if (i === 3) code += '-';
       }
-      const clash = this.sql.prepare('SELECT 1 FROM players WHERE recoveryCode = ?').get(code);
+      const clash = this.stmt('SELECT 1 FROM players WHERE recoveryCode = ?').get(code);
       if (!clash) return code;
     }
   }
 
   private playerCount(): number {
-    const row = this.sql.prepare('SELECT COUNT(*) AS n FROM players').get() as { n: number };
+    const row = this.stmt('SELECT COUNT(*) AS n FROM players').get() as { n: number };
     return row.n;
   }
 
   private upsertProfile(p: PlayerProfile): void {
-    this.sql
-      .prepare(
+    this.stmt(
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins, dailyStreak, lastDailyDate,
            achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
@@ -455,8 +506,7 @@ class GameDatabase {
   }
 
   private insertMatch(m: MatchRecord): void {
-    this.sql
-      .prepare(
+    this.stmt(
         `INSERT INTO matches (id, player1Id, player1Name, player2Id, player2Name, winnerId, winnerName,
            scoreP1, scoreP2, maxRally, mode, difficulty, timestamp)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -479,14 +529,16 @@ class GameDatabase {
   }
 
   private readProfile(id: string): PlayerProfile | null {
-    const row = this.sql
-      .prepare(
+    const row = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.id = ?`
       )
       .get(id) as unknown as PlayerRow | undefined;
-    return row ? rowToProfile(row) : null;
+    if (!row) return null;
+    // Elite unlocks live in their own permanent table; the client checks them
+    // when deciding which themes are available, so they ride the profile.
+    return { ...rowToProfile(row), eliteUnlocks: this.eliteUnlocks(id) };
   }
 
   public getProfile(id: string): PlayerProfile {
@@ -542,8 +594,7 @@ class GameDatabase {
   // True when no INITIALIZED profile other than `forId` holds `username`
   // (case-insensitive). Placeholder names on uninitialized rows don't count.
   public isUsernameAvailable(username: string, forId?: string): boolean {
-    const row = this.sql
-      .prepare(
+    const row = this.stmt(
         'SELECT id FROM players WHERE username = ? COLLATE NOCASE AND initializedAt IS NOT NULL'
       )
       .get(username) as unknown as { id: string } | undefined;
@@ -631,8 +682,7 @@ class GameDatabase {
     if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
 
     const dayKey = missionDayKey(now);
-    const row = this.sql
-      .prepare(`SELECT xpAwarded FROM daily_practice WHERE playerId = ? AND dayKey = ?`)
+    const row = this.stmt(`SELECT xpAwarded FROM daily_practice WHERE playerId = ? AND dayKey = ?`)
       .get(playerId, dayKey) as { xpAwarded: number } | undefined;
     const alreadyPaid = row?.xpAwarded ?? 0;
 
@@ -662,8 +712,7 @@ class GameDatabase {
 
     if (earnedXp > 0 || newAchievements.length > 0) {
       if (earnedXp > 0) {
-        this.sql
-          .prepare(
+        this.stmt(
             `INSERT INTO daily_practice (playerId, dayKey, xpAwarded) VALUES (?, ?, ?)
              ON CONFLICT(playerId, dayKey) DO UPDATE SET xpAwarded = xpAwarded + excluded.xpAwarded`
           )
@@ -692,41 +741,161 @@ class GameDatabase {
   // a claim — or clearing browser storage — grants nothing.
 
   private missionRows(playerId: string, dayKey: string): Map<string, { progress: number; claimedAt: string | null }> {
-    const rows = this.sql
-      .prepare(`SELECT missionId, progress, claimedAt FROM daily_missions WHERE playerId = ? AND dayKey = ?`)
+    const rows = this.stmt(`SELECT missionId, progress, claimedAt FROM daily_missions WHERE playerId = ? AND dayKey = ?`)
       .all(playerId, dayKey) as { missionId: string; progress: number; claimedAt: string | null }[];
     return new Map(rows.map((r) => [r.missionId, { progress: r.progress, claimedAt: r.claimedAt }]));
+  }
+
+  /**
+   * The missions a player holds today, dealing the hand on first sight of a
+   * new day. Slots are stored rather than derived on every read so a reroll
+   * has somewhere to live; the initial deal is deterministic from the player
+   * and the day, so two devices agree without coordinating.
+   */
+  private ensureSlots(playerId: string, dayKey: string): { slot: number; missionId: string }[] {
+    const existing = this.stmt(`SELECT slot, missionId FROM daily_mission_slots WHERE playerId = ? AND dayKey = ? ORDER BY slot`)
+      .all(playerId, dayKey) as { slot: number; missionId: string }[];
+    if (existing.length) return existing;
+
+    const regular = dealOrder(MISSION_POOL, playerId, dayKey, 'regular').slice(0, REGULAR_SLOTS);
+    const elite = dealOrder(ELITE_POOL, playerId, dayKey, 'elite').slice(0, ELITE_SLOTS);
+    const dealt = [...regular, ...elite];
+
+    const insert = this.stmt(
+      `INSERT INTO daily_mission_slots (playerId, dayKey, slot, missionId) VALUES (?, ?, ?, ?)
+       ON CONFLICT(playerId, dayKey, slot) DO NOTHING`
+    );
+    dealt.forEach((missionId, slot) => insert.run(playerId, dayKey, slot, missionId));
+    return dealt.map((missionId, slot) => ({ slot, missionId }));
+  }
+
+  /** Rerolls already spent today, per tier. */
+  private rerollsUsed(playerId: string, dayKey: string): { regular: number; elite: number } {
+    const row = this.stmt(`SELECT regularUsed, eliteUsed FROM daily_rerolls WHERE playerId = ? AND dayKey = ?`)
+      .get(playerId, dayKey) as { regularUsed: number; eliteUsed: number } | undefined;
+    return { regular: row?.regularUsed ?? 0, elite: row?.eliteUsed ?? 0 };
+  }
+
+  /** Elite missions this player has EVER completed, with what they unlocked. */
+  public eliteUnlocks(playerId: string): string[] {
+    const rows = this.stmt(`SELECT unlockId FROM elite_completions WHERE playerId = ?`)
+      .all(playerId) as { unlockId: string }[];
+    return rows.map((r) => r.unlockId);
   }
 
   /** Today's missions for a player, defaulting to zero progress. */
   public getMissions(playerId: string, now: Date = new Date()): DailyMission[] {
     const dayKey = missionDayKey(now);
+    const slots = this.ensureSlots(playerId, dayKey);
     const rows = this.missionRows(playerId, dayKey);
-    return MISSION_DEFS.map((def) => {
-      const row = rows.get(def.id);
-      return {
-        id: def.id,
-        type: def.type,
-        titleKey: def.titleKey,
-        descKey: def.descKey,
-        target: def.target,
-        xpReward: def.xpReward,
-        current: Math.min(def.target, row?.progress ?? 0),
-        claimed: !!row?.claimedAt,
-      };
-    });
+    const owned = new Set(this.eliteUnlocks(playerId));
+
+    return slots
+      .map(({ missionId }) => {
+        const def = findMission(missionId);
+        if (!def) return null;
+        const row = rows.get(def.id);
+        return {
+          id: def.id,
+          type: def.type,
+          tier: def.tier,
+          titleKey: def.titleKey,
+          descKey: def.descKey,
+          target: def.target,
+          xpReward: def.xpReward,
+          unlocks: def.unlocks,
+          unlockOwned: def.unlocks ? owned.has(def.unlocks) : undefined,
+          current: Math.min(def.target, row?.progress ?? 0),
+          claimed: !!row?.claimedAt,
+        } as DailyMission;
+      })
+      .filter(Boolean) as DailyMission[];
+  }
+
+  /** Rerolls left today, per tier. */
+  public rerollsRemaining(playerId: string, now: Date = new Date()): { regular: number; elite: number } {
+    const used = this.rerollsUsed(playerId, missionDayKey(now));
+    return {
+      regular: Math.max(0, REROLLS_REGULAR - used.regular),
+      elite: Math.max(0, REROLLS_ELITE - used.elite),
+    };
+  }
+
+  /**
+   * Swap one mission for the next unused one from its own pool, spending a
+   * reroll of that tier. A completed mission cannot be rerolled — there is
+   * nothing to gain and a reward to lose.
+   */
+  public rerollMission(
+    playerId: string,
+    missionId: string,
+    now: Date = new Date()
+  ): {
+    ok: boolean;
+    code?: 'MISSION_UNKNOWN' | 'MISSION_NOT_ACTIVE' | 'MISSION_COMPLETE' | 'NO_REROLLS' | 'POOL_EXHAUSTED';
+    missions?: DailyMission[];
+    rerolls?: { regular: number; elite: number };
+    newMissionId?: string;
+  } {
+    const def = findMission(missionId);
+    if (!def) return { ok: false, code: 'MISSION_UNKNOWN' };
+
+    const dayKey = missionDayKey(now);
+    const slots = this.ensureSlots(playerId, dayKey);
+    const target = slots.find((s) => s.missionId === missionId);
+    if (!target) return { ok: false, code: 'MISSION_NOT_ACTIVE' };
+
+    const rows = this.missionRows(playerId, dayKey);
+    const row = rows.get(missionId);
+    if (row?.claimedAt || (row?.progress ?? 0) >= def.target) {
+      return { ok: false, code: 'MISSION_COMPLETE' };
+    }
+
+    const used = this.rerollsUsed(playerId, dayKey);
+    const isElite = def.tier === 'elite';
+    const allowance = isElite ? REROLLS_ELITE : REROLLS_REGULAR;
+    if ((isElite ? used.elite : used.regular) >= allowance) return { ok: false, code: 'NO_REROLLS' };
+
+    // The next mission along in this player's deal order that they are not
+    // already holding — so a reroll always produces something new.
+    const pool = isElite ? ELITE_POOL : MISSION_POOL;
+    const order = dealOrder(pool, playerId, dayKey, isElite ? 'elite' : 'regular');
+    const held = new Set(slots.map((s) => s.missionId));
+    const replacement = order.find((id) => !held.has(id));
+    if (!replacement) return { ok: false, code: 'POOL_EXHAUSTED' };
+
+    this.stmt(`UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`)
+      .run(replacement, playerId, dayKey, target.slot);
+    this.stmt(
+        `INSERT INTO daily_rerolls (playerId, dayKey, regularUsed, eliteUsed) VALUES (?, ?, ?, ?)
+         ON CONFLICT(playerId, dayKey) DO UPDATE SET
+           regularUsed = regularUsed + excluded.regularUsed,
+           eliteUsed = eliteUsed + excluded.eliteUsed`
+      )
+      .run(playerId, dayKey, isElite ? 0 : 1, isElite ? 1 : 0);
+
+    return {
+      ok: true,
+      missions: this.getMissions(playerId, now),
+      rerolls: this.rerollsRemaining(playerId, now),
+      newMissionId: replacement,
+    };
   }
 
   /** Advance every mission this match touches. Called from recordMatch only. */
   private advanceMissions(playerId: string, payload: MatchEndPayload, now: Date): void {
     const dayKey = missionDayKey(now);
     const rows = this.missionRows(playerId, dayKey);
-    const upsert = this.sql.prepare(
+    const upsert = this.stmt(
       `INSERT INTO daily_missions (playerId, dayKey, missionId, progress)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(playerId, dayKey, missionId) DO UPDATE SET progress = excluded.progress`
     );
-    for (const def of MISSION_DEFS) {
+    // Only the missions actually held today advance. Progressing the whole
+    // pool would let a rerolled-away mission arrive back half-done.
+    for (const { missionId } of this.ensureSlots(playerId, dayKey)) {
+      const def = findMission(missionId);
+      if (!def) continue;
       const current = rows.get(def.id)?.progress ?? 0;
       const next = applyMatchToProgress(def, current, payload);
       if (next !== current) upsert.run(playerId, dayKey, def.id, next);
@@ -741,7 +910,15 @@ class GameDatabase {
     playerId: string,
     missionId: string,
     now: Date = new Date()
-  ): { ok: boolean; code?: 'MISSION_UNKNOWN' | 'MISSION_INCOMPLETE' | 'MISSION_CLAIMED'; profile?: PlayerProfile; missions?: DailyMission[]; earnedXp?: number } {
+  ): {
+    ok: boolean;
+    code?: 'MISSION_UNKNOWN' | 'MISSION_INCOMPLETE' | 'MISSION_CLAIMED';
+    profile?: PlayerProfile;
+    missions?: DailyMission[];
+    earnedXp?: number;
+    /** Permanent unlock banked by this claim, if it was a first-ever elite. */
+    unlocked?: string;
+  } {
     const def: MissionDef | undefined = findMission(missionId);
     if (!def) return { ok: false, code: 'MISSION_UNKNOWN' };
 
@@ -753,13 +930,25 @@ class GameDatabase {
 
     // Stamp the claim FIRST and only pay out if this call is the one that
     // stamped it, so two concurrent claims cannot both award the reward.
-    const stamped = this.sql
-      .prepare(
+    const stamped = this.stmt(
         `UPDATE daily_missions SET claimedAt = ?
          WHERE playerId = ? AND dayKey = ? AND missionId = ? AND claimedAt IS NULL`
       )
       .run(now.toISOString(), playerId, dayKey, def.id);
     if (!stamped.changes) return { ok: false, code: 'MISSION_CLAIMED' };
+
+    // An elite mission's XP is a daily reward; its unlock is kept for good.
+    // Recorded on first completion only, so repeating it later pays the XP
+    // again but cannot re-grant something already owned.
+    let unlocked: string | undefined;
+    if (def.tier === 'elite' && def.unlocks) {
+      const banked = this.stmt(
+          `INSERT INTO elite_completions (playerId, missionId, unlockId, completedAt)
+           VALUES (?, ?, ?, ?) ON CONFLICT(playerId, missionId) DO NOTHING`
+        )
+        .run(playerId, def.id, def.unlocks, now.toISOString());
+      if (banked.changes) unlocked = def.unlocks;
+    }
 
     const profile = this.getProfile(playerId);
     profile.xp += def.xpReward;
@@ -774,6 +963,7 @@ class GameDatabase {
       profile: this.readProfile(playerId)!,
       missions: this.getMissions(playerId, now),
       earnedXp: def.xpReward,
+      unlocked,
     };
   }
 
@@ -781,8 +971,7 @@ class GameDatabase {
   // they get here. Returns the new avatarVersion (epoch ms cache-buster).
   public setAvatar(playerId: string, data: Uint8Array): number {
     const now = new Date().toISOString();
-    this.sql
-      .prepare(
+    this.stmt(
         `INSERT INTO avatars (playerId, data, updatedAt) VALUES (?, ?, ?)
          ON CONFLICT(playerId) DO UPDATE SET data=excluded.data, updatedAt=excluded.updatedAt`
       )
@@ -791,14 +980,13 @@ class GameDatabase {
   }
 
   public getAvatar(playerId: string): { data: Uint8Array; updatedAt: string } | null {
-    const row = this.sql
-      .prepare('SELECT data, updatedAt FROM avatars WHERE playerId = ?')
+    const row = this.stmt('SELECT data, updatedAt FROM avatars WHERE playerId = ?')
       .get(playerId) as unknown as { data: Uint8Array; updatedAt: string } | undefined;
     return row || null;
   }
 
   public deleteAvatar(playerId: string): void {
-    this.sql.prepare('DELETE FROM avatars WHERE playerId = ?').run(playerId);
+    this.stmt('DELETE FROM avatars WHERE playerId = ?').run(playerId);
   }
 
   // The world-readable view of a profile. Uninitialized profiles don't exist
@@ -819,6 +1007,7 @@ class GameDatabase {
       totalPointsScored: p.totalPointsScored,
       totalAces: p.totalAces,
       multiplayerWins: p.multiplayerWins || 0,
+      eliteUnlocks: this.eliteUnlocks(p.id),
       dailyStreak: p.dailyStreak,
       tier: p.tier,
       rankedGames: p.rankedGames,
@@ -881,7 +1070,11 @@ class GameDatabase {
     return this.readProfile(bot.id)!;
   }
 
-  public recordMatch(payload: MatchEndPayload, context: RecordMatchContext = {}): MatchEndResult {
+  public recordMatch(
+    payload: MatchEndPayload,
+    context: RecordMatchContext = {},
+    now: Date = new Date()
+  ): MatchEndResult {
     const opponentRating = context.opponentRating;
     const performance = context.performanceWeight ?? 1;
     const profile = this.getProfile(payload.playerId);
@@ -1068,7 +1261,7 @@ class GameDatabase {
 
     // Daily mission progress rides the same server-verified match record, so
     // it can never be reported independently of an actual game.
-    this.advanceMissions(payload.playerId, payload, new Date());
+    this.advanceMissions(payload.playerId, payload, now);
 
     // Achievement XP can push the profile over a level threshold too
     const finalLevel = calculateLevelFromXp(profile.xp);
@@ -1116,7 +1309,7 @@ class GameDatabase {
       tierChanged: isPvp && ranked && profile.tier !== previousTier,
       ranked,
       newAchievements,
-      missions: this.getMissions(payload.playerId),
+      missions: this.getMissions(payload.playerId, now),
     };
   }
 
@@ -1129,7 +1322,7 @@ class GameDatabase {
   public claimProfileByCode(code: string, newDeviceId: string): PlayerProfile | null {
     const canonical = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     const formatted = canonical.length === 8 ? `${canonical.slice(0, 4)}-${canonical.slice(4)}` : code.trim().toUpperCase();
-    const row = this.sql.prepare('SELECT * FROM players WHERE recoveryCode = ?').get(formatted) as unknown as
+    const row = this.stmt('SELECT * FROM players WHERE recoveryCode = ?').get(formatted) as unknown as
       | PlayerRow
       | undefined;
     if (!row) return null;
@@ -1137,17 +1330,16 @@ class GameDatabase {
 
     this.sql.exec('BEGIN');
     try {
-      this.sql.prepare('DELETE FROM players WHERE id = ?').run(newDeviceId);
-      this.sql
-        .prepare('UPDATE players SET id = ?, recoveryCode = ?, lastActive = ? WHERE id = ?')
+      this.stmt('DELETE FROM players WHERE id = ?').run(newDeviceId);
+      this.stmt('UPDATE players SET id = ?, recoveryCode = ?, lastActive = ? WHERE id = ?')
         .run(newDeviceId, this.newRecoveryCode(), new Date().toISOString(), row.id);
-      this.sql.prepare('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, row.id);
-      this.sql.prepare('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, row.id);
-      this.sql.prepare('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, row.id);
+      this.stmt('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, row.id);
+      this.stmt('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, row.id);
+      this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, row.id);
       // The avatar moves with the profile; whatever throwaway avatar the
       // claiming device had is replaced.
-      this.sql.prepare('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
-      this.sql.prepare('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, row.id);
+      this.stmt('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
+      this.stmt('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, row.id);
       this.sql.exec('COMMIT');
     } catch (e) {
       this.sql.exec('ROLLBACK');
@@ -1170,8 +1362,7 @@ class GameDatabase {
 
     // Only initialized profiles compete — players who never finished
     // onboarding hold placeholder names and stay invisible.
-    const rows = this.sql
-      .prepare(
+    const rows = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
@@ -1221,8 +1412,7 @@ class GameDatabase {
   }
 
   public getMatchHistory(playerId: string, limit = 15): MatchRecord[] {
-    return this.sql
-      .prepare(
+    return this.stmt(
         'SELECT * FROM matches WHERE player1Id = ? OR player2Id = ? ORDER BY rowid DESC LIMIT ?'
       )
       .all(playerId, playerId, limit) as unknown as MatchRecord[];
