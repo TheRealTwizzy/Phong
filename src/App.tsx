@@ -14,6 +14,7 @@ import {
   DailyMission,
   LanguageCode,
   MatchRules,
+  CourtTheme,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
 import { postMatchRecord, flushPendingMatches } from './net/matchRecord';
@@ -119,6 +120,12 @@ export default function App() {
   // Missions are server state: progress advances only from a recorded match,
   // and rewards are claimed by id. Nothing about them lives in this browser.
   const [missions, setMissions] = useState<DailyMission[]>([]);
+  // Rerolls left today, per tier. Server-owned and day-keyed, so they expire
+  // with the missions rather than banking up.
+  const [rerolls, setRerolls] = useState<{ regular: number; elite: number }>({
+    regular: 0,
+    elite: 0,
+  });
   const [isMissionsOpen, setIsMissionsOpen] = useState<boolean>(false);
 
   // Modals state
@@ -154,6 +161,8 @@ export default function App() {
   // player is told rather than left looking at an untracked result.
   const [toastRecordFailed, setToastRecordFailed] = useState<boolean>(false);
   const [toastPracticeXp, setToastPracticeXp] = useState<number | null>(null);
+  // A permanent unlock banked from an elite mission — worth announcing.
+  const [toastUnlock, setToastUnlock] = useState<string | null>(null);
 
   // 'menu' = out-of-match navigation hub; 'game' = a match is on court.
   const [screen, setScreen] = useState<'menu' | 'game'>('menu');
@@ -279,6 +288,7 @@ export default function App() {
       const res = await fetch('/api/missions');
       const data = await res.json();
       if (data && Array.isArray(data.missions)) setMissions(data.missions);
+      if (data?.rerolls) setRerolls(data.rerolls);
     } catch (e) {
       console.error('Mission fetch error:', e);
     }
@@ -430,8 +440,32 @@ export default function App() {
       }
       if (data.profile) setProfile(data.profile);
       if (data.missions) setMissions(data.missions);
+      if (data.rerolls) setRerolls(data.rerolls);
+      if (data.unlocked) setToastUnlock(data.unlocked);
     } catch (e) {
       console.error('Failed to claim mission reward', e);
+    }
+  };
+
+  // Swap one mission for another from its pool, spending a reroll of its tier.
+  const handleRerollMission = async (missionId: string) => {
+    try {
+      const res = await fetch('/api/missions/reroll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ missionId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        // Out of rerolls, or the mission finished under us — resync either way.
+        if (data?.rerolls) setRerolls(data.rerolls);
+        void refreshMissions();
+        return;
+      }
+      if (data.missions) setMissions(data.missions);
+      if (data.rerolls) setRerolls(data.rerolls);
+    } catch (e) {
+      console.error('Failed to reroll mission', e);
     }
   };
 
@@ -1314,6 +1348,18 @@ export default function App() {
           }}
         />
 
+        {toastUnlock && (
+          <button
+            id="toast-unlock"
+            onClick={() => setToastUnlock(null)}
+            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-amber-950/90 border border-amber-400/60 text-amber-200 font-mono text-[11px] shadow-lg"
+          >
+            {t('mission_unlock_earned', currentLanguage, {
+              name: THEMES[toastUnlock as CourtTheme]?.name || toastUnlock,
+            })}
+          </button>
+        )}
+
         {toastPracticeXp !== null && (
           <button
             id="toast-practice-xp"
@@ -1616,6 +1662,8 @@ export default function App() {
           onClaimReward={handleClaimMissionReward}
           theme={currentTheme}
           language={currentLanguage}
+          onReroll={handleRerollMission}
+          rerolls={rerolls}
         />
 
         {/* Settings & Customization Modal (device preferences only —

@@ -2,11 +2,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { MatchEndPayload } from '../src/types';
+import type { CourtTheme, MatchEndPayload, PlayerProfile } from '../src/types';
+import { THEMES, isThemeUnlocked } from '../src/game/themes';
 import {
-  MISSION_DEFS,
-  MISSION_DAILY_XP_CAP,
+  MISSION_POOL,
+  ELITE_POOL,
+  ALL_MISSIONS,
+  REGULAR_SLOTS,
+  ELITE_SLOTS,
+  REROLLS_REGULAR,
+  REROLLS_ELITE,
   applyMatchToProgress,
+  findMission,
   missionDayKey,
   msUntilMissionReset,
 } from '../src/game/missions';
@@ -60,7 +67,7 @@ describe('mission definitions', () => {
   });
 
   it('holds rally progress at the best of the day and never sums it', () => {
-    const rally = MISSION_DEFS.find((m) => m.type === 'rally')!;
+    const rally = MISSION_POOL.find((m) => m.type === 'rally')!;
     let p = applyMatchToProgress(rally, 0, match('x', { maxRally: 5 }));
     expect(p).toBe(5);
     p = applyMatchToProgress(rally, p, match('x', { maxRally: 3 }));
@@ -70,7 +77,7 @@ describe('mission definitions', () => {
   });
 
   it('caps every mission at its target', () => {
-    for (const def of MISSION_DEFS) {
+    for (const def of ALL_MISSIONS) {
       const p = applyMatchToProgress(def, def.target, match('x', { playerScore: 99, maxRally: 99 }));
       expect(p).toBeLessThanOrEqual(def.target);
     }
@@ -81,22 +88,50 @@ describe('server-owned mission state', () => {
   it('starts every mission at zero and unclaimed', () => {
     init('m_fresh', 'MissionFresh');
     const missions = db.getMissions('m_fresh');
-    expect(missions).toHaveLength(MISSION_DEFS.length);
+    // A hand dealt from the pools, not the whole pool.
+    expect(missions).toHaveLength(REGULAR_SLOTS + ELITE_SLOTS);
+    expect(missions.filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS);
     expect(missions.every((m) => m.current === 0 && !m.claimed)).toBe(true);
   });
 
   it('advances progress only from a recorded match', () => {
     init('m_prog', 'MissionProg');
-    expect(byId('mission_games', 'm_prog').current).toBe(0);
+    const held = () => db.getMissions('m_prog');
+    expect(held().every((m) => m.current === 0)).toBe(true);
     db.recordMatch(match('m_prog', { playerScore: 4, maxRally: 6 }));
-    expect(byId('mission_games', 'm_prog').current).toBe(1);
-    expect(byId('mission_win', 'm_prog').current).toBe(1);
-    expect(byId('mission_points', 'm_prog').current).toBe(4);
-    expect(byId('mission_rally', 'm_prog').current).toBe(6);
+    // Whatever hand was dealt, a recorded win moves something in it.
+    expect(held().some((m) => m.current > 0)).toBe(true);
+  });
+
+  it('advances each mission by its own rule', () => {
+    // Checked against the definitions rather than a dealt hand, so the test
+    // does not depend on which missions a given player happens to hold.
+    const forType = (type: string) => MISSION_POOL.find((m) => m.type === type)!;
+    const soloWin = {
+      playerId: 'x', username: 'x', playerScore: 4, opponentScore: 1,
+      maxRally: 6, mode: 'solo' as const, difficulty: 'pro' as const, isWinner: true, aces: 2,
+    };
+    expect(applyMatchToProgress(forType('games_played'), 0, soloWin)).toBe(1);
+    expect(applyMatchToProgress(forType('matches_won'), 0, soloWin)).toBe(1);
+    expect(applyMatchToProgress(forType('points_scored'), 0, soloWin)).toBe(4);
+    expect(applyMatchToProgress(forType('rally'), 0, soloWin)).toBe(6);
+    expect(applyMatchToProgress(forType('aces'), 0, soloWin)).toBe(2);
     // Solo does not advance the multiplayer mission.
-    expect(byId('mission_multi', 'm_prog').current).toBe(0);
-    db.recordMatch(match('m_prog', { mode: 'multiplayer' }));
-    expect(byId('mission_multi', 'm_prog').current).toBe(1);
+    expect(applyMatchToProgress(forType('multiplayer'), 0, soloWin)).toBe(0);
+    expect(
+      applyMatchToProgress(forType('multiplayer'), 0, { ...soloWin, mode: 'multiplayer' })
+    ).toBe(1);
+  });
+
+  it('honours a difficulty restriction', () => {
+    // An elite "win against Cyber" must not be satisfied by a Rookie win.
+    const cyberOnly = ELITE_POOL.find((m) => m.difficulty === 'cyber')!;
+    const base = {
+      playerId: 'x', username: 'x', playerScore: 5, opponentScore: 1,
+      maxRally: 6, mode: 'solo' as const, isWinner: true,
+    };
+    expect(applyMatchToProgress(cyberOnly, 0, { ...base, difficulty: 'rookie' })).toBe(0);
+    expect(applyMatchToProgress(cyberOnly, 0, { ...base, difficulty: 'cyber' })).toBe(1);
   });
 
   it('refuses to pay an unfinished mission', () => {
@@ -113,12 +148,17 @@ describe('server-owned mission state', () => {
 
   it('pays a completed mission exactly once, no matter how often it is claimed', () => {
     init('m_once', 'MissionOnce');
-    db.recordMatch(match('m_once', { isWinner: true }));
+    // Drive every held mission to completion, then pick one of them.
+    for (let i = 0; i < 20; i++) {
+      db.recordMatch(match('m_once', { mode: 'multiplayer', playerScore: 5, maxRally: 45, aces: 9 }));
+    }
+    const done = db.getMissions('m_once').find((m) => m.current >= m.target && !m.claimed)!;
+    expect(done).toBeTruthy();
     const before = db.getProfile('m_once').xp;
 
-    const first = db.claimMission('m_once', 'mission_win');
+    const first = db.claimMission('m_once', done.id);
     expect(first.ok).toBe(true);
-    expect(first.earnedXp).toBe(MISSION_DEFS.find((m) => m.id === 'mission_win')!.xpReward);
+    expect(first.earnedXp).toBe(findMission(done.id)!.xpReward);
     const afterFirst = db.getProfile('m_once').xp;
     expect(afterFirst).toBe(before + first.earnedXp!);
 
@@ -127,30 +167,33 @@ describe('server-owned mission state', () => {
     // localStorage: clearing site data re-armed all five, and the endpoint
     // could simply be called in a loop. Replaying a claim must now pay zero.
     for (let i = 0; i < 25; i++) {
-      const again = db.claimMission('m_once', 'mission_win');
+      const again = db.claimMission('m_once', done.id);
       expect(again.ok).toBe(false);
       expect(again.code).toBe('MISSION_CLAIMED');
     }
     expect(db.getProfile('m_once').xp).toBe(afterFirst);
   });
 
-  it('bounds a whole day of mission XP by the definition table', () => {
+  it("bounds a day's mission XP by the hand actually dealt", () => {
     init('m_cap', 'MissionCap');
-    // Play enough to finish everything available today.
-    for (let i = 0; i < 15; i++) {
-      db.recordMatch(match('m_cap', { mode: 'multiplayer', playerScore: 5, maxRally: 12 }));
+    for (let i = 0; i < 25; i++) {
+      db.recordMatch(match('m_cap', { mode: 'multiplayer', playerScore: 5, maxRally: 45, aces: 9 }));
     }
+    const held = db.getMissions('m_cap');
+    const maxPayout = held.reduce((sum, m) => sum + m.xpReward, 0);
     const before = db.getProfile('m_cap').xp;
+
     let paid = 0;
-    // Claim every mission repeatedly; only the first of each may pay.
-    for (let round = 0; round < 5; round++) {
-      for (const def of MISSION_DEFS) {
-        const r = db.claimMission('m_cap', def.id);
+    // Claim everything repeatedly; only the first of each may pay.
+    for (let round = 0; round < 4; round++) {
+      for (const m of held) {
+        const r = db.claimMission('m_cap', m.id);
         if (r.ok) paid += r.earnedXp!;
       }
     }
-    expect(paid).toBe(MISSION_DAILY_XP_CAP);
-    expect(db.getProfile('m_cap').xp).toBe(before + MISSION_DAILY_XP_CAP);
+    expect(paid).toBeGreaterThan(0);
+    expect(paid).toBeLessThanOrEqual(maxPayout);
+    expect(db.getProfile('m_cap').xp).toBe(before + paid);
   });
 
   it('gives a fresh set of missions on the next UTC day', () => {
@@ -166,8 +209,8 @@ describe('server-owned mission state', () => {
   it('returns the advanced missions on the match result itself', () => {
     init('m_result', 'MissionResult');
     const res = db.recordMatch(match('m_result'));
-    expect(res.missions).toHaveLength(MISSION_DEFS.length);
-    expect(res.missions.find((m) => m.id === 'mission_games')!.current).toBe(1);
+    expect(res.missions).toHaveLength(REGULAR_SLOTS + ELITE_SLOTS);
+    expect(res.missions.some((m) => m.current > 0)).toBe(true);
   });
 });
 
@@ -217,5 +260,286 @@ describe('Practice Wall XP', () => {
     for (let i = 0; i < 40; i++) db.recordPractice('p_drill3', 500, today);
     expect(db.recordPractice('p_drill3', 500, today).earnedXp).toBe(0);
     expect(db.recordPractice('p_drill3', 500, tomorrow).earnedXp).toBeGreaterThan(0);
+  });
+});
+
+describe('rerolls', () => {
+  const today = new Date('2026-08-21T12:00:00Z');
+  const tomorrow = new Date('2026-08-22T12:00:00Z');
+
+  const heldRegular = (id: string, now = today) =>
+    db.getMissions(id, now).filter((m) => m.tier === 'regular');
+  const heldElite = (id: string, now = today) =>
+    db.getMissions(id, now).filter((m) => m.tier === 'elite');
+
+  it('grants the stated allowance per tier', () => {
+    init('r_fresh', 'RerollFresh');
+    expect(db.rerollsRemaining('r_fresh', today)).toEqual({
+      regular: REROLLS_REGULAR,
+      elite: REROLLS_ELITE,
+    });
+  });
+
+  it('swaps a mission for one the player is not already holding', () => {
+    init('r_swap', 'RerollSwap');
+    const before = heldRegular('r_swap');
+    const victim = before[0];
+    const res = db.rerollMission('r_swap', victim.id, today);
+    expect(res.ok).toBe(true);
+
+    const after = heldRegular('r_swap');
+    expect(after.map((m) => m.id)).not.toContain(victim.id);
+    expect(after).toHaveLength(before.length);
+    // No duplicates: a reroll must produce something genuinely new.
+    expect(new Set(after.map((m) => m.id)).size).toBe(after.length);
+    expect(res.newMissionId).toBe(after.find((m) => !before.some((b) => b.id === m.id))!.id);
+  });
+
+  it('spends from the tier that was rerolled, and only that tier', () => {
+    init('r_tier', 'RerollTier');
+    db.rerollMission('r_tier', heldRegular('r_tier')[0].id, today);
+    expect(db.rerollsRemaining('r_tier', today)).toEqual({
+      regular: REROLLS_REGULAR - 1,
+      elite: REROLLS_ELITE,
+    });
+
+    db.rerollMission('r_tier', heldElite('r_tier')[0].id, today);
+    expect(db.rerollsRemaining('r_tier', today)).toEqual({
+      regular: REROLLS_REGULAR - 1,
+      elite: REROLLS_ELITE - 1,
+    });
+  });
+
+  it('runs out after the allowance and refuses further rerolls', () => {
+    init('r_spend', 'RerollSpend');
+    for (let i = 0; i < REROLLS_REGULAR; i++) {
+      expect(db.rerollMission('r_spend', heldRegular('r_spend')[0].id, today).ok).toBe(true);
+    }
+    expect(db.rerollsRemaining('r_spend', today).regular).toBe(0);
+    const denied = db.rerollMission('r_spend', heldRegular('r_spend')[0].id, today);
+    expect(denied.ok).toBe(false);
+    expect(denied.code).toBe('NO_REROLLS');
+
+    // The single elite reroll is its own allowance and is spent the same way.
+    expect(db.rerollMission('r_spend', heldElite('r_spend')[0].id, today).ok).toBe(true);
+    expect(db.rerollMission('r_spend', heldElite('r_spend')[0].id, today).code).toBe('NO_REROLLS');
+  });
+
+  it('refuses to reroll a mission that is already complete', () => {
+    init('r_done', 'RerollDone');
+    for (let i = 0; i < 20; i++) {
+      db.recordMatch(match('r_done', { mode: 'multiplayer', playerScore: 5, maxRally: 45, aces: 9 }));
+    }
+    const done = db.getMissions('r_done').find((m) => m.current >= m.target);
+    if (done) {
+      const res = db.rerollMission('r_done', done.id);
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe('MISSION_COMPLETE');
+    }
+  });
+
+  it('refuses to reroll something the player is not holding', () => {
+    init('r_absent', 'RerollAbsent');
+    const held = new Set(db.getMissions('r_absent', today).map((m) => m.id));
+    const notHeld = MISSION_POOL.find((m) => !held.has(m.id))!;
+    expect(db.rerollMission('r_absent', notHeld.id, today).code).toBe('MISSION_NOT_ACTIVE');
+    expect(db.rerollMission('r_absent', 'no_such_mission', today).code).toBe('MISSION_UNKNOWN');
+  });
+
+  it('resets the allowance with the day, and never banks unused rerolls', () => {
+    init('r_reset', 'RerollReset');
+    // Spend every regular reroll today.
+    for (let i = 0; i < REROLLS_REGULAR; i++) {
+      db.rerollMission('r_reset', heldRegular('r_reset')[0].id, today);
+    }
+    db.rerollMission('r_reset', heldElite('r_reset')[0].id, today);
+    expect(db.rerollsRemaining('r_reset', today)).toEqual({ regular: 0, elite: 0 });
+
+    // Tomorrow the allowance is whole again — and no more than whole, so an
+    // unused day does not carry over into a double allowance.
+    expect(db.rerollsRemaining('r_reset', tomorrow)).toEqual({
+      regular: REROLLS_REGULAR,
+      elite: REROLLS_ELITE,
+    });
+  });
+
+  it('deals a fresh hand the next day, discarding an unfinished one', () => {
+    init('r_hand', 'RerollHand');
+    db.recordMatch(match('r_hand', { playerScore: 3, maxRally: 5 }));
+    expect(db.getMissions('r_hand', today).some((m) => m.current > 0)).toBe(true);
+
+    const next = db.getMissions('r_hand', tomorrow);
+    expect(next.every((m) => m.current === 0 && !m.claimed)).toBe(true);
+    expect(next.filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS);
+  });
+
+  it('deals different hands to different players on the same day', () => {
+    init('r_a', 'RerollA');
+    init('r_b', 'RerollB');
+    const a = db.getMissions('r_a', today).map((m) => m.id).join(',');
+    const b = db.getMissions('r_b', today).map((m) => m.id).join(',');
+    expect(a).not.toBe(b);
+  });
+
+  it('deals the same hand twice for the same player and day', () => {
+    init('r_stable', 'RerollStable');
+    const first = db.getMissions('r_stable', today).map((m) => m.id);
+    const again = db.getMissions('r_stable', today).map((m) => m.id);
+    expect(again).toEqual(first);
+  });
+});
+
+describe('elite missions are permanent unlocks', () => {
+  const today = new Date('2026-08-21T12:00:00Z');
+  const tomorrow = new Date('2026-08-22T12:00:00Z');
+
+  // Plays enough of everything to satisfy any elite in the pool, so the test
+  // never depends on which one the hand happened to deal.
+  const completeElite = (id: string, now: Date) => {
+    const elite = db.getMissions(id, now).find((m) => m.tier === 'elite')!;
+    for (let i = 0; i < 40; i++) {
+      db.recordMatch(
+        match(id, {
+          mode: 'multiplayer', playerScore: 5, opponentScore: 0, maxRally: 45, aces: 9,
+        }),
+        {},
+        now
+      );
+      db.recordMatch(
+        match(id, {
+          mode: 'solo', difficulty: 'cyber', playerScore: 5, opponentScore: 0,
+          maxRally: 45, aces: 9,
+        }),
+        {},
+        now
+      );
+    }
+    const after = db.getMissions(id, now).find((m) => m.id === elite.id)!;
+    // The point of the helper: if this ever stops completing, the tests below
+    // must fail rather than quietly skip.
+    expect(after.current).toBeGreaterThanOrEqual(after.target);
+    return elite;
+  };
+
+  it('every elite mission carries an unlock, and no regular one does', () => {
+    for (const m of ELITE_POOL) expect(m.unlocks).toBeTruthy();
+    for (const m of MISSION_POOL) expect(m.unlocks).toBeFalsy();
+    // Each elite grants a DIFFERENT unlock, or completing one would silently
+    // consume another's reward.
+    const unlocks = ELITE_POOL.map((m) => m.unlocks);
+    expect(new Set(unlocks).size).toBe(unlocks.length);
+  });
+
+  it('banks the unlock on first completion and keeps it across days', () => {
+    init('e_bank', 'EliteBank');
+    const elite = completeElite('e_bank', today);
+    const res = db.claimMission('e_bank', elite.id, today);
+    expect(res.ok).toBe(true);
+    expect(res.unlocked).toBe(elite.unlocks);
+    expect(db.eliteUnlocks('e_bank')).toContain(elite.unlocks);
+
+    // The XP is a daily reward; the unlock is kept for good.
+    expect(db.eliteUnlocks('e_bank')).toContain(elite.unlocks);
+    const nextDay = db.getMissions('e_bank', tomorrow);
+    expect(nextDay.every((m) => m.current === 0)).toBe(true);
+    expect(db.eliteUnlocks('e_bank')).toContain(elite.unlocks);
+  });
+
+  it('grants nothing extra for repeating an elite already banked', () => {
+    init('e_repeat', 'EliteRepeat');
+    const elite = completeElite('e_repeat', today);
+    expect(db.claimMission('e_repeat', elite.id, today).unlocked).toBe(elite.unlocks);
+    const owned = db.eliteUnlocks('e_repeat').length;
+
+    // Same mission, a later day: XP again, but no second unlock.
+    const laterElite = completeElite('e_repeat', tomorrow);
+    const again = db.claimMission('e_repeat', laterElite.id, tomorrow);
+    expect(again.ok).toBe(true);
+    expect(again.earnedXp).toBeGreaterThan(0); // the XP is a DAILY reward...
+    if (laterElite.id === elite.id) {
+      expect(again.unlocked).toBeUndefined(); // ...the unlock is not repeatable
+      expect(db.eliteUnlocks('e_repeat').length).toBe(owned);
+    } else {
+      expect(db.eliteUnlocks('e_repeat').length).toBe(owned + 1);
+    }
+  });
+
+  it('reports whether the unlock is already owned', () => {
+    init('e_flag', 'EliteFlag');
+    const elite = db.getMissions('e_flag', today).find((m) => m.tier === 'elite')!;
+    expect(elite.unlocks).toBeTruthy();
+    expect(elite.unlockOwned).toBe(false);
+  });
+});
+
+describe('permanent unlocks reach the themes', () => {
+  const base = (over: Partial<PlayerProfile> = {}): PlayerProfile =>
+    ({
+      id: 'x', username: 'x', level: 1, xp: 0, xpNext: 250,
+      mmrMu: 25, mmrSigma: 8.33, rankMu: 25, rankSigma: 8.33, rankedGames: 0,
+      matchesPlayed: 0, matchesWon: 0, matchesLost: 0, highestRally: 0,
+      totalPointsScored: 0, totalAces: 0, multiplayerWins: 0, dailyStreak: 0,
+      tier: 'unranked', achievements: [], eliteUnlocks: [],
+      createdAt: '', lastActive: '', initialized: true,
+      hasAvatar: false, avatarVersion: 0,
+      ...over,
+    }) as PlayerProfile;
+
+  it('gates every elite theme behind its own mission', () => {
+    for (const mission of ELITE_POOL) {
+      const themeId = mission.unlocks as CourtTheme;
+      expect(THEMES[themeId]).toBeTruthy();
+      expect(isThemeUnlocked(themeId, base())).toBe(false);
+      expect(isThemeUnlocked(themeId, base({ eliteUnlocks: [mission.unlocks!] }))).toBe(true);
+      // Owning one elite unlock must not open another's theme.
+      const other = ELITE_POOL.find((m) => m.id !== mission.id)!;
+      expect(isThemeUnlocked(themeId, base({ eliteUnlocks: [other.unlocks!] }))).toBe(false);
+    }
+  });
+
+  it('gates the hidden-rung themes behind their achievements', () => {
+    for (const [themeId, achId] of [
+      ['perpetual-blue', 'rally_100'],
+      ['flawless-white', 'cyber_shutout'],
+      ['legend-aurora', 'legend_tier'],
+      ['fixture-bronze', 'veteran_200'],
+    ] as const) {
+      expect(isThemeUnlocked(themeId, base())).toBe(false);
+      expect(isThemeUnlocked(themeId, base({ achievements: [achId] }))).toBe(true);
+    }
+  });
+
+  it('leaves the starter themes open to everyone', () => {
+    for (const themeId of ['neon', 'retro-crt', 'midnight', 'cyberpunk', 'tennis'] as const) {
+      expect(isThemeUnlocked(themeId, base())).toBe(true);
+    }
+  });
+
+  it('surfaces banked unlocks on the profile the client actually reads', () => {
+    init('t_profile', 'ThemeProfile');
+    expect(db.getProfile('t_profile').eliteUnlocks).toEqual([]);
+    const elite = db.getMissions('t_profile', new Date('2026-08-21T12:00:00Z'))
+      .find((m) => m.tier === 'elite')!;
+    for (let i = 0; i < 40; i++) {
+      db.recordMatch(
+        match('t_profile', {
+          mode: 'multiplayer', playerScore: 5, opponentScore: 0, maxRally: 45, aces: 9,
+        }),
+        {},
+        new Date('2026-08-21T12:00:00Z')
+      );
+      db.recordMatch(
+        match('t_profile', {
+          mode: 'solo', difficulty: 'cyber', playerScore: 5, opponentScore: 0,
+          maxRally: 45, aces: 9,
+        }),
+        {},
+        new Date('2026-08-21T12:00:00Z')
+      );
+    }
+    db.claimMission('t_profile', elite.id, new Date('2026-08-21T12:00:00Z'));
+    const profile = db.getProfile('t_profile');
+    expect(profile.eliteUnlocks).toContain(elite.unlocks);
+    expect(isThemeUnlocked(elite.unlocks as CourtTheme, profile)).toBe(true);
   });
 });

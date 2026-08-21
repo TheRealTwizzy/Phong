@@ -37,9 +37,15 @@ import {
   PRACTICE_XP_DAILY_CAP,
 } from '../src/rating';
 import {
-  MISSION_DEFS,
+  MISSION_POOL,
+  ELITE_POOL,
+  REGULAR_SLOTS,
+  ELITE_SLOTS,
+  REROLLS_REGULAR,
+  REROLLS_ELITE,
   MissionDef,
   applyMatchToProgress,
+  dealOrder,
   findMission,
   missionDayKey,
 } from '../src/game/missions';
@@ -262,6 +268,33 @@ class GameDatabase {
       CREATE INDEX IF NOT EXISTS idx_daily_missions_player
         ON daily_missions (playerId, dayKey);
       -- Practice Wall XP paid per UTC day, so the daily cap survives restarts.
+      -- Which missions a player actually holds today. Rerolling swaps the
+      -- mission in a slot; keyed by dayKey so the hand resets with the day.
+      CREATE TABLE IF NOT EXISTS daily_mission_slots (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        slot INTEGER NOT NULL,
+        missionId TEXT NOT NULL,
+        PRIMARY KEY (playerId, dayKey, slot)
+      );
+      -- Rerolls spent today. Also dayKey'd, which is the whole mechanism by
+      -- which unused rerolls expire rather than banking up.
+      CREATE TABLE IF NOT EXISTS daily_rerolls (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        regularUsed INTEGER NOT NULL DEFAULT 0,
+        eliteUsed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, dayKey)
+      );
+      -- PERMANENT, deliberately not dayKey'd: the first time an elite mission
+      -- is ever completed it banks an unlock that is kept for good.
+      CREATE TABLE IF NOT EXISTS elite_completions (
+        playerId TEXT NOT NULL,
+        missionId TEXT NOT NULL,
+        unlockId TEXT NOT NULL,
+        completedAt TEXT NOT NULL,
+        PRIMARY KEY (playerId, missionId)
+      );
       CREATE TABLE IF NOT EXISTS daily_practice (
         playerId TEXT NOT NULL,
         dayKey TEXT NOT NULL,
@@ -290,6 +323,9 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS matches');
       this.sql.exec('DROP TABLE IF EXISTS avatars');
       this.sql.exec('DROP TABLE IF EXISTS daily_missions');
+      this.sql.exec('DROP TABLE IF EXISTS daily_mission_slots');
+      this.sql.exec('DROP TABLE IF EXISTS daily_rerolls');
+      this.sql.exec('DROP TABLE IF EXISTS elite_completions');
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
@@ -486,7 +522,10 @@ class GameDatabase {
           WHERE p.id = ?`
       )
       .get(id) as unknown as PlayerRow | undefined;
-    return row ? rowToProfile(row) : null;
+    if (!row) return null;
+    // Elite unlocks live in their own permanent table; the client checks them
+    // when deciding which themes are available, so they ride the profile.
+    return { ...rowToProfile(row), eliteUnlocks: this.eliteUnlocks(id) };
   }
 
   public getProfile(id: string): PlayerProfile {
@@ -698,23 +737,145 @@ class GameDatabase {
     return new Map(rows.map((r) => [r.missionId, { progress: r.progress, claimedAt: r.claimedAt }]));
   }
 
+  /**
+   * The missions a player holds today, dealing the hand on first sight of a
+   * new day. Slots are stored rather than derived on every read so a reroll
+   * has somewhere to live; the initial deal is deterministic from the player
+   * and the day, so two devices agree without coordinating.
+   */
+  private ensureSlots(playerId: string, dayKey: string): { slot: number; missionId: string }[] {
+    const existing = this.sql
+      .prepare(`SELECT slot, missionId FROM daily_mission_slots WHERE playerId = ? AND dayKey = ? ORDER BY slot`)
+      .all(playerId, dayKey) as { slot: number; missionId: string }[];
+    if (existing.length) return existing;
+
+    const regular = dealOrder(MISSION_POOL, playerId, dayKey, 'regular').slice(0, REGULAR_SLOTS);
+    const elite = dealOrder(ELITE_POOL, playerId, dayKey, 'elite').slice(0, ELITE_SLOTS);
+    const dealt = [...regular, ...elite];
+
+    const insert = this.sql.prepare(
+      `INSERT INTO daily_mission_slots (playerId, dayKey, slot, missionId) VALUES (?, ?, ?, ?)
+       ON CONFLICT(playerId, dayKey, slot) DO NOTHING`
+    );
+    dealt.forEach((missionId, slot) => insert.run(playerId, dayKey, slot, missionId));
+    return dealt.map((missionId, slot) => ({ slot, missionId }));
+  }
+
+  /** Rerolls already spent today, per tier. */
+  private rerollsUsed(playerId: string, dayKey: string): { regular: number; elite: number } {
+    const row = this.sql
+      .prepare(`SELECT regularUsed, eliteUsed FROM daily_rerolls WHERE playerId = ? AND dayKey = ?`)
+      .get(playerId, dayKey) as { regularUsed: number; eliteUsed: number } | undefined;
+    return { regular: row?.regularUsed ?? 0, elite: row?.eliteUsed ?? 0 };
+  }
+
+  /** Elite missions this player has EVER completed, with what they unlocked. */
+  public eliteUnlocks(playerId: string): string[] {
+    const rows = this.sql
+      .prepare(`SELECT unlockId FROM elite_completions WHERE playerId = ?`)
+      .all(playerId) as { unlockId: string }[];
+    return rows.map((r) => r.unlockId);
+  }
+
   /** Today's missions for a player, defaulting to zero progress. */
   public getMissions(playerId: string, now: Date = new Date()): DailyMission[] {
     const dayKey = missionDayKey(now);
+    const slots = this.ensureSlots(playerId, dayKey);
     const rows = this.missionRows(playerId, dayKey);
-    return MISSION_DEFS.map((def) => {
-      const row = rows.get(def.id);
-      return {
-        id: def.id,
-        type: def.type,
-        titleKey: def.titleKey,
-        descKey: def.descKey,
-        target: def.target,
-        xpReward: def.xpReward,
-        current: Math.min(def.target, row?.progress ?? 0),
-        claimed: !!row?.claimedAt,
-      };
-    });
+    const owned = new Set(this.eliteUnlocks(playerId));
+
+    return slots
+      .map(({ missionId }) => {
+        const def = findMission(missionId);
+        if (!def) return null;
+        const row = rows.get(def.id);
+        return {
+          id: def.id,
+          type: def.type,
+          tier: def.tier,
+          titleKey: def.titleKey,
+          descKey: def.descKey,
+          target: def.target,
+          xpReward: def.xpReward,
+          unlocks: def.unlocks,
+          unlockOwned: def.unlocks ? owned.has(def.unlocks) : undefined,
+          current: Math.min(def.target, row?.progress ?? 0),
+          claimed: !!row?.claimedAt,
+        } as DailyMission;
+      })
+      .filter(Boolean) as DailyMission[];
+  }
+
+  /** Rerolls left today, per tier. */
+  public rerollsRemaining(playerId: string, now: Date = new Date()): { regular: number; elite: number } {
+    const used = this.rerollsUsed(playerId, missionDayKey(now));
+    return {
+      regular: Math.max(0, REROLLS_REGULAR - used.regular),
+      elite: Math.max(0, REROLLS_ELITE - used.elite),
+    };
+  }
+
+  /**
+   * Swap one mission for the next unused one from its own pool, spending a
+   * reroll of that tier. A completed mission cannot be rerolled — there is
+   * nothing to gain and a reward to lose.
+   */
+  public rerollMission(
+    playerId: string,
+    missionId: string,
+    now: Date = new Date()
+  ): {
+    ok: boolean;
+    code?: 'MISSION_UNKNOWN' | 'MISSION_NOT_ACTIVE' | 'MISSION_COMPLETE' | 'NO_REROLLS' | 'POOL_EXHAUSTED';
+    missions?: DailyMission[];
+    rerolls?: { regular: number; elite: number };
+    newMissionId?: string;
+  } {
+    const def = findMission(missionId);
+    if (!def) return { ok: false, code: 'MISSION_UNKNOWN' };
+
+    const dayKey = missionDayKey(now);
+    const slots = this.ensureSlots(playerId, dayKey);
+    const target = slots.find((s) => s.missionId === missionId);
+    if (!target) return { ok: false, code: 'MISSION_NOT_ACTIVE' };
+
+    const rows = this.missionRows(playerId, dayKey);
+    const row = rows.get(missionId);
+    if (row?.claimedAt || (row?.progress ?? 0) >= def.target) {
+      return { ok: false, code: 'MISSION_COMPLETE' };
+    }
+
+    const used = this.rerollsUsed(playerId, dayKey);
+    const isElite = def.tier === 'elite';
+    const allowance = isElite ? REROLLS_ELITE : REROLLS_REGULAR;
+    if ((isElite ? used.elite : used.regular) >= allowance) return { ok: false, code: 'NO_REROLLS' };
+
+    // The next mission along in this player's deal order that they are not
+    // already holding — so a reroll always produces something new.
+    const pool = isElite ? ELITE_POOL : MISSION_POOL;
+    const order = dealOrder(pool, playerId, dayKey, isElite ? 'elite' : 'regular');
+    const held = new Set(slots.map((s) => s.missionId));
+    const replacement = order.find((id) => !held.has(id));
+    if (!replacement) return { ok: false, code: 'POOL_EXHAUSTED' };
+
+    this.sql
+      .prepare(`UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`)
+      .run(replacement, playerId, dayKey, target.slot);
+    this.sql
+      .prepare(
+        `INSERT INTO daily_rerolls (playerId, dayKey, regularUsed, eliteUsed) VALUES (?, ?, ?, ?)
+         ON CONFLICT(playerId, dayKey) DO UPDATE SET
+           regularUsed = regularUsed + excluded.regularUsed,
+           eliteUsed = eliteUsed + excluded.eliteUsed`
+      )
+      .run(playerId, dayKey, isElite ? 0 : 1, isElite ? 1 : 0);
+
+    return {
+      ok: true,
+      missions: this.getMissions(playerId, now),
+      rerolls: this.rerollsRemaining(playerId, now),
+      newMissionId: replacement,
+    };
   }
 
   /** Advance every mission this match touches. Called from recordMatch only. */
@@ -726,7 +887,11 @@ class GameDatabase {
        VALUES (?, ?, ?, ?)
        ON CONFLICT(playerId, dayKey, missionId) DO UPDATE SET progress = excluded.progress`
     );
-    for (const def of MISSION_DEFS) {
+    // Only the missions actually held today advance. Progressing the whole
+    // pool would let a rerolled-away mission arrive back half-done.
+    for (const { missionId } of this.ensureSlots(playerId, dayKey)) {
+      const def = findMission(missionId);
+      if (!def) continue;
       const current = rows.get(def.id)?.progress ?? 0;
       const next = applyMatchToProgress(def, current, payload);
       if (next !== current) upsert.run(playerId, dayKey, def.id, next);
@@ -741,7 +906,15 @@ class GameDatabase {
     playerId: string,
     missionId: string,
     now: Date = new Date()
-  ): { ok: boolean; code?: 'MISSION_UNKNOWN' | 'MISSION_INCOMPLETE' | 'MISSION_CLAIMED'; profile?: PlayerProfile; missions?: DailyMission[]; earnedXp?: number } {
+  ): {
+    ok: boolean;
+    code?: 'MISSION_UNKNOWN' | 'MISSION_INCOMPLETE' | 'MISSION_CLAIMED';
+    profile?: PlayerProfile;
+    missions?: DailyMission[];
+    earnedXp?: number;
+    /** Permanent unlock banked by this claim, if it was a first-ever elite. */
+    unlocked?: string;
+  } {
     const def: MissionDef | undefined = findMission(missionId);
     if (!def) return { ok: false, code: 'MISSION_UNKNOWN' };
 
@@ -761,6 +934,20 @@ class GameDatabase {
       .run(now.toISOString(), playerId, dayKey, def.id);
     if (!stamped.changes) return { ok: false, code: 'MISSION_CLAIMED' };
 
+    // An elite mission's XP is a daily reward; its unlock is kept for good.
+    // Recorded on first completion only, so repeating it later pays the XP
+    // again but cannot re-grant something already owned.
+    let unlocked: string | undefined;
+    if (def.tier === 'elite' && def.unlocks) {
+      const banked = this.sql
+        .prepare(
+          `INSERT INTO elite_completions (playerId, missionId, unlockId, completedAt)
+           VALUES (?, ?, ?, ?) ON CONFLICT(playerId, missionId) DO NOTHING`
+        )
+        .run(playerId, def.id, def.unlocks, now.toISOString());
+      if (banked.changes) unlocked = def.unlocks;
+    }
+
     const profile = this.getProfile(playerId);
     profile.xp += def.xpReward;
     const { level, xpNext } = calculateLevelFromXp(profile.xp);
@@ -774,6 +961,7 @@ class GameDatabase {
       profile: this.readProfile(playerId)!,
       missions: this.getMissions(playerId, now),
       earnedXp: def.xpReward,
+      unlocked,
     };
   }
 
@@ -819,6 +1007,7 @@ class GameDatabase {
       totalPointsScored: p.totalPointsScored,
       totalAces: p.totalAces,
       multiplayerWins: p.multiplayerWins || 0,
+      eliteUnlocks: this.eliteUnlocks(p.id),
       dailyStreak: p.dailyStreak,
       tier: p.tier,
       rankedGames: p.rankedGames,
@@ -881,7 +1070,11 @@ class GameDatabase {
     return this.readProfile(bot.id)!;
   }
 
-  public recordMatch(payload: MatchEndPayload, context: RecordMatchContext = {}): MatchEndResult {
+  public recordMatch(
+    payload: MatchEndPayload,
+    context: RecordMatchContext = {},
+    now: Date = new Date()
+  ): MatchEndResult {
     const opponentRating = context.opponentRating;
     const performance = context.performanceWeight ?? 1;
     const profile = this.getProfile(payload.playerId);
@@ -1068,7 +1261,7 @@ class GameDatabase {
 
     // Daily mission progress rides the same server-verified match record, so
     // it can never be reported independently of an actual game.
-    this.advanceMissions(payload.playerId, payload, new Date());
+    this.advanceMissions(payload.playerId, payload, now);
 
     // Achievement XP can push the profile over a level threshold too
     const finalLevel = calculateLevelFromXp(profile.xp);
@@ -1116,7 +1309,7 @@ class GameDatabase {
       tierChanged: isPvp && ranked && profile.tier !== previousTier,
       ranked,
       newAchievements,
-      missions: this.getMissions(payload.playerId),
+      missions: this.getMissions(payload.playerId, now),
     };
   }
 

@@ -18,7 +18,19 @@ export type CourtTheme =
   | 'solar-flare'
   | 'hyper-violet'
   | 'monochrome-noir'
-  | 'quantum-gold';
+  | 'quantum-gold'
+  // Earned from the hidden rungs of the achievement tree.
+  | 'perpetual-blue'
+  | 'flawless-white'
+  | 'legend-aurora'
+  | 'fixture-bronze'
+  // Banked permanently by completing an elite daily mission.
+  | 'void-runner'
+  | 'crimson-tide'
+  | 'arctic-glass'
+  | 'molten-core'
+  | 'signal-lost'
+  | 'gilded-age';
 
 export type SoundscapeType = 'none' | 'stadium' | 'cyberpunk' | 'zen';
 
@@ -26,11 +38,23 @@ export type PlayerStatus = 'online' | 'idle' | 'offline';
 
 export type LanguageCode = 'en' | 'es' | 'ja' | 'de' | 'fr' | 'pt' | 'zh';
 
-export type MissionType = 'games_played' | 'matches_won' | 'rally' | 'multiplayer' | 'points_scored';
+export type MissionType =
+  | 'games_played'
+  | 'matches_won'
+  | 'rally'
+  | 'multiplayer'
+  | 'points_scored'
+  | 'aces'
+  | 'shutouts';
 
 export interface DailyMission {
   id: string;
   type: MissionType;
+  tier: 'regular' | 'elite';
+  /** Permanent unlock granted the first time this is ever completed. */
+  unlocks?: string;
+  /** True once the permanent unlock has already been banked on some day. */
+  unlockOwned?: boolean;
   titleKey: string;
   descKey: string;
   target: number;
@@ -147,6 +171,11 @@ export interface PlayerProfile {
   totalAces: number;
   /** PvP wins only — solo wins never count toward the duel branch. */
   multiplayerWins: number;
+  /**
+   * Permanent unlocks banked by completing elite daily missions. Kept for
+   * good: the mission's XP is a daily reward, this is not.
+   */
+  eliteUnlocks?: string[];
   dailyStreak: number;
   lastDailyDate?: string;
   achievements: string[]; // achievement IDs
@@ -187,6 +216,11 @@ export interface PublicProfile {
   totalAces: number;
   /** PvP wins only — solo wins never count toward the duel branch. */
   multiplayerWins: number;
+  /**
+   * Permanent unlocks banked by completing elite daily missions. Kept for
+   * good: the mission's XP is a daily reward, this is not.
+   */
+  eliteUnlocks?: string[];
   dailyStreak: number;
   // Tier only — a public profile never exposes raw mu/sigma numbers.
   tier: Tier;

@@ -8,63 +8,128 @@ import { DailyMission, MatchEndPayload, MissionType } from '../types';
 // in here reads or writes storage — it is pure data plus the rules for
 // advancing progress.
 
+export type MissionTier = 'regular' | 'elite';
+
 export interface MissionDef {
   id: string;
   type: MissionType;
+  tier: MissionTier;
   titleKey: string;
   descKey: string;
   target: number;
   xpReward: number;
+  /**
+   * A permanent unlock earned the FIRST time this mission is completed, ever.
+   * Elite missions only: the XP is daily, but this is kept for good, which is
+   * what makes a single brutal day's work worth doing.
+   */
+  unlocks?: string;
+  /** Solo difficulty the match must have been played at, if any. */
+  difficulty?: 'rookie' | 'pro' | 'cyber';
+  /** Restrict to a mode, e.g. an elite duel mission. */
+  mode?: 'solo' | 'multiplayer';
 }
 
-export const MISSION_DEFS: MissionDef[] = [
-  {
-    id: 'mission_games',
-    type: 'games_played',
-    titleKey: 'mission_games_title',
-    descKey: 'mission_games_desc',
-    target: 3,
-    xpReward: 120,
-  },
-  {
-    id: 'mission_win',
-    type: 'matches_won',
-    titleKey: 'mission_win_title',
-    descKey: 'mission_win_desc',
-    target: 1,
-    xpReward: 150,
-  },
-  {
-    id: 'mission_rally',
-    type: 'rally',
-    titleKey: 'mission_rally_title',
-    descKey: 'mission_rally_desc',
-    target: 8,
-    xpReward: 120,
-  },
-  {
-    id: 'mission_multi',
-    type: 'multiplayer',
-    titleKey: 'mission_multi_title',
-    descKey: 'mission_multi_desc',
-    target: 1,
-    xpReward: 200,
-  },
-  {
-    id: 'mission_points',
-    type: 'points_scored',
-    titleKey: 'mission_points_title',
-    descKey: 'mission_points_desc',
-    target: 12,
-    xpReward: 120,
-  },
+/**
+ * The regular pool. A player is dealt REGULAR_SLOTS of these each day, so
+ * there is something to reroll INTO — a fixed five would make a reroll button
+ * meaningless.
+ */
+export const MISSION_POOL: MissionDef[] = [
+  { id: 'mission_games', type: 'games_played', tier: 'regular', titleKey: 'mission_games_title', descKey: 'mission_games_desc', target: 3, xpReward: 120 },
+  { id: 'mission_games_6', type: 'games_played', tier: 'regular', titleKey: 'mission_games6_title', descKey: 'mission_games6_desc', target: 6, xpReward: 180 },
+  { id: 'mission_win', type: 'matches_won', tier: 'regular', titleKey: 'mission_win_title', descKey: 'mission_win_desc', target: 1, xpReward: 150 },
+  { id: 'mission_win_3', type: 'matches_won', tier: 'regular', titleKey: 'mission_win3_title', descKey: 'mission_win3_desc', target: 3, xpReward: 220 },
+  { id: 'mission_rally', type: 'rally', tier: 'regular', titleKey: 'mission_rally_title', descKey: 'mission_rally_desc', target: 8, xpReward: 120 },
+  { id: 'mission_rally_15', type: 'rally', tier: 'regular', titleKey: 'mission_rally15_title', descKey: 'mission_rally15_desc', target: 15, xpReward: 200 },
+  { id: 'mission_multi', type: 'multiplayer', tier: 'regular', titleKey: 'mission_multi_title', descKey: 'mission_multi_desc', target: 1, xpReward: 200 },
+  { id: 'mission_points', type: 'points_scored', tier: 'regular', titleKey: 'mission_points_title', descKey: 'mission_points_desc', target: 12, xpReward: 120 },
+  { id: 'mission_points_25', type: 'points_scored', tier: 'regular', titleKey: 'mission_points25_title', descKey: 'mission_points25_desc', target: 25, xpReward: 200 },
+  { id: 'mission_pro_win', type: 'matches_won', tier: 'regular', titleKey: 'mission_prowin_title', descKey: 'mission_prowin_desc', target: 1, xpReward: 200, difficulty: 'pro' },
+  { id: 'mission_aces', type: 'aces', tier: 'regular', titleKey: 'mission_aces_title', descKey: 'mission_aces_desc', target: 3, xpReward: 180 },
+  { id: 'mission_shutout', type: 'shutouts', tier: 'regular', titleKey: 'mission_shutout_title', descKey: 'mission_shutout_desc', target: 1, xpReward: 220 },
 ];
 
+/**
+ * The elite pool. Deliberately punishing — a day's work, not an errand — and
+ * each one carries a permanent unlock the first time it is ever completed.
+ */
+export const ELITE_POOL: MissionDef[] = [
+  { id: 'elite_cyber_3', type: 'matches_won', tier: 'elite', titleKey: 'elite_cyber3_title', descKey: 'elite_cyber3_desc', target: 3, xpReward: 600, difficulty: 'cyber', unlocks: 'void-runner' },
+  { id: 'elite_rally_40', type: 'rally', tier: 'elite', titleKey: 'elite_rally40_title', descKey: 'elite_rally40_desc', target: 40, xpReward: 600, unlocks: 'crimson-tide' },
+  { id: 'elite_shutout_2', type: 'shutouts', tier: 'elite', titleKey: 'elite_shutout2_title', descKey: 'elite_shutout2_desc', target: 2, xpReward: 600, unlocks: 'arctic-glass' },
+  { id: 'elite_points_60', type: 'points_scored', tier: 'elite', titleKey: 'elite_points60_title', descKey: 'elite_points60_desc', target: 60, xpReward: 600, unlocks: 'molten-core' },
+  { id: 'elite_duel_3', type: 'matches_won', tier: 'elite', titleKey: 'elite_duel3_title', descKey: 'elite_duel3_desc', target: 3, xpReward: 600, mode: 'multiplayer', unlocks: 'signal-lost' },
+  { id: 'elite_aces_8', type: 'aces', tier: 'elite', titleKey: 'elite_aces8_title', descKey: 'elite_aces8_desc', target: 8, xpReward: 600, unlocks: 'gilded-age' },
+];
+
+export const ALL_MISSIONS: MissionDef[] = [...MISSION_POOL, ...ELITE_POOL];
+
+/** How many of each tier a player holds on any given day. */
+export const REGULAR_SLOTS = 5;
+export const ELITE_SLOTS = 1;
+
+/** Rerolls granted per UTC day, per tier. Both reset with the day. */
+export const REROLLS_REGULAR = 5;
+export const REROLLS_ELITE = 1;
+
+/** Legacy alias — the fixed five before missions became a dealt hand. */
+export const MISSION_DEFS = MISSION_POOL;
+
+// ---------------------------------------------------------------------------
+// Dealing the daily hand
+// ---------------------------------------------------------------------------
+
+/** Deterministic 32-bit hash of a string, so a day's hand is reproducible. */
+function hashString(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Shuffle a copy of `items` with the given seed. */
+function seededShuffle<T>(items: readonly T[], seed: number): T[] {
+  const out = items.slice();
+  const rnd = mulberry32(seed);
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/**
+ * The order a player's pool is dealt in on a given day. The hand is the first
+ * REGULAR_SLOTS of it; a reroll takes the next one along. Deterministic from
+ * (playerId, dayKey), so it survives a restart without being stored, and two
+ * players get different hands on the same day.
+ */
+export const dealOrder = (pool: MissionDef[], playerId: string, dayKey: string, salt: string): string[] =>
+  seededShuffle(pool, hashString(`${playerId}|${dayKey}|${salt}`)).map((m) => m.id);
+
 /** Most XP a player can claim from missions in one day. */
-export const MISSION_DAILY_XP_CAP = MISSION_DEFS.reduce((sum, m) => sum + m.xpReward, 0);
+export const MISSION_DAILY_XP_CAP = MISSION_POOL.slice()
+  .sort((a, b) => b.xpReward - a.xpReward)
+  .slice(0, REGULAR_SLOTS)
+  .reduce((sum, m) => sum + m.xpReward, 0) +
+  Math.max(...ELITE_POOL.map((m) => m.xpReward)) * ELITE_SLOTS;
 
 export const findMission = (id: string): MissionDef | undefined =>
-  MISSION_DEFS.find((m) => m.id === id);
+  ALL_MISSIONS.find((m) => m.id === id);
 
 /**
  * The day a mission set belongs to, in UTC. Deliberately not local time: the
@@ -93,6 +158,13 @@ export function formatMissionReset(now: Date = new Date()): string {
  * held at the target so a mission cannot bank surplus toward tomorrow.
  */
 export function missionProgressDelta(def: MissionDef, match: MatchEndPayload): number {
+  // A mission restricted to a difficulty or a mode only counts matches that
+  // actually meet it — an elite "win 3 against Cyber" must not be satisfied by
+  // three Rookie wins.
+  if (def.difficulty && match.difficulty !== def.difficulty) return 0;
+  if (def.mode && match.mode !== def.mode) return 0;
+  if (def.difficulty && match.mode !== 'solo') return 0;
+
   switch (def.type) {
     case 'games_played':
       return 1;
@@ -102,6 +174,10 @@ export function missionProgressDelta(def: MissionDef, match: MatchEndPayload): n
       return match.mode === 'multiplayer' ? 1 : 0;
     case 'points_scored':
       return Math.max(0, Math.round(match.playerScore || 0));
+    case 'aces':
+      return Math.max(0, Math.round(match.aces || 0));
+    case 'shutouts':
+      return match.isWinner && match.opponentScore === 0 && match.playerScore >= 5 ? 1 : 0;
     case 'rally':
       return 0; // handled as a maximum, not a sum — see applyMatchToProgress
     default:
@@ -115,11 +191,12 @@ export function applyMatchToProgress(
   current: number,
   match: MatchEndPayload
 ): number {
-  const next =
-    def.type === 'rally'
-      ? Math.max(current, Math.max(0, Math.round(match.maxRally || 0)))
-      : current + missionProgressDelta(def, match);
-  return Math.min(def.target, next);
+  if (def.type === 'rally') {
+    if (def.difficulty && (match.difficulty !== def.difficulty || match.mode !== 'solo')) return current;
+    if (def.mode && match.mode !== def.mode) return current;
+    return Math.min(def.target, Math.max(current, Math.max(0, Math.round(match.maxRally || 0))));
+  }
+  return Math.min(def.target, current + missionProgressDelta(def, match));
 }
 
 export function getMissionsStatusSummary(missions: DailyMission[]): {
