@@ -77,15 +77,10 @@ export default function App() {
     return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
   });
 
-  // Persistent Player Identification
-  const [playerId] = useState<string>(() => {
-    let id = localStorage.getItem('half_pong_player_id');
-    if (!id) {
-      id = `usr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-      localStorage.setItem('half_pong_player_id', id);
-    }
-    return id;
-  });
+  // Player identity is server-issued (signed device cookie); the id arrives
+  // with the profile fetch and is display/labelling only — the server never
+  // trusts a client-sent id.
+  const [playerId, setPlayerId] = useState<string>('');
 
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
   const [lastMatchResult, setLastMatchResult] = useState<MatchEndResult | null>(null);
@@ -209,17 +204,18 @@ export default function App() {
   // Fetch Player Profile from Server
   const fetchProfile = useCallback(() => {
     const savedName = localStorage.getItem('half_pong_player_name') || undefined;
-    const url = `/api/profile/${playerId}${savedName ? `?username=${encodeURIComponent(savedName)}` : ''}`;
+    const url = `/api/profile/me${savedName ? `?username=${encodeURIComponent(savedName)}` : ''}`;
     fetch(url)
       .then((res) => res.json())
       .then((data) => {
         if (data && data.id) {
           setProfile(data);
+          setPlayerId(data.id);
           localStorage.setItem('half_pong_player_name', data.username);
         }
       })
       .catch((e) => console.error('Profile fetch error:', e));
-  }, [playerId]);
+  }, []);
 
   useEffect(() => {
     fetchProfile();
@@ -228,7 +224,7 @@ export default function App() {
   // Update Callsign / Username
   const handleUpdateUsername = async (newName: string) => {
     try {
-      const res = await fetch(`/api/profile/${playerId}`, {
+      const res = await fetch('/api/profile/me', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: newName }),
@@ -321,7 +317,7 @@ export default function App() {
     if (claimedMission && profile) {
       try {
         const nextXp = profile.currentXp + claimedMission.xpReward;
-        const res = await fetch(`/api/profile/${playerId}`, {
+        const res = await fetch('/api/profile/me', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ currentXp: nextXp }),

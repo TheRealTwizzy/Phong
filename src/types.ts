@@ -112,6 +112,9 @@ export interface PlayerProfile {
   createdAt: string;
   lastActive: string;
   rankTitle: string;
+  // One-time code that reclaims this profile on a new device (rotates on use).
+  // Only ever serialized to the profile's own device.
+  recoveryCode?: string;
 }
 
 export interface Achievement {

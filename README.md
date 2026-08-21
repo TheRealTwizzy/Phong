@@ -4,7 +4,7 @@ A blind half-court Pong for the web. Each player sees only their own half of the
 
 Also playable solo against an adaptive AI (Rookie → Chaos) and in a split-screen dual-court simulator on one device.
 
-Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server.
+Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server, keyed to a **server-issued device identity** (signed cookie — one profile per device, no login) with a recovery code to move your profile to a new phone.
 
 ## Quick start
 
