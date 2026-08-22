@@ -36,6 +36,21 @@ ngrok http 3000
 
 Open the printed `https://` URL on both phones. WebSockets upgrade over the same tunnel (the client derives `wss://` from `window.location`), and the QR code in the lobby encodes the full room link, so the second phone just scans and lands in the room.
 
+### Driving the game from a laptop
+
+The app is gated to Android and iOS **phones** (`src/device.ts`): a desktop or tablet gets a QR code, not a court. Two ways past it while developing:
+
+```bash
+npm run dev            # then open http://localhost:3000/?desktop=1
+```
+
+`?desktop=1` works **only** under `import.meta.env.DEV`, so the branch is compiled out of a production bundle entirely — there is no flag to find on the deployed site. For a production build, use your browser's device emulation (a phone profile sets the user agent and touch points, which is all the gate reads) or a real phone over the tunnel above.
+
+Two other things to expect on a dev laptop:
+
+- **Sessions.** An account is held by one device at a time. Opening the game in a second tab or a second browser profile takes the account over, and the first one shows the "playing elsewhere" wall. That is the feature, not a bug — tap through on whichever one you want to drive.
+- **Build ids.** Every restart of `npm run dev` mints a new build id when there is no `dist/index.html` to hash, which retires sessions from the previous run and reloads open tabs. Run `npm run build` once and the id becomes the digest of the built client, stable until you rebuild.
+
 Tailwind note: this project uses **Tailwind CSS 4**, which is CSS-first — configuration lives in `src/index.css` via `@import "tailwindcss"`, and there is deliberately no `tailwind.config.js`. Follow Tailwind 4 docs, not v3 tutorials.
 
 ## Tests

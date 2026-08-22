@@ -252,6 +252,20 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     simulate_phone: 'Preview Smartphone Screen (390×844)',
     rotate_prompt: 'Please rotate your smartphone to Portrait orientation',
 
+    // Device gate (smartphone-only) & session ownership
+    gate_desktop_body: "Phong is played on phones placed top-to-top. A desktop browser cannot run a match.",
+    gate_tablet_body: "Tablets are not supported — Phong needs a phone-sized screen held in one hand.",
+    gate_scan_hint: "Scan with your phone camera to play",
+    gate_url_label: "Or open this address on your phone",
+    session_moved_title: "ACCOUNT MOVED",
+    session_moved_body: "This account now lives on another device. Nothing played here would be saved to it.",
+    session_moved_action: "Start as a new player",
+    session_taken_title: "PLAYING ELSEWHERE",
+    session_taken_body: "Your account was opened on another device. Only one device can play it at a time.",
+    session_taken_action: "Play on this device",
+    session_update_title: "UPDATE AVAILABLE",
+    session_update_body: "A new version of Phong is live. Reloading…",
+
     // Main menu & mode navigation
     main_menu: 'Main Menu',
     choose_mode: 'Choose Your Game Mode',
@@ -517,6 +531,20 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     scan_qr: 'Escanea el QR para jugar en tu móvil:',
     simulate_phone: 'Simular Pantalla Móvil (390×844)',
     rotate_prompt: 'Por favor, gira tu smartphone a orientación vertical',
+
+    // Device gate (smartphone-only) & session ownership
+    gate_desktop_body: "Phong se juega con móviles colocados uno frente a otro. Un navegador de escritorio no puede ejecutar una partida.",
+    gate_tablet_body: "Las tabletas no son compatibles: Phong necesita una pantalla de móvil que quepa en una mano.",
+    gate_scan_hint: "Escanea con la cámara de tu móvil para jugar",
+    gate_url_label: "O abre esta dirección en tu móvil",
+    session_moved_title: "CUENTA TRASLADADA",
+    session_moved_body: "Esta cuenta ahora está en otro dispositivo. Nada de lo que juegues aquí se guardará en ella.",
+    session_moved_action: "Empezar como jugador nuevo",
+    session_taken_title: "EN JUEGO EN OTRO SITIO",
+    session_taken_body: "Tu cuenta se abrió en otro dispositivo. Solo un dispositivo puede jugar a la vez.",
+    session_taken_action: "Jugar en este dispositivo",
+    session_update_title: "ACTUALIZACIÓN DISPONIBLE",
+    session_update_body: "Hay una nueva versión de Phong. Recargando…",
 
     // Menú principal y navegación de modos
     main_menu: 'Menú Principal',
@@ -784,6 +812,20 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     simulate_phone: 'スマホ画面シミュレーション (390×844)',
     rotate_prompt: 'スマートフォンを縦向きにしてプレイしてください',
 
+    // Device gate (smartphone-only) & session ownership
+    gate_desktop_body: "Phong はスマートフォンを向かい合わせに置いてプレイします。デスクトップのブラウザーでは試合を実行できません。",
+    gate_tablet_body: "タブレットは非対応です。Phong には片手で持てるスマートフォンの画面が必要です。",
+    gate_scan_hint: "スマートフォンのカメラで読み取ってプレイ",
+    gate_url_label: "またはこのアドレスをスマートフォンで開いてください",
+    session_moved_title: "アカウントを移行しました",
+    session_moved_body: "このアカウントは別の端末にあります。ここでのプレイは記録されません。",
+    session_moved_action: "新しいプレイヤーとして始める",
+    session_taken_title: "別の端末でプレイ中",
+    session_taken_body: "アカウントが別の端末で開かれました。同時にプレイできる端末は1台だけです。",
+    session_taken_action: "この端末でプレイする",
+    session_update_title: "アップデートがあります",
+    session_update_body: "新しいバージョンが公開されました。再読み込みします…",
+
     // メインメニューとモード選択
     main_menu: 'メインメニュー',
     choose_mode: 'ゲームモードを選択',
@@ -1049,6 +1091,20 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     scan_qr: 'QR-Code scannen zum Spielen auf dem Smartphone:',
     simulate_phone: 'Smartphone-Vorschau (390×844)',
     rotate_prompt: 'Bitte drehe dein Smartphone ins Hochformat',
+
+    // Device gate (smartphone-only) & session ownership
+    gate_desktop_body: "Phong wird auf Smartphones gespielt, die Kante an Kante liegen. Ein Desktop-Browser kann kein Match ausführen.",
+    gate_tablet_body: "Tablets werden nicht unterstützt – Phong braucht einen Smartphone-Bildschirm für eine Hand.",
+    gate_scan_hint: "Mit der Handykamera scannen und spielen",
+    gate_url_label: "Oder diese Adresse auf dem Handy öffnen",
+    session_moved_title: "KONTO VERSCHOBEN",
+    session_moved_body: "Dieses Konto liegt jetzt auf einem anderen Gerät. Hier gespielte Matches werden nicht gespeichert.",
+    session_moved_action: "Als neuer Spieler starten",
+    session_taken_title: "WIRD WOANDERS GESPIELT",
+    session_taken_body: "Dein Konto wurde auf einem anderen Gerät geöffnet. Es kann immer nur ein Gerät spielen.",
+    session_taken_action: "Auf diesem Gerät spielen",
+    session_update_title: "UPDATE VERFÜGBAR",
+    session_update_body: "Eine neue Version von Phong ist live. Wird neu geladen…",
 
     // Hauptmenü & Modus-Navigation
     main_menu: 'Hauptmenü',
@@ -1316,6 +1372,20 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     simulate_phone: 'Aperçu Écran Smartphone (390×844)',
     rotate_prompt: 'Veuillez orienter votre smartphone en mode portrait',
 
+    // Device gate (smartphone-only) & session ownership
+    gate_desktop_body: "Phong se joue avec des téléphones posés bord à bord. Un navigateur de bureau ne peut pas lancer de match.",
+    gate_tablet_body: "Les tablettes ne sont pas prises en charge : Phong exige un écran de téléphone tenu à une main.",
+    gate_scan_hint: "Scanne avec l’appareil photo de ton téléphone pour jouer",
+    gate_url_label: "Ou ouvre cette adresse sur ton téléphone",
+    session_moved_title: "COMPTE DÉPLACÉ",
+    session_moved_body: "Ce compte se trouve désormais sur un autre appareil. Rien de ce que tu joues ici n’y sera enregistré.",
+    session_moved_action: "Commencer en nouveau joueur",
+    session_taken_title: "PARTIE AILLEURS",
+    session_taken_body: "Ton compte a été ouvert sur un autre appareil. Un seul appareil peut jouer à la fois.",
+    session_taken_action: "Jouer sur cet appareil",
+    session_update_title: "MISE À JOUR DISPONIBLE",
+    session_update_body: "Une nouvelle version de Phong est en ligne. Rechargement…",
+
     // Menu principal et navigation des modes
     main_menu: 'Menu Principal',
     choose_mode: 'Choisissez votre Mode de Jeu',
@@ -1582,6 +1652,20 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     simulate_phone: 'Simular Tela de Smartphone (390×844)',
     rotate_prompt: 'Por favor, gire seu smartphone para a posição vertical',
 
+    // Device gate (smartphone-only) & session ownership
+    gate_desktop_body: "O Phong joga-se com telemóveis encostados topo a topo. Um navegador de computador não consegue correr uma partida.",
+    gate_tablet_body: "Os tablets não são suportados — o Phong precisa de um ecrã de telemóvel para uma mão.",
+    gate_scan_hint: "Digitaliza com a câmara do telemóvel para jogar",
+    gate_url_label: "Ou abre este endereço no teu telemóvel",
+    session_moved_title: "CONTA TRANSFERIDA",
+    session_moved_body: "Esta conta está agora noutro dispositivo. Nada jogado aqui será guardado nela.",
+    session_moved_action: "Começar como novo jogador",
+    session_taken_title: "A JOGAR NOUTRO LADO",
+    session_taken_body: "A tua conta foi aberta noutro dispositivo. Só um dispositivo pode jogar de cada vez.",
+    session_taken_action: "Jogar neste dispositivo",
+    session_update_title: "ATUALIZAÇÃO DISPONÍVEL",
+    session_update_body: "Está disponível uma nova versão do Phong. A recarregar…",
+
     // Menu principal e navegação de modos
     main_menu: 'Menu Principal',
     choose_mode: 'Escolha seu Modo de Jogo',
@@ -1847,6 +1931,20 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     scan_qr: '扫描二维码在手机上即刻畅玩:',
     simulate_phone: '模拟手机竖屏 (390×844)',
     rotate_prompt: '请将手机旋转至竖屏模式以获得最佳视野',
+
+    // Device gate (smartphone-only) & session ownership
+    gate_desktop_body: "Phong 需要两部手机顶部相对摆放进行游戏，桌面浏览器无法运行比赛。",
+    gate_tablet_body: "不支持平板设备——Phong 需要单手握持的手机屏幕。",
+    gate_scan_hint: "用手机相机扫描即可开始游戏",
+    gate_url_label: "或在手机上打开此地址",
+    session_moved_title: "账号已转移",
+    session_moved_body: "该账号已转移到另一台设备。在此处进行的比赛不会记录到该账号。",
+    session_moved_action: "作为新玩家开始",
+    session_taken_title: "正在其他设备上游玩",
+    session_taken_body: "你的账号已在另一台设备上打开。同一时间只能有一台设备进行游戏。",
+    session_taken_action: "在此设备上游玩",
+    session_update_title: "有可用更新",
+    session_update_body: "Phong 新版本已上线，正在重新加载…",
 
     // 主菜单与模式导航
     main_menu: '主菜单',
