@@ -42,6 +42,8 @@ import {
 } from '../src/rating';
 import {
   MISSION_POOL,
+  RECENT_DEAL_MEMORY,
+  pickHand,
   ELITE_POOL,
   REGULAR_SLOTS,
   ELITE_SLOTS,
@@ -391,6 +393,25 @@ class GameDatabase {
       -- days later. The PRIMARY KEY is the whole mechanism; the result column
       -- holds the MatchEndResult that first call produced, replayed verbatim
       -- to the ones that follow so every caller sees the same XP.
+      -- The last few tasks dealt to a player, per tier. Tasks repeat now, so
+      -- this is what stops one returning the moment it leaves: a task is
+      -- eligible again once RECENT_DEAL_MEMORY other deals have gone by. Not
+      -- day-keyed on purpose — a task finished last night should not be first
+      -- in line this morning. At most one row per (player, tier, task), so it
+      -- is bounded by the pool size and never needs pruning.
+      CREATE TABLE IF NOT EXISTS recent_missions (
+        playerId TEXT NOT NULL,
+        tier TEXT NOT NULL,
+        missionId TEXT NOT NULL,
+        dealtAt TEXT NOT NULL,
+        -- Counts deals, per player and tier. "The last three" has to be exact,
+        -- and a timestamp cannot give that: a whole hand is dealt in one go
+        -- and would share a stamp, leaving the window's edge to a tiebreak.
+        seq INTEGER NOT NULL,
+        PRIMARY KEY (playerId, tier, missionId)
+      );
+      CREATE INDEX IF NOT EXISTS idx_recent_missions_player
+        ON recent_missions (playerId, tier, seq DESC);
       CREATE TABLE IF NOT EXISTS recorded_matches (
         playerId TEXT NOT NULL,
         matchKey TEXT NOT NULL,
@@ -432,6 +453,7 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS elite_completions');
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DROP TABLE IF EXISTS recorded_matches');
+      this.sql.exec('DROP TABLE IF EXISTS recent_missions');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -945,13 +967,25 @@ class GameDatabase {
    * has somewhere to live; the initial deal is deterministic from the player
    * and the day, so two devices agree without coordinating.
    */
-  private ensureSlots(playerId: string, dayKey: string): { slot: number; missionId: string }[] {
+  private ensureSlots(
+    playerId: string,
+    dayKey: string,
+    now: Date = new Date()
+  ): { slot: number; missionId: string }[] {
     const existing = this.stmt(`SELECT slot, missionId FROM daily_mission_slots WHERE playerId = ? AND dayKey = ? ORDER BY slot`)
       .all(playerId, dayKey) as { slot: number; missionId: string }[];
-    if (existing.length) return existing;
+    if (existing.length) return this.trimSlots(playerId, dayKey, existing);
 
-    const regular = dealOrder(MISSION_POOL, playerId, dayKey, 'regular').slice(0, REGULAR_SLOTS);
-    const elite = dealOrder(ELITE_POOL, playerId, dayKey, 'elite').slice(0, ELITE_SLOTS);
+    const regular = pickHand(
+      dealOrder(MISSION_POOL, playerId, dayKey, 'regular'),
+      this.recentlyDealt(playerId, 'regular'),
+      REGULAR_SLOTS
+    );
+    const elite = pickHand(
+      dealOrder(ELITE_POOL, playerId, dayKey, 'elite'),
+      this.recentlyDealt(playerId, 'elite'),
+      ELITE_SLOTS
+    );
     const dealt = [...regular, ...elite];
 
     const insert = this.stmt(
@@ -959,7 +993,78 @@ class GameDatabase {
        ON CONFLICT(playerId, dayKey, slot) DO NOTHING`
     );
     dealt.forEach((missionId, slot) => insert.run(playerId, dayKey, slot, missionId));
+    for (const missionId of regular) this.dealMission(playerId, dayKey, 'regular', missionId, now);
+    for (const missionId of elite) this.dealMission(playerId, dayKey, 'elite', missionId, now);
     return dealt.map((missionId, slot) => ({ slot, missionId }));
+  }
+
+  /**
+   * Hold a day already dealt to the CURRENT slot counts.
+   *
+   * The hand size is a constant, but a player mid-day is holding whatever they
+   * were dealt this morning — so lowering it left them with five active tasks
+   * until the UTC reset. The surplus is retired (blanked, never deleted; see
+   * RETIRED_SLOT) rather than reshuffled, so nothing in progress is disturbed
+   * beyond what has to be.
+   */
+  private trimSlots(
+    playerId: string,
+    dayKey: string,
+    slots: { slot: number; missionId: string }[]
+  ): { slot: number; missionId: string }[] {
+    const limits: Record<'regular' | 'elite', number> = { regular: REGULAR_SLOTS, elite: ELITE_SLOTS };
+    const kept: Record<'regular' | 'elite', number> = { regular: 0, elite: 0 };
+    const retire = this.stmt(
+      `UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`
+    );
+
+    return slots.map((sl) => {
+      const def = findMission(sl.missionId);
+      if (!def) return sl; // already retired
+      kept[def.tier] += 1;
+      if (kept[def.tier] <= limits[def.tier]) return sl;
+      retire.run(RETIRED_SLOT, playerId, dayKey, sl.slot);
+      return { slot: sl.slot, missionId: RETIRED_SLOT };
+    });
+  }
+
+  /** The tasks this player was dealt most recently, per tier. */
+  private recentlyDealt(playerId: string, tier: 'regular' | 'elite'): Set<string> {
+    const rows = this.stmt(
+        `SELECT missionId FROM recent_missions WHERE playerId = ? AND tier = ?
+         ORDER BY seq DESC LIMIT ?`
+      )
+      .all(playerId, tier, RECENT_DEAL_MEMORY) as { missionId: string }[];
+    return new Set(rows.map((r) => r.missionId));
+  }
+
+  /**
+   * Put a task into play: wipe whatever it held before, and remember that it
+   * was dealt.
+   *
+   * The reset is the point. Progress is stored per (player, day, task), so a
+   * task dealt back into a slot used to arrive carrying whatever it had
+   * collected the last time it was held — a rerolled "Point Machine" turning
+   * up at 21/25, which is a reward for nothing. A task in a slot has always
+   * just started.
+   */
+  private dealMission(
+    playerId: string,
+    dayKey: string,
+    tier: 'regular' | 'elite',
+    missionId: string,
+    now: Date
+  ): void {
+    this.stmt('DELETE FROM daily_missions WHERE playerId = ? AND dayKey = ? AND missionId = ?')
+      .run(playerId, dayKey, missionId);
+    this.stmt(
+        `INSERT INTO recent_missions (playerId, tier, missionId, dealtAt, seq)
+         VALUES (?, ?, ?, ?,
+           (SELECT COALESCE(MAX(seq), 0) + 1 FROM recent_missions WHERE playerId = ? AND tier = ?))
+         ON CONFLICT(playerId, tier, missionId)
+           DO UPDATE SET dealtAt = excluded.dealtAt, seq = excluded.seq`
+      )
+      .run(playerId, tier, missionId, now.toISOString(), playerId, tier);
   }
 
   /** Rerolls already spent today, per tier. */
@@ -1026,19 +1131,20 @@ class GameDatabase {
     dayKey: string,
     slot: number,
     tier: 'regular' | 'elite',
-    slots: { slot: number; missionId: string }[]
+    slots: { slot: number; missionId: string }[],
+    now: Date = new Date()
   ): string | null {
     const isElite = tier === 'elite';
     const pool = isElite ? ELITE_POOL : MISSION_POOL;
     const order = dealOrder(pool, playerId, dayKey, isElite ? 'elite' : 'regular');
+    // Anything may be dealt except what is already on the list and what was
+    // dealt in the last few rolls. Finishing a task no longer retires it for
+    // the day: one-and-done meant a productive player worked through the pool
+    // and a claim then had nothing to hand back, leaving the finished task
+    // sitting in its slot. A repeating pool cannot run out.
     const held = new Set(slots.map((sl) => sl.missionId));
-    const rows = this.missionRows(playerId, dayKey);
-    const finished = (id: string) => {
-      const def = findMission(id);
-      const row = rows.get(id);
-      return !!row?.claimedAt || (def ? (row?.progress ?? 0) >= def.target : false);
-    };
-    const replacement = order.find((id) => !held.has(id) && !finished(id));
+    const recent = this.recentlyDealt(playerId, tier);
+    const replacement = order.find((id) => !held.has(id) && !recent.has(id));
     // Nothing left to deal: the player has finished everything this tier had
     // for them today. RETIRE the slot rather than leaving what was in it —
     // a task that has been completed and paid is not an active task, and
@@ -1051,6 +1157,9 @@ class GameDatabase {
     // deal the player a whole fresh day's tasks.
     this.stmt(`UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`)
       .run(replacement ?? RETIRED_SLOT, playerId, dayKey, slot);
+    // A task arriving in a slot starts from zero, whatever it collected the
+    // last time it was held.
+    if (replacement) this.dealMission(playerId, dayKey, tier, replacement, now);
     return replacement ?? null;
   }
 
@@ -1091,7 +1200,7 @@ class GameDatabase {
 
     // The next mission along in this player's deal order — so a reroll always
     // produces something new. Only charged if one was actually found.
-    const replacement = this.fillSlot(playerId, dayKey, target.slot, def.tier, slots);
+    const replacement = this.fillSlot(playerId, dayKey, target.slot, def.tier, slots, now);
     if (!replacement) return { ok: false, code: 'POOL_EXHAUSTED' };
 
     this.stmt(
@@ -1197,7 +1306,7 @@ class GameDatabase {
     const slots = this.ensureSlots(playerId, dayKey);
     const mine = slots.find((sl) => sl.missionId === def.id);
     const newMissionId = mine
-      ? this.fillSlot(playerId, dayKey, mine.slot, def.tier, slots) ?? undefined
+      ? this.fillSlot(playerId, dayKey, mine.slot, def.tier, slots, now) ?? undefined
       : undefined;
 
     return {
