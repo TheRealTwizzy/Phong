@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AIDifficulty, GameMode, GameSettings, PlayerProfile, PlayerStatus } from '../types';
+import { Achievement, AIDifficulty, GameMode, GameSettings, PlayerProfile, PlayerStatus } from '../types';
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
@@ -8,6 +8,7 @@ import { AI_DIFFICULTIES, aiRating, winProbability, recommendedDifficulty } from
 import { normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
 import { MatchRulesPanel } from './MatchRulesPanel';
+import { SegmentedControl, UnlockHintSheet } from './ui';
 import {
   Bot,
   Dumbbell,
@@ -24,7 +25,6 @@ import {
   Shield,
   Flame,
   ChevronDown,
-  Lock,
 } from 'lucide-react';
 
 // Out-of-match hub: pick a mode, lock in the match settings (difficulty,
@@ -72,6 +72,9 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 }) => {
   const lang = settings.language || 'en';
   const [expandedMode, setExpandedMode] = useState<GameMode | null>(null);
+  // Which gate the player tapped, so the reason a rung is shut is something
+  // they can read rather than a tooltip no touch device will ever show.
+  const [gateHint, setGateHint] = useState<Achievement | null>(null);
 
   const modes: {
     id: GameMode;
@@ -254,59 +257,37 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                             {t('win_chance', lang)}
                           </span>
                         </label>
-                        <div className="grid grid-cols-4 gap-1.5">
-                          {AI_DIFFICULTIES.map((diff) => {
+                        <SegmentedControl
+                          columns={3}
+                          ariaLabel={t('ai_difficulty', lang)}
+                          value={settings.difficulty}
+                          onChange={(diff) => onUpdateSettings({ difficulty: diff })}
+                          onLockTap={setGateHint}
+                          options={AI_DIFFICULTIES.map((diff) => {
                             // Pre-match prediction from hidden MMR vs this AI
                             // anchor — the same number that scales match XP.
-                            const chance = Math.round(winProbability(myRating, aiRating(diff, myRating.mu)) * 100);
-                            const unlocked = opened('difficulty', diff);
-                            const gate = unlocked ? null : unlockedBy('difficulty', diff);
-                            return (
-                              <button
-                                key={diff}
-                                id={`menu-diff-${diff}`}
-                                disabled={!unlocked}
-                                title={gate ? `${gate.title} — ${gate.description}` : undefined}
-                                onClick={() => onUpdateSettings({ difficulty: diff })}
-                                className={`relative py-1.5 px-1 rounded-lg border text-[10px] font-mono capitalize transition flex flex-col items-center gap-0.5 ${
-                                  !unlocked
-                                    ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
-                                    : settings.difficulty === diff
-                                      ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                                      : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800'
-                                }`}
-                              >
-                                {!unlocked && (
-                                  <Lock
-                                    id={`menu-diff-${diff}-lock`}
-                                    className="absolute top-0.5 right-0.5 w-2.5 h-2.5 text-zinc-600"
-                                  />
-                                )}
-                                <span>{diff}</span>
-                                <span
-                                  id={`menu-diff-${diff}-odds`}
-                                  className={`text-[9px] font-bold ${
-                                    chance >= 60
-                                      ? 'text-emerald-400'
-                                      : chance >= 40
-                                        ? 'text-amber-400'
-                                        : 'text-rose-400'
-                                  }`}
-                                >
-                                  {chance}%
-                                </span>
-                                {diff === bestDifficulty && (
-                                  <span
-                                    id="menu-diff-balanced"
-                                    className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-[7px] font-black tracking-wider px-1 rounded bg-cyan-400 text-slate-950"
-                                  >
-                                    {t('balanced', lang)}
-                                  </span>
-                                )}
-                              </button>
+                            const chance = Math.round(
+                              winProbability(myRating, aiRating(diff, myRating.mu)) * 100
                             );
+                            return {
+                              value: diff,
+                              id: `menu-diff-${diff}`,
+                              label: <span className="capitalize">{diff}</span>,
+                              sublabel: `${chance}%`,
+                              sublabelId: `menu-diff-${diff}-odds`,
+                              sublabelTone:
+                                chance >= 60 ? 'win' : chance >= 40 ? 'warn' : 'loss',
+                              badge:
+                                diff === bestDifficulty
+                                  ? { id: 'menu-diff-balanced', text: t('balanced', lang) }
+                                  : undefined,
+                              lock: opened('difficulty', diff)
+                                ? null
+                                : unlockedBy('difficulty', diff) ?? null,
+                              lockId: `menu-diff-${diff}-lock`,
+                            };
                           })}
-                        </div>
+                        />
                       </div>
                     )}
 
@@ -315,30 +296,21 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                         <label className="text-[10px] font-mono text-zinc-400">
                           {t('winning_score', lang)}
                         </label>
-                        <div className="grid grid-cols-4 gap-1.5">
-                          {[3, 5, 10, 15].map((pts) => {
-                            const ptsOpen = opened('winningScore', pts);
-                            const ptsGate = ptsOpen ? null : unlockedBy('winningScore', pts);
-                            return (
-                            <button
-                              key={pts}
-                              id={`menu-pts-${pts}`}
-                              disabled={!ptsOpen}
-                              title={ptsGate ? `${ptsGate.title} — ${ptsGate.description}` : undefined}
-                              onClick={() => onUpdateSettings({ winningScore: pts })}
-                              className={`py-1.5 rounded-lg text-[10px] font-mono border transition ${
-                                !ptsOpen
-                                  ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
-                                  : settings.winningScore === pts
-                                  ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                                  : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
-                              }`}
-                            >
-                              {pts} pts
-                            </button>
-                            );
-                          })}
-                        </div>
+                        <SegmentedControl
+                          columns={4}
+                          ariaLabel={t('winning_score', lang)}
+                          value={settings.winningScore}
+                          onChange={(pts) => onUpdateSettings({ winningScore: pts })}
+                          onLockTap={setGateHint}
+                          options={[3, 5, 10, 15].map((pts) => ({
+                            value: pts,
+                            id: `menu-pts-${pts}`,
+                            label: `${pts} pts`,
+                            lock: opened('winningScore', pts)
+                              ? null
+                              : unlockedBy('winningScore', pts) ?? null,
+                          }))}
+                        />
                       </div>
                     )}
 
@@ -390,6 +362,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           ))}
         </div>
       </div>
+
+      <UnlockHintSheet achievement={gateHint} onClose={() => setGateHint(null)} />
     </div>
   );
 };

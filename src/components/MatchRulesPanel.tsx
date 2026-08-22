@@ -12,6 +12,7 @@ import {
   unrankedRuleKeys,
 } from '../matchRules';
 import { t } from '../i18n/translations';
+import { SegmentedControl } from './ui';
 
 // Pre-match rules, collapsed by default so the menu still reads as one tap to
 // play. Six sliders change the physics; four toggles are presentation only.
@@ -175,25 +176,21 @@ export const MatchRulesPanel: React.FC<Props> = ({
           {mode === 'multiplayer' && (
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-mono text-zinc-400">{t('rule_autoserve', lang)}</label>
-              <div className="grid grid-cols-4 gap-1.5">
-                {AUTO_SERVE_OPTIONS.map((secs) => (
-                  <button
-                    key={secs}
-                    id={`${idPrefix}-rule-autoserve-${secs}`}
-                    // Ranked play always carries a timer — "off" is only on
-                    // the table once the rules have left the ranked bands.
-                    disabled={readOnly || (secs === 0 && ranked)}
-                    onClick={() => onUpdateRules({ autoServeSeconds: secs })}
-                    className={`py-1.5 rounded-lg text-[10px] font-mono border transition disabled:opacity-60 ${
-                      rules.autoServeSeconds === secs
-                        ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                        : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
-                    }`}
-                  >
-                    {secs === 0 ? t('rule_off', lang) : `${secs}s`}
-                  </button>
-                ))}
-              </div>
+              <SegmentedControl
+                columns={4}
+                ariaLabel={t('rule_autoserve', lang)}
+                value={rules.autoServeSeconds}
+                readOnly={readOnly}
+                onChange={(secs) => onUpdateRules({ autoServeSeconds: secs })}
+                options={AUTO_SERVE_OPTIONS.map((secs) => ({
+                  value: secs,
+                  id: `${idPrefix}-rule-autoserve-${secs}`,
+                  label: secs === 0 ? t('rule_off', lang) : `${secs}s`,
+                  // Ranked play always carries a timer — "off" is only on the
+                  // table once the rules have left the ranked bands.
+                  disabled: secs === 0 && ranked,
+                }))}
+              />
               {ranked && (
                 <span id={`${idPrefix}-autoserve-ranked-note`} className="text-[8px] font-mono text-zinc-600">
                   {t('rule_autoserve_ranked', lang)}

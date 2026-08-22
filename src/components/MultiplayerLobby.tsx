@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ThemeConfig } from '../game/themes';
 import { isLinkableId } from '../profileRules';
 import { t } from '../i18n/translations';
-import { Sheet } from './ui';
+import { Sheet, SegmentedControl, UnlockHintSheet } from './ui';
 import { Achievement, LanguageCode, MatchRules, RoomMatchConfig } from '../types';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { DEFAULT_ROOM_CONFIG, WINNING_SCORES, normalizeRules } from '../matchRules';
@@ -77,6 +77,9 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
   const [showQR, setShowQR] = useState<boolean>(false);
+  // A gated match length explains itself on tap, rather than through a title
+  // attribute that no touch device renders.
+  const [gateHint, setGateHint] = useState<Achievement | null>(null);
 
   // Check URL query parameters for auto room join (?room=CODE)
   useEffect(() => {
@@ -119,6 +122,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   const scoreOpen = (pts: number) => hasUnlock(earnedAchievements, 'winningScore', pts);
 
   return (
+    <>
     <Sheet
       id="multiplayer-lobby-modal"
       isOpen={isOpen}
@@ -315,32 +319,25 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
 
               <div className="flex flex-col gap-1.5">
                 <label className="text-[10px] font-mono text-zinc-400">{t('winning_score', language)}</label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {WINNING_SCORES.map((pts) => {
-                    const open = isHost ? scoreOpen(pts) : true;
-                    const gate: Achievement | null = open ? null : unlockedBy('winningScore', pts);
-                    const selected = config.winningScore === pts;
-                    return (
-                      <button
-                        key={pts}
-                        id={`lobby-pts-${pts}`}
-                        disabled={!isHost || !open}
-                        title={gate ? `${gate.title} — ${gate.description}` : undefined}
-                        onClick={() => onUpdateRoomConfig?.({ winningScore: pts })}
-                        className={`py-1.5 rounded-lg text-[10px] font-mono border transition flex items-center justify-center gap-1 ${
-                          !open
-                            ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
-                            : selected
-                              ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                              : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
-                        } ${!isHost ? 'cursor-default' : ''}`}
-                      >
-                        {!open && <Lock className="w-2.5 h-2.5" />}
-                        {pts}
-                      </button>
-                    );
-                  })}
-                </div>
+                <SegmentedControl
+                  columns={4}
+                  ariaLabel={t('winning_score', language)}
+                  value={config.winningScore}
+                  // The room's terms belong to the host: the guest sees the
+                  // same control, genuinely disabled, rather than a dead
+                  // button that looks live.
+                  readOnly={!isHost}
+                  onLockTap={setGateHint}
+                  onChange={(pts) => onUpdateRoomConfig?.({ winningScore: pts })}
+                  options={WINNING_SCORES.map((pts) => ({
+                    value: pts,
+                    id: `lobby-pts-${pts}`,
+                    label: String(pts),
+                    lock: (isHost ? scoreOpen(pts) : true)
+                      ? null
+                      : unlockedBy('winningScore', pts) ?? null,
+                  }))}
+                />
               </div>
 
               <MatchRulesPanel
@@ -506,6 +503,9 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
             </button>
           )}
         </div>
-    </Sheet>
+      </Sheet>
+
+      <UnlockHintSheet achievement={gateHint} onClose={() => setGateHint(null)} />
+    </>
   );
 };
