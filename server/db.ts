@@ -32,6 +32,7 @@ import {
   PVP_UPDATE,
   PLACEMENT_UPDATE,
   PLACEMENT_SIGMA,
+  soloCountsForRank,
   PLACEMENT_GAMES,
   surpriseMultiplier,
   normalizeDifficulty,
@@ -1387,16 +1388,35 @@ class GameDatabase {
       profile.mmrSigma = nextMmr.sigma;
     }
 
-    if (isPvp && ranked) {
+    // The visible ladder moves on a duel, and on a solo match at a difficulty
+    // the player had to EARN. Rookie is the tutorial rung — placing against it
+    // would be a formality — so it feeds hidden MMR only.
+    const ranksThisMatch = ranked && (isPvp || soloCountsForRank(difficulty));
+    if (ranksThisMatch) {
       // While still unplaced, a ranked match sheds uncertainty faster — the
       // whole point of placement matches, and what makes the profile screen's
       // "N/PLACEMENT_GAMES" the truth rather than the first of two conditions.
       const placing = profile.rankedGames < PLACEMENT_GAMES;
+      const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
+      const rankOpts = isPvp
+        ? { ...placementOpts, performance }
+        : {
+            // Lighter on mu than a duel — beating an AI says less than beating
+            // a person — and held under the same ceiling every solo result is,
+            // so farming a rung converges on it and stops.
+            k: SOLO_UPDATE.k,
+            cap: soloMuCap(difficulty),
+            // Sigma converges at the SAME rate as a duel's, deliberately:
+            // placement counts observations, not opponents. Shrinking it
+            // slower would land a solo player on "5/5" and still unranked —
+            // the exact trap placement was just fixed for.
+            sigmaScale: placementOpts.sigmaScale,
+          };
       const nextRank = updateRating(
         { mu: profile.rankMu, sigma: profile.rankSigma },
         oppRating,
         isWin,
-        { ...(placing ? PLACEMENT_UPDATE : PVP_UPDATE), performance }
+        rankOpts
       );
       profile.rankMu = nextRank.mu;
       profile.rankSigma = nextRank.sigma;
@@ -1584,9 +1604,9 @@ class GameDatabase {
       earnedXp,
       leveledUp,
       winProbability: winProb,
-      previousTier: isPvp && ranked ? previousTier : null,
-      tier: isPvp && ranked ? profile.tier : null,
-      tierChanged: isPvp && ranked && profile.tier !== previousTier,
+      previousTier: ranksThisMatch ? previousTier : null,
+      tier: ranksThisMatch ? profile.tier : null,
+      tierChanged: ranksThisMatch && profile.tier !== previousTier,
       ranked,
       newAchievements,
       missions: this.getMissions(payload.playerId, now),

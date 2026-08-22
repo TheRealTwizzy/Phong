@@ -153,6 +153,27 @@ export function effectiveAiMu(difficulty: AIDifficulty, playerMu: number): numbe
 export const soloMuCap = (difficulty: AIDifficulty): number =>
   AI_RATINGS[difficulty].mu + AI_ADAPT_BAND;
 
+/**
+ * The solo difficulties that feed the RANKED track, not just hidden MMR.
+ *
+ * Rookie is the tutorial rung — open from the first match, and the one the
+ * ladder hands you before you have proved anything — so placing against it
+ * would be a formality and the tier badge would stop meaning much. Pro and
+ * Cyber both have to be earned (Pro by beating Rookie, Cyber by ten Pro wins
+ * at level 10), which is what makes them worth rating against.
+ *
+ * A solo result still weighs less than a duel wherever it lands: a lighter mu
+ * step, and the soloMuCap ceiling, so no amount of farming an AI reaches the
+ * top of the ladder. Note the standing trade-off (CLAUDE.md §5) — solo stats
+ * are self-reported, so a modified client can forge them. That was the reason
+ * the ranked track was PvP-only, and counting solo here accepts it knowingly.
+ */
+export const RANKED_SOLO_DIFFICULTIES: readonly AIDifficulty[] = ['pro', 'cyber'];
+
+/** Whether a solo match at this difficulty moves the visible ranked rating. */
+export const soloCountsForRank = (difficulty: AIDifficulty): boolean =>
+  RANKED_SOLO_DIFFICULTIES.includes(difficulty);
+
 /** The adapted anchor to rate a solo match against. */
 export function aiRating(difficulty: AIDifficulty, playerMu: number): Rating {
   return { mu: effectiveAiMu(difficulty, playerMu), sigma: AI_RATINGS[difficulty].sigma };

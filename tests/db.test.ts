@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import type { MatchEndPayload } from '../src/types';
-import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA } from '../src/rating';
+import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, soloMuCap } from '../src/rating';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-db-test-'));
@@ -83,18 +83,83 @@ describe('GameDatabase', () => {
     expect(loss.profile.rankedGames).toBe(2);
   });
 
-  it('solo results move hidden MMR but NEVER the ranked rating or tier', () => {
+  it('Rookie moves hidden MMR but NEVER the ranked rating or tier', () => {
+    // Rookie is the tutorial rung, open before anything has been proved, so
+    // placing against it would be a formality. Pro and Cyber have to be
+    // earned, and those do count — see the ranked-solo tests below.
     const p = init('p_solo_only', 'SoloOnly');
     const beforeRank = p.rankMu;
-    const beforeMmr = p.mmrMu;
     for (let i = 0; i < 6; i++) {
-      db.recordMatch(match('p_solo_only', { mode: 'solo', difficulty: 'cyber' }));
+      db.recordMatch(
+        match('p_solo_only', { mode: 'solo', difficulty: 'rookie', matchKey: `solo:rk:${i}` })
+      );
     }
     const after = db.getProfile('p_solo_only');
-    expect(after.mmrMu).not.toBe(beforeMmr);
     expect(after.rankMu).toBe(beforeRank);
     expect(after.rankedGames).toBe(0);
     expect(after.tier).toBe('unranked');
+  });
+
+  it('an earned solo difficulty moves the ranked rating; the tutorial rung does not', () => {
+    init('p_solo_rank', 'SoloRank');
+    const start = db.getProfile('p_solo_rank');
+
+    db.recordMatch(match('p_solo_rank', { mode: 'solo', difficulty: 'rookie', matchKey: 'sr:rookie' }));
+    const afterRookie = db.getProfile('p_solo_rank');
+    expect(afterRookie.rankedGames).toBe(0);
+    expect(afterRookie.rankMu).toBe(start.rankMu);
+
+    db.recordMatch(match('p_solo_rank', { mode: 'solo', difficulty: 'pro', matchKey: 'sr:pro' }));
+    const afterPro = db.getProfile('p_solo_rank');
+    expect(afterPro.rankedGames).toBe(1);
+    expect(afterPro.rankMu).toBeGreaterThan(start.rankMu);
+
+    db.recordMatch(match('p_solo_rank', { mode: 'solo', difficulty: 'cyber', matchKey: 'sr:cyber' }));
+    expect(db.getProfile('p_solo_rank').rankedGames).toBe(2);
+  });
+
+  it('places a solo player over their placement games, like a duellist', () => {
+    // The promise the profile screen makes has to hold whatever the matches
+    // were: reaching PLACEMENT_GAMES must place you, or solo players land on
+    // "5/5, UNRANKED" — the exact trap placement was just fixed for.
+    init('p_solo_place', 'SoloPlace');
+    for (let i = 0; i < PLACEMENT_GAMES; i++) {
+      db.recordMatch(
+        match('p_solo_place', {
+          mode: 'solo', difficulty: 'pro', isWinner: i % 2 === 0, matchKey: `sp:${i}`,
+        })
+      );
+    }
+    const placed = db.getProfile('p_solo_place');
+    expect(placed.rankedGames).toBe(PLACEMENT_GAMES);
+    expect(placed.rankSigma).toBeLessThanOrEqual(PLACEMENT_SIGMA);
+    expect(placed.tier).not.toBe('unranked');
+  });
+
+  it('moves rank less for a solo win than for the same win in a duel', () => {
+    // Mode asymmetry survives: a duel is always the heavier result.
+    init('p_cmp_solo', 'CmpSolo');
+    init('p_cmp_duel', 'CmpDuel');
+    db.recordMatch(match('p_cmp_solo', { mode: 'solo', difficulty: 'pro', matchKey: 'cmp:s' }));
+    db.recordMatch(match('p_cmp_duel', { mode: 'multiplayer', matchKey: 'cmp:d' }));
+    const solo = db.getProfile('p_cmp_solo');
+    const duel = db.getProfile('p_cmp_duel');
+    expect(solo.rankMu).toBeGreaterThan(25);
+    expect(duel.rankMu).toBeGreaterThan(solo.rankMu);
+  });
+
+  it('caps how far farming an AI can carry the visible rank', () => {
+    // No amount of beating Pro reaches the top of the ladder; the ceiling is
+    // the hardest that rung ever plays.
+    init('p_farm_rank', 'FarmRank');
+    for (let i = 0; i < 80; i++) {
+      db.recordMatch(
+        match('p_farm_rank', { mode: 'solo', difficulty: 'pro', matchKey: `farm:${i}` })
+      );
+    }
+    const farmed = db.getProfile('p_farm_rank');
+    expect(farmed.rankMu).toBeLessThanOrEqual(soloMuCap('pro') + 1e-9);
+    expect(farmed.tier).not.toBe('cyber-overlord');
   });
 
   it('awards more XP for beating a hard AI than an easy one', () => {
@@ -167,14 +232,25 @@ describe('GameDatabase', () => {
     expect(db.getProfile('p_nearly').tier).toBe('unranked');
   });
 
-  it('moves hidden MMR on a solo win, but never the ranked track', () => {
+  it('moves hidden MMR on a Rookie win, but never the ranked track', () => {
     // The two currencies, asserted at the seam where they could blur. Solo
     // wins used to move NEITHER: the mu cap was the difficulty's base anchor
     // and every player starts at exactly Pro's base, so the hidden rating was
     // frozen while losses moved it freely down.
     init('p_solo_mmr', 'SoloMmr');
+    // Rookie's ceiling IS the starting rating, so beat it from below —
+    // winning against the tutorial rung at full strength correctly proves
+    // nothing and is correctly worth nothing.
+    for (let i = 0; i < 2; i++) {
+      db.recordMatch(
+        match('p_solo_mmr', {
+          mode: 'solo', difficulty: 'rookie', isWinner: false,
+          playerScore: 1, opponentScore: 5, matchKey: `solo:mmr:down:${i}`,
+        })
+      );
+    }
     const before = db.getProfile('p_solo_mmr');
-    db.recordMatch(match('p_solo_mmr', { mode: 'solo', difficulty: 'pro', matchKey: 'solo:mmr:1' }));
+    db.recordMatch(match('p_solo_mmr', { mode: 'solo', difficulty: 'rookie', matchKey: 'solo:mmr:1' }));
     const after = db.getProfile('p_solo_mmr');
 
     expect(after.mmrMu).toBeGreaterThan(before.mmrMu);
@@ -192,7 +268,7 @@ describe('GameDatabase', () => {
     for (let i = 0; i < 3; i++) {
       db.recordMatch(
         match('p_solo_swing', {
-          mode: 'solo', difficulty: 'pro', isWinner: false,
+          mode: 'solo', difficulty: 'rookie', isWinner: false,
           playerScore: 1, opponentScore: 5, matchKey: `solo:down:${i}`,
         })
       );
@@ -202,7 +278,7 @@ describe('GameDatabase', () => {
 
     for (let i = 0; i < 3; i++) {
       db.recordMatch(
-        match('p_solo_swing', { mode: 'solo', difficulty: 'pro', matchKey: `solo:up:${i}` })
+        match('p_solo_swing', { mode: 'solo', difficulty: 'rookie', matchKey: `solo:up:${i}` })
       );
     }
     // Recoverable, which it was not: wins were capped to zero movement.
