@@ -121,7 +121,8 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
     │   ├── physics.ts         # Ball movement, collisions, spin, AI opponent
     │   ├── themes.ts          # 10 visual themes + unlock requirements
     │   └── missions.ts        # Daily mission DEFINITIONS (shared client+server)
-    ├── i18n/translations.ts   # 7-language dictionary (en es ja de fr pt zh) + t()
+    ├── i18n/translations.ts   # 7-language dictionary (en es ja de fr pt zh) + t();
+    │                           #   locale parity pinned by tests/i18n.test.ts
     └── components/            # MainMenu, CourtCanvas, ScoreBoard,
                                # MultiplayerLobby, SplitScreenMatch,
                                # MobileGatekeeper (smartphone gate), SessionGuard,
@@ -293,6 +294,7 @@ changes, change the suite in the same commit.
 8. **Never widen what a device may do without a live session.** Anything that spends, earns, or changes goes behind `requireActiveSession`; anything that resolves a profile goes behind `blockReleasedDevice`, or the lazy mint in `getProfile` hands a retired device a brand-new account. A new gameplay path needs the check in `server.ts` **and** at the WS upgrade.
 9. **The device gate reads the platform, never the window.** No width, height, or orientation may re-enter `src/device.ts` — a window is not a device, and that is precisely the bypass it replaced.
 10. **Username & avatar rules live in `src/profileRules.ts`** and nowhere else — both sides import them. Usernames enter the system only through `initializeProfile`/`changeUsername` (never via query params, match payloads, or WS messages).
+11. **A user-facing string ships in all seven locales, or it is not shipped.** `t()` falls back to English for a key a locale lacks, so an untranslated string never crashes and never shows a raw key — which is exactly how 70 of them accumulated across all six non-English locales unnoticed, until a Japanese player's menu and lobby were half English. Nothing in the build or the browser suites had an opinion about it, so `tests/i18n.test.ts` does: every locale carries every `en` key, no locale invents one, no value is blank, and every `{param}` English declares survives translation. Adding English copy without the other six is now a red test, not a silent regression.
 
 ## 10. Deployment
 
