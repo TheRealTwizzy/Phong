@@ -5,7 +5,18 @@ import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { db, RecordMatchContext } from './server/db';
-import { deviceIdentity, deviceIdFromCookieHeader } from './server/auth';
+import {
+  clearSessionCookie,
+  deviceIdentity,
+  deviceIdFromCookieHeader,
+  issueSession,
+  blockReleasedDevice,
+  requireActiveSession,
+  resetDeviceIdentity,
+  resolveSession,
+  sessionIdentity,
+} from './server/auth';
+import { buildId } from './server/build';
 import { hasUnlock } from './src/achievements';
 import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
@@ -27,6 +38,13 @@ interface PlayerSession {
    * profiles, and it must never invent one to do it.
    */
   deviceId: string | null;
+  /**
+   * The session that held the account when this socket was seated. The
+   * upgrade check is a snapshot: ownership can move while the socket stays
+   * open, and a displaced socket that keeps playing would have its result
+   * written by the relay, which is the exploit again with extra steps.
+   */
+  sessionId: string | null;
 }
 
 interface Room {
@@ -186,6 +204,67 @@ function applyMatchSync(
  * fallback for a match the relay never saw, and the shared match key means
  * whichever of them arrives second is recognised rather than paid again.
  */
+interface LiveSocket {
+  ws: WebSocket;
+  deviceId: string;
+  sessionId: string | null;
+}
+
+/**
+ * Every relay socket that arrived with a verified device. Small — one entry
+ * per connected phone — and the only thing it is for is displacement.
+ */
+const liveSockets = new Set<LiveSocket>();
+
+/**
+ * Whether a seat still holds the account it was seated under. The upgrade
+ * check cannot answer this on its own: ownership moves while sockets stay
+ * open, and the relay writes a finished duel onto both seats itself.
+ */
+function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: string | null }): boolean {
+  if (!seat.deviceId) return false;
+  if (db.releasedDevice(seat.deviceId)) return false;
+  const owner = db.activeSessionId(seat.deviceId);
+  // No recorded owner means nothing has displaced this seat.
+  return !owner || owner === seat.sessionId;
+}
+
+/**
+ * Close any socket this device holds under a DIFFERENT session. Called when a
+ * session is issued, so the device that just lost the account finds out in
+ * milliseconds instead of at its next heartbeat — and cannot land another
+ * point in between.
+ */
+function closeDisplacedSockets(deviceId: string, keepSessionId: string): void {
+  for (const entry of liveSockets) {
+    if (entry.deviceId !== deviceId || entry.sessionId === keepSessionId) continue;
+    try {
+      entry.ws.send(JSON.stringify({ type: 'session_invalid', status: 'superseded', build: buildId() }));
+      entry.ws.close(4001, 'session superseded');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/**
+ * Close every registered socket that no longer holds the account it was
+ * seated under, whatever made that true. Used after a transfer, where the
+ * device that gave the account away is still sitting on an open socket.
+ */
+function evictStaleSockets(): void {
+  for (const entry of liveSockets) {
+    if (seatStillHoldsAccount(entry)) continue;
+    const status = db.releasedDevice(entry.deviceId) ? 'released' : 'superseded';
+    try {
+      entry.ws.send(JSON.stringify({ type: 'session_invalid', status, build: buildId() }));
+      entry.ws.close(4001, `session ${status}`);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 function recordRoomMatch(room: Room): void {
   const seats: Array<0 | 1> = [0, 1];
   // Both seats must still be occupied. A match decided after one player left
@@ -198,8 +277,15 @@ function recordRoomMatch(room: Room): void {
   for (const seat of seats) {
     const me = room.players[seat];
     const them = room.players[seat === 0 ? 1 : 0];
-    // No verified cookie, no profile to record onto — never invent one.
+    // No verified cookie, no profile to record onto — never invent one. Nor
+    // for a device whose account was claimed away DURING this duel: it holds
+    // nothing, and `getProfile` would mint it a stray empty profile to fail
+    // against. The other seat is still recorded.
     if (!me?.deviceId || !them) continue;
+    // Not just "was this device released" — also "does this seat still hold
+    // the account". A socket displaced mid-duel would otherwise have its
+    // result written here by the relay, under an account it no longer holds.
+    if (!seatStillHoldsAccount(me)) continue;
 
     const mine = room.scores[seat];
     const theirs = room.scores[seat === 0 ? 1 : 0];
@@ -222,7 +308,7 @@ function recordRoomMatch(room: Room): void {
     const context: RecordMatchContext = {
       performanceWeight: performanceWeight(mine, theirs, room.maxRallyInMatch),
     };
-    if (them.deviceId) {
+    if (them.deviceId && seatStillHoldsAccount(them)) {
       const opp = db.getProfile(them.deviceId);
       context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
     }
@@ -274,11 +360,100 @@ async function startServer() {
   // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies)
   app.set('trust proxy', true);
   app.use(express.json());
-  app.use('/api', deviceIdentity);
+  app.use('/api', deviceIdentity, sessionIdentity);
 
   // Health check
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', activeRooms: rooms.size });
+    res.json({ status: 'ok', activeRooms: rooms.size, build: buildId() });
+  });
+
+  // ---- Session: which one device is holding this account right now --------
+  //
+  // The heartbeat. Cheap, unauthenticated, and safe to call from a device
+  // that has just lost its account — being told so is precisely what it is
+  // for. The client polls this while it plays, so an eviction lands within
+  // seconds instead of at the final whistle of a match that will then be
+  // refused.
+  app.get('/api/session', (req, res) => {
+    const session = req.session!;
+    res.json({
+      status: session.status,
+      build: buildId(),
+      deviceId: req.deviceId,
+      // Which session the account is actually held by. Cookies are scoped to
+      // the ORIGIN, not to a page, so two tabs on one device share this one
+      // and the newest value wins for both — the server cannot tell them
+      // apart. Reporting the id lets a tab compare it against the one IT was
+      // given and notice it has been displaced.
+      sessionId: session.sessionId,
+      // Only ever the fact of the move, never the profile it moved to: a
+      // released device has no claim on the account's details any more.
+      ...(session.status === 'released' ? { released: true } : {}),
+    });
+  });
+
+  // Take the account for this browser. Called on every load, and after any
+  // status the client cannot play under. A device that was transferred away
+  // cannot start a session at all — it has no account to start one on.
+  app.post('/api/session', (req, res) => {
+    try {
+      if (req.session!.status === 'released') {
+        return res.status(409).json({ error: 'DEVICE_RELEASED', sessionStatus: 'released', build: buildId() });
+      }
+      const sessionId = issueSession(req, res, req.deviceId!);
+      // Whatever this device was holding open under an older session is over
+      // NOW, not at that client's next heartbeat — otherwise the displaced
+      // phone has seconds in which to keep scoring on an account it has just
+      // lost, and the relay would write the result.
+      closeDisplacedSockets(req.deviceId!, sessionId);
+      res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(req.deviceId!) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Start over as a new player. The one way off a released device: the
+  // account this browser used to hold is alive on another device, so it is
+  // issued a fresh device identity rather than handed the old one back.
+  app.post('/api/session/reset', (req, res) => {
+    try {
+      // Only a released device may take this door. It is documented and
+      // surfaced as the escape hatch for one, but the endpoint served anyone
+      // who called it — and for a device that still HELD its account, a reset
+      // swapped the cookie for a fresh identity while the initialized profile
+      // stayed behind under the old one. The account would not be deleted,
+      // merely unreachable: stranded under an id no browser holds any more.
+      if (req.session!.status !== 'released') {
+        return res.status(409).json({
+          error: 'DEVICE_NOT_RELEASED',
+          sessionStatus: req.session!.status,
+          build: buildId(),
+        });
+      }
+      const previous = req.deviceId!;
+      const deviceId = resetDeviceIdentity(req, res);
+      // The tombstone has done its job for this browser; the identity it
+      // pointed at is gone from the cookie jar and will never be presented
+      // again. Leaving it would strand the row forever.
+      db.clearDeviceRelease(previous);
+      const sessionId = issueSession(req, res, deviceId);
+      // The old identity's sockets belong to a device that no longer exists.
+      closeDisplacedSockets(previous, sessionId);
+      res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(deviceId) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Hand the account back voluntarily (the tab is closing). Best-effort: the
+  // next load displaces whatever still holds it anyway.
+  app.post('/api/session/end', (req, res) => {
+    const session = req.session!;
+    if (session.status === 'active' && session.sessionId) {
+      db.endSession(req.deviceId!, session.sessionId);
+    }
+    clearSessionCookie(req, res);
+    res.json({ status: 'ended' });
   });
 
   // ICE servers for the P2P (WebRTC) private-session mode. STUN is enough on
@@ -327,7 +502,7 @@ async function startServer() {
   // can no longer name (or forge) a player id. Profiles are minted lazily in
   // an UNINITIALIZED state — onboarding (POST /api/profile/initialize) locks
   // in the unique username before the player can record matches.
-  app.get('/api/profile/me', (req, res) => {
+  app.get('/api/profile/me', blockReleasedDevice, (req, res) => {
     try {
       const profile = db.getProfile(req.deviceId!);
       res.json(profile);
@@ -338,7 +513,7 @@ async function startServer() {
 
   // First-arrival onboarding: claim a unique username (starts the 365-day
   // rename lock). One-shot per profile.
-  app.post('/api/profile/initialize', (req, res) => {
+  app.post('/api/profile/initialize', requireActiveSession, (req, res) => {
     try {
       const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
       const result = db.initializeProfile(req.deviceId!, username);
@@ -369,7 +544,7 @@ async function startServer() {
   // Rename (365-day lock). XP is never accepted from the client: mission
   // rewards are claimed by id at /api/missions/claim and paid from the server's
   // own definition table.
-  app.put('/api/profile/me', (req, res) => {
+  app.put('/api/profile/me', requireActiveSession, (req, res) => {
     try {
       const { username } = req.body ?? {};
       let profile = null;
@@ -401,6 +576,7 @@ async function startServer() {
   // untouched; validation is dependency-free (see server/image.ts).
   app.post(
     '/api/profile/me/avatar',
+    requireActiveSession,
     express.raw({ type: 'image/png', limit: '600kb' }),
     (req, res) => {
       try {
@@ -428,7 +604,7 @@ async function startServer() {
     }
   );
 
-  app.delete('/api/profile/me/avatar', (req, res) => {
+  app.delete('/api/profile/me/avatar', requireActiveSession, (req, res) => {
     try {
       db.deleteAvatar(req.deviceId!);
       res.json({ hasAvatar: false });
@@ -455,16 +631,20 @@ async function startServer() {
 
   // Restore a profile on this device using its recovery code. The profile
   // moves: the previous device unlinks and the code rotates.
-  app.post('/api/profile/claim', (req, res) => {
+  app.post('/api/profile/claim', requireActiveSession, (req, res) => {
     try {
       const code = String(req.body?.code || '');
       if (!code.trim()) {
         return res.status(400).json({ error: 'Recovery code required' });
       }
-      const profile = db.claimProfileByCode(code, req.deviceId!);
+      const profile = db.claimProfileByCode(code, req.deviceId!, req.session!.sessionId);
       if (!profile) {
         return res.status(404).json({ error: 'No profile matches that code' });
       }
+      // The device that just gave the account away may be sitting on an open
+      // socket in a live duel. It stops being able to play the moment the
+      // transfer lands, not whenever it next asks.
+      evictStaleSockets();
       res.json(profile);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -488,7 +668,7 @@ async function startServer() {
   });
 
   // Match Result & Stats Recording API
-  app.post('/api/match/record', (req, res) => {
+  app.post('/api/match/record', requireActiveSession, (req, res) => {
     try {
       const me = db.getProfile(req.deviceId!);
       if (!me.initialized) {
@@ -571,7 +751,7 @@ async function startServer() {
 
   // Practice Wall: no match is recorded and no rating moves; the client
   // reports the streak it reached and the server decides what it is worth.
-  app.post('/api/practice/record', (req, res) => {
+  app.post('/api/practice/record', requireActiveSession, (req, res) => {
     try {
       const me = db.getProfile(req.deviceId!);
       if (!me.initialized) return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
@@ -587,7 +767,7 @@ async function startServer() {
 
   // Daily missions. Progress is advanced server-side by /api/match/record, so
   // these two routes only read state and pay out a completed mission once.
-  app.get('/api/missions', (req, res) => {
+  app.get('/api/missions', blockReleasedDevice, (req, res) => {
     try {
       res.json({
         missions: db.getMissions(req.deviceId!),
@@ -598,7 +778,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/missions/claim', (req, res) => {
+  app.post('/api/missions/claim', requireActiveSession, (req, res) => {
     try {
       const { missionId } = req.body ?? {};
       if (typeof missionId !== 'string') {
@@ -626,7 +806,7 @@ async function startServer() {
 
   // Reroll one mission for another from its own pool. Allowances are per UTC
   // day and expire with it — they never bank up.
-  app.post('/api/missions/reroll', (req, res) => {
+  app.post('/api/missions/reroll', requireActiveSession, (req, res) => {
     try {
       const { missionId } = req.body ?? {};
       if (typeof missionId !== 'string') {
@@ -648,7 +828,7 @@ async function startServer() {
   });
 
   // Achievements API
-  app.get('/api/achievements', (req, res) => {
+  app.get('/api/achievements', blockReleasedDevice, (req, res) => {
     try {
       const list = db.getAchievementsList(req.deviceId!);
       res.json({ achievements: list });
@@ -658,7 +838,7 @@ async function startServer() {
   });
 
   // Match History API
-  app.get('/api/matches/me', (req, res) => {
+  app.get('/api/matches/me', blockReleasedDevice, (req, res) => {
     try {
       const history = db.getMatchHistory(req.deviceId!);
       res.json({ matches: history });
@@ -682,6 +862,29 @@ async function startServer() {
 
   wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
     const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
+
+    // A duel is the relay's own record-keeping: it writes a finished match
+    // onto both seats' profiles. So the same rule the REST routes hold to
+    // applies at the upgrade — a device that handed its account to another
+    // device, or a session displaced by a newer load, does not get a court.
+    // Without this the exploit simply moved: barred from recording a solo
+    // match, an evicted device could still play (and be recorded for) a duel.
+    let cookieSessionId: string | null = null;
+    if (cookieDeviceId) {
+      const session = resolveSession(cookieDeviceId, upgradeReq.headers.cookie);
+      if (session.status !== 'active') {
+        ws.send(JSON.stringify({ type: 'session_invalid', status: session.status, build: buildId() }));
+        ws.close(4001, 'session not active');
+        return;
+      }
+      cookieSessionId = session.sessionId;
+      // Registered so a later session on this device can displace it. The
+      // check above is a snapshot; this is what keeps it true afterwards.
+      const entry: LiveSocket = { ws, deviceId: cookieDeviceId, sessionId: cookieSessionId };
+      liveSockets.add(entry);
+      ws.on('close', () => liveSockets.delete(entry));
+    }
+
     let currentRoomId: string | null = null;
     let playerIndex: 0 | 1 | null = null;
     let currentPlayerId: string = '';
@@ -737,6 +940,7 @@ async function startServer() {
                 playerName: hostName,
                 playerIndex: 0,
                 deviceId: cookieDeviceId || null,
+                sessionId: cookieSessionId,
               },
               null,
             ],
@@ -787,6 +991,7 @@ async function startServer() {
             playerName: guestName,
             playerIndex: 1,
             deviceId: cookieDeviceId || null,
+            sessionId: cookieSessionId,
           };
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
@@ -1063,7 +1268,13 @@ async function startServer() {
           const bothSeated = !!(room.players[0] && room.players[1]);
           if (bothSeated && room.inPlay && !room.matchOver && currentPlayerId) {
             try {
-              db.recordAbandon(currentPlayerId, { ranked: isRankedRules(room.config.rules) });
+              // Same rule as recordRoomMatch: a seat that no longer holds
+              // its account has no profile to charge — and when the relay
+              // itself closed that socket to displace it, charging the
+              // player an abandon for our own eviction would be perverse.
+              if (seatStillHoldsAccount({ deviceId: currentPlayerId, sessionId: cookieSessionId })) {
+                db.recordAbandon(currentPlayerId, { ranked: isRankedRules(room.config.rules) });
+              }
             } catch (e) {
               console.error('abandon record failed:', e);
             }
@@ -1101,8 +1312,19 @@ async function startServer() {
     const distPath = fs.existsSync(path.join(bundleDir, 'index.html'))
       ? bundleDir
       : path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    // The hashed assets under /assets are immutable and may be cached hard;
+    // index.html must NOT be, or a client told its session is stale would
+    // reload straight back onto the build it was already running and the
+    // deploy would never reach it.
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
+        },
+      })
+    );
     app.get('*', (req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

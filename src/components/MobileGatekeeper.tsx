@@ -1,135 +1,152 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Smartphone, RotateCcw } from 'lucide-react';
+import { RotateCcw, Smartphone } from 'lucide-react';
 import { LanguageCode } from '../types';
 import { t } from '../i18n/translations';
+import { classifyDevice, DeviceClass, desktopPlayAllowed } from '../device';
+import { encodeQr, qrToSvgPath } from '../media/qr';
 
 interface MobileGatekeeperProps {
   children: React.ReactNode;
   language: LanguageCode;
 }
 
-// How the app is presented for the current viewport:
-//  - native: phone-sized viewport, render the game full-window
-//  - framed: anything larger (desktop, tablet, zoomed-out browser) — render
-//    the game inside a centered phone-proportioned frame, always playable
-//  - rotate: a real touch device held in landscape — ask for portrait
-type ViewMode = 'native' | 'framed' | 'rotate';
+// Phong is a smartphone game and now says so.
+//
+// What was here before decided by VIEWPORT SIZE and, whatever it decided,
+// always rendered the game — a desktop just got it inside a drawn phone
+// bezel, with a 200×200 QR fetched from api.qrserver.com beside it. Two
+// problems, both reported: resizing a desktop window walked through the
+// check, and every desktop visitor's URL was handed to a third party to have
+// its picture taken.
+//
+// So: the verdict comes from the platform the browser reports (see
+// src/device.ts), the QR is generated here with no network call and no
+// dependency, and it is an SVG — crisp at whatever size the screen can show,
+// rather than a 200px bitmap stretched over a retina panel.
 
-export const MobileGatekeeper: React.FC<MobileGatekeeperProps> = ({ children, language }) => {
-  const [viewMode, setViewMode] = useState<ViewMode>('native');
+type ViewMode = 'play' | 'rotate' | 'blocked';
+
+/** A phone must be held in portrait: the half-court IS the tall half of a screen. */
+function useViewMode(): { mode: ViewMode; device: DeviceClass } {
+  const [device] = useState<DeviceClass>(() => (desktopPlayAllowed() ? 'phone' : classifyDevice()));
+  const [landscape, setLandscape] = useState(false);
 
   useEffect(() => {
-    const checkResolution = () => {
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-
-      const isNarrow = width <= 540;
-      const isPortrait = height >= width * 1.15;
-      const isPhoneViewport = isNarrow || (isPortrait && width <= 600);
-
-      if (isTouch && width > height && width <= 900) {
-        // A real phone (touch) held sideways: portrait is required for the
-        // half-court layout, so ask for a rotation.
-        setViewMode('rotate');
-      } else if (isPhoneViewport) {
-        setViewMode('native');
-      } else {
-        // Desktops, tablets, and zoom-level oddities all get the playable
-        // frame — never a lock screen. Browser zoom merely resizes the frame.
-        setViewMode('framed');
-      }
-    };
-
-    checkResolution();
-    window.addEventListener('resize', checkResolution);
-    window.addEventListener('orientationchange', checkResolution);
-
+    if (device !== 'phone') return;
+    const check = () => setLandscape(window.innerWidth > window.innerHeight);
+    check();
+    window.addEventListener('resize', check);
+    window.addEventListener('orientationchange', check);
     return () => {
-      window.removeEventListener('resize', checkResolution);
-      window.removeEventListener('orientationchange', checkResolution);
+      window.removeEventListener('resize', check);
+      window.removeEventListener('orientationchange', check);
     };
-  }, []);
+  }, [device]);
 
-  if (viewMode === 'native') {
-    return <>{children}</>;
-  }
+  if (device !== 'phone') return { mode: 'blocked', device };
+  return { mode: landscape ? 'rotate' : 'play', device };
+}
 
-  if (viewMode === 'rotate') {
+const Panel: React.FC<{ children: React.ReactNode; wide?: boolean; id?: string; device?: DeviceClass }> = ({
+  children,
+  wide,
+  id,
+  device,
+}) => (
+  // The id lives on the FIXED element, not a wrapper around it: a wrapper
+  // whose only child is position:fixed collapses to zero height, which reads
+  // as hidden to anything measuring it (the e2e did exactly that).
+  <div
+    id={id}
+    data-device={device}
+    className="fixed inset-0 z-50 w-screen h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6 select-none overflow-auto"
+  >
+    <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(0,240,255,0.06)_0%,_transparent_70%)] pointer-events-none" />
+    <motion.div
+      initial={{ opacity: 0, y: 15 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4 }}
+      className={`relative w-full ${wide ? 'max-w-md' : 'max-w-sm'} bg-slate-900/90 border border-cyan-500/30 rounded-3xl p-8 shadow-2xl shadow-cyan-950/40 backdrop-blur-xl flex flex-col items-center text-center`}
+    >
+      {children}
+    </motion.div>
+  </div>
+);
+
+export const MobileGatekeeper: React.FC<MobileGatekeeperProps> = ({ children, language }) => {
+  const { mode, device } = useViewMode();
+
+  // The URL is stable for the life of the page, and encoding is the only
+  // non-trivial work this component does.
+  const url = typeof window !== 'undefined' ? window.location.href : '';
+  const qr = useMemo(() => {
+    if (mode !== 'blocked' || !url) return null;
+    try {
+      // Level Q: a phone camera reads this off a monitor, at an angle, with
+      // glare. The extra redundancy is worth the handful of modules.
+      const matrix = encodeQr(url, 'Q');
+      return { path: qrToSvgPath(matrix, 4), extent: matrix.size + 8 };
+    } catch {
+      // A URL too long for version 10 is not a reason to show nothing; the
+      // address below the code is still readable and typable.
+      return null;
+    }
+  }, [mode, url]);
+
+  if (mode === 'play') return <>{children}</>;
+
+  if (mode === 'rotate') {
     return (
-      <div className="fixed inset-0 z-50 w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 select-none">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(0,240,255,0.06)_0%,_transparent_70%)] pointer-events-none" />
-        <motion.div
-          initial={{ opacity: 0, y: 15 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-          className="relative max-w-md w-full bg-slate-900/90 border border-cyan-500/30 rounded-3xl p-8 shadow-2xl shadow-cyan-950/40 backdrop-blur-xl flex flex-col items-center text-center"
-        >
-          <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-500/10">
-            <RotateCcw className="w-8 h-8 animate-spin" style={{ animationDuration: '6s' }} />
-          </div>
-          <h1 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase mb-2">
-            {t('rotate_prompt', language)}
-          </h1>
-          <p className="text-xs text-slate-400 leading-relaxed">{t('mobile_only_subtitle', language)}</p>
-        </motion.div>
-      </div>
+      <Panel>
+        <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-500/10">
+          <RotateCcw className="w-8 h-8 animate-spin" style={{ animationDuration: '6s' }} />
+        </div>
+        <h1 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase mb-2">
+          {t('rotate_prompt', language)}
+        </h1>
+        <p className="text-xs text-slate-400 leading-relaxed">{t('mobile_only_subtitle', language)}</p>
+      </Panel>
     );
   }
 
-  // framed: the game runs inside a phone bezel, centered; a side card nudges
-  // players toward the real two-phone experience without ever blocking play.
-  const currentUrl = typeof window !== 'undefined' ? window.location.href : '';
-  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
-    currentUrl
-  )}&bgcolor=0b0f19&color=00f0ff&margin=1`;
-
   return (
-    <div className="w-screen h-screen bg-slate-950 flex items-center justify-center gap-8 p-4 overflow-hidden relative">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(0,240,255,0.05)_0%,_transparent_70%)] pointer-events-none" />
-
-      {/* Smartphone Frame — the game itself, always interactive */}
-      <div
-        id="phone-frame"
-        className="w-[390px] h-[844px] max-h-[96vh] bg-black rounded-[48px] p-3 border-[6px] border-slate-700/80 shadow-[0_0_50px_rgba(0,240,255,0.15)] flex flex-col relative overflow-hidden ring-1 ring-white/10 shrink-0"
-      >
-        {/* Dynamic Island / Speaker Notch */}
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 w-28 h-5 bg-black rounded-full z-40 flex items-center justify-center border border-slate-800 pointer-events-none">
-          <div className="w-2.5 h-2.5 rounded-full bg-slate-900 border border-slate-800 mr-2" />
-          <div className="w-2 h-2 rounded-full bg-cyan-950" />
-        </div>
-
-        {/* Inner Mobile Screen Content */}
-        <div className="w-full h-full rounded-[38px] overflow-hidden relative flex flex-col bg-slate-950">
-          {children}
-        </div>
-
-        {/* Home Indicator Bar */}
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-32 h-1 bg-slate-600/60 rounded-full z-40 pointer-events-none" />
+    <Panel wide id="device-gate" device={device}>
+      <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-500/10">
+        <Smartphone className="w-8 h-8" />
       </div>
+      <h1 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase mb-2">
+        {t('mobile_only_title', language)}
+      </h1>
+      <p className="text-xs text-slate-400 leading-relaxed mb-6">
+        {t(device === 'tablet' ? 'gate_tablet_body' : 'gate_desktop_body', language)}
+      </p>
 
-      {/* Side hint: play it on a real phone (hidden on smaller desktop windows) */}
-      <div className="relative hidden lg:flex flex-col items-center text-center max-w-[240px] bg-slate-900/80 border border-cyan-500/20 rounded-2xl p-5 shadow-xl backdrop-blur">
-        <Smartphone className="w-6 h-6 text-cyan-400 mb-2" />
-        <p className="text-xs font-bold text-white uppercase tracking-wider mb-1">
-          {t('mobile_only_title', language)}
-        </p>
-        <p className="text-[11px] text-slate-400 leading-relaxed mb-4">
-          {t('mobile_only_subtitle', language)}
-        </p>
-        <p className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider mb-2">
-          {t('scan_qr', language)}
-        </p>
-        <div className="p-2 bg-slate-950 border border-cyan-500/40 rounded-xl shadow-md">
-          <img
-            src={qrCodeUrl}
-            alt="Scan to open on smartphone"
-            className="w-28 h-28 rounded-lg block"
-            referrerPolicy="no-referrer"
-          />
-        </div>
-      </div>
-    </div>
+      {qr && (
+        <>
+          <p className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider mb-3">
+            {t('gate_scan_hint', language)}
+          </p>
+          {/* Rendered from the matrix, so it is exact at any size — no
+              upscaled bitmap, and nothing fetched from anywhere. */}
+          <svg
+            id="device-gate-qr"
+            viewBox={`0 0 ${qr.extent} ${qr.extent}`}
+            className="w-64 h-64 max-w-full rounded-xl bg-white p-1 shadow-lg"
+            shapeRendering="crispEdges"
+            role="img"
+            aria-label={t('gate_scan_hint', language)}
+          >
+            <rect width={qr.extent} height={qr.extent} fill="#ffffff" />
+            <path d={qr.path} fill="#020617" />
+          </svg>
+        </>
+      )}
+
+      <p className="text-[10px] text-slate-500 uppercase tracking-wider mt-6 mb-1">
+        {t('gate_url_label', language)}
+      </p>
+      <p className="text-[11px] font-mono text-cyan-300/90 break-all leading-relaxed">{url}</p>
+    </Panel>
   );
 };

@@ -1,4 +1,5 @@
 import { MatchEndPayload, MatchEndResult } from '../types';
+import { openSession, refreshForBuild } from './session';
 
 // Recording a finished match used to be fire-and-forget: the response status
 // was never checked, so a 403, a 500, or a dropped connection left the player
@@ -38,12 +39,13 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    let code = '';
+    let body: any = null;
     try {
-      code = (await res.json())?.error || '';
+      body = await res.json();
     } catch {
       /* no body to read */
     }
+    const code = body?.error || '';
     // The server does not recognise this device. That is not the player's
     // fault and not a hiccup: the device cookie is signed with a secret held
     // in the database, so a reset or a deploy that loses the data volume
@@ -53,6 +55,28 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
     // caller has to re-sync and re-onboard; the match is kept meanwhile.
     if (res.status === 403 && code === 'PROFILE_NOT_INITIALIZED') {
       throw Object.assign(new Error(code), { unidentified: true });
+    }
+    // This device no longer holds the account: it handed it to another device,
+    // or a newer load elsewhere took it over. The match is NOT queued — the
+    // profile it was played under is not ours any more, and replaying it later
+    // would credit whatever fresh identity this browser ends up with for a
+    // match somebody else's account played.
+    if (code === 'DEVICE_RELEASED' || code === 'SESSION_SUPERSEDED') {
+      throw Object.assign(new Error(code), { evicted: true });
+    }
+    // This bundle is older than the deployment being served. Minting a fresh
+    // session here would let it keep running indefinitely on the old code —
+    // the retry would succeed, the next heartbeat would say `active`, and the
+    // one guarantee this whole mechanism exists to make ("an update always
+    // force-refreshes the field") would quietly not hold. The reload is the
+    // point, so it is what happens.
+    if (code === 'SESSION_STALE_BUILD') {
+      throw Object.assign(new Error(code), { staleBuild: true, build: body?.build });
+    }
+    // No live session at all — first contact, or one we ended ourselves.
+    // That IS recoverable in place: mint a new one and try again.
+    if (code === 'SESSION_REQUIRED') {
+      throw Object.assign(new Error(code), { needsSession: true });
     }
     // Any other 4xx is a verdict, not a hiccup: replaying it fails identically.
     const permanent = res.status >= 400 && res.status < 500;
@@ -77,9 +101,11 @@ export interface RecordOutcome {
    * Why it did not land:
    *  - 'queued'       parked on the device; it will be replayed
    *  - 'unidentified' the server doesn't know this device; re-onboard needed
+   *  - 'evicted'      the account moved on; this match belongs to nobody here
+   *  - 'stale_build'  a newer deployment is live; queued, and the page reloads
    *  - 'rejected'     refused outright; replaying would fail identically
    */
-  reason?: 'queued' | 'unidentified' | 'rejected';
+  reason?: 'queued' | 'unidentified' | 'evicted' | 'stale_build' | 'rejected';
 }
 
 /**
@@ -97,9 +123,26 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
         writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
         return { ok: false, reason: 'unidentified' };
       }
+      if (e?.evicted) {
+        // Deliberately dropped rather than queued: see attempt().
+        console.warn('Match discarded — this device no longer holds the account:', e.message);
+        return { ok: false, reason: 'evicted' };
+      }
+      if (e?.staleBuild) {
+        // Park it first: the reload replays the queue under the new build, so
+        // the match is paid rather than lost to the refresh.
+        writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
+        refreshForBuild(e.build);
+        return { ok: false, reason: 'stale_build' };
+      }
       if (e?.permanent) {
         console.error('Match rejected by the server:', e.message);
         return { ok: false, reason: 'rejected' };
+      }
+      if (e?.needsSession && tryIndex === 0) {
+        // Re-mint in place; the second pass then carries a live session.
+        await openSession();
+        continue;
       }
       if (tryIndex === 0) await sleep(RETRY_DELAY_MS);
     }
@@ -138,8 +181,22 @@ async function runFlush(): Promise<number> {
       await attempt(item.payload);
       recovered++;
     } catch (e: any) {
-      // Keep anything that might still land; drop only outright refusals.
-      if (!e?.permanent) stillPending.push(item);
+      if (e?.needsSession) {
+        // No live session yet — this queue is flushed on load, which can beat
+        // the session being minted. Keep everything and try the next time.
+        await openSession();
+        stillPending.push(item);
+        continue;
+      }
+      if (e?.staleBuild) {
+        // Keep it and go get the new bundle; the queue survives the reload.
+        stillPending.push(item);
+        refreshForBuild(e.build);
+        continue;
+      }
+      // Keep anything that might still land; drop outright refusals, and
+      // anything played under an account this device no longer holds.
+      if (!e?.permanent && !e?.evicted) stillPending.push(item);
     }
   }
   writeQueue(stillPending);

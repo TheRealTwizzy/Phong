@@ -118,6 +118,12 @@ curl -s localhost:3000/api/health  # from the box, bypassing Caddy
 
 1. Long-lived process, WebSocket upgrades on the routed port.
 2. `DATA_DIR` on storage that survives deploys — otherwise every deploy wipes profiles/ELO.
+   `BUILD_ID` is optional: set it to the image tag or commit sha if you have one. Left unset, the
+   server derives it from the built artifacts — the client's `index.html` and the server bundle
+   together, so a server-only deploy moves it too — which is what makes every deploy retire the
+   sessions still open in the field so each client reloads onto the new build. Device cookies are untouched,
+   so nobody loses an account over it — and two restarts of the same build produce the same id, so
+   a crash-loop does not log anyone out.
 3. Single instance (rooms live in process memory).
 
 ## Local production run
