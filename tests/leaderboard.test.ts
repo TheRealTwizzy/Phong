@@ -12,10 +12,11 @@ let db: typeof import('../server/db').db;
 
 beforeAll(async () => {
   ({ db } = await import('../server/db'));
-  // Bots no longer seed automatically (the fresh launch starts with 0
-  // players) — insert a roster through the insertBot seam so the
-  // interleave/rank contract stays covered for the future bot rollout.
-  // Bot skill anchors, strongest first.
+  // The shipped roster is seeded at SERVER boot, not in the Db constructor,
+  // so a test that builds a `db` directly gets an empty table and controls
+  // its own fixtures — which is what keeps the counts below stable. These
+  // four are this suite's own bots, not the shipped ladder; see
+  // tests/bots.test.ts for that one. Strongest first.
   db.insertBot({ id: 'bot-pro-04', username: 'CyberStriker', xp: 9800, mu: 36 });
   db.insertBot({ id: 'bot-pro-01', username: 'NeonViper', xp: 6200, mu: 32 });
   db.insertBot({ id: 'bot-pro-02', username: 'PulseEcho', xp: 4100, mu: 29 });

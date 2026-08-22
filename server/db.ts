@@ -40,6 +40,7 @@ import {
   achievementXpCap,
   PRACTICE_XP_DAILY_CAP,
 } from '../src/rating';
+import { BotSeed, botProfileFields } from './bots';
 import {
   MISSION_POOL,
   RECENT_DEAL_MEMORY,
@@ -1525,6 +1526,43 @@ class GameDatabase {
     };
     this.upsertProfile(full);
     return this.readProfile(bot.id)!;
+  }
+
+  /**
+   * Seed the curated bot roster, once per database.
+   *
+   * A launched deployment has no players and the boards refuse rows of zeros,
+   * so the leaderboard opened empty — and stayed close to empty long enough
+   * for the ladder to be invisible to exactly the players deciding whether to
+   * climb it. Bot rows carry `rank: null` and never shift a human's number,
+   * which is what makes them safe to show at all.
+   *
+   * One-shot and flagged, like every other migration here: re-running is a
+   * no-op, so a restart cannot resurrect a bot an operator deleted on purpose.
+   *
+   * A roster name may already be held by a human on an existing deployment —
+   * the username index is unique and case-insensitive, so inserting would
+   * throw. That is per-bot recoverable and must never take the boot down with
+   * it: the collision is skipped and named in the log, the rest of the roster
+   * still lands, and the flag is still stamped so this does not retry forever.
+   */
+  public seedBotRoster(roster: BotSeed[]): { inserted: number; skipped: string[] } {
+    const KEY = 'bot_roster_v1';
+    if (this.getMeta(KEY)) return { inserted: 0, skipped: [] };
+    let inserted = 0;
+    const skipped: string[] = [];
+    for (const bot of roster) {
+      try {
+        this.insertBot(botProfileFields(bot));
+        inserted++;
+      } catch (e: any) {
+        skipped.push(`${bot.username} (${e?.message || 'insert failed'})`);
+      }
+    }
+    this.setMeta(KEY, new Date().toISOString());
+    if (inserted) console.log(`bot_roster_v1: seeded ${inserted} bot(s) onto the leaderboard`);
+    if (skipped.length) console.log(`bot_roster_v1: skipped ${skipped.length} — ${skipped.join(', ')}`);
+    return { inserted, skipped };
   }
 
   public recordMatch(
