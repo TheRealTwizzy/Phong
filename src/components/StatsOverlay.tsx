@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { BallState } from '../types';
+import { BallState, LanguageCode } from '../types';
+import { t } from '../i18n/translations';
 import { ThemeConfig } from '../game/themes';
 import {
   Activity,
@@ -24,6 +25,7 @@ interface StatsOverlayProps {
   isVisible: boolean;
   onToggleVisible: () => void;
   matchStartTime: number | null;
+  language: LanguageCode;
 }
 
 export const StatsOverlay: React.FC<StatsOverlayProps> = ({
@@ -36,6 +38,7 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
   isVisible,
   onToggleVisible,
   matchStartTime,
+  language,
 }) => {
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const [topSpeed, setTopSpeed] = useState<number>(0);
@@ -86,11 +89,10 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
       <button
         id="btn-show-stats-overlay"
         onClick={onToggleVisible}
-        title="Show Live Telemetry Overlay"
+        title={t('telemetry_show', language)}
         className="absolute top-14 left-3 z-30 flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-900/80 hover:bg-slate-800 border border-slate-700/80 text-cyan-400 font-mono text-[11px] backdrop-blur-md transition-all active:scale-95 shadow-md"
       >
         <Activity className="w-3.5 h-3.5" />
-        <span className="hidden sm:inline">Telemetry</span>
       </button>
     );
   }
@@ -98,7 +100,7 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
   return (
     <div
       id="court-stats-overlay"
-      className="absolute top-14 left-3 z-30 w-52 sm:w-60 rounded-2xl border backdrop-blur-lg shadow-2xl transition-all font-mono select-none overflow-hidden"
+      className="absolute top-14 left-3 z-30 w-52 rounded-2xl border backdrop-blur-lg shadow-2xl transition-all font-mono select-none overflow-hidden"
       style={{
         backgroundColor: 'rgba(10, 15, 29, 0.88)',
         borderColor: theme.accentColor + '40',
@@ -111,7 +113,7 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
           <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
           <span className="text-[11px] font-black tracking-wider text-cyan-300 flex items-center gap-1">
             <Activity className="w-3.5 h-3.5" />
-            LIVE TELEMETRY
+            {t('telemetry_title', language)}
           </span>
         </div>
 
@@ -119,14 +121,14 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
           <button
             onClick={() => setIsMinimized(!isMinimized)}
             className="p-0.5 text-slate-400 hover:text-white rounded"
-            title={isMinimized ? 'Expand' : 'Minimize'}
+            title={t(isMinimized ? 'telemetry_expand' : 'telemetry_minimize', language)}
           >
             {isMinimized ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
           </button>
           <button
             onClick={onToggleVisible}
             className="p-0.5 text-slate-400 hover:text-white rounded"
-            title="Close Overlay"
+            title={t('telemetry_close', language)}
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -140,9 +142,11 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
             <div className="flex justify-between items-center text-[10px] text-slate-400 mb-1">
               <span className="flex items-center gap-1">
                 <Gauge className="w-3 h-3 text-cyan-400" />
-                BALL VELOCITY
+                {t('telemetry_velocity', language)}
               </span>
-              <span className="text-slate-500">Peak: {topSpeed} km/h</span>
+              <span className="text-slate-500">
+                {t('telemetry_peak', language)}: {topSpeed} km/h
+              </span>
             </div>
 
             <div className="flex items-baseline justify-between">
@@ -151,7 +155,8 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
                 <span className="text-[10px] font-normal text-cyan-400">km/h</span>
               </span>
               <span className="text-[10px] font-bold text-amber-400">
-                {ball.active ? (ball.speedMultiplier || 1).toFixed(1) : '1.0'}x Base
+                {ball.active ? (ball.speedMultiplier || 1).toFixed(1) : '1.0'}x{' '}
+                {t('telemetry_base', language)}
               </span>
             </div>
 
@@ -170,7 +175,7 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
             <div className="bg-slate-900/90 rounded-xl p-2 border border-slate-800 flex flex-col">
               <span className="text-[9px] text-slate-400 flex items-center gap-1">
                 <Zap className="w-2.5 h-2.5 text-amber-400" />
-                TOTAL TOUCHES
+                {t('telemetry_touches', language)}
               </span>
               <span className="text-sm font-black text-amber-300 mt-0.5">{totalTouches}</span>
             </div>
@@ -179,7 +184,7 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
             <div className="bg-slate-900/90 rounded-xl p-2 border border-slate-800 flex flex-col">
               <span className="text-[9px] text-slate-400 flex items-center gap-1">
                 <Clock className="w-2.5 h-2.5 text-indigo-400" />
-                MATCH TIME
+                {t('telemetry_time', language)}
               </span>
               <span className="text-sm font-black text-indigo-300 mt-0.5">
                 {formatTime(elapsedSeconds)}
@@ -192,7 +197,7 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
             <div className="bg-slate-900/90 rounded-xl p-2 border border-slate-800 flex flex-col">
               <span className="text-[9px] text-slate-400 flex items-center gap-1">
                 <Flame className="w-2.5 h-2.5 text-orange-400" />
-                RALLY (MAX)
+                {t('telemetry_rally_max', language)}
               </span>
               <span className="text-xs font-bold text-slate-200 mt-0.5">
                 <span className="text-orange-400 font-black">{rallyCount}</span> / {maxRally}
@@ -202,7 +207,7 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
             <div className="bg-slate-900/90 rounded-xl p-2 border border-slate-800 flex flex-col">
               <span className="text-[9px] text-slate-400 flex items-center gap-1">
                 <Compass className="w-2.5 h-2.5 text-emerald-400" />
-                DEFLECTION
+                {t('telemetry_deflection', language)}
               </span>
               <span className="text-xs font-bold text-emerald-300 mt-0.5">
                 {angleDeg > 0 ? `+${angleDeg}` : angleDeg}°
@@ -212,8 +217,10 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
 
           {/* Paddle Pos Indicator */}
           <div className="px-2 py-1 rounded-lg bg-slate-950/60 border border-slate-800/80 flex items-center justify-between text-[10px] text-slate-400">
-            <span>Paddle Pos: {Math.round(paddleX * 100)}%</span>
-            <span className="text-cyan-400 font-semibold">{ball.active ? 'IN COURT' : 'IN FLIGHT'}</span>
+            <span>
+              {t('telemetry_paddle_pos', language)}: {Math.round(paddleX * 100)}%
+            </span>
+            <span className="text-cyan-400 font-semibold">{t(ball.active ? 'telemetry_in_court' : 'telemetry_in_flight', language)}</span>
           </div>
         </div>
       )}

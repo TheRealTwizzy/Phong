@@ -2227,6 +2227,7 @@ export default function App() {
               theme={currentTheme}
               isVisible={telemetryOpen}
               onToggleVisible={() => setTelemetryOpen((o) => !o)}
+              language={currentLanguage}
               matchStartTime={matchStartTime}
             />
           )}
@@ -2533,6 +2534,7 @@ export default function App() {
           onClose={() => setIsHistoryOpen(false)}
           playerId={playerId}
           onViewProfile={openPublicProfile}
+          language={currentLanguage}
         />
       </div>
       </SessionGuard>
