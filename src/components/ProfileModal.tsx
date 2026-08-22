@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
 import { PlayerProfile, MatchRecord, PlayerStatus, LanguageCode } from '../types';
 import { USERNAME_MAX, isLinkableId } from '../profileRules';
 import { PLACEMENT_GAMES, xpForLevel } from '../rating';
@@ -7,6 +6,7 @@ import { processAvatarFile, uploadAvatar, deleteAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
 import { t } from '../i18n/translations';
+import { Sheet, ProgressBar } from './ui';
 import {
   X,
   Trophy,
@@ -147,7 +147,7 @@ export const ProfileModal: React.FC<Props> = ({
     }
   }, [isOpen, profile, activeTab]);
 
-  if (!isOpen || !profile) return null;
+  if (!profile) return null;
 
   const handleSaveName = async () => {
     if (!tempName.trim()) return;
@@ -188,18 +188,10 @@ export const ProfileModal: React.FC<Props> = ({
   const xpNeededForLevel = Math.max(1, profile.xpNext - xpCurrentLevelBase);
   const xpPercent = Math.min(100, Math.round((xpCurrentLevelProgress / xpNeededForLevel) * 100));
 
-  return (
-    <AnimatePresence>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-        <motion.div
-          id="profile-modal-container"
-          initial={{ opacity: 0, scale: 0.92, y: 20 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.92, y: 20 }}
-          className="bg-slate-900 border border-cyan-500/30 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-sheet"
-        >
+  const header = (
+    <div className="shrink-0">
           {/* Header Banner */}
-          <div className="relative bg-gradient-to-r from-cyan-950 via-slate-900 to-indigo-950 p-6 border-b border-slate-800">
+          <div className="relative bg-gradient-to-r from-accent/12 via-surface-2 to-surface-2 p-4 border-b border-line">
             <button
               id="close-profile-btn"
               onClick={onClose}
@@ -360,12 +352,7 @@ export const ProfileModal: React.FC<Props> = ({
                   {xpCurrentLevelProgress.toLocaleString()} / {xpNeededForLevel.toLocaleString()} XP
                 </span>
               </div>
-              <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden p-0.5 border border-slate-700">
-                <div
-                  className="h-full bg-gradient-to-r from-cyan-400 to-indigo-400 rounded-full transition-all duration-500"
-                  style={{ width: `${xpPercent}%` }}
-                />
-              </div>
+              <ProgressBar value={xpPercent / 100} tone="xp" ariaLabel="Experience" />
             </div>
           </div>
 
@@ -395,8 +382,29 @@ export const ProfileModal: React.FC<Props> = ({
             </button>
           </div>
 
-          {/* Tab Content */}
-          <div className="p-6 scroll-y flex-1 space-y-4">
+    </div>
+  );
+
+  return (
+    <Sheet
+      cardId="profile-modal-container"
+      isOpen={isOpen}
+      onClose={onClose}
+      size="lg"
+      accent="accent"
+      header={header}
+      footer={
+        <>
+          <span className="flex-1 text-2xs font-normal tracking-normal text-ink-muted">
+            Player ID: <code className="text-ink-muted">{profile.id.slice(0, 10)}...</code>
+          </span>
+          <button onClick={onRefreshProfile} className="text-2xs text-accent hover:text-ink">
+            Sync Data
+          </button>
+        </>
+      }
+      bodyClassName="p-4 space-y-4"
+    >
             {activeTab === 'stats' ? (
               <div className="space-y-4">
                 {/* Daily Streak Highlight Banner */}
@@ -584,20 +592,6 @@ export const ProfileModal: React.FC<Props> = ({
                 )}
               </div>
             )}
-          </div>
-
-          {/* Footer */}
-          <div className="p-4 bg-slate-950 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-            <span>Player ID: <code className="text-slate-300 font-mono">{profile.id.slice(0, 10)}...</code></span>
-            <button
-              onClick={onRefreshProfile}
-              className="text-cyan-400 hover:text-cyan-300 font-bold"
-            >
-              Sync Data
-            </button>
-          </div>
-        </motion.div>
-      </div>
-    </AnimatePresence>
+    </Sheet>
   );
 };

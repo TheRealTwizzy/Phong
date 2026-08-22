@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ThemeConfig } from '../game/themes';
 import { isLinkableId } from '../profileRules';
 import { t } from '../i18n/translations';
+import { Sheet } from './ui';
 import { Achievement, LanguageCode, MatchRules, RoomMatchConfig } from '../types';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { DEFAULT_ROOM_CONFIG, WINNING_SCORES, normalizeRules } from '../matchRules';
@@ -86,7 +87,6 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
     }
   }, [roomId]);
 
-  if (!isOpen) return null;
 
   const shareableUrl = roomId
     ? `${window.location.origin}${window.location.pathname}?room=${roomId}`
@@ -119,18 +119,16 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   const scoreOpen = (pts: number) => hasUnlock(earnedAchievements, 'winningScore', pts);
 
   return (
-    <div
+    <Sheet
       id="multiplayer-lobby-modal"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
+      isOpen={isOpen}
+      onClose={onClose}
+      size="md"
+      accent="accent"
+      backdrop="solid"
+      dismissOnBackdrop={false}
+      bodyClassName="p-5 flex flex-col gap-5"
     >
-      <div
-        className="w-full max-w-md rounded-2xl border p-6 shadow-2xl relative flex flex-col gap-5 text-zinc-100"
-        style={{
-          backgroundColor: '#10141e',
-          borderColor: theme.accentColor + '50',
-          boxShadow: `0 0 30px ${theme.accentColor}20`,
-        }}
-      >
         {/* Close Button */}
         <button
           id="btn-close-lobby"
@@ -508,7 +506,6 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
             </button>
           )}
         </div>
-      </div>
-    </div>
+    </Sheet>
   );
 };

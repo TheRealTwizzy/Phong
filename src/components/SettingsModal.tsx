@@ -1,8 +1,9 @@
 import React from 'react';
 import { CourtTheme, GameSettings, LanguageCode, PlayerProfile, SoundscapeType } from '../types';
-import { THEMES, ThemeConfig, isThemeUnlocked } from '../game/themes';
+import { THEMES, isThemeUnlocked } from '../game/themes';
 import { LANGUAGES, t } from '../i18n/translations';
 import { sound } from '../audio/soundEffects';
+import { Sheet, Button } from './ui';
 import {
   X,
   Smartphone,
@@ -32,7 +33,6 @@ interface SettingsModalProps {
   onClose: () => void;
   settings: GameSettings;
   onUpdateSettings: (newSettings: Partial<GameSettings>) => void;
-  currentTheme: ThemeConfig;
   profile?: PlayerProfile | null;
   onOpenTutorial?: () => void;
   onTriggerShake?: () => void;
@@ -43,12 +43,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   settings,
   onUpdateSettings,
-  currentTheme,
   profile = null,
   onOpenTutorial,
   onTriggerShake,
 }) => {
-  if (!isOpen) return null;
   const lang = settings.language || 'en';
 
   const handleRequestTiltPermission = async () => {
@@ -95,51 +93,55 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     { id: 'zen', labelKey: 'soundscape_zen', icon: '🎋', desc: 'Calm bamboo wind & natural resonance' },
   ];
 
-  return (
-    <div
-      id="settings-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md"
-    >
-      <div
-        className="w-full max-w-lg max-h-sheet rounded-3xl border p-4 sm:p-6 shadow-2xl relative flex flex-col gap-4 scroll-y text-zinc-100"
-        style={{
-          backgroundColor: '#0f141f',
-          borderColor: currentTheme.accentColor + '50',
-          boxShadow: `0 0 35px ${currentTheme.accentColor}20`,
-        }}
-      >
-        {/* Close Button */}
+  const header = (
+    <div className="shrink-0 flex items-center justify-between gap-2 border-b border-line bg-surface-1 p-4">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <Sliders className="h-5 w-5 text-accent" />
+        <h2 className="text-title truncate">{t('settings_title', lang)}</h2>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-1.5">
+        {onOpenTutorial && (
+          <Button
+            id="btn-settings-start-tutorial"
+            size="sm"
+            variant="secondary"
+            icon={<BookOpen className="h-3.5 w-3.5" />}
+            onClick={() => {
+              onClose();
+              onOpenTutorial();
+            }}
+          >
+            {t('start_tutorial', lang)}
+          </Button>
+        )}
         <button
           id="btn-close-settings"
           onClick={onClose}
-          className="absolute top-4 right-4 p-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
+          aria-label={t('close', lang)}
+          className="rounded-ctl p-2 text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
         >
-          <X className="w-5 h-5" />
+          <X className="h-5 w-5" />
         </button>
+      </div>
+    </div>
+  );
 
-        {/* Header with Tutorial Launch Button */}
-        <div className="flex items-center justify-between pr-8">
-          <div className="flex items-center gap-2.5">
-            <Sliders className="w-5 h-5" style={{ color: currentTheme.accentColor }} />
-            <h2 className="text-base sm:text-lg font-bold font-mono tracking-wide">
-              {t('settings_title', lang)}
-            </h2>
-          </div>
-
-          {onOpenTutorial && (
-            <button
-              id="btn-settings-start-tutorial"
-              onClick={() => {
-                onClose();
-                onOpenTutorial();
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 transition active:scale-95 shadow-sm"
-            >
-              <BookOpen className="w-3.5 h-3.5" />
-              <span>{t('start_tutorial', lang)}</span>
-            </button>
-          )}
-        </div>
+  return (
+    <Sheet
+      id="settings-modal-overlay"
+      isOpen={isOpen}
+      onClose={onClose}
+      size="lg"
+      accent="accent"
+      header={header}
+      bodyClassName="p-4 flex flex-col gap-4"
+      footer={
+        <Button id="btn-done-settings" variant="primary" size="lg" block onClick={onClose}>
+          {t('close', lang)}
+        </Button>
+      }
+    >
 
         {/* Language Selection Dropdown */}
         <div className="flex flex-col gap-1.5 p-3 rounded-2xl bg-zinc-900/70 border border-zinc-800">
@@ -563,15 +565,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Done Button */}
-        <button
-          id="btn-done-settings"
-          onClick={onClose}
-          className="w-full py-3.5 rounded-2xl font-mono text-sm font-bold bg-cyan-500 hover:bg-cyan-400 text-zinc-950 transition active:scale-95 shadow-lg"
-        >
-          {t('close', lang)}
-        </button>
-      </div>
-    </div>
+    </Sheet>
   );
 };
 

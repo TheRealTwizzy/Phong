@@ -172,6 +172,18 @@
   }
 }
 
+/* The horizontal counterpart, for tab strips and card rails. */
+@utility scroll-x {
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 /* index.html ships viewport-fit=cover and a black-translucent status bar, so
    content runs edge to edge under the notch and the home indicator. Nothing
    in the app had ever honoured that. */

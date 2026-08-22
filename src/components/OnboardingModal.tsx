@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { LanguageCode, PlayerProfile, UsernameCheckResponse } from '../types';
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
+import { Sheet } from './ui';
 import { validateUsername, USERNAME_MAX } from '../profileRules';
 import { processAvatarFile, uploadAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
@@ -88,8 +89,6 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     };
   }, [previewUrl]);
 
-  if (!isOpen) return null;
-
   const handlePickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -170,18 +169,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const canSubmit = nameStatus.kind === 'available' && !submitting;
 
   return (
-    <div
+    <Sheet
       id="onboarding-modal-overlay"
-      className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md"
+      isOpen={isOpen}
+      size="md"
+      layer="gate"
+      accent="accent"
+      bodyClassName="p-5 flex flex-col gap-4"
     >
-      <div
-        className="w-full max-w-md max-h-sheet scroll-y rounded-3xl border p-5 sm:p-6 flex flex-col gap-4 text-zinc-100 shadow-2xl"
-        style={{
-          backgroundColor: '#0f141f',
-          borderColor: theme.accentColor + '50',
-          boxShadow: `0 0 40px ${theme.accentColor}25`,
-        }}
-      >
         {/* Header */}
         <div className="flex flex-col items-center text-center gap-1.5">
           <div
@@ -349,7 +344,6 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <p className="text-[10px] font-mono text-rose-400 text-center">{claimError}</p>
           )}
         </div>
-      </div>
-    </div>
+    </Sheet>
   );
 };

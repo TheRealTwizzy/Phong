@@ -76,6 +76,7 @@ import { SessionGuard } from './components/SessionGuard';
 import { TutorialModal } from './components/TutorialModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { PublicProfileModal } from './components/PublicProfileModal';
+import { Sheet, Button } from './components/ui';
 import { isLinkableId } from './profileRules';
 import {
   ClientSessionStatus,
@@ -1991,40 +1992,42 @@ export default function App() {
           </button>
         )}
 
-        {quitConfirmOpen && (
-          <div
-            id="quit-confirm-modal"
-            className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/80 backdrop-blur-sm"
-          >
-            <div className="w-full max-w-xs rounded-2xl border border-rose-500/40 bg-zinc-950 p-5 flex flex-col gap-3 shadow-2xl">
-              <h3 className="text-sm font-black font-mono text-white tracking-wide">
-                {t('quit_confirm_title', currentLanguage)}
-              </h3>
-              <p className="text-[11px] font-mono text-zinc-400 leading-relaxed">
-                {t('quit_confirm_body', currentLanguage)}
-              </p>
-              <div className="flex items-center gap-2 mt-1">
-                <button
-                  id="btn-quit-cancel"
-                  onClick={() => setQuitConfirmOpen(false)}
-                  className="flex-1 py-2.5 rounded-xl font-mono text-xs font-bold bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 transition active:scale-95"
-                >
-                  {t('quit_confirm_no', currentLanguage)}
-                </button>
-                <button
-                  id="btn-quit-confirm"
-                  onClick={() => {
-                    setQuitConfirmOpen(false);
-                    handleLeaveRoom();
-                  }}
-                  className="flex-1 py-2.5 rounded-xl font-mono text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white transition active:scale-95"
-                >
-                  {t('quit_confirm_yes', currentLanguage)}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        <Sheet
+          id="quit-confirm-modal"
+          isOpen={quitConfirmOpen}
+          onClose={() => setQuitConfirmOpen(false)}
+          size="xs"
+          layer="over"
+          accent="loss"
+          title={t('quit_confirm_title', currentLanguage)}
+          footer={
+            <>
+              <Button
+                id="btn-quit-cancel"
+                variant="secondary"
+                block
+                onClick={() => setQuitConfirmOpen(false)}
+              >
+                {t('quit_confirm_no', currentLanguage)}
+              </Button>
+              <Button
+                id="btn-quit-confirm"
+                variant="danger"
+                block
+                onClick={() => {
+                  setQuitConfirmOpen(false);
+                  handleLeaveRoom();
+                }}
+              >
+                {t('quit_confirm_yes', currentLanguage)}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
+            {t('quit_confirm_body', currentLanguage)}
+          </p>
+        </Sheet>
 
         {toastOpponentLeft && (
           <button
@@ -2062,7 +2065,6 @@ export default function App() {
         <PublicProfileModal
           playerId={publicProfileId}
           onClose={() => setPublicProfileId(null)}
-          theme={currentTheme}
           language={currentLanguage}
         />
 
@@ -2368,7 +2370,6 @@ export default function App() {
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
-          currentTheme={currentTheme}
           profile={profile}
           onOpenTutorial={() => setIsTutorialOpen(true)}
           onTriggerShake={() => setShakeTrigger(Date.now())}
