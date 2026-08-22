@@ -47,6 +47,12 @@ beforeAll(async () => {
     // faster to boot; the API and the relay are the same either way.
     env: { ...process.env, PORT: String(port), DATA_DIR: TMP, NODE_ENV: 'production' },
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Its own process group, so it can be killed as a whole. `npx tsx` is a
+    // TREE — a shell, npx, then the server — and signalling only the process
+    // we spawned leaves the actual server running: every test run stranded one
+    // holding a port and a deleted temp directory, until CI reaped it as an
+    // orphan at the end of the job.
+    detached: true,
   });
   for (let i = 0; i < 200; i++) {
     try {
@@ -60,10 +66,24 @@ beforeAll(async () => {
   throw new Error('server did not start');
 }, 40000);
 
-afterAll(() => {
-  server?.kill('SIGKILL');
+afterAll(async () => {
+  await stopServer();
   fs.rmSync(TMP, { recursive: true, force: true });
 });
+
+/** Kill the server's whole process group and wait for it to actually be gone. */
+async function stopServer(): Promise<void> {
+  if (!server?.pid || server.exitCode !== null) return;
+  const exited = new Promise<void>((resolve) => server.once('exit', () => resolve()));
+  try {
+    // Negative pid = the group, which is the point of spawning detached.
+    process.kill(-server.pid, 'SIGKILL');
+  } catch {
+    server.kill('SIGKILL');
+  }
+  // Don't leave the temp directory being deleted out from under a live server.
+  await Promise.race([exited, sleep(3000)]);
+}
 
 interface Device {
   cookie: string;
