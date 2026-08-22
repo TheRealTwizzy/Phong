@@ -101,6 +101,9 @@ import { TierBadge } from './components/TierBadge';
 import confetti from 'canvas-confetti';
 import { Trophy, RefreshCw, Home } from 'lucide-react';
 
+/** How many times a lost invitation socket is retried before giving up. */
+const MAX_INVITE_RETRIES = 2;
+
 const DEFAULT_SETTINGS: GameSettings = {
   soundEnabled: true,
   sfxVolume: 80,
@@ -417,9 +420,12 @@ export default function App() {
   // it. Every write is gated on holding a live session, so this has to land
   // first — and it returns the profile, which is why no separate fetch runs
   // here any more.
-  const adoptSession = useCallback(async () => {
+  // `force` is the session wall's "play here instead": a deliberate take-back
+  // from another device. Boot passes nothing, so it will not mint a second
+  // session over one this page already holds.
+  const adoptSession = useCallback(async (force = false) => {
     setSessionBusy(true);
-    const res = await openSession();
+    const res = await openSession({ force });
     setSessionBusy(false);
     setSessionStatus(res.status);
     if (res.profile) {
@@ -840,6 +846,12 @@ export default function App() {
   // full" — about the room this player is in the middle of joining — so the
   // first attempt holds the door until the server has answered either way.
   const joinInFlightRef = useRef<boolean>(false);
+  // An invitation that loses its socket before the server has answered is not
+  // a refusal — it is an unanswered question, and latching autoJoinedRef on
+  // the ATTEMPT turned every such blip into "the link is broken". Bounded, so
+  // a genuinely unreachable relay stops rather than spinning.
+  const inviteRetriesRef = useRef<number>(0);
+  const [inviteRetry, setInviteRetry] = useState<number>(0);
   useEffect(() => {
     const roomCode = new URLSearchParams(window.location.search).get('room');
     if (roomCode) pendingRoomRef.current = roomCode.trim().toUpperCase();
@@ -1066,6 +1078,8 @@ export default function App() {
         break;
 
       case 'room_joined':
+        // Answered. Stop treating a later disconnect as an unfulfilled invite.
+        pendingRoomRef.current = null;
         joinInFlightRef.current = false;
         // Holding a seat means the lobby is the right surface until the match
         // starts, so a seat granted while the lobby is shut reopens it. The
@@ -1322,6 +1336,8 @@ export default function App() {
         break;
 
       case 'error':
+        // The server answered — a dead or full room is a verdict, not a blip.
+        pendingRoomRef.current = null;
         joinInFlightRef.current = false;
         alert(msg.message);
         break;
@@ -1380,6 +1396,13 @@ export default function App() {
       if (intentionalCloseRef.current) {
         intentionalCloseRef.current = false;
         return;
+      }
+      // The invitation is still outstanding: this socket never produced a
+      // room_joined or an error, so ask again on a fresh one.
+      if (pendingRoomRef.current && inviteRetriesRef.current < MAX_INVITE_RETRIES) {
+        inviteRetriesRef.current += 1;
+        autoJoinedRef.current = false;
+        setInviteRetry((n) => n + 1);
       }
       const midMatch =
         modeRef.current === 'multiplayer' &&
@@ -1480,7 +1503,7 @@ export default function App() {
     autoJoinedRef.current = true;
     setIsMultiplayerOpen(true);
     handleJoinRoom(code);
-  }, [profile?.initialized]);
+  }, [profile?.initialized, inviteRetry]);
 
   /**
    * Host-only: change the room's terms from the lobby. The server re-checks
@@ -1946,7 +1969,7 @@ export default function App() {
         status={sessionStatus}
         busy={sessionBusy}
         language={currentLanguage}
-        onAdopt={() => void adoptSession()}
+        onAdopt={() => void adoptSession(true)}
         onStartFresh={() => void startFreshIdentity()}
       >
       {/* The equipped court theme's accent is published ONCE, here. The shell
