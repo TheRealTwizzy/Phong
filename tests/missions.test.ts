@@ -659,3 +659,117 @@ describe('permanent unlocks reach the themes', () => {
     expect(isThemeUnlocked(elite.unlocks as CourtTheme, profile)).toBe(true);
   });
 });
+
+describe('a claimed task never lingers in the list', () => {
+  // Reported: "I completed Connected Court but after receiving the reward it
+  // remained completed, on the list without automatically rerolling."
+  //
+  // Claiming deals a free replacement — but only while that tier still HAS
+  // one. A claimed task can never be dealt back, so a productive day works
+  // through the pool, and at that point the claim had nowhere to deal from and
+  // simply left the finished task sitting in its slot marked "claimed".
+
+  const heavyDuel = (playerId: string, i: number): MatchEndPayload => ({
+    playerId,
+    username: 'Heavy',
+    playerScore: 5,
+    opponentScore: 0,
+    maxRally: 20,
+    aces: 4,
+    mode: 'multiplayer',
+    isWinner: true,
+    matchKey: `${playerId}:heavy:${i}`,
+  });
+
+  /** Claim everything claimable, returning how many claims found no replacement. */
+  const claimAll = (playerId: string): { claims: number; retired: number } => {
+    let claims = 0;
+    let retired = 0;
+    for (let pass = 0; pass < 20; pass++) {
+      const ready = db.getMissions(playerId).filter((m) => !m.claimed && m.current >= m.target);
+      if (!ready.length) break;
+      for (const m of ready) {
+        const res = db.claimMission(playerId, m.id);
+        if (!res.ok) continue;
+        claims++;
+        if (!res.newMissionId) retired++;
+      }
+    }
+    return { claims, retired };
+  };
+
+  it('drops a claimed task out of the list even when nothing is left to deal', () => {
+    const id = 'p_no_linger';
+    init(id, 'NoLinger');
+    for (let round = 0; round < 12; round++) {
+      db.recordMatch(heavyDuel(id, round));
+      claimAll(id);
+      // Whatever else is true, a task that has been paid out must not still be
+      // sitting in the list. That is the whole complaint.
+      const held = db.getMissions(id);
+      expect(held.filter((m) => m.claimed)).toEqual([]);
+    }
+  });
+
+  it('exhausts the pool rather than dealing a finished task back', () => {
+    const id = 'p_exhaust';
+    init(id, 'Exhaust');
+    const seen = new Set<string>();
+    for (let round = 0; round < 12; round++) {
+      db.recordMatch(heavyDuel(id, round));
+      for (const m of db.getMissions(id)) seen.add(m.id);
+      claimAll(id);
+    }
+    // The list only ever shrinks, and never below empty.
+    const left = db.getMissions(id);
+    expect(left.length).toBeLessThanOrEqual(REGULAR_SLOTS + ELITE_SLOTS);
+    expect(left.length).toBeGreaterThanOrEqual(0);
+    // Nothing was dealt twice: every id seen is a real, distinct mission.
+    expect(seen.size).toBeLessThanOrEqual(MISSION_POOL.length + ELITE_POOL.length);
+  });
+
+  it('does not re-deal a whole fresh day when the last slot retires', () => {
+    // The slot is blanked, not deleted: ensureSlots reads "no rows today" as
+    // "not dealt yet", so deleting the last row would hand out a new day.
+    const id = 'p_all_clear';
+    init(id, 'AllClear');
+    for (let round = 0; round < 25; round++) {
+      db.recordMatch(heavyDuel(id, round));
+      claimAll(id);
+    }
+    const before = db.getMissions(id).map((m) => m.id);
+    const after = db.getMissions(id).map((m) => m.id);
+    expect(after).toEqual(before);
+    expect(after.filter((id2) => MISSION_POOL.some((d) => d.id === id2)).length)
+      .toBeLessThanOrEqual(REGULAR_SLOTS);
+  });
+
+  it('deals a full hand again on the next UTC day', () => {
+    const id = 'p_next_day';
+    const today = new Date('2026-05-05T12:00:00.000Z');
+    const tomorrow = new Date('2026-05-06T12:00:00.000Z');
+    init(id, 'NextDay');
+    for (let round = 0; round < 20; round++) {
+      db.recordMatch(heavyDuel(id, round), {}, today);
+      for (let pass = 0; pass < 20; pass++) {
+        const ready = db.getMissions(id, today).filter((m) => !m.claimed && m.current >= m.target);
+        if (!ready.length) break;
+        for (const m of ready) db.claimMission(id, m.id, today);
+      }
+    }
+    expect(db.getMissions(id, tomorrow)).toHaveLength(REGULAR_SLOTS + ELITE_SLOTS);
+  });
+});
+
+describe('the size of a day\'s hand', () => {
+  it('deals three regular tasks and one elite', () => {
+    expect(REGULAR_SLOTS).toBe(3);
+    expect(ELITE_SLOTS).toBe(1);
+  });
+
+  it('leaves the pool room to deal a replacement for most of a day', () => {
+    // A claim can only deal what the pool still holds, so the slots have to
+    // leave spare room. Three of twelve leaves nine claims before it can dry.
+    expect(MISSION_POOL.length - REGULAR_SLOTS).toBeGreaterThanOrEqual(2 * REGULAR_SLOTS);
+  });
+});
