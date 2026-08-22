@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
 import { Achievement, AchievementBranch, LanguageCode } from '../types';
 import { BRANCHES, isBranchRevealed, isRevealed, isUnlockable } from '../achievements';
 import { Tier } from '../rating';
 import { t } from '../i18n/translations';
+import { Sheet, ProgressBar } from './ui';
 import {
   X,
   Award,
@@ -74,8 +74,6 @@ export const AchievementsModal: React.FC<Props> = ({
     }
   }, [isOpen, playerId]);
 
-  if (!isOpen) return null;
-
   const unlockedCount = achievements.filter((a) => a.unlockedAt).length;
   const earned = achievements.filter((a) => a.unlockedAt).map((a) => a.id);
   const progress = { level, tier };
@@ -98,57 +96,49 @@ export const AchievementsModal: React.FC<Props> = ({
   const progressPercent =
     achievements.length > 0 ? Math.round((unlockedCount / achievements.length) * 100) : 0;
 
-  return (
-    <AnimatePresence>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-        <motion.div
-          id="achievements-modal-container"
-          initial={{ opacity: 0, scale: 0.92, y: 20 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.92, y: 20 }}
-          className="bg-slate-900 border border-purple-500/30 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
-        >
-          {/* Header */}
-          <div className="p-6 bg-gradient-to-r from-purple-950/60 via-slate-900 to-indigo-950/60 border-b border-slate-800 relative">
-            <button
-              id="close-achievements-btn"
-              onClick={onClose}
-              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white rounded-full hover:bg-white/10 transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
+  const header = (
+    <div className="shrink-0 relative border-b border-line bg-gradient-to-r from-violet-500/12 via-surface-2 to-surface-2 p-4">
+      <button
+        id="close-achievements-btn"
+        onClick={onClose}
+        aria-label={t('close', language)}
+        className="absolute top-3 right-3 rounded-ctl p-2 text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
+      >
+        <X className="w-5 h-5" />
+      </button>
 
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-2xl bg-purple-400/10 border border-purple-400/30 text-purple-400">
-                <Award className="w-7 h-7" />
-              </div>
-              <div>
-                <h2 className="text-xl font-black text-white">Career Achievements</h2>
-                <p className="text-xs text-slate-400">Unlock trophies and earn XP rewards</p>
-              </div>
-            </div>
+      <div className="flex items-center gap-3">
+        <div className="rounded-card border border-violet-400/30 bg-violet-400/10 p-2.5 text-violet-400">
+          <Award className="w-6 h-6" />
+        </div>
+        <div>
+          <h2 className="text-title">Career Achievements</h2>
+          <p className="text-2xs font-normal tracking-normal text-ink-muted">
+            Unlock trophies and earn XP rewards
+          </p>
+        </div>
+      </div>
 
-            {/* Overall Progress */}
-            <div className="mt-4 bg-slate-950/60 p-3 rounded-xl border border-slate-800/80">
-              <div className="flex justify-between items-center text-xs mb-1.5 font-bold">
-                <span className="text-slate-300">Completion Status</span>
-                <span className="text-purple-400">
-                  {unlockedCount} / {achievements.length} ({progressPercent}%)
-                  <span className="text-slate-500 ml-2">
-                    · {t('ach_this_branch', language)} {branchDone}/{rows.length}
-                  </span>
-                </span>
-              </div>
-              <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-500"
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
-            </div>
+      {/* Overall progress */}
+      <div className="mt-3 rounded-card border border-line bg-surface-1 p-3">
+        <ProgressBar
+          value={progressPercent / 100}
+          tone="accent"
+          label="Completion Status"
+          trailing={
+            <>
+              {unlockedCount} / {achievements.length} ({progressPercent}%)
+              <span className="ml-2 text-ink-dim">
+                · {t('ach_this_branch', language)} {branchDone}/{rows.length}
+              </span>
+            </>
+          }
+          ariaLabel="Completion status"
+        />
+      </div>
 
-            {/* Branch tabs — one short tree each, rather than one long list */}
-            <div className="flex gap-1.5 mt-4 overflow-x-auto pb-1">
+      {/* Branch tabs — one short tree each, rather than one long list */}
+      <div className="scroll-x mt-3 flex gap-1.5 pb-1">
               {BRANCHES.map((b) => {
                 const nodes = achievements.filter((a) => a.branch === b.id);
                 const done = nodes.filter((a) => a.unlockedAt).length;
@@ -161,45 +151,61 @@ export const AchievementsModal: React.FC<Props> = ({
                     id={`ach-branch-${b.id}`}
                     data-locked={open ? 'false' : 'true'}
                     onClick={() => setBranch(b.id)}
-                    className={`py-1 px-3 rounded-lg text-xs font-bold whitespace-nowrap transition-colors flex items-center gap-1 ${
+                    aria-selected={branch === b.id}
+                    data-selected={branch === b.id ? 'true' : 'false'}
+                    className={`flex min-h-8 items-center gap-1 whitespace-nowrap rounded-ctl px-3 py-1 text-2xs transition-colors ${
                       branch === b.id
-                        ? 'bg-purple-500 text-white'
+                        ? 'bg-violet-500 text-ink'
                         : open
-                          ? 'bg-slate-800/80 text-slate-400 hover:text-slate-200'
-                          : 'bg-slate-900/80 text-slate-600 hover:text-slate-500'
+                          ? 'bg-surface-3 text-ink-muted hover:text-ink'
+                          : 'bg-surface-1 text-locked hover:text-ink-muted'
                     }`}
                   >
                     {open ? (
                       <>
                         {t(b.titleKey, language)}
-                        <span className="ml-0.5 opacity-70 font-mono">
+                        <span className="ml-0.5 tnum opacity-70">
                           {done}/{nodes.length}
                         </span>
                       </>
                     ) : (
                       <>
                         <Lock className="w-3 h-3" />
-                        <span className="font-mono">???</span>
+                        <span>???</span>
                       </>
                     )}
                   </button>
                 );
               })}
-            </div>
-          </div>
+      </div>
+    </div>
+  );
 
-          {/* List Content */}
-          <div className="p-4 overflow-y-auto flex-1 space-y-2.5">
+  return (
+    <Sheet
+      cardId="achievements-modal-container"
+      isOpen={isOpen}
+      onClose={onClose}
+      size="lg"
+      accent="accent"
+      header={header}
+      footer={
+        <p className="flex-1 text-center text-2xs font-normal tracking-normal text-ink-muted">
+          Unlocking achievements accelerates your player level and leaderboard standing.
+        </p>
+      }
+      bodyClassName="p-3 space-y-2.5"
+    >
             {isLoading ? (
-              <div className="text-center py-12 text-slate-400 text-sm">Loading trophies...</div>
+              <div className="py-12 text-center text-2xs font-normal tracking-normal text-ink-muted">Loading trophies...</div>
             ) : !branchOpen(branch) ? (
               <div
                 id="ach-branch-locked"
                 className="flex flex-col items-center gap-2 py-14 px-6 text-center"
               >
-                <Lock className="w-8 h-8 text-slate-600" />
-                <p className="text-sm font-bold text-slate-400">{t('branch_locked', language)}</p>
-                <p className="text-xs text-slate-500 max-w-xs leading-relaxed">
+                <Lock className="w-8 h-8 text-locked" />
+                <p className="text-2xs text-ink-muted">{t('branch_locked', language)}</p>
+                <p className="max-w-xs text-2xs leading-relaxed font-normal tracking-normal text-ink-dim">
                   {t(BRANCHES.find((b) => b.id === branch)?.gateHintKey || 'branch_locked', language)}
                 </p>
               </div>
@@ -215,33 +221,33 @@ export const AchievementsModal: React.FC<Props> = ({
                     {depth > 0 && (
                       <div className="flex shrink-0" aria-hidden="true">
                         {Array.from({ length: depth - 1 }).map((_, i) => (
-                          <div key={i} className="w-4 border-l border-slate-700/70 ml-2" />
+                          <div key={i} className="w-4 border-l border-line-strong ml-2" />
                         ))}
                         <div className="w-4 ml-2 relative">
                           <div
-                            className={`absolute left-0 top-0 w-px bg-slate-700/70 ${
+                            className={`absolute left-0 top-0 w-px bg-line-strong ${
                               lastChild ? 'h-6' : 'h-full'
                             }`}
                           />
-                          <div className="absolute left-0 top-6 w-4 h-px bg-slate-700/70" />
+                          <div className="absolute left-0 top-6 w-4 h-px bg-line-strong" />
                         </div>
                       </div>
                     )}
 
                     <div
-                      className={`flex-1 flex items-start gap-3.5 p-3.5 rounded-2xl border transition-all min-w-0 ${
+                      className={`flex min-w-0 flex-1 items-start gap-3.5 rounded-card border p-3.5 transition-colors ${
                         isUnlocked
-                          ? 'bg-purple-950/20 border-purple-500/30'
+                          ? 'border-violet-500/30 bg-violet-500/10'
                           : reachable
-                            ? 'bg-slate-800/20 border-slate-800 opacity-80'
-                            : 'bg-slate-900/40 border-slate-800/60 opacity-45'
+                            ? 'border-line bg-surface-3/40 opacity-80'
+                            : 'border-line/60 bg-surface-1 opacity-45'
                       }`}
                     >
                       <div
-                        className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border ${
+                        className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-ctl border ${
                           isUnlocked
-                            ? 'bg-purple-500/20 border-purple-400/40 text-purple-300'
-                            : 'bg-slate-800 border-slate-700 text-slate-600'
+                            ? 'border-violet-400/40 bg-violet-500/20 text-violet-300'
+                            : 'border-line bg-surface-3 text-locked'
                         }`}
                       >
                         {isUnlocked ? (
@@ -256,27 +262,27 @@ export const AchievementsModal: React.FC<Props> = ({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between gap-2">
                           <h4
-                            className={`text-sm font-bold truncate ${
-                              isUnlocked ? 'text-white' : 'text-slate-400'
+                            className={`truncate text-2xs ${
+                              isUnlocked ? 'text-ink' : 'text-ink-muted'
                             }`}
                           >
                             {revealed ? ach.title : t('ach_hidden_title', language)}
                           </h4>
-                          <span className="text-xs font-bold text-yellow-400 shrink-0">
+                          <span className="shrink-0 text-2xs text-xp">
                             {revealed ? `+${ach.xpReward} XP` : '???'}
                           </span>
                         </div>
-                        <p className="text-xs text-slate-400 mt-0.5">
+                        <p className="mt-0.5 text-2xs font-normal tracking-normal text-ink-muted">
                           {revealed ? ach.description : t('ach_hidden_desc', language)}
                         </p>
                         {isUnlocked ? (
-                          <div className="flex items-center gap-1 text-[10px] text-emerald-400 font-bold mt-1">
+                          <div className="mt-1 flex items-center gap-1 text-2xs text-win">
                             <CheckCircle2 className="w-3 h-3" />
                             <span>{t('ach_unlocked', language)}</span>
                           </div>
                         ) : (
                           !reachable && (
-                            <div className="flex items-center gap-1 text-[10px] text-slate-500 font-bold mt-1">
+                            <div className="mt-1 flex items-center gap-1 text-2xs text-ink-dim">
                               <Lock className="w-3 h-3" />
                               <span>
                                 {t('ach_requires', language, {
@@ -294,14 +300,6 @@ export const AchievementsModal: React.FC<Props> = ({
                 );
               })
             )}
-          </div>
-
-          {/* Footer */}
-          <div className="p-4 bg-slate-950 border-t border-slate-800 text-center text-xs text-slate-400">
-            Unlocking achievements accelerates your player level and leaderboard standing!
-          </div>
-        </motion.div>
-      </div>
-    </AnimatePresence>
+    </Sheet>
   );
 };

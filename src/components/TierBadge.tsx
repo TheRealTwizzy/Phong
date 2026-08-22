@@ -19,14 +19,18 @@ export const TierBadge: React.FC<TierBadgeProps> = ({
   size = 'sm',
   className = '',
 }) => {
+  // 11px is the type floor for the shell; this chip was the last thing under
+  // it. TIER_STYLE keeps supplying the per-tier colour — rank colour is the
+  // one thing allowed to override the single accent, because in a competitive
+  // game the colour of your rank IS your identity.
   const dims =
     size === 'md'
-      ? 'text-xs px-2 py-0.5 rounded-md'
-      : 'text-[9px] px-1.5 py-0.5 rounded';
+      ? 'text-xs px-2 py-0.5 rounded-ctl'
+      : 'text-2xs px-1.5 py-0.5 rounded-chip';
   return (
     <span
       id={`tier-badge-${tier}`}
-      className={`inline-flex items-center font-black font-mono uppercase tracking-wide border ${dims} ${TIER_STYLE[tier]} ${className}`}
+      className={`inline-flex items-center border uppercase ${dims} ${TIER_STYLE[tier]} ${className}`}
       title={t(TIER_LABEL_KEY[tier], language)}
     >
       {t(TIER_LABEL_KEY[tier], language)}

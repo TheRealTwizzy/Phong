@@ -159,11 +159,10 @@ ok('lobby shows locked identity, no callsign field');
 await alice.click('#btn-create-room');
 const code = await alice
   .waitForFunction(() => {
-    for (const el of document.querySelectorAll('.tracking-widest')) {
-      const txt = (el.textContent || '').trim();
-      if (/^[A-HJ-NP-Z2-9]{4}$/.test(txt)) return txt;
-    }
-    return null;
+    // The code has its own element; hunting for it by a styling class meant
+    // any restyle of the lobby silently broke the lookup.
+    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
   }, { timeout: 5000 })
   .then((h) => h.jsonValue());
 

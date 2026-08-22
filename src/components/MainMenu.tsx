@@ -1,18 +1,41 @@
 import React, { useState } from 'react';
-import { AIDifficulty, GameMode, GameSettings, PlayerProfile, PlayerStatus } from '../types';
+import {
+  Achievement,
+  DailyMission,
+  GameMode,
+  GameSettings,
+  PlayerProfile,
+  PlayerStatus,
+} from '../types';
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
-import { TierBadge } from './TierBadge';
-import { AI_DIFFICULTIES, aiRating, winProbability, recommendedDifficulty } from '../rating';
+import {
+  AI_DIFFICULTIES,
+  aiRating,
+  winProbability,
+  recommendedDifficulty,
+  xpForLevel,
+} from '../rating';
 import { normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
 import { MatchRulesPanel } from './MatchRulesPanel';
+import { useQuickMatch } from '../net/useQuickMatch';
+import {
+  Button,
+  Panel,
+  ProgressBar,
+  RankBadge,
+  SegmentedControl,
+  Sheet,
+  UnlockHintSheet,
+} from './ui';
 import {
   Bot,
   Dumbbell,
   Users,
   Smartphone,
+  Swords,
   Target,
   Trophy,
   Award,
@@ -24,19 +47,30 @@ import {
   Shield,
   Flame,
   ChevronDown,
-  Lock,
+  ChevronRight,
 } from 'lucide-react';
 
-// Out-of-match hub: pick a mode, lock in the match settings (difficulty,
-// points to win) BEFORE play starts, and reach every non-match screen.
-// Paddle width and ball speed are fixed engine constants — deliberately
-// absent from this screen and every other one.
+// Out-of-match hub. Reads top-down as WHO YOU ARE → WHAT YOU PLAY → WHAT'S
+// NEXT, which is the shape a competitive title's home screen takes.
+//
+// The shell does not scroll; exactly one region does. Header and tab bar are
+// shrink-0 flex children of a full-height column rather than position:fixed,
+// because dvh changes as mobile browser chrome collapses and a fixed bar
+// would jump mid-scroll.
+//
+// Match settings are still chosen HERE, before a match starts, and still by
+// expanding a mode in place. Moving them into a bottom sheet was considered
+// and rejected: the suites open a mode, pick a score and close it again by
+// tapping the same control twice, which a sheet backdrop would swallow — and
+// an accordion already withholds every mode's options until asked, which is
+// the property that matters.
 interface MainMenuProps {
   theme: ThemeConfig;
   settings: GameSettings;
   onUpdateSettings: (newSettings: Partial<GameSettings>) => void;
   profile: PlayerProfile | null;
   playerStatus: PlayerStatus;
+  missions: DailyMission[];
   unclaimedMissionsCount: number;
   onStartSolo: () => void;
   onStartPractice: () => void;
@@ -51,12 +85,17 @@ interface MainMenuProps {
   onOpenTutorial: () => void;
 }
 
+const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span className="text-kicker px-0.5 text-ink-dim uppercase">{children}</span>
+);
+
 export const MainMenu: React.FC<MainMenuProps> = ({
   theme,
   settings,
   onUpdateSettings,
   profile,
   playerStatus,
+  missions,
   unclaimedMissionsCount,
   onStartSolo,
   onStartPractice,
@@ -72,18 +111,25 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 }) => {
   const lang = settings.language || 'en';
   const [expandedMode, setExpandedMode] = useState<GameMode | null>(null);
+  // Which gate the player tapped, so the reason a rung is shut is something
+  // they can read rather than a tooltip no touch device will ever show.
+  const [gateHint, setGateHint] = useState<Achievement | null>(null);
+  const [queueInfoOpen, setQueueInfoOpen] = useState(false);
+  const quickMatch = useQuickMatch();
 
   const modes: {
     id: GameMode;
     icon: React.ReactNode;
     labelKey: string;
     descKey: string;
-    accent: string;
+    kicker: string;
   }[] = [
-    { id: 'solo', icon: <Bot className="w-5 h-5" />, labelKey: 'mode_solo', descKey: 'menu_solo_desc', accent: '#22d3ee' },
-    { id: 'practice', icon: <Dumbbell className="w-5 h-5" />, labelKey: 'mode_practice', descKey: 'menu_practice_desc', accent: '#34d399' },
-    { id: 'split', icon: <Users className="w-5 h-5" />, labelKey: 'mode_split', descKey: 'menu_split_desc', accent: '#f472b6' },
-    { id: 'multiplayer', icon: <Smartphone className="w-5 h-5" />, labelKey: 'mode_multiplayer', descKey: 'menu_multiplayer_desc', accent: '#a78bfa' },
+    // Mode identity is the icon plus a kicker, not a colour. This used to
+    // hardcode four different accents that fought each other and the theme.
+    { id: 'multiplayer', icon: <Smartphone className="h-5 w-5" />, labelKey: 'mode_multiplayer', descKey: 'menu_multiplayer_desc', kicker: 'FRIEND' },
+    { id: 'solo', icon: <Bot className="h-5 w-5" />, labelKey: 'mode_solo', descKey: 'menu_solo_desc', kicker: 'VS AI' },
+    { id: 'practice', icon: <Dumbbell className="h-5 w-5" />, labelKey: 'mode_practice', descKey: 'menu_practice_desc', kicker: 'DRILL' },
+    { id: 'split', icon: <Users className="h-5 w-5" />, labelKey: 'mode_split', descKey: 'menu_split_desc', kicker: 'LOCAL' },
   ];
 
   const handleModeTap = (id: GameMode) => {
@@ -112,280 +158,398 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   const opened = (kind: 'difficulty' | 'winningScore' | 'mode', value: string | number) =>
     hasUnlock(earned, kind, value);
 
-  const navButtons: { id: string; icon: React.ReactNode; labelKey: string; onClick: () => void; badge?: number }[] = [
-    { id: 'missions', icon: <Target className="w-4 h-4 text-cyan-400" />, labelKey: 'daily_missions', onClick: onOpenMissions, badge: unclaimedMissionsCount },
-    { id: 'leaderboard', icon: <Trophy className="w-4 h-4 text-amber-400" />, labelKey: 'leaderboard', onClick: onOpenLeaderboard },
-    { id: 'achievements', icon: <Award className="w-4 h-4 text-purple-400" />, labelKey: 'achievements', onClick: onOpenAchievements },
-    { id: 'history', icon: <History className="w-4 h-4 text-cyan-400" />, labelKey: 'history', onClick: onOpenHistory },
-    { id: 'profile', icon: <User className="w-4 h-4 text-emerald-400" />, labelKey: 'profile', onClick: onOpenProfile },
-    { id: 'tutorial', icon: <BookOpen className="w-4 h-4 text-cyan-400" />, labelKey: 'start_tutorial', onClick: onOpenTutorial },
-    { id: 'settings', icon: <Settings className="w-4 h-4 text-zinc-300" />, labelKey: 'settings', onClick: onOpenSettings },
+  // xp is a running total and xpNext an absolute threshold, so the bar has to
+  // be measured from the floor of the CURRENT level — same arithmetic the
+  // profile card uses. Reading xp/xpNext directly understates it badly at
+  // higher levels.
+  const levelFloor = profile ? xpForLevel(profile.level) : 0;
+  const xpIntoLevel = Math.max(0, (profile?.xp ?? 0) - levelFloor);
+  const xpForThisLevel = Math.max(1, (profile?.xpNext ?? 1) - levelFloor);
+  const xpFraction = Math.min(1, xpIntoLevel / xpForThisLevel);
+
+  const tabs: { id: string; icon: React.ReactNode; labelKey: string; onClick?: () => void }[] = [
+    { id: 'play', icon: <Play className="h-4 w-4" />, labelKey: 'menu_tab_play' },
+    { id: 'leaderboard', icon: <Trophy className="h-4 w-4" />, labelKey: 'menu_tab_ranks', onClick: onOpenLeaderboard },
+    { id: 'achievements', icon: <Award className="h-4 w-4" />, labelKey: 'achievements', onClick: onOpenAchievements },
+    { id: 'history', icon: <History className="h-4 w-4" />, labelKey: 'history', onClick: onOpenHistory },
+    { id: 'profile', icon: <User className="h-4 w-4" />, labelKey: 'profile', onClick: onOpenProfile },
   ];
+
+  const railMissions = missions.filter((m) => !m.claimed).slice(0, 3);
 
   return (
     <div
       id="main-menu-screen"
-      className="relative w-full h-full overflow-y-auto flex flex-col select-none text-zinc-100"
-      style={{ backgroundColor: theme.background }}
+      className="relative flex h-full w-full flex-col overflow-hidden bg-surface-1 text-ink select-none"
     >
-      {/* Ambient glow backdrop */}
+      {/* The equipped court theme is FELT here and nowhere else in the shell:
+          a wash at low alpha over the surface ramp, so twenty themes cannot
+          turn the menu into twenty different designs. */}
       <div
         className="pointer-events-none absolute inset-0"
         style={{
-          background: `radial-gradient(circle at 50% 18%, ${theme.accentColor}14 0%, transparent 60%)`,
+          background: `radial-gradient(circle at 50% 14%, ${theme.accentColor}14 0%, transparent 60%)`,
         }}
       />
 
-      <div className="relative flex flex-col gap-4 px-4 pt-5 pb-6 min-h-full">
-        {/* Player identity pill */}
+      <header className="relative z-10 flex shrink-0 items-center gap-2 px-safe pt-safe pb-2">
         <button
           id="menu-profile-pill"
           onClick={onOpenProfile}
-          className="self-start flex items-center gap-2 p-1.5 pr-3 rounded-2xl bg-slate-900/80 hover:bg-slate-800/80 border border-slate-700/80 transition active:scale-95"
+          className="flex min-w-0 items-center gap-2 rounded-card border border-line bg-surface-2 p-1 pr-2.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
         >
-          <div className="relative">
+          <div className="relative shrink-0">
             <AvatarImage
               playerId={profile?.id}
               hasAvatar={profile?.hasAvatar}
               avatarVersion={profile?.avatarVersion}
-              size={32}
-              className="rounded-xl border border-cyan-400/40"
+              size={30}
+              className="rounded-ctl border border-line-strong"
             />
             <span
-              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-slate-900 ${
+              className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface-2 ${
                 playerStatus === 'online'
-                  ? 'bg-emerald-400'
+                  ? 'bg-win'
                   : playerStatus === 'idle'
-                  ? 'bg-amber-400'
-                  : 'bg-zinc-500'
+                    ? 'bg-warn'
+                    : 'bg-locked'
               }`}
             />
           </div>
-          <div className="flex flex-col text-left">
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-bold text-white max-w-[110px] truncate">
-                {profile?.username || 'Player'}
+          <span className="max-w-[110px] truncate text-2xs text-ink">
+            {profile?.username || 'Player'}
+          </span>
+          <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
+            LV{profile?.level || 1}
+          </span>
+        </button>
+
+        <span className="flex-1" />
+
+        <button
+          id="menu-nav-missions"
+          onClick={onOpenMissions}
+          aria-label={t('daily_missions', lang)}
+          className="relative rounded-ctl border border-line bg-surface-2 p-2 text-accent transition-colors active:scale-95 motion-reduce:active:scale-100"
+        >
+          <Target className="h-4 w-4" />
+          {unclaimedMissionsCount > 0 && (
+            <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface-1 bg-loss px-1 text-2xs text-ink">
+              {unclaimedMissionsCount}
+            </span>
+          )}
+        </button>
+        <button
+          id="menu-nav-settings"
+          onClick={onOpenSettings}
+          aria-label={t('settings', lang)}
+          className="rounded-ctl border border-line bg-surface-2 p-2 text-ink-muted transition-colors active:scale-95 motion-reduce:active:scale-100"
+        >
+          <Settings className="h-4 w-4" />
+        </button>
+      </header>
+
+      <main className="scroll-y relative z-10 flex min-h-0 flex-1 flex-col gap-3 px-safe pb-3">
+        {/* Rank is the hero: the ladder always shows its next rung. */}
+        <Panel id="menu-rank-card" variant="raised" className="flex items-center gap-4">
+          <RankBadge
+            size="hero"
+            tier={profile?.tier || 'unranked'}
+            rankMu={profile?.rankMu ?? 25}
+            rankedGames={profile?.rankedGames ?? 0}
+            rankSigma={profile?.rankSigma ?? 25 / 3}
+            language={lang}
+          />
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-kicker text-ink-muted uppercase">
+                {t('menu_level', lang)} {profile?.level || 1}
               </span>
-              <span className="text-[9px] font-black px-1 rounded bg-amber-400 text-slate-950">
-                LV{profile?.level || 1}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 mt-0.5 text-[9px] font-mono text-cyan-300/80">
-              <TierBadge tier={profile?.tier || 'unranked'} language={lang} />
-              <span className="inline-flex items-center gap-0.5 px-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">
-                <Flame className="w-2.5 h-2.5 text-amber-400 fill-amber-400" />
+              <span className="inline-flex items-center gap-0.5 rounded-chip border border-warn/30 bg-warn/15 px-1 text-2xs text-warn">
+                <Flame className="h-2.5 w-2.5 fill-current" />
                 {profile?.dailyStreak || 1}d
               </span>
             </div>
+            <ProgressBar
+              id="menu-xp-bar"
+              value={xpFraction}
+              tone="xp"
+              ariaLabel={t('menu_level', lang)}
+            />
           </div>
+        </Panel>
+
+        <SectionLabel>{t('menu_section_play', lang)}</SectionLabel>
+
+        {/* The ranked queue's slot, held open and honest. It uses aria-disabled
+            rather than disabled: a disabled button swallows the tap and reads
+            as broken, where this can say what it is waiting for. */}
+        <button
+          id="menu-mode-quickmatch"
+          data-stub="true"
+          aria-disabled={!quickMatch.available}
+          onClick={() => setQueueInfoOpen(true)}
+          className="flex items-center gap-3 rounded-card border border-dashed border-line-strong bg-surface-2/60 p-3 text-left opacity-60 transition-colors"
+        >
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border border-line-strong text-ink-muted">
+            <Swords className="h-5 w-5" />
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="text-2xs text-ink">{t('menu_quickmatch', lang)}</span>
+            <span className="text-2xs leading-tight font-normal tracking-normal text-ink-dim">
+              {t('menu_quickmatch_desc', lang)}
+            </span>
+          </div>
+          <span className="shrink-0 rounded-chip border border-warn/40 bg-warn/15 px-1.5 py-0.5 text-2xs text-warn uppercase">
+            {t('menu_quickmatch_soon', lang)}
+          </span>
         </button>
 
-        {/* Title block */}
-        <div className="flex flex-col items-center gap-1 py-2">
-          <h1
-            className="text-4xl font-black font-mono tracking-[0.3em] pl-[0.3em]"
-            style={{ color: theme.accentColor, textShadow: `0 0 24px ${theme.accentColor}80` }}
-          >
-            {t('app_title', lang)}
-          </h1>
-          <p className="text-[11px] text-zinc-400 font-mono tracking-widest uppercase">
-            {t('app_subtitle', lang)}
-          </p>
-        </div>
-
-        {/* Mode selection */}
-        <div className="flex flex-col gap-2">
-          <span className="text-[10px] font-mono font-bold text-zinc-400 uppercase tracking-widest">
-            {t('choose_mode', lang)}
-          </span>
-
-          {modes.map((m) => {
-            const isExpanded = expandedMode === m.id;
-            return (
-              <div
-                key={m.id}
-                className={`rounded-2xl border overflow-hidden transition-colors ${
-                  isExpanded ? 'bg-slate-900/90' : 'bg-slate-900/50'
-                }`}
-                style={{ borderColor: isExpanded ? m.accent + '80' : '#27272a' }}
-              >
-                <button
-                  id={`menu-mode-${m.id}`}
-                  onClick={() => handleModeTap(m.id)}
-                  className="w-full flex items-center gap-3 p-3 text-left transition active:scale-[0.99]"
-                >
-                  <div
-                    className="w-10 h-10 rounded-xl border flex items-center justify-center shrink-0"
-                    style={{ color: m.accent, borderColor: m.accent + '50', backgroundColor: m.accent + '15' }}
-                  >
-                    {m.icon}
-                  </div>
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-sm font-mono font-bold text-white">{t(m.labelKey, lang)}</span>
-                    <span className="text-[10px] text-zinc-400 leading-tight">{t(m.descKey, lang)}</span>
-                  </div>
-                  {m.id !== 'multiplayer' && (
-                    <ChevronDown
-                      className={`w-4 h-4 text-zinc-500 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                    />
-                  )}
-                  {m.id === 'multiplayer' && <Play className="w-4 h-4 text-zinc-500 shrink-0" />}
-                </button>
-
-                {/* Pre-match setup panel — the ONLY place match settings change */}
-                {isExpanded && (
-                  <div className="px-3 pb-3 flex flex-col gap-3 border-t border-zinc-800/80 pt-3">
-                    {m.id !== 'practice' && (
-                      <span className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest -mb-1">
-                        {t('match_settings', lang)}
-                      </span>
-                    )}
-
-                    {m.id === 'solo' && (
-                      <div className="flex flex-col gap-1.5">
-                        <label className="text-[10px] font-mono text-zinc-400 flex items-center gap-1">
-                          <Shield className="w-3 h-3" />
-                          {t('ai_difficulty', lang)}
-                          <span className="ml-auto text-[9px] text-zinc-500 normal-case">
-                            {t('win_chance', lang)}
-                          </span>
-                        </label>
-                        <div className="grid grid-cols-4 gap-1.5">
-                          {AI_DIFFICULTIES.map((diff) => {
-                            // Pre-match prediction from hidden MMR vs this AI
-                            // anchor — the same number that scales match XP.
-                            const chance = Math.round(winProbability(myRating, aiRating(diff, myRating.mu)) * 100);
-                            const unlocked = opened('difficulty', diff);
-                            const gate = unlocked ? null : unlockedBy('difficulty', diff);
-                            return (
-                              <button
-                                key={diff}
-                                id={`menu-diff-${diff}`}
-                                disabled={!unlocked}
-                                title={gate ? `${gate.title} — ${gate.description}` : undefined}
-                                onClick={() => onUpdateSettings({ difficulty: diff })}
-                                className={`relative py-1.5 px-1 rounded-lg border text-[10px] font-mono capitalize transition flex flex-col items-center gap-0.5 ${
-                                  !unlocked
-                                    ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
-                                    : settings.difficulty === diff
-                                      ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                                      : 'border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800'
-                                }`}
-                              >
-                                {!unlocked && (
-                                  <Lock
-                                    id={`menu-diff-${diff}-lock`}
-                                    className="absolute top-0.5 right-0.5 w-2.5 h-2.5 text-zinc-600"
-                                  />
-                                )}
-                                <span>{diff}</span>
-                                <span
-                                  id={`menu-diff-${diff}-odds`}
-                                  className={`text-[9px] font-bold ${
-                                    chance >= 60
-                                      ? 'text-emerald-400'
-                                      : chance >= 40
-                                        ? 'text-amber-400'
-                                        : 'text-rose-400'
-                                  }`}
-                                >
-                                  {chance}%
-                                </span>
-                                {diff === bestDifficulty && (
-                                  <span
-                                    id="menu-diff-balanced"
-                                    className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-[7px] font-black tracking-wider px-1 rounded bg-cyan-400 text-slate-950"
-                                  >
-                                    {t('balanced', lang)}
-                                  </span>
-                                )}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-
-                    {(m.id === 'solo' || m.id === 'split') && (
-                      <div className="flex flex-col gap-1.5">
-                        <label className="text-[10px] font-mono text-zinc-400">
-                          {t('winning_score', lang)}
-                        </label>
-                        <div className="grid grid-cols-4 gap-1.5">
-                          {[3, 5, 10, 15].map((pts) => {
-                            const ptsOpen = opened('winningScore', pts);
-                            const ptsGate = ptsOpen ? null : unlockedBy('winningScore', pts);
-                            return (
-                            <button
-                              key={pts}
-                              id={`menu-pts-${pts}`}
-                              disabled={!ptsOpen}
-                              title={ptsGate ? `${ptsGate.title} — ${ptsGate.description}` : undefined}
-                              onClick={() => onUpdateSettings({ winningScore: pts })}
-                              className={`py-1.5 rounded-lg text-[10px] font-mono border transition ${
-                                !ptsOpen
-                                  ? 'border-zinc-800 bg-zinc-950/70 text-zinc-600 cursor-not-allowed'
-                                  : settings.winningScore === pts
-                                  ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 font-bold'
-                                  : 'border-zinc-800 bg-zinc-900/60 text-zinc-400'
-                              }`}
-                            >
-                              {pts} pts
-                            </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-
-                    <MatchRulesPanel
-                      rules={settings.rules}
-                      onUpdateRules={(patch) =>
-                        onUpdateSettings({ rules: normalizeRules({ ...settings.rules, ...patch }) })
-                      }
-                      lang={lang}
-                      mode={m.id}
-                    />
-
-                    <button
-                      id={`menu-start-${m.id}`}
-                      onClick={startExpanded}
-                      className="w-full py-3 rounded-xl font-mono text-xs font-black tracking-widest uppercase text-zinc-950 transition active:scale-95 shadow-lg flex items-center justify-center gap-1.5"
-                      style={{ backgroundColor: m.accent }}
-                    >
-                      <Play className="w-4 h-4" />
-                      {m.id === 'practice' ? t('start_training', lang) : t('start_match', lang)}
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Out-of-match navigation */}
-        <div className="grid grid-cols-4 gap-2 mt-auto pt-2">
-          {navButtons.map((b) => (
-            <button
-              key={b.id}
-              id={`menu-nav-${b.id}`}
-              onClick={b.onClick}
-              title={t(b.labelKey, lang)}
-              className="relative flex flex-col items-center gap-1 p-2 rounded-xl bg-slate-900/60 hover:bg-slate-800/70 border border-slate-800 transition active:scale-95"
+        {modes.map((m) => {
+          const isExpanded = expandedMode === m.id;
+          const isPrimary = m.id === 'multiplayer';
+          return (
+            <div
+              key={m.id}
+              className={`overflow-hidden rounded-card border transition-colors ${
+                isExpanded || isPrimary
+                  ? 'border-accent/40 bg-surface-2'
+                  : 'border-line bg-surface-2/70'
+              }`}
             >
-              {b.icon}
-              <span className="text-[8px] font-mono text-zinc-400 leading-none truncate max-w-full">
-                {t(b.labelKey, lang)}
-              </span>
-              {(b.badge ?? 0) > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-black font-mono flex items-center justify-center border border-slate-900">
-                  {b.badge}
-                </span>
+              <button
+                id={`menu-mode-${m.id}`}
+                onClick={() => handleModeTap(m.id)}
+                className="flex w-full items-center gap-3 p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100"
+              >
+                <div
+                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border ${
+                    isPrimary
+                      ? 'border-accent/50 bg-accent/15 text-accent'
+                      : 'border-line-strong bg-surface-3 text-ink-muted'
+                  }`}
+                >
+                  {m.icon}
+                </div>
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="flex items-center gap-1.5">
+                    <span className="truncate text-2xs text-ink">{t(m.labelKey, lang)}</span>
+                    <span className="shrink-0 text-2xs font-normal tracking-normal text-ink-dim">
+                      {m.kicker}
+                    </span>
+                  </span>
+                  <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
+                    {t(m.descKey, lang)}
+                  </span>
+                </div>
+                {isPrimary ? (
+                  <ChevronRight className="h-4 w-4 shrink-0 text-accent" />
+                ) : (
+                  <ChevronDown
+                    className={`h-4 w-4 shrink-0 text-ink-dim transition-transform ${
+                      isExpanded ? 'rotate-180' : ''
+                    }`}
+                  />
+                )}
+              </button>
+
+              {/* Pre-match setup — the ONLY place match settings change */}
+              {isExpanded && (
+                <div className="flex flex-col gap-3 border-t border-line px-3 pt-3 pb-3">
+                  {m.id !== 'practice' && (
+                    <SectionLabel>{t('match_settings', lang)}</SectionLabel>
+                  )}
+
+                  {m.id === 'solo' && (
+                    <div className="flex flex-col gap-1.5">
+                      <label className="flex items-center gap-1 text-2xs font-normal tracking-normal text-ink-muted">
+                        <Shield className="h-3 w-3" />
+                        {t('ai_difficulty', lang)}
+                        <span className="ml-auto text-2xs text-ink-dim">
+                          {t('win_chance', lang)}
+                        </span>
+                      </label>
+                      <SegmentedControl
+                        columns={3}
+                        ariaLabel={t('ai_difficulty', lang)}
+                        value={settings.difficulty}
+                        onChange={(diff) => onUpdateSettings({ difficulty: diff })}
+                        onLockTap={setGateHint}
+                        options={AI_DIFFICULTIES.map((diff) => {
+                          // Pre-match prediction from hidden MMR vs this AI
+                          // anchor — the same number that scales match XP.
+                          const chance = Math.round(
+                            winProbability(myRating, aiRating(diff, myRating.mu)) * 100
+                          );
+                          return {
+                            value: diff,
+                            id: `menu-diff-${diff}`,
+                            label: <span className="capitalize">{diff}</span>,
+                            sublabel: `${chance}%`,
+                            sublabelId: `menu-diff-${diff}-odds`,
+                            sublabelTone:
+                              chance >= 60 ? 'win' : chance >= 40 ? 'warn' : 'loss',
+                            badge:
+                              diff === bestDifficulty
+                                ? { id: 'menu-diff-balanced', text: t('balanced', lang) }
+                                : undefined,
+                            lock: opened('difficulty', diff)
+                              ? null
+                              : unlockedBy('difficulty', diff) ?? null,
+                            lockId: `menu-diff-${diff}-lock`,
+                          };
+                        })}
+                      />
+                    </div>
+                  )}
+
+                  {(m.id === 'solo' || m.id === 'split') && (
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-2xs font-normal tracking-normal text-ink-muted">
+                        {t('winning_score', lang)}
+                      </label>
+                      <SegmentedControl
+                        columns={4}
+                        ariaLabel={t('winning_score', lang)}
+                        value={settings.winningScore}
+                        onChange={(pts) => onUpdateSettings({ winningScore: pts })}
+                        onLockTap={setGateHint}
+                        options={[3, 5, 10, 15].map((pts) => ({
+                          value: pts,
+                          id: `menu-pts-${pts}`,
+                          label: `${pts} pts`,
+                          lock: opened('winningScore', pts)
+                            ? null
+                            : unlockedBy('winningScore', pts) ?? null,
+                        }))}
+                      />
+                    </div>
+                  )}
+
+                  <MatchRulesPanel
+                    rules={settings.rules}
+                    onUpdateRules={(patch) =>
+                      onUpdateSettings({ rules: normalizeRules({ ...settings.rules, ...patch }) })
+                    }
+                    lang={lang}
+                    mode={m.id}
+                  />
+
+                  <Button
+                    id={`menu-start-${m.id}`}
+                    variant="primary"
+                    size="lg"
+                    block
+                    icon={<Play className="h-4 w-4" />}
+                    onClick={startExpanded}
+                  >
+                    {m.id === 'practice' ? t('start_training', lang) : t('start_match', lang)}
+                  </Button>
+                </div>
               )}
+            </div>
+          );
+        })}
+
+        {railMissions.length > 0 && (
+          <>
+            <SectionLabel>{t('menu_section_today', lang)}</SectionLabel>
+            <div id="menu-daily-rail" className="scroll-x flex gap-2 pb-1">
+              {railMissions.map((mi) => (
+                <button
+                  key={mi.id}
+                  id={`menu-daily-${mi.id}`}
+                  onClick={onOpenMissions}
+                  className="flex w-40 shrink-0 flex-col gap-1.5 rounded-card border border-line bg-surface-2 p-2.5 text-left transition-colors active:scale-[0.99] motion-reduce:active:scale-100"
+                >
+                  <span className="truncate text-2xs text-ink">{t(mi.titleKey, lang)}</span>
+                  <ProgressBar
+                    height="sm"
+                    value={mi.current / mi.target}
+                    tone={mi.current >= mi.target ? 'win' : 'accent'}
+                  />
+                  <span className="text-2xs tnum font-normal tracking-normal text-ink-dim">
+                    {mi.current}/{mi.target} · +{mi.xpReward} XP
+                  </span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        <button
+          id="menu-nav-tutorial"
+          onClick={onOpenTutorial}
+          className="flex items-center gap-2 rounded-card border border-line bg-surface-2/60 px-3 py-2.5 text-left text-ink-muted transition-colors active:scale-[0.99] motion-reduce:active:scale-100"
+        >
+          <BookOpen className="h-4 w-4 shrink-0" />
+          <span className="flex-1 text-2xs font-normal tracking-normal">
+            {t('menu_how_to_play', lang)}
+          </span>
+          <ChevronRight className="h-4 w-4 shrink-0 text-ink-dim" />
+        </button>
+      </main>
+
+      {/* A flex sibling, not position:fixed — dvh changes as mobile browser
+          chrome collapses, and a fixed bar would jump mid-scroll. */}
+      <nav
+        id="menu-tabbar"
+        className="relative z-10 grid shrink-0 grid-cols-5 border-t border-line bg-surface-2 px-safe pb-safe"
+      >
+        {tabs.map((tab) => {
+          const current = !tab.onClick;
+          return (
+            <button
+              key={tab.id}
+              id={`menu-nav-${tab.id}`}
+              onClick={tab.onClick}
+              aria-current={current ? 'page' : undefined}
+              className={`flex flex-col items-center gap-1 py-2.5 transition-colors ${
+                current ? 'text-accent' : 'text-ink-muted'
+              }`}
+            >
+              {tab.icon}
+              <span className="max-w-full truncate text-2xs font-normal tracking-normal">
+                {t(tab.labelKey, lang)}
+              </span>
             </button>
-          ))}
-        </div>
-      </div>
+          );
+        })}
+      </nav>
+
+      <UnlockHintSheet
+        achievement={gateHint}
+        onClose={() => setGateHint(null)}
+        closeLabel={t('close', lang)}
+      />
+
+      <Sheet
+        id="quickmatch-info-sheet"
+        isOpen={queueInfoOpen}
+        onClose={() => setQueueInfoOpen(false)}
+        size="xs"
+        layer="over"
+        accent="warn"
+        closeLabel={t('close', lang)}
+        icon={<Swords className="h-4 w-4" />}
+        title={t('menu_quickmatch', lang)}
+        footer={
+          <Button
+            variant="primary"
+            block
+            onClick={() => {
+              setQueueInfoOpen(false);
+              onOpenMultiplayer();
+            }}
+          >
+            {t('menu_quickmatch_cta', lang)}
+          </Button>
+        }
+      >
+        <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
+          {t('menu_quickmatch_body', lang)}
+        </p>
+      </Sheet>
     </div>
   );
 };

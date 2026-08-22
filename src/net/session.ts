@@ -48,13 +48,49 @@ export interface SessionSnapshot {
 // first heartbeat can both ask, so they share one attempt.
 let opening: Promise<{ status: ClientSessionStatus; profile?: PlayerProfile }> | null = null;
 
-/** Start (or take back) the session for this device. */
-export function openSession(): Promise<{ status: ClientSessionStatus; profile?: PlayerProfile }> {
+/**
+ * Start (or take back) the session for this device.
+ *
+ * `force` mints unconditionally, for the one caller that genuinely wants a NEW
+ * session: the player pressing "play here instead" on the session wall, taking
+ * the account back from another device on purpose.
+ */
+export function openSession(
+  options: { force?: boolean } = {}
+): Promise<{ status: ClientSessionStatus; profile?: PlayerProfile }> {
   if (opening) return opening;
-  opening = mintSession().finally(() => {
+  opening = (options.force ? mintSession() : ensureSession()).finally(() => {
     opening = null;
   });
   return opening;
+}
+
+/**
+ * A page that already holds a live session must not mint a second one.
+ *
+ * The guard above only ever covered mints that OVERLAP. These arrive in
+ * SEQUENCE: boot mints one, and then the match queue — which is flushed on
+ * load and can beat the session being established — is answered
+ * SESSION_REQUIRED and mints another. The second supersedes the first, and
+ * superseding closes every socket opened under it. A player following an
+ * invitation link had their relay socket shut mid-join and was shown the
+ * "playing elsewhere" wall, against themselves: exactly the failure the
+ * comment above describes, arrived at the other way round.
+ *
+ * Measured at roughly one join in twenty before this.
+ */
+async function ensureSession(): Promise<{
+  status: ClientSessionStatus;
+  profile?: PlayerProfile;
+}> {
+  if (mySessionId) {
+    const snapshot = await readSession();
+    // Still ours: nothing to do, and minting would only take it from itself.
+    if (snapshot.status === 'active') return { status: 'active' };
+    // Genuinely lost it (another tab, another device) — minting is how a
+    // caller that needs a live session gets one back, as it always was.
+  }
+  return mintSession();
 }
 
 async function mintSession(): Promise<{ status: ClientSessionStatus; profile?: PlayerProfile }> {
