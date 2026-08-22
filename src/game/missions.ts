@@ -81,6 +81,30 @@ export const ELITE_SLOTS = 1;
 export const REROLLS_REGULAR = 5;
 export const REROLLS_ELITE = 1;
 
+/**
+ * How many recent deals block a task from being dealt again.
+ *
+ * Tasks are NOT one-and-done: finishing one puts it back in the pool, so the
+ * twelve regular tasks can never be used up and a claim always has something
+ * to deal. What stops the same task returning immediately is this window —
+ * anything among the last few dealt is skipped, along with anything currently
+ * held. Kept small deliberately: too large and it becomes the old exhaustion
+ * problem wearing a different hat.
+ */
+export const RECENT_DEAL_MEMORY = 3;
+
+/** Pick a hand of `count` from `order`, avoiding anything recently dealt. */
+export function pickHand(order: readonly string[], recent: ReadonlySet<string>, count: number): string[] {
+  const hand = order.filter((id) => !recent.has(id)).slice(0, count);
+  // A pool small enough that the recency window swallows it still has to deal
+  // a full hand; falling back to the plain order is better than a short one.
+  for (const id of order) {
+    if (hand.length >= count) break;
+    if (!hand.includes(id)) hand.push(id);
+  }
+  return hand;
+}
+
 /** Legacy alias — the fixed five before missions became a dealt hand. */
 export const MISSION_DEFS = MISSION_POOL;
 
@@ -128,13 +152,6 @@ function seededShuffle<T>(items: readonly T[], seed: number): T[] {
  */
 export const dealOrder = (pool: MissionDef[], playerId: string, dayKey: string, salt: string): string[] =>
   seededShuffle(pool, hashString(`${playerId}|${dayKey}|${salt}`)).map((m) => m.id);
-
-/** Most XP a player can claim from missions in one day. */
-export const MISSION_DAILY_XP_CAP = MISSION_POOL.slice()
-  .sort((a, b) => b.xpReward - a.xpReward)
-  .slice(0, REGULAR_SLOTS)
-  .reduce((sum, m) => sum + m.xpReward, 0) +
-  Math.max(...ELITE_POOL.map((m) => m.xpReward)) * ELITE_SLOTS;
 
 export const findMission = (id: string): MissionDef | undefined =>
   ALL_MISSIONS.find((m) => m.id === id);

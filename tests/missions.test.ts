@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { DatabaseSync } from 'node:sqlite';
 import type { CourtTheme, MatchEndPayload, PlayerProfile } from '../src/types';
 import { THEMES, isThemeUnlocked } from '../src/game/themes';
 import {
@@ -12,6 +13,7 @@ import {
   ELITE_SLOTS,
   REROLLS_REGULAR,
   REROLLS_ELITE,
+  RECENT_DEAL_MEMORY,
   applyMatchToProgress,
   findMission,
   missionDayKey,
@@ -487,21 +489,100 @@ describe('a completed mission deals a free replacement', () => {
     expect(held('ar_elite').filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS);
   });
 
-  it('never deals something already held or already finished today', () => {
+  it('never deals something held, or dealt in the last few rolls', () => {
+    // The rule that replaced one-and-done: anything may come back, once
+    // RECENT_DEAL_MEMORY other deals have gone by. One-and-done meant a
+    // productive player used the pool up, and a claim then had nothing to hand
+    // back — which is what left a finished task sitting in its slot.
     init('ar_dupes', 'AutoDupes');
-    const seen = new Set<string>();
-    for (let round = 0; round < 4; round++) {
+    const dealt = db
+      .getMissions('ar_dupes', today)
+      .filter((m) => m.tier === 'regular')
+      .map((m) => m.id);
+
+    for (let round = 0; round < 10; round++) {
       const target = db
         .getMissions('ar_dupes', today)
         .find((m) => m.tier === 'regular' && !m.claimed);
       if (!target) break;
-      seen.add(target.id);
       finish('ar_dupes', target.id);
       const res = db.claimMission('ar_dupes', target.id, today);
       const hand = db.getMissions('ar_dupes', today).map((m) => m.id);
+      // Never the same task twice on the list at once.
       expect(new Set(hand).size).toBe(hand.length);
-      if (res.newMissionId) expect(seen.has(res.newMissionId)).toBe(false);
+      expect(res.newMissionId).toBeTruthy();
+      // Never one of the last few dealt, and never one already held.
+      expect(dealt.slice(-RECENT_DEAL_MEMORY)).not.toContain(res.newMissionId);
+      expect(hand.filter((id) => id === res.newMissionId)).toHaveLength(1);
+      // ...and it arrives clean. Past the first few rounds these ARE re-deals
+      // of tasks completed and claimed earlier, which without the reset would
+      // come straight back finished and already marked claimed.
+      const fresh = res.missions!.find((m) => m.id === res.newMissionId)!;
+      expect(fresh.current).toBe(0);
+      expect(fresh.claimed).toBe(false);
+      dealt.push(res.newMissionId!);
     }
+    // Ten claims out of a twelve-task pool: only a repeating pool gets here.
+    expect(dealt.length).toBeGreaterThan(REGULAR_SLOTS + RECENT_DEAL_MEMORY);
+    expect(new Set(dealt).size).toBeLessThan(dealt.length);
+  });
+
+  it('deals a repeat back at zero, never carrying what it held before', () => {
+    // Reported: rerolling into "Point Machine" arrived at 21/25. Progress is
+    // stored per task for the day, so a task dealt back into a slot used to
+    // bring whatever it collected the last time it was held — and since tasks
+    // now repeat, every repeat would arrive already finished and claimed.
+    // A task in a slot has always just started.
+    init('ar_fresh', 'FreshStart');
+    const seen = new Set(
+      db.getMissions('ar_fresh', today).filter((m) => m.tier === 'regular').map((m) => m.id)
+    );
+    let repeats = 0;
+
+    for (let round = 0; round < 12; round++) {
+      const target = db
+        .getMissions('ar_fresh', today)
+        .find((m) => m.tier === 'regular' && !m.claimed);
+      if (!target) break;
+      finish('ar_fresh', target.id);
+      const res = db.claimMission('ar_fresh', target.id, today);
+      if (!res.ok || !res.newMissionId) break;
+
+      const dealt = res.missions!.find((m) => m.id === res.newMissionId)!;
+      if (seen.has(res.newMissionId)) {
+        // A task coming round again — completed and claimed earlier today.
+        repeats += 1;
+        expect(dealt.current).toBe(0);
+        expect(dealt.claimed).toBe(false);
+      }
+      seen.add(res.newMissionId);
+    }
+
+    // Twelve claims against a twelve-task pool: repeats are certain, and it is
+    // the repeats that carry the risk.
+    expect(repeats).toBeGreaterThan(0);
+  });
+
+  it('holds a day dealt under a larger hand down to the current size', () => {
+    // A player mid-day is holding whatever they were dealt this morning, so
+    // lowering the hand size has to take effect on the list they already have.
+    init('ar_trim', 'TrimMe');
+    db.getMissions('ar_trim', today);
+    const dayKey = today.toISOString().slice(0, 10);
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    const seed = raw.prepare(
+      `INSERT INTO daily_mission_slots (playerId, dayKey, slot, missionId) VALUES (?, ?, ?, ?)
+       ON CONFLICT(playerId, dayKey, slot) DO UPDATE SET missionId = excluded.missionId`
+    );
+    ['mission_games', 'mission_win', 'mission_rally', 'mission_points', 'mission_aces'].forEach(
+      (id, i) => seed.run('ar_trim', dayKey, i, id)
+    );
+    seed.run('ar_trim', dayKey, 5, 'elite_rally_40');
+    raw.close();
+
+    const hand = db.getMissions('ar_trim', today);
+    expect(hand.filter((m) => m.tier === 'regular')).toHaveLength(REGULAR_SLOTS);
+    expect(hand.filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS);
   });
 });
 
