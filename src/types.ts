@@ -94,7 +94,8 @@ export interface GameSettings {
   hapticIntensity: number; // 10 to 100
   tiltEnabled: boolean;
   showRadar: boolean;
-  showStatsOverlay: boolean;
+  // Telemetry visibility is deliberately NOT a stored setting: the panel is
+  // per-match, starting hidden and toggled from the court (see App.tsx).
   showTrails: boolean;
   // Paddle width and ball speed are deliberately NOT settings — they are
   // fixed constants in game/physics.ts and must never be player-editable.
