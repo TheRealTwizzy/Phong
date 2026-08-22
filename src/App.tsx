@@ -1989,6 +1989,7 @@ export default function App() {
         <AchievementToast
           achievement={toastAchievement}
           levelUp={toastLevelUp}
+          language={currentLanguage}
           onClose={() => {
             setToastAchievement(null);
             setToastLevelUp(null);
@@ -2171,6 +2172,7 @@ export default function App() {
           oppPaddleXRef={oppPaddleXRef}
           paddleWidthRatio={paddleWidthFor(activeConfig.rules)}
           theme={currentTheme}
+          language={currentLanguage}
           active={
             settings.showRadar &&
             activeConfig.rules.opponentSonar &&
@@ -2516,6 +2518,7 @@ export default function App() {
           onClose={() => setIsLeaderboardOpen(false)}
           currentPlayerId={playerId}
           onViewProfile={openPublicProfile}
+          language={currentLanguage}
         />
 
         {/* Achievements & Trophies Modal */}

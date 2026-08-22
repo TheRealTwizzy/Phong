@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { LeaderboardEntry } from '../types';
+import { LeaderboardEntry, LanguageCode } from '../types';
+import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
 import { Sheet, Button, Panel } from './ui';
@@ -11,17 +12,20 @@ interface Props {
   currentPlayerId: string;
   // Tapping any row opens that player's public profile.
   onViewProfile?: (id: string) => void;
+  language: LanguageCode;
 }
 
 type SortCategory = 'elo' | 'level' | 'rally' | 'wins';
 
-const CATEGORIES: { id: SortCategory; label: string }[] = [
+const CATEGORIES: { id: SortCategory; labelKey: string }[] = [
   // "Skill Tier", never the estimator's name: the ladder shows a tier, and a
-  // raw rating number is never rendered anywhere in this app.
-  { id: 'elo', label: 'Skill Tier' },
-  { id: 'level', label: 'Level / XP' },
-  { id: 'rally', label: 'Top Rally' },
-  { id: 'wins', label: 'Victories' },
+  // raw rating number is never rendered anywhere in this app. These sit at
+  // module scope, so they hold a KEY and resolve against the live language at
+  // render — a label baked in here would be English for everyone.
+  { id: 'elo', labelKey: 'board_cat_elo' },
+  { id: 'level', labelKey: 'board_cat_level' },
+  { id: 'rally', labelKey: 'board_cat_rally' },
+  { id: 'wins', labelKey: 'board_cat_wins' },
 ];
 
 export const LeaderboardModal: React.FC<Props> = ({
@@ -29,6 +33,7 @@ export const LeaderboardModal: React.FC<Props> = ({
   onClose,
   currentPlayerId,
   onViewProfile,
+  language,
 }) => {
   const [category, setCategory] = useState<SortCategory>('elo');
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
@@ -62,7 +67,7 @@ export const LeaderboardModal: React.FC<Props> = ({
     if (rank === null) {
       return (
         <div className="w-8 h-8 rounded-full bg-violet-500/15 border border-violet-400/40 flex items-center justify-center text-violet-300 text-2xs">
-          BOT
+          {t('board_bot', language)}
         </div>
       );
     }
@@ -99,7 +104,7 @@ export const LeaderboardModal: React.FC<Props> = ({
       <button
         id="close-leaderboard-btn"
         onClick={onClose}
-        aria-label="Close leaderboard"
+        aria-label={t('board_close', language)}
         className="absolute top-3 right-3 rounded-ctl p-2 text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
       >
         <X className="w-5 h-5" />
@@ -110,9 +115,9 @@ export const LeaderboardModal: React.FC<Props> = ({
           <Trophy className="w-6 h-6" />
         </div>
         <div>
-          <h2 className="text-title">Global Leaderboard</h2>
+          <h2 className="text-title">{t('board_title', language)}</h2>
           <p className="text-2xs font-normal tracking-normal text-ink-muted">
-            Live rankings and competitive player records
+            {t('board_subtitle', language)}
           </p>
         </div>
       </div>
@@ -120,7 +125,7 @@ export const LeaderboardModal: React.FC<Props> = ({
       {/* Filter tabs */}
       <div
         role="tablist"
-        aria-label="Leaderboard category"
+        aria-label={t('board_category', language)}
         className="mt-4 grid grid-cols-4 gap-1 rounded-card border border-line bg-surface-1 p-1"
       >
         {CATEGORIES.map((c) => {
@@ -139,7 +144,7 @@ export const LeaderboardModal: React.FC<Props> = ({
                   : 'text-ink-muted hover:bg-surface-3 hover:text-ink'
               }`}
             >
-              {c.label}
+              {t(c.labelKey, language)}
             </button>
           );
         })}
@@ -150,7 +155,7 @@ export const LeaderboardModal: React.FC<Props> = ({
         id="toggle-show-bots"
         className="mt-2.5 flex cursor-pointer select-none items-center justify-between px-1 text-2xs font-normal tracking-normal text-ink-muted"
       >
-        <span>Show AI bot rankings</span>
+        <span>{t('board_show_bots', language)}</span>
         <input
           type="checkbox"
           checked={showBots}
@@ -164,7 +169,7 @@ export const LeaderboardModal: React.FC<Props> = ({
   const footer = (
     <>
       <span className="flex-1 text-2xs font-normal tracking-normal text-ink-muted">
-        Updates live after every completed match
+        {t('board_footer', language)}
       </span>
       <Button
         size="sm"
@@ -172,7 +177,7 @@ export const LeaderboardModal: React.FC<Props> = ({
         icon={<RefreshCw className="w-3.5 h-3.5" />}
         onClick={() => fetchLeaderboard(category, showBots)}
       >
-        Refresh
+        {t('board_refresh', language)}
       </Button>
     </>
   );
@@ -191,11 +196,11 @@ export const LeaderboardModal: React.FC<Props> = ({
       {isLoading ? (
         <div className="flex items-center justify-center gap-2 py-12 text-2xs font-normal tracking-normal text-ink-muted">
           <RefreshCw className="w-4 h-4 animate-spin text-warn" data-motion-essential />
-          <span>Fetching rankings...</span>
+          <span>{t('board_loading', language)}</span>
         </div>
       ) : entries.length === 0 ? (
         <div className="py-12 text-center text-2xs font-normal tracking-normal text-ink-dim">
-          No ranking entries found. Be the first to claim the top spot!
+          {t('board_empty', language)}
         </div>
       ) : (
         entries.map((entry) => {
@@ -212,7 +217,7 @@ export const LeaderboardModal: React.FC<Props> = ({
               <button
                 id={`leaderboard-row-${entry.id}`}
                 onClick={() => onViewProfile?.(entry.id)}
-                title="View profile"
+                title={t('view_profile', language)}
                 className="flex w-full items-center justify-between gap-2 p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100"
               >
                 <div className="flex min-w-0 items-center gap-3">
@@ -233,19 +238,19 @@ export const LeaderboardModal: React.FC<Props> = ({
                       </span>
                       {isMe && (
                         <span className="rounded-chip bg-warn px-1.5 py-0.5 text-2xs text-ink-on-accent uppercase">
-                          YOU
+                          {t('you', language)}
                         </span>
                       )}
                       {entry.isBot && (
                         <span className="rounded-chip border border-violet-400/40 bg-violet-500/25 px-1.5 py-0.5 text-2xs text-violet-300 uppercase">
-                          BOT
+                          {t('board_bot', language)}
                         </span>
                       )}
                     </div>
                     <div className="mt-0.5 flex items-center gap-2 text-2xs font-normal tracking-normal text-ink-muted">
-                      <span className="text-accent">LV {entry.level}</span>
+                      <span className="text-accent">{t('level', language)} {entry.level}</span>
                       <span>•</span>
-                      <span>{entry.winRate}% Win Rate</span>
+                      <span>{entry.winRate}% {t('win_rate', language)}</span>
                     </div>
                   </div>
                 </div>
@@ -255,33 +260,33 @@ export const LeaderboardModal: React.FC<Props> = ({
                     <div className="flex flex-col items-end gap-0.5">
                       <TierBadge tier={entry.tier} />
                       <div className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
-                        {entry.rankedGames} ranked
+                        {t('board_ranked_games', language, { n: entry.rankedGames })}
                       </div>
                     </div>
                   )}
                   {category === 'level' && (
                     <>
                       <div className="text-2xs tnum text-accent">
-                        {entry.xp.toLocaleString()} XP
+                        {entry.xp.toLocaleString()} {t('xp', language)}
                       </div>
                       <div className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
-                        Level {entry.level}
+                        {t('menu_level', language)} {entry.level}
                       </div>
                     </>
                   )}
                   {category === 'rally' && (
                     <>
-                      <div className="text-2xs tnum text-warn">{entry.highestRally} Hits</div>
+                      <div className="text-2xs tnum text-warn">{entry.highestRally} {t('board_hits', language)}</div>
                       <div className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
-                        Max Rally
+                        {t('board_max_rally', language)}
                       </div>
                     </>
                   )}
                   {category === 'wins' && (
                     <>
-                      <div className="text-2xs tnum text-win">{entry.matchesWon} Won</div>
+                      <div className="text-2xs tnum text-win">{entry.matchesWon} {t('board_won', language)}</div>
                       <div className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
-                        {entry.matchesPlayed} Played
+                        {entry.matchesPlayed} {t('board_played', language)}
                       </div>
                     </>
                   )}

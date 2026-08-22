@@ -1,12 +1,14 @@
 import React, { useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Achievement } from '../types';
+import { Achievement, LanguageCode } from '../types';
+import { t } from '../i18n/translations';
 import { Award, Zap, Flame, Shield, Trophy, Star, Cpu, Smartphone, Target, Sparkles, Crown, TrendingUp } from 'lucide-react';
 
 interface Props {
   achievement: Achievement | null;
   levelUp: number | null;
   onClose: () => void;
+  language: LanguageCode;
 }
 
 const ICON_MAP: Record<string, React.ReactNode> = {
@@ -25,7 +27,7 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   'trending-up': <TrendingUp className="w-6 h-6 text-emerald-300" />,
 };
 
-export const AchievementToast: React.FC<Props> = ({ achievement, levelUp, onClose }) => {
+export const AchievementToast: React.FC<Props> = ({ achievement, levelUp, onClose, language }) => {
   useEffect(() => {
     if (achievement || levelUp) {
       const timer = setTimeout(() => {
@@ -52,9 +54,9 @@ export const AchievementToast: React.FC<Props> = ({ achievement, levelUp, onClos
                 <Crown className="w-7 h-7 text-yellow-300 animate-pulse" />
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-xs font-bold uppercase tracking-wider text-yellow-400">Level Up!</div>
-                <div className="text-base font-black text-white truncate">Rank Promoted to Level {levelUp}</div>
-                <div className="text-xs text-yellow-200/80">Keep dominating the table to reach Master!</div>
+                <div className="text-xs font-bold uppercase tracking-wider text-yellow-400">{t('toast_level_up', language)}</div>
+                <div className="text-base font-black text-white truncate">{t('toast_level_promoted', language, { n: levelUp })}</div>
+                <div className="text-xs text-yellow-200/80">{t('toast_level_hint', language)}</div>
               </div>
             </div>
           ) : achievement ? (
@@ -64,7 +66,7 @@ export const AchievementToast: React.FC<Props> = ({ achievement, levelUp, onClos
               </div>
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center justify-between">
-                  <span>Achievement Unlocked</span>
+                  <span>{t('toast_achievement_unlocked', language)}</span>
                   <span className="text-yellow-400 font-bold">+{achievement.xpReward} XP</span>
                 </div>
                 <div className="text-base font-bold text-white truncate">{achievement.title}</div>
