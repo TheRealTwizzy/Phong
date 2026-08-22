@@ -9,6 +9,8 @@ import {
   aiRating,
   effectiveAiMu,
   soloMuCap,
+  PLACEMENT_UPDATE,
+  SIGMA_FLOOR,
   PLACEMENT_GAMES,
   PVP_UPDATE,
   SOLO_UPDATE,
@@ -305,6 +307,55 @@ describe('solo is capped and always lighter than PvP', () => {
 });
 
 describe('placement and tiers', () => {
+  it('actually places a player who finishes their placement games', () => {
+    // The bug: the profile screen counts ranked games to PLACEMENT_GAMES and
+    // stops, but placement ALSO needs sigma <= PLACEMENT_SIGMA — which at the
+    // ordinary PvP shrink was not reached until about the sixteenth game. A
+    // player saw "5/5" and stayed UNRANKED with nothing to explain it.
+    for (const pattern of ['wins', 'losses', 'alternating'] as const) {
+      let r = fresh();
+      for (let i = 1; i <= PLACEMENT_GAMES; i++) {
+        const won = pattern === 'wins' ? true : pattern === 'losses' ? false : i % 2 === 0;
+        r = updateRating(r, fresh(), won, { ...PLACEMENT_UPDATE });
+      }
+      expect(isPlaced(PLACEMENT_GAMES, r.sigma)).toBe(true);
+      expect(tierFor(r.mu, PLACEMENT_GAMES, r.sigma)).not.toBe('unranked');
+    }
+  });
+
+  it('does not place anyone early, however fast their sigma falls', () => {
+    let r = fresh();
+    for (let i = 1; i < PLACEMENT_GAMES; i++) {
+      r = updateRating(r, fresh(), true, { ...PLACEMENT_UPDATE });
+      expect(isPlaced(i, r.sigma)).toBe(false);
+      expect(tierFor(r.mu, i, r.sigma)).toBe('unranked');
+    }
+  });
+
+  it('leaves ratings past placement behaving as they did', () => {
+    // The boost is for placement only; it must not quietly freeze everyone's
+    // rating afterwards by collapsing sigma.
+    let boosted = fresh();
+    for (let i = 1; i <= PLACEMENT_GAMES; i++) boosted = updateRating(boosted, fresh(), i % 2 === 0, PLACEMENT_UPDATE);
+    for (let i = 0; i < 30; i++) boosted = updateRating(boosted, fresh(), i % 2 === 0, PVP_UPDATE);
+
+    let plain = fresh();
+    for (let i = 0; i < 35; i++) plain = updateRating(plain, fresh(), i % 2 === 0, PVP_UPDATE);
+
+    expect(Math.abs(boosted.sigma - plain.sigma)).toBeLessThan(0.5);
+    expect(boosted.sigma).toBeGreaterThan(SIGMA_FLOOR);
+  });
+
+  it('moves the rating itself no further during placement than after it', () => {
+    // Only the uncertainty shrinks faster; the mu step is untouched, so
+    // placement cannot be farmed for a bigger rating swing.
+    const start = fresh();
+    const placing = updateRating(start, fresh(), true, PLACEMENT_UPDATE);
+    const ordinary = updateRating(start, fresh(), true, PVP_UPDATE);
+    expect(placing.mu).toBeCloseTo(ordinary.mu, 9);
+    expect(placing.sigma).toBeLessThan(ordinary.sigma);
+  });
+
   it('stays unranked until enough ranked games AND low enough sigma', () => {
     expect(isPlaced(PLACEMENT_GAMES - 1, 2)).toBe(false);
     expect(isPlaced(PLACEMENT_GAMES, 8)).toBe(false);

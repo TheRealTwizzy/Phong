@@ -190,8 +190,33 @@ export interface UpdateOptions {
   performance?: number;
 }
 
+/**
+ * Placement matches shed uncertainty faster than ordinary ones — which is what
+ * placement matches are FOR.
+ *
+ * Without this the two placement conditions disagreed about when placement
+ * happens, and the slower one won silently. At the ordinary PvP shrink, sigma
+ * after PLACEMENT_GAMES ranked matches is ~5.36 — still above PLACEMENT_SIGMA
+ * — and does not reach 4.0 until about the SIXTEENTH ranked game. So a player
+ * finished the five matches the profile screen counts, saw "5/5", and stayed
+ * UNRANKED with no way to tell why: the counter is capped at 5 so it cannot
+ * show the eleven games still actually required.
+ *
+ * The number of matches is the promise the UI makes, so that is the one made
+ * true; the sigma condition stays as the safety net it was meant to be. At
+ * this scale the worst case over five matches is sigma 3.84, and long-run
+ * sigma is barely moved (1.97 vs 2.14 after 35 games), so ratings past
+ * placement behave as before.
+ */
+export const PLACEMENT_SIGMA_SCALE = 2;
+
 export const SOLO_UPDATE: UpdateOptions = { k: 0.35, sigmaScale: 0.5 };
 export const PVP_UPDATE: UpdateOptions = { k: 1.0, sigmaScale: 1.0 };
+/** A ranked match played while still unplaced. Same rating step, faster sigma. */
+export const PLACEMENT_UPDATE: UpdateOptions = {
+  ...PVP_UPDATE,
+  sigmaScale: PVP_UPDATE.sigmaScale * PLACEMENT_SIGMA_SCALE,
+};
 
 /**
  * One-sided TrueSkill update: returns the new rating for `me` after a result

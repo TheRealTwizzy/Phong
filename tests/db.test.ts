@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import type { MatchEndPayload } from '../src/types';
-import { levelFromXp } from '../src/rating';
+import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA } from '../src/rating';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-db-test-'));
@@ -140,6 +140,31 @@ describe('GameDatabase', () => {
     // Recording again must not re-award them
     const again = db.recordMatch(match('p_ach'));
     expect(again.newAchievements.map((a) => a.id)).not.toContain('first_win');
+  });
+
+  it('places a player once they finish their placement duels', () => {
+    // End to end through the real recording path: five ranked PvP matches is
+    // what the profile screen asks for, so five must be what it takes.
+    init('p_place', 'PlaceMe');
+    for (let i = 0; i < PLACEMENT_GAMES; i++) {
+      db.recordMatch(
+        match('p_place', { isWinner: i % 2 === 0, matchKey: `pvp:place:${i}` })
+      );
+    }
+    const placed = db.getProfile('p_place');
+    expect(placed.rankedGames).toBe(PLACEMENT_GAMES);
+    expect(placed.rankSigma).toBeLessThanOrEqual(PLACEMENT_SIGMA);
+    expect(placed.tier).not.toBe('unranked');
+  });
+
+  it('is still unranked one duel short of placement', () => {
+    init('p_nearly', 'NearlyThere');
+    for (let i = 0; i < PLACEMENT_GAMES - 1; i++) {
+      db.recordMatch(
+        match('p_nearly', { isWinner: i % 2 === 0, matchKey: `pvp:nearly:${i}` })
+      );
+    }
+    expect(db.getProfile('p_nearly').tier).toBe('unranked');
   });
 
   it('moves hidden MMR on a solo win, but never the ranked track', () => {
