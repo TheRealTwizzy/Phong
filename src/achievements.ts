@@ -1,5 +1,6 @@
 import { Achievement, AchievementBranch, AchievementGate, GameUnlock } from './types';
 import { TIER_ORDER, Tier } from './rating';
+import { WINNING_SCORES } from './matchRules';
 
 // The achievement tree, shared by client and server like profileRules.ts,
 // rating.ts and matchRules.ts. Definitions live here rather than in the
@@ -718,6 +719,56 @@ export function unlockedKeys(earned: readonly string[]): Set<string> {
 
 export const hasUnlock = (earned: readonly string[], kind: GameUnlock['kind'], value: string | number): boolean =>
   unlockedKeys(earned).has(`${kind}:${value}`);
+
+/**
+ * Hold a stored match setting to something the player may actually play.
+ *
+ * A setting outlives the profile that earned it: it is kept in localStorage on
+ * the device, while the achievements that open it live on the server and can
+ * be reset by a wipe. The pair could therefore drift apart — and did, from the
+ * very first launch, because the app shipped with Pro preselected while Pro is
+ * locked until Rookie has been beaten. The menu drew Pro as locked and played
+ * it anyway, and `/api/match/record` answered every one of those matches with
+ * 403 DIFFICULTY_LOCKED, which the client treats as a verdict rather than a
+ * hiccup: the match was dropped, not queued. A new player's first solo matches
+ * paid nothing at all.
+ *
+ * `order` must run easiest-first; the fallback is the last unlocked option
+ * before the wanted one, and the first entry must always be in BASE_UNLOCKS so
+ * there is something to fall back TO.
+ */
+function clampToUnlocked<T extends string | number>(
+  earned: readonly string[],
+  kind: GameUnlock['kind'],
+  order: readonly T[],
+  wanted: T
+): T {
+  if (hasUnlock(earned, kind, wanted)) return wanted;
+  const keys = unlockedKeys(earned);
+  let best = order[0];
+  for (const option of order) {
+    if (option === wanted) break;
+    if (keys.has(`${kind}:${option}`)) best = option;
+  }
+  return best;
+}
+
+/** Difficulties easiest-first. Only `rookie` is open from the first match. */
+export const DIFFICULTY_ORDER = ['rookie', 'pro', 'cyber'] as const;
+
+/** Match lengths shortest-first. 3 and 5 are open from the first match. */
+export const WINNING_SCORE_ORDER = WINNING_SCORES;
+
+/** The hardest difficulty this player has earned, at or below `wanted`. */
+export const playableDifficulty = (
+  earned: readonly string[],
+  wanted: string
+): (typeof DIFFICULTY_ORDER)[number] =>
+  clampToUnlocked(earned, 'difficulty', DIFFICULTY_ORDER, wanted as (typeof DIFFICULTY_ORDER)[number]);
+
+/** The longest match length this player has earned, at or below `wanted`. */
+export const playableWinningScore = (earned: readonly string[], wanted: number): number =>
+  clampToUnlocked(earned, 'winningScore', WINNING_SCORE_ORDER, wanted as (typeof WINNING_SCORE_ORDER)[number]);
 
 /** Which achievement opens a given thing, for telling the player what to do. */
 export function unlockedBy(kind: GameUnlock['kind'], value: string | number): Achievement | undefined {

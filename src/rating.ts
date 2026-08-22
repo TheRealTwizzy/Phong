@@ -130,6 +130,50 @@ export function effectiveAiMu(difficulty: AIDifficulty, playerMu: number): numbe
     : base + clamp(AI_ADAPT_STRENGTH * deviation, 0, AI_ADAPT_BAND);
 }
 
+/**
+ * The ceiling a solo win may lift hidden mu to, per difficulty.
+ *
+ * The cap exists so that farming one rung converges on it and stops. It used
+ * to be the difficulty's BASE anchor, which froze the whole early game: every
+ * player starts at START_MU, which is exactly Pro's base, so beating Pro moved
+ * mu by nothing at all — while losses moved it freely down. The hidden rating
+ * could only ratchet DOWNWARD until Cyber was unlocked, and Cyber is behind
+ * ten Pro wins at level 10. Prediction, XP scaling and the AI's own upward
+ * adaptation all key off this mu, so none of them could ever reflect a solo
+ * player improving.
+ *
+ * The ceiling is the hardest that difficulty ever plays: it adapts upward by
+ * at most AI_ADAPT_BAND over its anchor, so beating it cannot demonstrate more
+ * than that. Deliberately a CONSTANT per difficulty rather than anything
+ * derived from the player's own mu — a cap that rose with the player would
+ * chase them upward without bound, which is why the base anchor was chosen in
+ * the first place. Rookie's ceiling lands exactly on START_MU, so farming the
+ * easiest rung from a standing start still moves nothing.
+ */
+export const soloMuCap = (difficulty: AIDifficulty): number =>
+  AI_RATINGS[difficulty].mu + AI_ADAPT_BAND;
+
+/**
+ * The solo difficulties that feed the RANKED track, not just hidden MMR.
+ *
+ * Rookie is the tutorial rung — open from the first match, and the one the
+ * ladder hands you before you have proved anything — so placing against it
+ * would be a formality and the tier badge would stop meaning much. Pro and
+ * Cyber both have to be earned (Pro by beating Rookie, Cyber by ten Pro wins
+ * at level 10), which is what makes them worth rating against.
+ *
+ * A solo result still weighs less than a duel wherever it lands: a lighter mu
+ * step, and the soloMuCap ceiling, so no amount of farming an AI reaches the
+ * top of the ladder. Note the standing trade-off (CLAUDE.md §5) — solo stats
+ * are self-reported, so a modified client can forge them. That was the reason
+ * the ranked track was PvP-only, and counting solo here accepts it knowingly.
+ */
+export const RANKED_SOLO_DIFFICULTIES: readonly AIDifficulty[] = ['pro', 'cyber'];
+
+/** Whether a solo match at this difficulty moves the visible ranked rating. */
+export const soloCountsForRank = (difficulty: AIDifficulty): boolean =>
+  RANKED_SOLO_DIFFICULTIES.includes(difficulty);
+
 /** The adapted anchor to rate a solo match against. */
 export function aiRating(difficulty: AIDifficulty, playerMu: number): Rating {
   return { mu: effectiveAiMu(difficulty, playerMu), sigma: AI_RATINGS[difficulty].sigma };
@@ -167,8 +211,33 @@ export interface UpdateOptions {
   performance?: number;
 }
 
+/**
+ * Placement matches shed uncertainty faster than ordinary ones — which is what
+ * placement matches are FOR.
+ *
+ * Without this the two placement conditions disagreed about when placement
+ * happens, and the slower one won silently. At the ordinary PvP shrink, sigma
+ * after PLACEMENT_GAMES ranked matches is ~5.36 — still above PLACEMENT_SIGMA
+ * — and does not reach 4.0 until about the SIXTEENTH ranked game. So a player
+ * finished the five matches the profile screen counts, saw "5/5", and stayed
+ * UNRANKED with no way to tell why: the counter is capped at 5 so it cannot
+ * show the eleven games still actually required.
+ *
+ * The number of matches is the promise the UI makes, so that is the one made
+ * true; the sigma condition stays as the safety net it was meant to be. At
+ * this scale the worst case over five matches is sigma 3.84, and long-run
+ * sigma is barely moved (1.97 vs 2.14 after 35 games), so ratings past
+ * placement behave as before.
+ */
+export const PLACEMENT_SIGMA_SCALE = 2;
+
 export const SOLO_UPDATE: UpdateOptions = { k: 0.35, sigmaScale: 0.5 };
 export const PVP_UPDATE: UpdateOptions = { k: 1.0, sigmaScale: 1.0 };
+/** A ranked match played while still unplaced. Same rating step, faster sigma. */
+export const PLACEMENT_UPDATE: UpdateOptions = {
+  ...PVP_UPDATE,
+  sigmaScale: PVP_UPDATE.sigmaScale * PLACEMENT_SIGMA_SCALE,
+};
 
 /**
  * One-sided TrueSkill update: returns the new rating for `me` after a result

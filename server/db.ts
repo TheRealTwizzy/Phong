@@ -28,7 +28,11 @@ import {
   matchXp,
   levelFromXp,
   SOLO_UPDATE,
+  soloMuCap,
   PVP_UPDATE,
+  PLACEMENT_UPDATE,
+  PLACEMENT_SIGMA,
+  soloCountsForRank,
   PLACEMENT_GAMES,
   surpriseMultiplier,
   normalizeDifficulty,
@@ -482,12 +486,45 @@ class GameDatabase {
     // keyed on the Master tier since ELO was replaced.
     this.renameAchievement('rating_1400', 'master_tier');
 
+    this.releaseStrandedPlacements();
+
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
       .all() as unknown as Array<{ id: string }>;
     for (const row of missing) {
       this.stmt('UPDATE players SET recoveryCode = ? WHERE id = ?')
         .run(this.newRecoveryCode(), row.id);
+    }
+  }
+
+  /**
+   * Place the players the old placement rule stranded.
+   *
+   * Placement needs BOTH enough ranked games AND sigma <= PLACEMENT_SIGMA, and
+   * at the ordinary PvP shrink the sigma condition was not reachable until
+   * roughly the sixteenth ranked game — while the profile screen counted to
+   * five and stopped. Players finished the matches the game asked of them, saw
+   * "5/5", and stayed UNRANKED with nothing to tell them what was still
+   * missing. Placement matches now shed uncertainty faster, but that only
+   * helps people placing from here on: anyone already past their placement
+   * games carries a sigma earned under the old rule and would go on waiting.
+   *
+   * Their uncertainty is brought to exactly the placement threshold — the most
+   * uncertain a placed player may be, so nobody is credited with more
+   * confidence than they played for. The tier itself is derived on read
+   * (rowToProfile), so the badge follows immediately.
+   */
+  private releaseStrandedPlacements(): void {
+    const KEY = 'placement_sigma_v1';
+    if (this.getMeta(KEY)) return;
+    const stranded = this.stmt(
+        `UPDATE players SET rankSigma = ?
+          WHERE rankedGames >= ? AND rankSigma > ?`
+      )
+      .run(PLACEMENT_SIGMA, PLACEMENT_GAMES, PLACEMENT_SIGMA);
+    this.setMeta(KEY, new Date().toISOString());
+    if (stranded.changes) {
+      console.log(`placement_sigma_v1: placed ${stranded.changes} player(s) stranded by the old placement rule`);
     }
   }
 
@@ -1334,11 +1371,11 @@ class GameDatabase {
     const previousTier = profile.tier;
     const soloOpts = {
       ...SOLO_UPDATE,
-      // A solo win can't push mu past the anchor it beat: farming a weak
-      // difficulty converges on that difficulty and stops. Deliberately the
-      // BASE anchor, not the adapted one — capping at a target that rises with
-      // the player would be circular and let solo lift mu without limit.
-      cap: AI_RATINGS[difficulty].mu,
+      // A solo win can't push mu past the hardest that difficulty ever plays:
+      // farming one rung converges on it and stops. A constant per difficulty,
+      // never anything derived from the player's own mu — a cap that rose with
+      // the player would chase them upward without bound.
+      cap: soloMuCap(difficulty),
     };
     if (ranked) {
       const nextMmr = updateRating(
@@ -1351,12 +1388,35 @@ class GameDatabase {
       profile.mmrSigma = nextMmr.sigma;
     }
 
-    if (isPvp && ranked) {
+    // The visible ladder moves on a duel, and on a solo match at a difficulty
+    // the player had to EARN. Rookie is the tutorial rung — placing against it
+    // would be a formality — so it feeds hidden MMR only.
+    const ranksThisMatch = ranked && (isPvp || soloCountsForRank(difficulty));
+    if (ranksThisMatch) {
+      // While still unplaced, a ranked match sheds uncertainty faster — the
+      // whole point of placement matches, and what makes the profile screen's
+      // "N/PLACEMENT_GAMES" the truth rather than the first of two conditions.
+      const placing = profile.rankedGames < PLACEMENT_GAMES;
+      const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
+      const rankOpts = isPvp
+        ? { ...placementOpts, performance }
+        : {
+            // Lighter on mu than a duel — beating an AI says less than beating
+            // a person — and held under the same ceiling every solo result is,
+            // so farming a rung converges on it and stops.
+            k: SOLO_UPDATE.k,
+            cap: soloMuCap(difficulty),
+            // Sigma converges at the SAME rate as a duel's, deliberately:
+            // placement counts observations, not opponents. Shrinking it
+            // slower would land a solo player on "5/5" and still unranked —
+            // the exact trap placement was just fixed for.
+            sigmaScale: placementOpts.sigmaScale,
+          };
       const nextRank = updateRating(
         { mu: profile.rankMu, sigma: profile.rankSigma },
         oppRating,
         isWin,
-        { ...PVP_UPDATE, performance }
+        rankOpts
       );
       profile.rankMu = nextRank.mu;
       profile.rankSigma = nextRank.sigma;
@@ -1544,9 +1604,9 @@ class GameDatabase {
       earnedXp,
       leveledUp,
       winProbability: winProb,
-      previousTier: isPvp && ranked ? previousTier : null,
-      tier: isPvp && ranked ? profile.tier : null,
-      tierChanged: isPvp && ranked && profile.tier !== previousTier,
+      previousTier: ranksThisMatch ? previousTier : null,
+      tier: ranksThisMatch ? profile.tier : null,
+      tierChanged: ranksThisMatch && profile.tier !== previousTier,
       ranked,
       newAchievements,
       missions: this.getMissions(payload.playerId, now),
