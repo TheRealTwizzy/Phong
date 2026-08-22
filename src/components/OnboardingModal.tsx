@@ -265,7 +265,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               if (e.key === 'Enter') handleSubmit();
             }}
             placeholder="NeonSmasher"
-            className="w-full bg-slate-950 text-slate-100 text-sm font-bold font-mono py-2.5 px-3 rounded-xl border border-slate-700 focus:border-cyan-400 focus:outline-none transition"
+            className="w-full bg-slate-950 text-slate-100 text-base font-bold font-mono py-2.5 px-3 rounded-xl border border-slate-700 focus:border-cyan-400 focus:outline-none transition"
           />
           <div className="min-h-4 text-[10px] font-mono flex items-center gap-1">
             {nameStatus.kind === 'checking' && (
@@ -333,7 +333,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 maxLength={9}
                 onChange={(e) => setClaimCode(e.target.value.toUpperCase())}
                 placeholder="XXXX-XXXX"
-                className="flex-1 bg-slate-950 text-slate-100 text-xs font-bold font-mono py-2.5 px-3 rounded-xl border border-slate-700 focus:border-cyan-400 focus:outline-none transition tracking-widest"
+                className="flex-1 bg-slate-950 text-slate-100 text-base font-bold font-mono py-2.5 px-3 rounded-xl border border-slate-700 focus:border-cyan-400 focus:outline-none transition tracking-widest"
               />
               <button
                 id="btn-onboarding-claim"

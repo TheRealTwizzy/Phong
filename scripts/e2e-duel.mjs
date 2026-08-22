@@ -96,6 +96,14 @@ async function guestJoin(page, code, points = 3) {
   await pickShortMatch(page, points);
   await page.click('#menu-mode-multiplayer');
   await page.waitForSelector('#btn-join-room-submit', { timeout: 5000 });
+  // Regression guard for the "match starts zoomed" bug: iOS Safari zooms the
+  // page when an input under 16px is focused and STAYS zoomed afterwards —
+  // typing the room code was the trigger. The input must render at >=16px
+  // and the viewport must cap the scale.
+  const fontPx = await page.$eval('#input-room-code', (el) => parseFloat(getComputedStyle(el).fontSize));
+  if (fontPx < 16) fail(`room-code input is ${fontPx}px — iOS will zoom on focus and stay zoomed`);
+  const viewport = await page.$eval('meta[name="viewport"]', (el) => el.getAttribute('content') || '');
+  if (!/maximum-scale=1/.test(viewport)) fail(`viewport meta lacks maximum-scale=1: "${viewport}"`);
   const input = await page.$('#input-room-code');
   if ((await input.inputValue()) !== code) await input.fill(code);
   await page.click('#btn-join-room-submit');

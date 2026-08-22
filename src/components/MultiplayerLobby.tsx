@@ -466,7 +466,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                   value={joinCodeInput}
                   onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
                   placeholder="CODE (e.g. AB12)"
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-700 text-center font-mono font-bold text-sm tracking-widest uppercase focus:outline-none focus:border-emerald-400"
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-700 text-center font-mono font-bold text-base tracking-widest uppercase focus:outline-none focus:border-emerald-400"
                 />
                 <button
                   id="btn-join-room-submit"
