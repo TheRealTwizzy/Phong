@@ -2076,6 +2076,7 @@ export default function App() {
             onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
             profile={profile}
             playerStatus={playerStatus}
+            missions={missions}
             unclaimedMissionsCount={missionsSummary.unclaimed}
             onStartSolo={() => startMatch('solo')}
             onStartPractice={() => startMatch('practice')}

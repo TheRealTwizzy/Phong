@@ -269,6 +269,21 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     // Main menu & mode navigation
     main_menu: 'Main Menu',
     choose_mode: 'Choose Your Game Mode',
+
+    // Menu shell (P4). English-only for now: t() falls back to en for any
+    // locale missing a key, which 34 existing keys already rely on.
+    menu_section_play: 'Play',
+    menu_section_today: 'Today',
+    menu_level: 'Level',
+    menu_how_to_play: 'How to play',
+    menu_tab_play: 'Play',
+    menu_tab_ranks: 'Ranks',
+    menu_quickmatch: 'Quick Match',
+    menu_quickmatch_desc: 'Ranked queue — an opponent at your tier',
+    menu_quickmatch_soon: 'Soon',
+    menu_quickmatch_body:
+      "The ranked queue isn't live yet. Duel a friend with a room code, or climb solo against the AI in the meantime.",
+    menu_quickmatch_cta: 'Duel a friend',
     match_settings: 'Match Settings',
     start_match: 'Start Match',
     start_training: 'Start Training',
