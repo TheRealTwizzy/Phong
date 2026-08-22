@@ -686,9 +686,37 @@ async function startServer() {
     let playerIndex: 0 | 1 | null = null;
     let currentPlayerId: string = '';
 
+    /**
+     * Whether this socket may take a seat in a room.
+     *
+     * The relay stamps a seat's display name at join time and never revisits
+     * it, so a player who joins before choosing a username is shown to their
+     * opponent as Paddle-XXXX for the life of the room — and the app gates
+     * everything else behind onboarding, so a seat was the one thing an
+     * unidentified player could still take.
+     *
+     * Only a cookie that resolves to a real, uninitialized profile is
+     * refused. A socket with no cookie at all is the synthetic-id fallback
+     * the load test and other tooling run on; it records nothing either way.
+     */
+    const seatRefusal = (): string | null => {
+      if (!cookieDeviceId) return null;
+      return db.getProfile(cookieDeviceId).initialized
+        ? null
+        : 'Pick a username before joining a match.';
+    };
+
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
+
+        if (msg.type === 'create_room' || msg.type === 'join_room') {
+          const refusal = seatRefusal();
+          if (refusal) {
+            ws.send(JSON.stringify({ type: 'error', message: refusal }));
+            return;
+          }
+        }
 
         if (msg.type === 'create_room') {
           let code = generateRoomCode();

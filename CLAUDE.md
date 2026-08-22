@@ -11,14 +11,14 @@ This document is the working guide to **Phong**, an arcade sports web app with a
 - **The Net Boundary**: the glowing top edge of the player's screen is the net.
 - **Cross-Net Jump**: when the ball exits through the net, it leaves the player's screen and appears on the opponent's, travelling downward.
 - **Opponent Radar**: a mini radar tracks the opponent's paddle and the ball while it is on their half. Solo reads the locally simulated half; a duel reads what the opponent's phone streams (`paddle_move` + `ball_pos`), so the sonar works identically in both.
-- **Physical 2-Phone Duel**: two phones placed top-to-top, connected by a 4-letter room code over WebSockets; the ball physically transitions between screens.
+- **Physical 2-Phone Duel**: two phones placed top-to-top, connected by a 4-letter room code over WebSockets; the ball physically transitions between screens. An invitation link or QR (`?room=CODE`) **joins** rather than merely prefilling the code — held until the player has a username, so a first-time guest onboards and is then taken straight into the room.
 - **Solo AI**: an adaptive AI opponent (Rookie / Pro / Cyber) on the hidden half. Each difficulty is a *rating*, not a fixed parameter set, and slides part-way toward the player's own skill — see §7.
 - **Practice Wall**: fully solo drill mode — no opponent exists and the ball never leaves the player's screen; the net line acts as a *return line* that bounces every ball back. HUD shows current/best return streak. Records no match and moves no rating, but banks thin streak-scaled XP on exit (`practiceXp`, server-computed, capped per UTC day) so every mode is progression.
 - **Split Screen**: local 2-player classic Pong on ONE device (`SplitScreenMatch`) — full court on a single screen, net across the middle, one player per half (multi-touch; each pointer is locked to the half it started in). No networking, no stats saved, unranked.
 
 **Navigation**: the app opens on a **MainMenu** screen (`screen: 'menu' | 'game'` in `App.tsx`). Match settings — AI difficulty and winning score — are locked in on the menu **before** a solo match starts, and in the **lobby** before a duel (the host sets them, the guest reads them); neither is editable once play begins; the in-game Settings modal carries device/presentation preferences only. The in-match HUD keeps just sound/reset/settings/home; the winner overlay offers Play Again (or Rematch) and Main Menu.
 
-**Player identity**: profiles are minted lazily from the device cookie in an *uninitialized* state and a blocking **OnboardingModal** gates everything until the player locks in a **unique username** (case-insensitive, 3–16 chars `[A-Za-z0-9][A-Za-z0-9_-]*`, `Paddle-` prefix reserved for placeholders; rules shared client/server via `src/profileRules.ts`). The username then can't change for **365 days** from initialization (and from each later change); a released name returns to the pool. Optional **avatars** are exactly 256×256 PNGs — the client center-crops/resizes any image (`src/media/avatar.ts`), the server validates dimensions dependency-free (`server/image.ts`). Tapping any username (leaderboard, match history, lobby, in-match opponent) opens the sanitized **PublicProfileModal** backed by `GET /api/profile/:id`. Uninitialized profiles can't record matches and never appear on the leaderboard.
+**Player identity**: profiles are minted lazily from the device cookie in an *uninitialized* state and a blocking **OnboardingModal** gates everything — including taking a seat in a duel, refused by the relay itself, since a seat's display name is stamped at join time and never revisited — until the player locks in a **unique username** (case-insensitive, 3–16 chars `[A-Za-z0-9][A-Za-z0-9_-]*`, `Paddle-` prefix reserved for placeholders; rules shared client/server via `src/profileRules.ts`). The username then can't change for **365 days** from initialization (and from each later change); a released name returns to the pool. Optional **avatars** are exactly 256×256 PNGs — the client center-crops/resizes any image (`src/media/avatar.ts`), the server validates dimensions dependency-free (`server/image.ts`). Tapping any username (leaderboard, match history, lobby, in-match opponent) opens the sanitized **PublicProfileModal** backed by `GET /api/profile/:id`. Uninitialized profiles can't record matches and never appear on the leaderboard.
 
 ## 2. Tech Stack
 
@@ -81,7 +81,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── render.yaml                # Render blueprint (alternative host)
 ├── scripts/load-test.mjs      # N-concurrent-matches relay load test
 ├── scripts/e2e-*.mjs          # Browser E2E (profiles, gameplay, rating, rules,
-│                              #   achievements, elite, duel, eject)
+│                              #   achievements, elite, duel, eject, invite)
 ├── index.html                 # HTML entry
 ├── package.json               # npm scripts & deps (lockfile: package-lock.json)
 ├── server.ts                  # Express + ws relay + REST API + Vite middleware

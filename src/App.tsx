@@ -741,13 +741,17 @@ export default function App() {
     };
   }, []);
 
-  // Check URL room code on mount (?room=CODE)
+  // An invitation link or QR (?room=CODE). Held here rather than acted on
+  // immediately: a player arriving on one may have no identity yet, and the
+  // relay stamps a seat's display name at join time — so joining first and
+  // onboarding second seats them under their Paddle-XXXX placeholder for the
+  // life of the room, which is what the host then sees instead of their name.
+  // The auto-join effect below waits for the profile and then joins for them.
+  const pendingRoomRef = useRef<string | null>(null);
+  const autoJoinedRef = useRef<boolean>(false);
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const roomCode = params.get('room');
-    if (roomCode) {
-      setIsMultiplayerOpen(true);
-    }
+    const roomCode = new URLSearchParams(window.location.search).get('room');
+    if (roomCode) pendingRoomRef.current = roomCode.trim().toUpperCase();
   }, []);
 
   // Handle paddle movement & velocity
@@ -1319,6 +1323,26 @@ export default function App() {
     };
     checkAndSend();
   };
+
+  /**
+   * Follow an invitation link the moment the player has an identity to follow
+   * it with.
+   *
+   * The lobby already prefilled the code from the URL, but prefilling is not
+   * joining: someone who followed a link or scanned a QR expects to land in
+   * the match, and instead sat on a lobby waiting for them to find the button
+   * — which reads as the link simply not working. Gated on `initialized`
+   * rather than on the profile existing, so a first-time player onboards and
+   * is then taken into the room, rather than being seated under a placeholder
+   * name before they have chosen one.
+   */
+  useEffect(() => {
+    if (!profile?.initialized || autoJoinedRef.current) return;
+    const code = pendingRoomRef.current;
+    if (!code) return;
+    autoJoinedRef.current = true;
+    setIsMultiplayerOpen(true);
+  }, [profile?.initialized]);
 
   /**
    * Host-only: change the room's terms from the lobby. The server re-checks
