@@ -13,8 +13,8 @@
 //     display name at join time and never revisits it, so a player seated
 //     early showed to their opponent as Paddle-XXXX for the life of the room.
 //
-// Requires: `npm i --no-save playwright-core` + CHROMIUM_PATH. Target a running
-// server with E2E_URL, fresh DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 
 const BASE = process.env.E2E_URL || 'http://localhost:3000';

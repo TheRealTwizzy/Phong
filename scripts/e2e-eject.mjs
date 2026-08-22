@@ -6,9 +6,8 @@
 // so this suite owns its server process and kills it under a live duel —
 // which is also the real scenario (a deploy drops in-flight matches).
 //
-// Requires: `npm i --no-save playwright-core` + CHROMIUM_PATH, and a built
-// dist/server.cjs. This script starts and stops its own server on E2E_PORT
-// (default 3199) with a throwaway DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -77,8 +76,9 @@ const code = await host
 await guest.goto(`${BASE}/?room=${code}`, { waitUntil: 'networkidle' });
 const sim2 = await guest.$('#simulate-smartphone-btn');
 if (sim2) await sim2.click();
-await guest.waitForSelector('#btn-join-room-submit', { timeout: 5000 });
-await guest.click('#btn-join-room-submit');
+// Following the link IS the join — no button to press (scripts/e2e-invite.mjs
+// is where that contract is asserted; here it is just how a guest gets in).
+await guest.waitForSelector('#btn-leave-room', { timeout: 8000 });
 
 // The handshake: guest readies, host starts, both lobbies close.
 await guest.waitForSelector('#btn-ready-play', { timeout: 8000 });

@@ -749,6 +749,12 @@ export default function App() {
   // The auto-join effect below waits for the profile and then joins for them.
   const pendingRoomRef = useRef<string | null>(null);
   const autoJoinedRef = useRef<boolean>(false);
+  // A join is now dispatched by the auto-join as well as by the lobby button,
+  // and the lobby still renders that button for the moment before room_joined
+  // lands. A second join_room on the same socket is answered "Room is already
+  // full" — about the room this player is in the middle of joining — so the
+  // first attempt holds the door until the server has answered either way.
+  const joinInFlightRef = useRef<boolean>(false);
   useEffect(() => {
     const roomCode = new URLSearchParams(window.location.search).get('room');
     if (roomCode) pendingRoomRef.current = roomCode.trim().toUpperCase();
@@ -975,6 +981,7 @@ export default function App() {
         break;
 
       case 'room_joined':
+        joinInFlightRef.current = false;
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
@@ -1215,6 +1222,7 @@ export default function App() {
         break;
 
       case 'error':
+        joinInFlightRef.current = false;
         alert(msg.message);
         break;
     }
@@ -1259,6 +1267,13 @@ export default function App() {
 
     socket.onclose = () => {
       setIsConnected(false);
+      // A dead socket answers nothing, so any join waiting on one is over —
+      // released here rather than in handleJoinRoom, which stops watching the
+      // moment it sends. A socket that dies after `join_room` goes out but
+      // before `room_joined` or `error` comes back would otherwise latch the
+      // guard for good, and every later Join would return early without even
+      // opening a replacement socket.
+      joinInFlightRef.current = false;
       // The socket dying UNDER a live duel means this player was ejected —
       // the relay has already recorded the abandon and told the opponent.
       // A deliberate leave sets the flag first and lands here silently.
@@ -1310,6 +1325,8 @@ export default function App() {
   };
 
   const handleJoinRoom = (code: string) => {
+    if (joinInFlightRef.current) return;
+    joinInFlightRef.current = true;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
@@ -1317,6 +1334,10 @@ export default function App() {
     const checkAndSend = () => {
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'join_room', roomId: code, playerId }));
+      } else if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        // Stop retrying against a socket that will never open (onclose is what
+        // releases the guard; this just declines to poll a corpse forever).
+        joinInFlightRef.current = false;
       } else {
         setTimeout(checkAndSend, 100);
       }
@@ -1335,6 +1356,11 @@ export default function App() {
    * rather than on the profile existing, so a first-time player onboards and
    * is then taken into the room, rather than being seated under a placeholder
    * name before they have chosen one.
+   *
+   * The lobby is opened as well as joined, and deliberately in that order: it
+   * is what renders the room once `room_joined` lands, and if the code turns
+   * out to be dead or the room full, the player is left looking at the lobby
+   * with their code still in the box rather than at a menu that ate the link.
    */
   useEffect(() => {
     if (!profile?.initialized || autoJoinedRef.current) return;
@@ -1342,6 +1368,7 @@ export default function App() {
     if (!code) return;
     autoJoinedRef.current = true;
     setIsMultiplayerOpen(true);
+    handleJoinRoom(code);
   }, [profile?.initialized]);
 
   /**
