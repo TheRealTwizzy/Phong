@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import { LANGUAGES, TRANSLATIONS, t } from '../src/i18n/translations';
 
 // Every locale carries every key.
@@ -46,11 +48,75 @@ describe('translations', () => {
 
   it('substitutes params in a non-English locale', () => {
     // Guards the fallback path too: a real translated string, not English.
-    expect(t('streak_days', 'de', { count: 7 })).toBe('7 Tage in Folge');
-    expect(t('streak_days', 'ja', { count: 3 })).toBe('3 日連続');
+    // Deliberately a key the product actually renders — pinning one that
+    // nothing uses is how a test ends up being the only thing keeping a
+    // dead string alive, which is exactly what the next test forbids.
+    expect(t('mission_reroll_left', 'de', { n: 3 })).toBe('Noch 3 Neuauslosungen heute');
+    expect(t('mission_reroll_left', 'ja', { n: 2 })).toBe('本日の引き直し残り 2');
   });
 
   it('falls back to English for an unknown key rather than throwing', () => {
     expect(t('definitely_not_a_key', 'fr')).toBe('definitely_not_a_key');
+  });
+});
+
+// The dictionary and the product must agree in BOTH directions.
+//
+// 47 of 333 keys — 14% — were referenced nowhere: superseded lobby copy, a
+// settings layout that no longer exists, telemetry labels describing an older
+// overlay, and ten theme names that had drifted out of sync with themes.ts
+// and would have rendered the wrong words if anything had used them. Dead
+// weight is cheap to carry and expensive to trust: every one of them looked
+// live enough to translate, and 47 x 7 locales is a lot of work spent on
+// strings nobody would ever read.
+//
+// The reverse is worse and nothing checked it either: `t()` returns the KEY
+// when it knows no translation, so a typo renders `menu_quickmach` to the
+// player instead of failing anywhere a developer would notice.
+
+const PRODUCT_ROOTS = ['src', 'server'];
+const PRODUCT_FILES = ['server.ts'];
+/** Every product source file, excluding the dictionary itself. */
+function productSources(): string[] {
+  const out: string[] = [...PRODUCT_FILES];
+  const walk = (dir: string) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (['node_modules', 'dist', '.git'].includes(e.name)) continue;
+        walk(p);
+      } else if (/\.(ts|tsx)$/.test(e.name) && !p.endsWith(path.join('i18n', 'translations.ts'))) {
+        out.push(p);
+      }
+    }
+  };
+  for (const r of PRODUCT_ROOTS) walk(r);
+  return out;
+}
+const SOURCE = productSources()
+  .map((f) => fs.readFileSync(f, 'utf8'))
+  .join('\n');
+
+describe('the dictionary matches the product', () => {
+  it('defines no key the product never asks for', () => {
+    // Quoted anywhere counts — keys reach `t()` directly and through fields
+    // like `labelKey`, all of which are string literals. There are no
+    // template-literal `t()` calls; if one is ever added, this test will
+    // name the key it can no longer see, which is the intended prompt to
+    // reconsider rather than to add an exception.
+    const unused = Object.keys(EN).filter(
+      (k) => !new RegExp(`['"\`]${k}['"\`]`).test(SOURCE)
+    );
+    expect(unused).toEqual([]);
+  });
+
+  it('asks for no key the dictionary lacks', () => {
+    // `t()` answers an unknown key with the key itself, so this surfaces in
+    // the UI as `menu_quickmach` rather than as any kind of error.
+    const asked = new Set<string>();
+    for (const m of SOURCE.matchAll(/\bt\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]/g)) {
+      asked.add(m[1]);
+    }
+    expect([...asked].filter((k) => !(k in EN))).toEqual([]);
   });
 });
