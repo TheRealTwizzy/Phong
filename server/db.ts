@@ -99,6 +99,13 @@ const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY];
  */
 const RECORDED_MATCH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
+/**
+ * A daily-task slot whose tier has nothing fresh left to deal today. Matches
+ * no mission id, so getMissions drops it and advanceMissions skips it, while
+ * the row itself stays put so ensureSlots still knows the day was dealt.
+ */
+const RETIRED_SLOT = '';
+
 // Result of any operation that (re)names a profile. Optional fields rather
 // than a discriminated union — strictNullChecks is off in this repo, so
 // union narrowing wouldn't apply at the call sites.
@@ -1032,11 +1039,19 @@ class GameDatabase {
       return !!row?.claimedAt || (def ? (row?.progress ?? 0) >= def.target : false);
     };
     const replacement = order.find((id) => !held.has(id) && !finished(id));
-    if (!replacement) return null;
-
+    // Nothing left to deal: the player has finished everything this tier had
+    // for them today. RETIRE the slot rather than leaving what was in it —
+    // a task that has been completed and paid is not an active task, and
+    // leaving it sitting there marked "claimed" reads as the reroll being
+    // broken. getMissions drops a slot it cannot resolve, so the list simply
+    // gets shorter and fills up again at the UTC reset.
+    //
+    // Deliberately blanked rather than DELETEd: ensureSlots treats "no rows
+    // for today" as "not dealt yet", so removing the last row outright would
+    // deal the player a whole fresh day's tasks.
     this.stmt(`UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`)
-      .run(replacement, playerId, dayKey, slot);
-    return replacement;
+      .run(replacement ?? RETIRED_SLOT, playerId, dayKey, slot);
+    return replacement ?? null;
   }
 
   /**

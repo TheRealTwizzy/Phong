@@ -65,8 +65,16 @@ export const ELITE_POOL: MissionDef[] = [
 
 export const ALL_MISSIONS: MissionDef[] = [...MISSION_POOL, ...ELITE_POOL];
 
-/** How many of each tier a player holds on any given day. */
-export const REGULAR_SLOTS = 5;
+/**
+ * How many of each tier a player holds on any given day.
+ *
+ * Three regular, not five: a shorter list is one a player actually reads, and
+ * it leaves more of the twelve-strong pool spare — which is what a claim needs
+ * to deal a fresh task into the slot it empties. At five slots a productive
+ * day exhausted the pool after about seven claims and the claimed task then
+ * had nowhere to go; at three there is room for nine.
+ */
+export const REGULAR_SLOTS = 3;
 export const ELITE_SLOTS = 1;
 
 /** Rerolls granted per UTC day, per tier. Both reset with the day. */

@@ -68,7 +68,11 @@ export const MissionsModal: React.FC<Props> = ({
 
   const completedCount = missions.filter((m) => m.current >= m.target).length;
   const totalCount = missions.length;
-  const progressPercent = Math.round((completedCount / totalCount) * 100);
+  // The list shrinks as tasks are cleared: a claim retires its slot when its
+  // tier has nothing fresh left to deal today, so an all-clear day empties it
+  // entirely. Without the guard that reads "0 / 0 completed (NaN%)".
+  const progressPercent = totalCount ? Math.round((completedCount / totalCount) * 100) : 100;
+  const allClear = totalCount === 0;
 
   const getMissionIcon = (type: DailyMission['type']) => {
     switch (type) {
@@ -162,7 +166,7 @@ export const MissionsModal: React.FC<Props> = ({
                 className="h-full bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-400"
               />
             </div>
-            {completedCount === totalCount && (
+            {(allClear || completedCount === totalCount) && (
               <p className="text-[11px] text-emerald-400 font-medium mt-2 flex items-center gap-1">
                 <Sparkles className="w-3 h-3" />
                 {t('all_completed', language)}
@@ -170,8 +174,16 @@ export const MissionsModal: React.FC<Props> = ({
             )}
           </div>
 
-          {/* Missions List */}
+          {/* Task List */}
           <div className="p-4 space-y-3 overflow-y-auto flex-1 custom-scrollbar">
+            {allClear && (
+              <p
+                id="missions-all-clear"
+                className="text-center text-xs text-slate-400 font-mono py-8 px-4 leading-relaxed"
+              >
+                {t('resets_in', language)} {countdown}
+              </p>
+            )}
             {missions.map((mission) => {
               const isDone = mission.current >= mission.target;
               const isClaimed = mission.claimed;
