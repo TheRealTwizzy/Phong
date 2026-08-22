@@ -9,9 +9,8 @@
 //     usernames (no callsign field anywhere).
 //  5. Tapping the opponent's name in-match and a leaderboard row opens the
 //     sanitized public profile modal.
-// Requires: `npm i --no-save playwright-core` and a Chromium binary
-// (set CHROMIUM_PATH). Target a running server with E2E_URL
-// (default http://localhost:3000) — use a FRESH DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 import fs from 'node:fs';
 import os from 'node:os';
