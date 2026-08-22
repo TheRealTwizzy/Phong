@@ -154,11 +154,15 @@ async function newDeviceHoldingAWinMission(
 
 /** A device that has a cookie but has NOT chosen a username yet. */
 async function newUnclaimedDevice(): Promise<Device> {
-  const first = await fetch(`${base}/api/profile/me`);
-  const cookie = (first.headers.getSetCookie?.() ?? [])
-    .map((c) => c.split(';')[0])
-    .join('; ');
-  const profile = await first.json();
+  // A session, but no username yet — which is exactly the state a real
+  // browser is in while the onboarding modal is up: the session is minted on
+  // load, and onboarding happens after it. Without the session the relay
+  // would refuse this socket for having no live session at all, which is a
+  // true answer to a different question than the one this device is here to
+  // ask.
+  const first = await fetch(`${base}/api/session`, { method: 'POST' });
+  const cookie = mergeCookies('', first);
+  const { profile } = await first.json();
   return { cookie, id: profile.id, username: profile.username };
 }
 

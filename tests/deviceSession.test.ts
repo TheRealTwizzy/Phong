@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import WebSocket from 'ws';
 import type { MatchEndPayload } from '../src/types';
 
 // The reported exploit, reproduced against the REAL server, because every
@@ -25,6 +26,7 @@ import type { MatchEndPayload } from '../src/types';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-session-test-'));
 let server: ChildProcess;
 let base: string;
+let wsUrl: string;
 
 const freePort = (): Promise<number> =>
   new Promise((resolve, reject) => {
@@ -41,6 +43,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 beforeAll(async () => {
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
+  wsUrl = `ws://127.0.0.1:${port}/ws`;
   server = spawn('npx', ['tsx', 'server.ts'], {
     cwd: path.resolve(__dirname, '..'),
     env: { ...process.env, PORT: String(port), DATA_DIR: TMP, NODE_ENV: 'production' },
@@ -132,6 +135,31 @@ const soloWin = (key: string): MatchEndPayload =>
 
 const record = (jar: Jar, key: string) =>
   call(jar, '/api/match/record', { method: 'POST', body: JSON.stringify(soloWin(key)) });
+
+/**
+ * Open a relay socket with this jar's cookies and report what the relay did
+ * with it: the first message, and whether it was closed.
+ */
+function dial(jar: Jar, settleMs = 1000): Promise<{ message: any; closed: boolean; code: number }> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl, { headers: { cookie: jar.header } });
+    let message: any = null;
+    // The refusal is synchronous in the connection handler, so a socket that
+    // is still open after a moment was accepted.
+    const timer = setTimeout(() => {
+      ws.close();
+      resolve({ message, closed: false, code: 0 });
+    }, settleMs);
+    ws.on('message', (raw) => {
+      message = JSON.parse(raw.toString());
+    });
+    ws.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ message, closed: true, code });
+    });
+    ws.on('error', reject);
+  });
+}
 
 describe('one account, one live device', () => {
   it('evicts the phone the moment the desktop claims the account', async () => {
@@ -230,6 +258,34 @@ describe('one account, one live device', () => {
     await call(first, '/api/session', { method: 'POST' });
     expect((await call(first, '/api/session')).body.status).toBe('active');
     expect((await call(second, '/api/session')).body.status).toBe('superseded');
+  }, 30000);
+
+  it('refuses a relay socket from a device that no longer holds the account', async () => {
+    // The duel half of the same rule. Barred from recording a SOLO match, an
+    // evicted device could otherwise still play a duel — and the relay records
+    // a finished duel onto both seats itself, so the exploit would simply have
+    // moved from one mode to the other.
+    const phone = await onboard(`Duel${Date.now().toString(36).slice(-5)}`);
+    const live = await dial(phone);
+    expect(live.closed).toBe(false);
+    expect(live.message).toBeNull();
+
+    const code = (await call(phone, '/api/profile/me')).body.recoveryCode;
+    const desktop = new Jar();
+    await call(desktop, '/api/session', { method: 'POST' });
+    await call(desktop, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) });
+
+    const evicted = await dial(phone);
+    expect(evicted.closed).toBe(true);
+    expect(evicted.code).toBe(4001);
+    // Told WHY before the close, so the client acts on the reason rather than
+    // on a bare disconnect it would otherwise try to reconnect through.
+    expect(evicted.message?.type).toBe('session_invalid');
+    expect(evicted.message?.status).toBe('released');
+
+    // The device that DOES hold the account is seated normally.
+    const holder = await dial(desktop);
+    expect(holder.closed).toBe(false);
   }, 30000);
 
   it('keeps the device — and so the account — across losing a session', async () => {
