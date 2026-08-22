@@ -1,6 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { BallState } from '../types';
 import { ThemeConfig } from '../game/themes';
+import { LanguageCode } from '../types';
+import { t } from '../i18n/translations';
 import { Radio } from 'lucide-react';
 
 // The sonar draws itself: a requestAnimationFrame loop reads the game's OWN
@@ -24,9 +26,11 @@ interface RadarPreviewProps {
       badge owns the top-right corner there, and the two never coexisted
       before the sonar worked in PvP. */
   topClass?: string;
+  language: LanguageCode;
 }
 
 export const RadarPreview: React.FC<RadarPreviewProps> = ({
+  language,
   oppBallRef,
   oppPaddleXRef,
   paddleWidthRatio,
@@ -88,7 +92,7 @@ export const RadarPreview: React.FC<RadarPreviewProps> = ({
         style={{ color: theme.accentColor }}
       >
         <Radio className="w-3 h-3 animate-pulse" />
-        <span>OPPONENT SONAR</span>
+        <span>{t('sonar_label', language)}</span>
       </div>
 
       {/* Mini opponent court: their baseline at the top, the net at the bottom */}
