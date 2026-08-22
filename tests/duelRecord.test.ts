@@ -137,6 +137,16 @@ async function newDeviceHoldingAWinMission(
   throw new Error('no device was dealt an unrestricted win mission');
 }
 
+/** A device that has a cookie but has NOT chosen a username yet. */
+async function newUnclaimedDevice(): Promise<Device> {
+  const first = await fetch(`${base}/api/profile/me`);
+  const cookie = (first.headers.getSetCookie?.() ?? [])
+    .map((c) => c.split(';')[0])
+    .join('; ');
+  const profile = await first.json();
+  return { cookie, id: profile.id, username: profile.username };
+}
+
 /** A connected phone: its socket plus every server message it has received. */
 class Phone {
   ws: WebSocket;
@@ -208,6 +218,46 @@ async function seatDuel(host: Device, guest: Device, winningScore = 3) {
   await p2.await('game_start');
   return { p1, p2, roomId: created.roomId, matchSeq: start.matchSeq };
 }
+
+describe('taking a seat in a room', () => {
+  it('refuses a player who has not chosen a username yet', async () => {
+    // The relay stamps a seat's display name at join time and never revisits
+    // it, so a player seated before onboarding is shown to their opponent as
+    // Paddle-XXXX for the life of the room. The app gates everything else
+    // behind onboarding; a seat was the one thing still reachable without it.
+    const host = await newDevice('SeatHost');
+    const { p1, roomId } = await seatDuel(host, await newDevice('SeatGuest'), 3);
+
+    const stranger = await newUnclaimedDevice();
+    expect(stranger.username.startsWith('Paddle-')).toBe(true);
+    const p3 = await Phone.open(stranger);
+
+    p3.send({ type: 'join_room', roomId, playerId: stranger.id });
+    const refusedJoin = await p3.await('error');
+    expect(refusedJoin.message).toMatch(/username/i);
+    expect(p3.last('room_joined')).toBeUndefined();
+
+    p3.clear();
+    p3.send({ type: 'create_room', playerId: stranger.id, config: { winningScore: 3, rules: {} } });
+    const refusedCreate = await p3.await('error');
+    expect(refusedCreate.message).toMatch(/username/i);
+    expect(p3.last('room_created')).toBeUndefined();
+
+    p3.close();
+    p1.close();
+  });
+
+  it('seats a player once they have a username, under that name', async () => {
+    const host = await newDevice('NamedHost');
+    const guest = await newDevice('NamedGuest');
+    const { p1, p2 } = await seatDuel(host, guest, 3);
+    // The host is told who joined, by the name they actually chose.
+    expect((await p1.await('opponent_joined')).opponentName).toBe('NamedGuest');
+    expect((await p2.await('room_joined')).opponentName).toBe('NamedHost');
+    p1.close();
+    p2.close();
+  });
+});
 
 describe('recording a duel', () => {
   it('gives every match in a room its own sequence number', async () => {
