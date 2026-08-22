@@ -63,11 +63,16 @@ async function buildIdOf(dir, env = {}) {
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-build-data-'));
   temps.push(dataDir);
+  // BUILD_ID beats the artifacts by design, so an inherited one would answer
+  // every case with the same pinned value — the artifact cases would fail
+  // having tested nothing. Cases that want it pass it explicitly.
+  const inherited = { ...process.env };
+  delete inherited.BUILD_ID;
   // Artifact discovery keys off the script's own __dirname, so running the
   // staged copy is what makes it report the staged build.
   const srv = spawn('node', [path.join(dir, 'server.cjs')], {
     cwd: dir,
-    env: { ...process.env, NODE_ENV: 'production', PORT: String(port), DATA_DIR: dataDir, ...env },
+    env: { ...inherited, NODE_ENV: 'production', PORT: String(port), DATA_DIR: dataDir, ...env },
     stdio: 'ignore',
     detached: true,
   });
