@@ -80,11 +80,10 @@ async function hostCreateRoom(page, { p2p, points = 3 }) {
   await page.click('#btn-create-room');
   return page
     .waitForFunction(() => {
-      for (const el of Array.from(document.querySelectorAll('.tracking-widest'))) {
-        const txt = (el.textContent || '').trim();
-        if (/^[A-HJ-NP-Z2-9]{4}$/.test(txt)) return txt;
-      }
-      return null;
+      // The code has its own element; hunting for it by a styling class meant
+      // any restyle of the lobby silently broke the lookup.
+      const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+      return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
     }, { timeout: 5000 })
     .then((h) => h.jsonValue());
 }
@@ -261,11 +260,14 @@ for (const transport of ['relay', 'p2p']) {
   await guest.waitForSelector('#lobby-match-settings', { timeout: 8000 });
   ok('both phones see the room settings block');
 
+  // Read the selection from the control's own state, not from a colour. This
+  // used to test `className.includes('border-cyan-400')`, which coupled the
+  // suite to a literal Tailwind class and broke on any restyle.
   const selected = (page) =>
     page.evaluate(() =>
       [3, 5, 10, 15].find((p) => {
         const el = document.querySelector(`#lobby-pts-${p}`);
-        return el && el.className.includes('border-cyan-400');
+        return el && el.getAttribute('data-selected') === 'true';
       })
     );
 
@@ -281,7 +283,7 @@ for (const transport of ['relay', 'p2p']) {
   const followed = await guest
     .waitForFunction(() => {
       const el = document.querySelector('#lobby-pts-3');
-      return el && el.className.includes('border-cyan-400');
+      return el && el.getAttribute('data-selected') === 'true';
     }, { timeout: 6000 })
     .then(() => true)
     .catch(() => false);
@@ -382,8 +384,9 @@ for (const transport of ['relay', 'p2p']) {
   await host.waitForSelector('#lobby-match-settings', { timeout: 8000 });
   await host.click('#lobby-rules-toggle');
   const offDisabled = await host.$eval('#lobby-rule-autoserve-0', (el) => el.hasAttribute('disabled'));
-  const fiveSelected = await host.$eval('#lobby-rule-autoserve-5', (el) =>
-    el.className.includes('border-cyan-400')
+  const fiveSelected = await host.$eval(
+    '#lobby-rule-autoserve-5',
+    (el) => el.getAttribute('data-selected') === 'true'
   );
   if (!offDisabled) fail('auto-serve "off" is selectable on a ranked room');
   if (!fiveSelected) fail('a ranked room did not arrive with the 5s auto-serve forced');

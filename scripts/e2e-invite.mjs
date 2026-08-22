@@ -80,9 +80,12 @@ await host.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host.click('#btn-create-room');
 await host.waitForSelector('#btn-copy-link', { timeout: 8000 });
 const code = await host.evaluate(() => {
-  const t = document.querySelector('#multiplayer-lobby-modal')?.textContent || '';
-  const m = t.match(/ROOM CODE\s*([A-Z0-9]{4})/);
-  return m ? m[1] : null;
+  // Read the code from its own element rather than regexing the panel's
+  // text for an English label — that coupled the suite to copy that is now
+  // translated, and to the label sitting immediately before the code.
+  const el = document.querySelector('#lobby-room-code');
+  const t = (el?.textContent || '').trim();
+  return /^[A-Z0-9]{4}$/.test(t) ? t : null;
 });
 if (!code) fail('host never got a room code');
 ok(`host ${hostName} opened room ${code}`);

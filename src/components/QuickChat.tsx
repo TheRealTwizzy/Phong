@@ -115,7 +115,7 @@ export const QuickChat: React.FC<QuickChatProps> = ({
                 <span className="text-cyan-400 text-[10px]">TAP TO SEND</span>
               </div>
 
-              <div className="grid grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pt-1">
+              <div className="grid grid-cols-2 gap-1.5 max-h-48 scroll-y pt-1">
                 {PRESET_CHAT_KEYS.map((key) => {
                   const label = t(key, language);
                   return (

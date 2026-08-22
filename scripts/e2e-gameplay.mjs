@@ -63,12 +63,10 @@ async function hostCreateRoom(page, { p2p }) {
   await page.click('#btn-create-room');
   const code = await page
     .waitForFunction(() => {
-      const els = Array.from(document.querySelectorAll('.tracking-widest'));
-      for (const el of els) {
-        const txt = (el.textContent || '').trim();
-        if (/^[A-HJ-NP-Z2-9]{4}$/.test(txt)) return txt;
-      }
-      return null;
+      // The code has its own element; hunting for it by a styling class meant
+      // any restyle of the lobby silently broke the lookup.
+      const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+      return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
     }, { timeout: 5000 })
     .then((h) => h.jsonValue());
   return code;
@@ -229,8 +227,14 @@ const guest = await newPage();
   await guestJoin(g2, code);
   await h2.waitForTimeout(2500);
   const txt = await h2.$eval('#link-status-badge', (el) => el.textContent.trim());
-  if (!txt.startsWith('RELAY')) fail(`expected RELAY with toggle off, got: ${txt}`);
-  console.log(`scenario 3 OK — badge: ${txt}`);
+  // Strict equality, not startsWith. The badge used to append the ping to its
+  // own text, so this assertion had to be loosened — which is exactly what
+  // hid it, since the P2P path (asserted strictly above) never appends. The
+  // ping is a sibling now, so both states can be compared the same way.
+  if (txt !== 'RELAY') fail(`expected exactly RELAY with toggle off, got: ${txt}`);
+  const ping = await h2.$eval('#link-ping', (el) => el.textContent.trim()).catch(() => null);
+  if (ping !== null && !/^\d+ms$/.test(ping)) fail(`ping badge is malformed: ${ping}`);
+  console.log(`scenario 3 OK — badge: ${txt}${ping ? `, ping: ${ping}` : ''}`);
   await h2.context().close();
   await g2.context().close();
 }

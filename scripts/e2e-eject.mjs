@@ -64,12 +64,11 @@ await host.waitForSelector('#btn-create-room', { timeout: 5000 });
 await host.click('#toggle-p2p input, #toggle-p2p'); // relay only: P2P would outlive it
 await host.click('#btn-create-room');
 const code = await host
+  // The code has its own element; hunting for it by a styling class meant any
+  // restyle of the lobby silently broke the lookup.
   .waitForFunction(() => {
-    for (const el of document.querySelectorAll('.tracking-widest')) {
-      const t = (el.textContent || '').trim();
-      if (/^[A-HJ-NP-Z2-9]{4}$/.test(t)) return t;
-    }
-    return null;
+    const t = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(t) ? t : null;
   }, { timeout: 5000 })
   .then((h) => h.jsonValue());
 

@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { LanguageCode, PublicProfile } from '../types';
-import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
-import { X, Trophy, Flame, Activity, Target, Award, Bot, Loader2 } from 'lucide-react';
+import { Sheet, Panel, StatTile } from './ui';
+import { Trophy, Flame, Activity, Target, Award, Bot, Loader2 } from 'lucide-react';
 
 // World-readable profile card — opens when any username is tapped anywhere
 // in the UI. Sits above the z-50 modals (leaderboard, history…) that spawn
@@ -12,14 +12,12 @@ import { X, Trophy, Flame, Activity, Target, Award, Bot, Loader2 } from 'lucide-
 interface PublicProfileModalProps {
   playerId: string | null;
   onClose: () => void;
-  theme: ThemeConfig;
   language: LanguageCode;
 }
 
 export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
   playerId,
   onClose,
-  theme,
   language,
 }) => {
   const [profile, setProfile] = useState<PublicProfile | null>(null);
@@ -49,8 +47,6 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
     };
   }, [playerId]);
 
-  if (!playerId) return null;
-
   const winRate =
     profile && profile.matchesPlayed > 0
       ? Math.round((profile.matchesWon / profile.matchesPlayed) * 100)
@@ -62,151 +58,128 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
       })
     : '';
 
-  return (
-    <div
-      id="public-profile-modal-overlay"
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl border p-5 flex flex-col gap-4 text-zinc-100 shadow-2xl relative"
-        style={{
-          backgroundColor: '#0f141f',
-          borderColor: theme.accentColor + '50',
-          boxShadow: `0 0 35px ${theme.accentColor}20`,
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          id="btn-close-public-profile"
-          onClick={onClose}
-          className="absolute top-3.5 right-3.5 p-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
-        >
-          <X className="w-4 h-4" />
-        </button>
-
-        {state === 'loading' && (
-          <div className="py-14 flex items-center justify-center text-zinc-400">
-            <Loader2 className="w-6 h-6 animate-spin" />
-          </div>
-        )}
-
-        {state === 'missing' && (
-          <div className="py-14 text-center text-sm font-mono text-zinc-400">
-            {t('profile_not_found', language)}
-          </div>
-        )}
-
-        {state === 'ready' && profile && (
-          <>
-            {/* Identity header */}
-            <div className="flex items-center gap-3.5 pr-8">
-              <AvatarImage
-                playerId={profile.id}
-                hasAvatar={profile.hasAvatar}
-                avatarVersion={profile.avatarVersion}
-                size={72}
-                className="rounded-2xl border border-white/10"
-              />
-              <div className="flex flex-col min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <h2
-                    id="public-profile-username"
-                    className="text-lg font-black font-mono truncate"
-                  >
-                    {profile.username}
-                  </h2>
-                  {profile.isBot && (
-                    <span className="flex items-center gap-0.5 text-[9px] font-black px-1.5 py-0.5 rounded bg-purple-500/25 text-purple-300 border border-purple-500/40">
-                      <Bot className="w-2.5 h-2.5" />
-                      BOT
-                    </span>
-                  )}
-                </div>
-                <span className="flex items-center gap-1.5 mt-0.5">
-                  <TierBadge tier={profile.tier} language={language} />
-                  <span className="text-[11px] font-mono" style={{ color: theme.accentColor }}>
-                    LV{profile.level}
-                  </span>
-                </span>
-                <span className="text-[10px] font-mono text-zinc-500">
-                  {t('member_since', language)} {memberSince}
-                </span>
-              </div>
-            </div>
-
-            {/* Headline numbers */}
-            <div className="grid grid-cols-3 gap-2">
-              <div className="p-2.5 rounded-2xl bg-zinc-900/70 border border-zinc-800 text-center">
-                <div className="text-base font-black font-mono text-cyan-300">
-                  {profile.rankedGames}
-                </div>
-                <div className="text-[9px] font-mono text-zinc-500 uppercase">
-                  {t('ranked_games', language)}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-2xl bg-zinc-900/70 border border-zinc-800 text-center">
-                <div className="text-base font-black font-mono text-emerald-300">{winRate}%</div>
-                <div className="text-[9px] font-mono text-zinc-500 uppercase">
-                  {t('win_rate', language)}
-                </div>
-              </div>
-              <div className="p-2.5 rounded-2xl bg-zinc-900/70 border border-zinc-800 text-center">
-                <div className="text-base font-black font-mono text-amber-300 flex items-center justify-center gap-0.5">
-                  <Flame className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                  {profile.dailyStreak}
-                </div>
-                <div className="text-[9px] font-mono text-zinc-500 uppercase">
-                  {t('daily_streak', language)}
-                </div>
-              </div>
-            </div>
-
-            {/* Career stats */}
-            <div className="grid grid-cols-2 gap-2">
-              <div className="p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center gap-2.5">
-                <Trophy className="w-4 h-4 text-amber-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-sm font-bold font-mono">
-                    {profile.matchesWon}
-                    <span className="text-zinc-500 text-[10px]"> / {profile.matchesPlayed}</span>
-                  </div>
-                  <div className="text-[9px] font-mono text-zinc-500 uppercase truncate">
-                    {t('matches_label', language)}
-                  </div>
-                </div>
-              </div>
-              <div className="p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center gap-2.5">
-                <Activity className="w-4 h-4 text-cyan-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-sm font-bold font-mono">{profile.highestRally}</div>
-                  <div className="text-[9px] font-mono text-zinc-500 uppercase truncate">
-                    {t('max_rally', language)}
-                  </div>
-                </div>
-              </div>
-              <div className="p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center gap-2.5">
-                <Target className="w-4 h-4 text-rose-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-sm font-bold font-mono">{profile.totalPointsScored}</div>
-                  <div className="text-[9px] font-mono text-zinc-500 uppercase truncate">
-                    {t('total_points', language)}
-                  </div>
-                </div>
-              </div>
-              <div className="p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center gap-2.5">
-                <Award className="w-4 h-4 text-purple-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-sm font-bold font-mono">{profile.achievements.length}</div>
-                  <div className="text-[9px] font-mono text-zinc-500 uppercase truncate">
-                    {t('achievements', language)}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
+  const careerStat = (
+    icon: React.ReactNode,
+    value: React.ReactNode,
+    label: string
+  ) => (
+    <Panel variant="inset" className="flex items-center gap-2.5">
+      <span className="shrink-0">{icon}</span>
+      <div className="min-w-0">
+        <div className="text-2xs tnum text-ink">{value}</div>
+        <div className="truncate text-2xs font-normal tracking-normal text-ink-muted uppercase">
+          {label}
+        </div>
       </div>
-    </div>
+    </Panel>
+  );
+
+  return (
+    <Sheet
+      id="public-profile-modal-overlay"
+      isOpen={Boolean(playerId)}
+      onClose={onClose}
+      size="sm"
+      layer="over"
+      accent="accent"
+      closeId="btn-close-public-profile"
+      closeLabel={t('close', language)}
+      title={
+        state === 'ready' && profile ? (
+          <span className="flex items-center gap-1.5">
+            <span id="public-profile-username" className="truncate">
+              {profile.username}
+            </span>
+            {profile.isBot && (
+              <span className="flex items-center gap-0.5 rounded-chip border border-violet-500/40 bg-violet-500/25 px-1.5 py-0.5 text-2xs text-violet-300">
+                <Bot className="h-2.5 w-2.5" />
+                BOT
+              </span>
+            )}
+          </span>
+        ) : (
+          ' '
+        )
+      }
+    >
+      {state === 'loading' && (
+        <div className="flex items-center justify-center py-14 text-ink-muted">
+          <Loader2 className="h-6 w-6 animate-spin" data-motion-essential />
+        </div>
+      )}
+
+      {state === 'missing' && (
+        <div className="py-14 text-center text-2xs font-normal tracking-normal text-ink-muted">
+          {t('profile_not_found', language)}
+        </div>
+      )}
+
+      {state === 'ready' && profile && (
+        <>
+          {/* Identity */}
+          <div className="flex items-center gap-3.5">
+            <AvatarImage
+              playerId={profile.id}
+              hasAvatar={profile.hasAvatar}
+              avatarVersion={profile.avatarVersion}
+              size={72}
+              className="rounded-card border border-line-strong"
+            />
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="flex items-center gap-1.5">
+                <TierBadge tier={profile.tier} language={language} />
+                <span className="text-2xs text-accent">LV{profile.level}</span>
+              </span>
+              <span className="text-2xs font-normal tracking-normal text-ink-dim">
+                {t('member_since', language)} {memberSince}
+              </span>
+            </div>
+          </div>
+
+          {/* Headline numbers */}
+          <div className="grid grid-cols-3 gap-2">
+            <StatTile
+              label={t('ranked_games', language)}
+              value={profile.rankedGames}
+              tone="accent"
+            />
+            <StatTile label={t('win_rate', language)} value={`${winRate}%`} tone="win" />
+            <StatTile
+              label={t('daily_streak', language)}
+              value={profile.dailyStreak}
+              tone="warn"
+              icon={<Flame className="h-3.5 w-3.5 fill-current" />}
+            />
+          </div>
+
+          {/* Career */}
+          <div className="grid grid-cols-2 gap-2">
+            {careerStat(
+              <Trophy className="h-4 w-4 text-warn" />,
+              <>
+                {profile.matchesWon}
+                <span className="text-ink-dim"> / {profile.matchesPlayed}</span>
+              </>,
+              t('matches_label', language)
+            )}
+            {careerStat(
+              <Activity className="h-4 w-4 text-accent" />,
+              profile.highestRally,
+              t('max_rally', language)
+            )}
+            {careerStat(
+              <Target className="h-4 w-4 text-loss" />,
+              profile.totalPointsScored,
+              t('total_points', language)
+            )}
+            {careerStat(
+              <Award className="h-4 w-4 text-violet-400" />,
+              profile.achievements.length,
+              t('achievements', language)
+            )}
+          </div>
+        </>
+      )}
+    </Sheet>
   );
 };

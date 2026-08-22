@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { ThemeConfig } from '../game/themes';
 import { LanguageCode } from '../types';
 import { t } from '../i18n/translations';
 import { sound } from '../audio/soundEffects';
+import { Sheet, Button } from './ui';
 import {
   X,
   BookOpen,
@@ -101,7 +102,6 @@ export const TutorialModal: React.FC<Props> = ({
     return () => cancelAnimationFrame(animId);
   }, [isOpen, step, practicePaddleX]);
 
-  if (!isOpen) return null;
 
   const totalSteps = 4;
 
@@ -123,52 +123,86 @@ export const TutorialModal: React.FC<Props> = ({
     }
   };
 
-  return (
-    <AnimatePresence>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md">
-        <motion.div
-          id="tutorial-modal-container"
-          initial={{ opacity: 0, scale: 0.93, y: 15 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.93, y: 15 }}
-          className="bg-slate-900 border rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[92vh]"
-          style={{ borderColor: theme.accentColor + '50' }}
-        >
-          {/* Modal Header */}
-          <div className="flex items-center justify-between p-4 sm:p-5 border-b border-slate-800 bg-slate-950/60">
-            <div className="flex items-center gap-2.5">
-              <div
-                className="w-8 h-8 rounded-xl flex items-center justify-center border"
-                style={{
-                  backgroundColor: theme.accentColor + '20',
-                  borderColor: theme.accentColor + '40',
-                  color: theme.accentColor,
-                }}
-              >
-                <BookOpen className="w-4 h-4" />
-              </div>
-              <div>
-                <h2 className="text-base sm:text-lg font-black text-white leading-tight">
-                  {t('tutorial_title', language)}
-                </h2>
-                <div className="text-[11px] text-slate-400 font-mono">
-                  Step {step + 1} of {totalSteps}
-                </div>
-              </div>
-            </div>
-
-            <button
-              id="btn-close-tutorial"
-              onClick={onClose}
-              className="p-2 text-slate-400 hover:text-white rounded-full hover:bg-slate-800 transition"
-              title="Close Tutorial"
-            >
-              <X className="w-5 h-5" />
-            </button>
+  const header = (
+    <div className="shrink-0 flex items-center justify-between gap-2 border-b border-line bg-surface-1 p-4">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <div className="flex h-8 w-8 items-center justify-center rounded-ctl border border-accent/40 bg-accent/20 text-accent">
+          <BookOpen className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <h2 className="text-title truncate">{t('tutorial_title', language)}</h2>
+          <div className="text-2xs tnum font-normal tracking-normal text-ink-muted">
+            Step {step + 1} of {totalSteps}
           </div>
+        </div>
+      </div>
 
-          {/* Step Content */}
-          <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-4">
+      <button
+        id="btn-close-tutorial"
+        onClick={onClose}
+        aria-label="Close tutorial"
+        className="shrink-0 rounded-ctl p-2 text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
+      >
+        <X className="h-5 w-5" />
+      </button>
+    </div>
+  );
+
+  const footer = (
+    <>
+      <div className="flex flex-1 items-center gap-1.5">
+        {Array.from({ length: totalSteps }).map((_, idx) => (
+          <button
+            key={idx}
+            onClick={() => setStep(idx)}
+            aria-label={`Step ${idx + 1}`}
+            className={`h-2 rounded-chip transition-all ${
+              idx === step ? 'w-6 bg-accent' : 'w-2 bg-surface-4 hover:bg-line-strong'
+            }`}
+          />
+        ))}
+      </div>
+
+      {step > 0 && (
+        <Button
+          id="btn-tutorial-prev"
+          size="sm"
+          variant="secondary"
+          icon={<ArrowLeft className="h-3.5 w-3.5" />}
+          onClick={handlePrev}
+        >
+          {t('tutorial_prev', language)}
+        </Button>
+      )}
+      <Button
+        id="btn-tutorial-next"
+        size="sm"
+        variant="primary"
+        iconRight={
+          step === totalSteps - 1 ? (
+            <CheckCircle2 className="h-4 w-4" />
+          ) : (
+            <ArrowRight className="h-4 w-4" />
+          )
+        }
+        onClick={handleNext}
+      >
+        {step === totalSteps - 1 ? t('tutorial_finish', language) : t('tutorial_next', language)}
+      </Button>
+    </>
+  );
+
+  return (
+    <Sheet
+      cardId="tutorial-modal-container"
+      isOpen={isOpen}
+      onClose={onClose}
+      size="lg"
+      accent="accent"
+      header={header}
+      footer={footer}
+      bodyClassName="scroll-y p-5 space-y-4"
+    >
             {/* Step 1: Half Court Concept */}
             {step === 0 && (
               <motion.div
@@ -354,55 +388,6 @@ export const TutorialModal: React.FC<Props> = ({
                 </div>
               </motion.div>
             )}
-          </div>
-
-          {/* Stepper Dots & Action Buttons Footer */}
-          <div className="p-4 sm:p-5 border-t border-slate-800 bg-slate-950 flex items-center justify-between gap-3">
-            {/* Stepper Dots */}
-            <div className="flex items-center gap-1.5">
-              {Array.from({ length: totalSteps }).map((_, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => setStep(idx)}
-                  className={`h-2 rounded-full transition-all duration-300 ${
-                    idx === step
-                      ? 'w-6 bg-cyan-400'
-                      : 'w-2 bg-slate-700 hover:bg-slate-600'
-                  }`}
-                  title={`Step ${idx + 1}`}
-                />
-              ))}
-            </div>
-
-            {/* Navigation Buttons */}
-            <div className="flex items-center gap-2">
-              {step > 0 && (
-                <button
-                  id="btn-tutorial-prev"
-                  onClick={handlePrev}
-                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition active:scale-95 flex items-center gap-1"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>{t('tutorial_prev', language)}</span>
-                </button>
-              )}
-
-              <button
-                id="btn-tutorial-next"
-                onClick={handleNext}
-                className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-slate-950 font-black text-xs sm:text-sm transition active:scale-95 flex items-center gap-1.5 shadow-lg shadow-cyan-500/25"
-              >
-                <span>{step === totalSteps - 1 ? t('tutorial_finish', language) : t('tutorial_next', language)}</span>
-                {step === totalSteps - 1 ? (
-                  <CheckCircle2 className="w-4 h-4" />
-                ) : (
-                  <ArrowRight className="w-4 h-4" />
-                )}
-              </button>
-            </div>
-          </div>
-        </motion.div>
-      </div>
-    </AnimatePresence>
+    </Sheet>
   );
 };
