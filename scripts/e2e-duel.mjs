@@ -318,6 +318,7 @@ for (const transport of ['relay', 'p2p']) {
   await host.waitForSelector('#lobby-match-settings', { timeout: 8000 });
   await host.click('#lobby-rules-toggle');
   await host.click('#lobby-rule-autoserve-1');
+  await host.click('#lobby-rules-toggle'); // collapse so Play stays reachable
   await host.waitForTimeout(3500);
 
   const room = await host.evaluate(async (c) => (await fetch(`/api/room/${c}`)).json(), code);
@@ -345,6 +346,74 @@ for (const transport of ['relay', 'p2p']) {
   ok('the same timer serves once an opponent is in and the lobby is closed');
   await host.context().close();
   await guest.context().close();
+}
+
+// ---- Countdown, the ranked auto-serve mandate, and the disconnect bounce --
+{
+  console.log('\n--- countdown, ranked auto-serve, disconnect ---');
+  const host = await newPage();
+  const guest = await newPage();
+  const code = await hostCreateRoom(host, { p2p: false });
+
+  // A fresh room's default rules are ranked, and ranked play MUST carry an
+  // auto-serve timer: the lobby arrives with 5s already selected and the
+  // "off" option refused.
+  await host.waitForSelector('#lobby-match-settings', { timeout: 8000 });
+  await host.click('#lobby-rules-toggle');
+  const offDisabled = await host.$eval('#lobby-rule-autoserve-0', (el) => el.hasAttribute('disabled'));
+  const fiveSelected = await host.$eval('#lobby-rule-autoserve-5', (el) =>
+    el.className.includes('border-cyan-400')
+  );
+  if (!offDisabled) fail('auto-serve "off" is selectable on a ranked room');
+  if (!fiveSelected) fail('a ranked room did not arrive with the 5s auto-serve forced');
+  ok('ranked room: auto-serve arrives forced to 5s and "off" is refused');
+  // Collapse the panel again: left open it pushes the Play button off the
+  // phone viewport and the court-entry click silently misses.
+  await host.click('#lobby-rules-toggle');
+
+  await guestJoin(guest, code);
+
+  // Each phone's countdown starts when THAT phone reaches the court — not
+  // when game_start arrived, or it would burn away unseen behind the lobby.
+  // So each is asserted right after its own court entry.
+  await enterCourt(host);
+  await host.waitForSelector('#match-countdown', { timeout: 3000 });
+  ok('the host counts down from the moment they reach the court');
+
+  // The host holds the first serve: a tap during their countdown must not
+  // put a ball in play.
+  await tapServe(host).catch(() => {});
+  const early = await host.evaluate(async (c) => (await fetch(`/api/room/${c}`)).json(), code);
+  if (early.inPlay) fail('a serve landed during the start countdown');
+  ok('serves are refused while the countdown runs');
+
+  await enterCourt(guest);
+  await guest.waitForSelector('#match-countdown', { timeout: 3000 });
+  ok('the guest gets their own full countdown on court entry');
+
+  // Countdown done + the mandated 5s timer -> the ball enters play by itself.
+  const live = await host
+    .waitForFunction(
+      async (c) => (await (await fetch(`/api/room/${c}`)).json()).inPlay,
+      code,
+      { timeout: 15000, polling: 1000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!live) fail('the mandated auto-serve never started the ranked match');
+  ok('the mandated timer serves once the countdown clears');
+
+  // Mid-match, the guest's connection dies. The host must not be stranded on
+  // a dead court: they are returned to the menu with a notice.
+  await guest.context().close();
+  await host.waitForSelector('#main-menu-screen', { timeout: 8000 }).catch(() => {
+    fail('host was not returned to the menu after a mid-match disconnect');
+  });
+  await host.waitForSelector('#toast-opponent-left', { timeout: 4000 }).catch(() => {
+    fail('no notice shown for the mid-match disconnect');
+  });
+  ok('a mid-match disconnect bounces the survivor to the menu with a notice');
+  await host.context().close();
 }
 
 console.log('\nDUEL ROOM CHECKS PASSED');

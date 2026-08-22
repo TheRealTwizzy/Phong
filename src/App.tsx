@@ -43,6 +43,7 @@ import { START_MU, normalizeDifficulty } from './rating';
 import {
   DEFAULT_MATCH_RULES,
   DEFAULT_ROOM_CONFIG,
+  MATCH_START_COUNTDOWN_SECONDS,
   normalizeRoomConfig,
   normalizeRules,
   isRankedRules,
@@ -170,6 +171,7 @@ export default function App() {
   const [toastPracticeXp, setToastPracticeXp] = useState<number | null>(null);
   // A permanent unlock banked from an elite mission — worth announcing.
   const [toastUnlock, setToastUnlock] = useState<string | null>(null);
+  const [toastOpponentLeft, setToastOpponentLeft] = useState<boolean>(false);
 
   // 'menu' = out-of-match navigation hub; 'game' = a match is on court.
   const [screen, setScreen] = useState<'menu' | 'game'>('menu');
@@ -215,6 +217,17 @@ export default function App() {
   // exists. In a duel this — never the local menu — decides how long the match
   // is and how the ball behaves, so both phones play the same match.
   const [roomConfig, setRoomConfig] = useState<RoomMatchConfig | null>(null);
+  // Ticks 3-2-1 on BOTH phones at every duel (re)start. The match does not
+  // initialize until it hits zero: no serve — tapped or automatic — can fire
+  // under it, so neither player is ambushed by a ball they weren't watching
+  // for. Null outside a duel.
+  //
+  // ARMED by game_start but STARTED only when this player actually reaches
+  // the court: game_start arrives while both phones still show the lobby, and
+  // a countdown ticking behind a modal would burn away unseen — the player
+  // pressed Play Match and got a match already in progress.
+  const [matchCountdown, setMatchCountdown] = useState<number | null>(null);
+  const [countdownArmed, setCountdownArmed] = useState<boolean>(false);
   // 'relay' = via server; 'connecting' = P2P handshake running; 'p2p' = direct
   const [linkStatus, setLinkStatus] = useState<'relay' | 'connecting' | 'p2p'>('relay');
   const [p2pEnabled, setP2pEnabled] = useState<boolean>(true);
@@ -264,6 +277,8 @@ export default function App() {
   const sendNetRef = useRef<(msg: WSClientMessage) => void>(() => {});
   const playerIndexRef = useRef<0 | 1 | null>(playerIndex);
   const opponentIdRef = useRef<string | null>(opponentId);
+  const matchCountdownRef = useRef<number | null>(matchCountdown);
+  const countdownArmedRef = useRef<boolean>(countdownArmed);
 
   ballRef.current = ball;
   oppBallRef.current = oppBall;
@@ -277,6 +292,8 @@ export default function App() {
   profileRef.current = profile;
   playerIndexRef.current = playerIndex;
   opponentIdRef.current = opponentId;
+  matchCountdownRef.current = matchCountdown;
+  countdownArmedRef.current = countdownArmed;
 
   // Route a gameplay message over the P2P link when it is open, otherwise
   // over the WebSocket relay. Reassigned every render so it sees fresh refs.
@@ -640,6 +657,13 @@ export default function App() {
       // (auto or tapped) would fire the ball into an empty room, where it
       // crosses the net and is simply gone.
       if (modeRef.current === 'multiplayer' && !opponentIdRef.current) return;
+      // And no serve of any kind before or under the start countdown.
+      if (
+        modeRef.current === 'multiplayer' &&
+        (countdownArmedRef.current || (matchCountdownRef.current ?? 0) > 0)
+      ) {
+        return;
+      }
       setIsServing(false);
       isServingRef.current = false;
       setWinner(null);
@@ -688,6 +712,26 @@ export default function App() {
     [isPlayerServer]
   );
 
+  // An armed countdown starts the moment this player is on the court with the
+  // lobby out of the way — which is also the moment they can first see it.
+  useEffect(() => {
+    if (!countdownArmed) return;
+    if (mode !== 'multiplayer' || screen !== 'game' || isMultiplayerOpen) return;
+    setCountdownArmed(false);
+    setMatchCountdown(MATCH_START_COUNTDOWN_SECONDS);
+  }, [countdownArmed, mode, screen, isMultiplayerOpen]);
+
+  // The start countdown's clock. game_start arms it; it walks itself to zero.
+  useEffect(() => {
+    if (matchCountdown === null) return;
+    if (matchCountdown <= 0) {
+      setMatchCountdown(null);
+      return;
+    }
+    const t = setTimeout(() => setMatchCountdown((c) => (c === null ? null : c - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [matchCountdown]);
+
   // Auto-serve: when the rules set a timer, a serve the player is sitting on
   // fires by itself so a PvP match can't stall on someone who put their phone
   // down. The countdown is surfaced on the court so it never feels arbitrary.
@@ -699,7 +743,11 @@ export default function App() {
     // Hosting used to arm it the moment the room existed, so a host who set
     // auto-serve while waiting had the game "begin" against nobody.
     const duelReady =
-      mode !== 'multiplayer' || (opponentId !== null && !isMultiplayerOpen);
+      mode !== 'multiplayer' ||
+      (opponentId !== null &&
+        !isMultiplayerOpen &&
+        !countdownArmed &&
+        (matchCountdown ?? 0) <= 0);
     const active = isServing && isPlayerServer && screen === 'game' && !winner && duelReady;
     if (!active || seconds <= 0) {
       setServeCountdown(null);
@@ -724,6 +772,8 @@ export default function App() {
     mode,
     opponentId,
     isMultiplayerOpen,
+    countdownArmed,
+    matchCountdown,
     activeConfig.rules.autoServeSeconds,
     handleServe,
   ]);
@@ -856,6 +906,8 @@ export default function App() {
         setWinner(null);
         setLastMatchResult(null);
         setRematchVotes([false, false]);
+        setMatchCountdown(null);
+        setCountdownArmed(true);
         p2pRef.current?.resetMatchState(msg.servingPlayer);
         break;
 
@@ -952,7 +1004,7 @@ export default function App() {
         setRematchVotes(msg.votes);
         break;
 
-      case 'opponent_left':
+      case 'opponent_left': {
         setMatchPrediction(null);
         setOpponentName(null);
         setOpponentId(null);
@@ -960,8 +1012,21 @@ export default function App() {
         p2pRef.current?.close();
         p2pRef.current = null;
         setLinkStatus('relay');
-        alert('Opponent disconnected from the match.');
+        // A disconnect mid-match leaves this player alone on a court where no
+        // point can ever be scored again — so they are returned to the menu
+        // with a notice, instead of a blocking alert() over a dead court.
+        // Two cases deliberately do NOT bounce: the winner overlay is up (the
+        // match finished; let them read it — the rematch button disables
+        // itself), and the lobby is still open (a host goes back to waiting
+        // for the next opponent, which is what the lobby is for).
+        const midMatch = !winner && !isMultiplayerOpen && screenRef.current === 'game';
+        if (midMatch) {
+          setToastOpponentLeft(true);
+          setTimeout(() => setToastOpponentLeft(false), 6000);
+          handleLeaveRoom();
+        }
         break;
+      }
 
       case 'pong':
         setPingMs(Date.now() - msg.timestamp);
@@ -1087,6 +1152,8 @@ export default function App() {
     setOpponentName(null);
     setOpponentId(null);
     setRoomConfig(null);
+    setMatchCountdown(null);
+    setCountdownArmed(false);
     setMode('solo');
     setScreen('menu');
     resetMatch();
@@ -1449,6 +1516,16 @@ export default function App() {
           </button>
         )}
 
+        {toastOpponentLeft && (
+          <button
+            id="toast-opponent-left"
+            onClick={() => setToastOpponentLeft(false)}
+            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-rose-950/90 border border-rose-500/60 text-rose-200 font-mono text-[11px] shadow-lg"
+          >
+            {t('opponent_left_notice', currentLanguage)}
+          </button>
+        )}
+
         {toastRecordFailed && (
           <button
             id="toast-record-failed"
@@ -1624,6 +1701,28 @@ export default function App() {
         </main>
 
         {/* Winner Overlay Modal */}
+        {/* Match-start countdown: the duel initializes only when it hits 0.
+            Pointer-events pass through — the paddle can be positioned early. */}
+        {mode === 'multiplayer' && matchCountdown !== null && matchCountdown > 0 && (
+          <div
+            id="match-countdown"
+            className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none"
+          >
+            <div className="flex flex-col items-center gap-2">
+              <span
+                key={matchCountdown}
+                className="text-7xl font-black font-mono text-cyan-300 drop-shadow-[0_0_18px_rgba(34,211,238,0.7)] animate-ping-once"
+                style={{ animation: 'pulse 1s ease-out' }}
+              >
+                {matchCountdown}
+              </span>
+              <span className="text-[11px] font-mono uppercase tracking-widest text-zinc-400">
+                {t('match_starting', currentLanguage)}
+              </span>
+            </div>
+          </div>
+        )}
+
         {winner && (
           <div
             id="winner-modal-overlay"

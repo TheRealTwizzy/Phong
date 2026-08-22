@@ -13,6 +13,8 @@ import {
   isRuleRanked,
   unrankedRuleKeys,
   normalizeRules,
+  normalizeRoomConfig,
+  RANKED_AUTO_SERVE_SECONDS,
 } from '../src/matchRules';
 import {
   PADDLE_WIDTH_RATIO,
@@ -101,6 +103,32 @@ describe('match rules', () => {
       expect(isRankedRules({ ...DEFAULT_MATCH_RULES, [key]: false })).toBe(true);
     }
     expect(isRankedRules({ ...DEFAULT_MATCH_RULES, autoServeSeconds: 3 })).toBe(true);
+  });
+
+  it('forces an auto-serve timer onto a ranked duel', () => {
+    // Ranked play MUST carry the timer: "off" would let a losing player
+    // stall a rated match forever by never serving.
+    const forced = normalizeRoomConfig({
+      winningScore: 5,
+      rules: { ...DEFAULT_MATCH_RULES, autoServeSeconds: 0 },
+    });
+    expect(isRankedRules(forced.rules)).toBe(true);
+    expect(forced.rules.autoServeSeconds).toBe(RANKED_AUTO_SERVE_SECONDS);
+
+    // A chosen timer is respected — the mandate only fills in "off".
+    const chosen = normalizeRoomConfig({
+      winningScore: 5,
+      rules: { ...DEFAULT_MATCH_RULES, autoServeSeconds: 1 },
+    });
+    expect(chosen.rules.autoServeSeconds).toBe(1);
+
+    // An unranked party match may stall — nothing is at stake.
+    const party = normalizeRoomConfig({
+      winningScore: 5,
+      rules: { ...DEFAULT_MATCH_RULES, paddleScale: 1.6, autoServeSeconds: 0 },
+    });
+    expect(isRankedRules(party.rules)).toBe(false);
+    expect(party.rules.autoServeSeconds).toBe(0);
   });
 
   it('keeps every ranked band a real window that contains stock', () => {

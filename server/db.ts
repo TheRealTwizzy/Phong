@@ -137,6 +137,7 @@ interface PlayerRow {
   rookieWins: number | null;
   proWins: number | null;
   cyberWins: number | null;
+  abandons: number | null;
   id: string;
   username: string;
   level: number;
@@ -183,6 +184,7 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
     rookieWins: row.rookieWins || 0,
     proWins: row.proWins || 0,
     cyberWins: row.cyberWins || 0,
+    abandons: row.abandons || 0,
     achievements: JSON.parse(row.achievements || '[]'),
     recoveryCode: row.recoveryCode || undefined,
     initializedAt: row.initializedAt || undefined,
@@ -192,6 +194,13 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
     avatarVersion: avatarUpdatedAt ? Date.parse(avatarUpdatedAt) : undefined,
   };
 }
+
+// Mid-match abandons: the first of a UTC day is forgiven, ranked repeats pay
+// in visible rating. Sized to sting across a session of rage-quits (three in
+// a day is a full mu point, a third of a tier) without one bad wifi evening
+// costing a rank.
+const ABANDONS_FORGIVEN_PER_DAY = 1;
+const ABANDON_RANKED_MU_PENALTY = 0.5;
 
 class GameDatabase {
   private sql: DatabaseSync;
@@ -257,6 +266,7 @@ class GameDatabase {
         rookieWins INTEGER NOT NULL DEFAULT 0,
         proWins INTEGER NOT NULL DEFAULT 0,
         cyberWins INTEGER NOT NULL DEFAULT 0,
+        abandons INTEGER NOT NULL DEFAULT 0,
         dailyStreak INTEGER NOT NULL,
         lastDailyDate TEXT NOT NULL,
         achievements TEXT NOT NULL,
@@ -318,6 +328,12 @@ class GameDatabase {
       );
       -- Rerolls spent today. Also dayKey'd, which is the whole mechanism by
       -- which unused rerolls expire rather than banking up.
+      CREATE TABLE IF NOT EXISTS daily_abandons (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, dayKey)
+      );
       CREATE TABLE IF NOT EXISTS daily_rerolls (
         playerId TEXT NOT NULL,
         dayKey TEXT NOT NULL,
@@ -364,6 +380,7 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS daily_missions');
       this.sql.exec('DROP TABLE IF EXISTS daily_mission_slots');
       this.sql.exec('DROP TABLE IF EXISTS daily_rerolls');
+      this.sql.exec('DROP TABLE IF EXISTS daily_abandons');
       this.sql.exec('DROP TABLE IF EXISTS elite_completions');
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DELETE FROM meta');
@@ -407,6 +424,7 @@ class GameDatabase {
     addColumn('rookieWins', 'rookieWins INTEGER NOT NULL DEFAULT 0');
     addColumn('proWins', 'proWins INTEGER NOT NULL DEFAULT 0');
     addColumn('cyberWins', 'cyberWins INTEGER NOT NULL DEFAULT 0');
+    addColumn('abandons', 'abandons INTEGER NOT NULL DEFAULT 0');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
     // Uniqueness is case-insensitive and applies to chosen names only:
     // uninitialized rows keep their Paddle-XXXX placeholders outside the
@@ -485,9 +503,9 @@ class GameDatabase {
     this.stmt(
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins,
-           winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, cyberWins, dailyStreak, lastDailyDate,
+           winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, cyberWins, abandons, dailyStreak, lastDailyDate,
            achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
@@ -499,6 +517,7 @@ class GameDatabase {
            winStreak=excluded.winStreak, bestWinStreak=excluded.bestWinStreak,
            shutoutsWon=excluded.shutoutsWon, rookieWins=excluded.rookieWins,
            proWins=excluded.proWins, cyberWins=excluded.cyberWins,
+           abandons=excluded.abandons,
            dailyStreak=excluded.dailyStreak,
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive,
@@ -529,6 +548,7 @@ class GameDatabase {
         p.rookieWins || 0,
         p.proWins || 0,
         p.cyberWins || 0,
+        p.abandons || 0,
         p.dailyStreak,
         p.lastDailyDate,
         JSON.stringify(p.achievements),
@@ -609,6 +629,7 @@ class GameDatabase {
         rookieWins: 0,
         proWins: 0,
         cyberWins: 0,
+        abandons: 0,
         dailyStreak: 1,
         lastDailyDate: todayStr,
         achievements: [],
@@ -709,6 +730,48 @@ class GameDatabase {
    * allowance is left, so nothing here takes an XP amount from the caller.
    * Practice records no match, moves no rating, and feeds no missions.
    */
+  /**
+   * A duel walked out on mid-match — socket died or the player quit with a
+   * live ball. Recorded by the relay from its own room state; a client can
+   * never report one.
+   *
+   * The FIRST abandon of a UTC day is forgiven outright: connections drop,
+   * phones ring, life happens, and punishing an accident teaches nothing.
+   * Every further one that day marks a pattern, and when the abandoned match
+   * was RANKED it costs visible rating — the ladder is what rage-quitting
+   * corrupts, since a quitter denies their opponent the win they were about
+   * to take. XP is untouched either way: levels never regress.
+   */
+  public recordAbandon(
+    playerId: string,
+    opts: { ranked: boolean },
+    now: Date = new Date()
+  ): { counted: boolean; penalized: boolean; abandonsToday: number } {
+    const profile = this.readProfile(playerId);
+    if (!profile || !profile.initialized) {
+      return { counted: false, penalized: false, abandonsToday: 0 };
+    }
+    const dayKey = missionDayKey(now);
+    this.stmt(
+        `INSERT INTO daily_abandons (playerId, dayKey, count) VALUES (?, ?, 1)
+         ON CONFLICT(playerId, dayKey) DO UPDATE SET count = count + 1`
+      )
+      .run(playerId, dayKey);
+    const row = this.stmt(`SELECT count FROM daily_abandons WHERE playerId = ? AND dayKey = ?`)
+      .get(playerId, dayKey) as { count: number };
+
+    profile.abandons += 1;
+    let penalized = false;
+    if (opts.ranked && row.count > ABANDONS_FORGIVEN_PER_DAY) {
+      profile.rankMu -= ABANDON_RANKED_MU_PENALTY;
+      profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma);
+      penalized = true;
+    }
+    profile.lastActive = now.toISOString();
+    this.upsertProfile(profile);
+    return { counted: true, penalized, abandonsToday: row.count };
+  }
+
   public recordPractice(
     playerId: string,
     bestStreak: number,
@@ -1145,6 +1208,7 @@ class GameDatabase {
       rookieWins: 0,
       proWins: 0,
       cyberWins: 0,
+      abandons: 0,
       dailyStreak: bot.dailyStreak || 1,
       lastDailyDate: todayStr,
       achievements: bot.achievements || [],

@@ -262,3 +262,61 @@ describe('renaming an achievement id', () => {
     expect(master!.description).toMatch(/Master tier/i);
   });
 });
+
+describe('mid-match abandons', () => {
+  const day = new Date('2026-09-01T10:00:00Z');
+  const laterSameDay = new Date('2026-09-01T21:00:00Z');
+  const nextDay = new Date('2026-09-02T10:00:00Z');
+
+  it('records nothing for a profile that never onboarded', () => {
+    db.getProfile('p_ab_ghost');
+    const res = db.recordAbandon('p_ab_ghost', { ranked: true }, day);
+    expect(res.counted).toBe(false);
+    expect(res.penalized).toBe(false);
+  });
+
+  it('forgives the first abandon of a day, penalizes ranked repeats', () => {
+    init('p_ab_rage', 'RageOne');
+    const before = db.getProfile('p_ab_rage');
+
+    // First of the day: counted, never penalized — connections drop.
+    const first = db.recordAbandon('p_ab_rage', { ranked: true }, day);
+    expect(first).toEqual({ counted: true, penalized: false, abandonsToday: 1 });
+    const afterFirst = db.getProfile('p_ab_rage');
+    expect(afterFirst.abandons).toBe(1);
+    expect(afterFirst.rankMu).toBeCloseTo(before.rankMu, 10);
+
+    // Second the same day, ranked: the pattern costs visible rating.
+    const second = db.recordAbandon('p_ab_rage', { ranked: true }, laterSameDay);
+    expect(second.penalized).toBe(true);
+    const afterSecond = db.getProfile('p_ab_rage');
+    expect(afterSecond.abandons).toBe(2);
+    expect(afterSecond.rankMu).toBeLessThan(before.rankMu);
+    // XP is untouched either way: levels never regress.
+    expect(afterSecond.xp).toBe(before.xp);
+    expect(afterSecond.level).toBe(before.level);
+  });
+
+  it('never takes rating for abandoning an unranked party match', () => {
+    init('p_ab_party', 'PartyQuit');
+    const before = db.getProfile('p_ab_party');
+    db.recordAbandon('p_ab_party', { ranked: false }, day);
+    const res = db.recordAbandon('p_ab_party', { ranked: false }, laterSameDay);
+    expect(res.counted).toBe(true);
+    expect(res.penalized).toBe(false);
+    const after = db.getProfile('p_ab_party');
+    expect(after.abandons).toBe(2);
+    expect(after.rankMu).toBeCloseTo(before.rankMu, 10);
+  });
+
+  it('resets the forgiveness with the UTC day, not a rolling window', () => {
+    init('p_ab_days', 'DayQuit');
+    db.recordAbandon('p_ab_days', { ranked: true }, day);
+    db.recordAbandon('p_ab_days', { ranked: true }, laterSameDay); // penalized
+    // A new day is a new row: the first one is forgiven again, however many
+    // yesterday held — while the career total keeps climbing.
+    const fresh = db.recordAbandon('p_ab_days', { ranked: true }, nextDay);
+    expect(fresh).toEqual({ counted: true, penalized: false, abandonsToday: 1 });
+    expect(db.getProfile('p_ab_days').abandons).toBe(3);
+  });
+});

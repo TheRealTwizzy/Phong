@@ -11,7 +11,7 @@ import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig } from './src/types';
-import { DEFAULT_ROOM_CONFIG, normalizeRoomConfig } from './src/matchRules';
+import { DEFAULT_ROOM_CONFIG, isRankedRules, normalizeRoomConfig } from './src/matchRules';
 import { validateUsername } from './src/profileRules';
 import { Rating, winProbability } from './src/rating';
 
@@ -777,6 +777,19 @@ async function startServer() {
       if (currentRoomId && playerIndex !== null) {
         const room = rooms.get(currentRoomId);
         if (room) {
+          // A socket dying with a live, undecided ball is an abandon — the
+          // opponent was denied a match they were in the middle of. Judged
+          // BEFORE the seat empties, from state the relay owns: a client can
+          // never report one, and the second player's departure from an
+          // already-abandoned room records nothing.
+          const bothSeated = !!(room.players[0] && room.players[1]);
+          if (bothSeated && room.inPlay && !room.matchOver && currentPlayerId) {
+            try {
+              db.recordAbandon(currentPlayerId, { ranked: isRankedRules(room.config.rules) });
+            } catch (e) {
+              console.error('abandon record failed:', e);
+            }
+          }
           room.players[playerIndex] = null;
           room.rematchVotes[playerIndex] = false;
           const oppIdx = playerIndex === 0 ? 1 : 0;

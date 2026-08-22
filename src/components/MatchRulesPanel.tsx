@@ -180,7 +180,9 @@ export const MatchRulesPanel: React.FC<Props> = ({
                   <button
                     key={secs}
                     id={`${idPrefix}-rule-autoserve-${secs}`}
-                    disabled={readOnly}
+                    // Ranked play always carries a timer — "off" is only on
+                    // the table once the rules have left the ranked bands.
+                    disabled={readOnly || (secs === 0 && ranked)}
                     onClick={() => onUpdateRules({ autoServeSeconds: secs })}
                     className={`py-1.5 rounded-lg text-[10px] font-mono border transition disabled:opacity-60 ${
                       rules.autoServeSeconds === secs
@@ -192,6 +194,11 @@ export const MatchRulesPanel: React.FC<Props> = ({
                   </button>
                 ))}
               </div>
+              {ranked && (
+                <span id={`${idPrefix}-autoserve-ranked-note`} className="text-[8px] font-mono text-zinc-600">
+                  {t('rule_autoserve_ranked', lang)}
+                </span>
+              )}
             </div>
           )}
 

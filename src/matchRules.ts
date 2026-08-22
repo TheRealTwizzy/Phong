@@ -129,6 +129,12 @@ export function normalizeWinningScore(value: unknown): number {
   return (WINNING_SCORES as readonly number[]).includes(n) ? n : DEFAULT_WINNING_SCORE;
 }
 
+/** The timer a ranked duel falls back to when the host left auto-serve off. */
+export const RANKED_AUTO_SERVE_SECONDS: AutoServeSeconds = 5;
+
+/** How long both phones count down before a duel's first serve can happen. */
+export const MATCH_START_COUNTDOWN_SECONDS = 3;
+
 export const DEFAULT_ROOM_CONFIG: RoomMatchConfig = {
   winningScore: DEFAULT_WINNING_SCORE,
   rules: DEFAULT_MATCH_RULES,
@@ -144,8 +150,17 @@ export function normalizeRoomConfig(
   input: Partial<RoomMatchConfig> | null | undefined
 ): RoomMatchConfig {
   const raw = input || {};
+  const rules = normalizeRules(raw.rules);
+  // Ranked play MUST carry an auto-serve timer. With rating on the line,
+  // "off" would let a losing player stall the match indefinitely by simply
+  // never serving; the timer is what makes a ranked result something the
+  // other player can always reach. An unranked party match may still stall —
+  // nothing is at stake there.
+  if (isRankedRules(rules) && rules.autoServeSeconds === 0) {
+    rules.autoServeSeconds = RANKED_AUTO_SERVE_SECONDS;
+  }
   return {
     winningScore: normalizeWinningScore(raw.winningScore),
-    rules: normalizeRules(raw.rules),
+    rules,
   };
 }
