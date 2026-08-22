@@ -71,17 +71,17 @@ export const MatchRulesPanel: React.FC<Props> = ({
       <button
         id={`${idPrefix}-rules-toggle`}
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 text-[10px] font-mono text-zinc-300"
+        className="flex items-center justify-between px-2.5 py-1.5 rounded-ctl border border-line bg-surface-3 text-2xs font-normal tracking-normal text-ink"
       >
         <span className="flex items-center gap-1.5">
           {ranked ? (
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <ShieldCheck className="w-3.5 h-3.5 text-win" />
           ) : (
-            <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+            <ShieldAlert className="w-3.5 h-3.5 text-warn" />
           )}
           {t('match_rules', lang)}
           {!ranked && (
-            <span id={`${idPrefix}-rules-altered-count`} className="text-amber-400">
+            <span id={`${idPrefix}-rules-altered-count`} className="text-warn">
               ({beyond.length})
             </span>
           )}
@@ -91,10 +91,10 @@ export const MatchRulesPanel: React.FC<Props> = ({
 
       <div
         id={`${idPrefix}-rules-status`}
-        className={`px-2.5 py-1 rounded-lg text-[9px] font-mono leading-snug ${
+        className={`px-2.5 py-1 rounded-ctl text-2xs leading-snug ${
           ranked
-            ? 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/60'
-            : 'bg-amber-950/40 text-amber-300 border border-amber-900/60'
+            ? 'border border-win/40 bg-win/10 text-win'
+            : 'border border-warn/40 bg-warn/10 text-warn'
         }`}
       >
         {ranked ? t('rules_ranked', lang) : t('rules_unranked', lang)}
@@ -103,7 +103,7 @@ export const MatchRulesPanel: React.FC<Props> = ({
       {open && (
         <div
           id={`${idPrefix}-rules-panel`}
-          className="flex flex-col gap-2 p-2.5 rounded-lg border border-zinc-800 bg-zinc-950/60"
+          className="flex flex-col gap-2 p-2.5 rounded-ctl border border-line bg-surface-1/60"
         >
           {SLIDERS.map(({ key, labelKey }) => {
             const spec = PHYSICS_RULES[key];
@@ -118,11 +118,11 @@ export const MatchRulesPanel: React.FC<Props> = ({
             return (
               <div key={key} className="flex flex-col gap-0.5">
                 <div className="flex items-center justify-between">
-                  <label className="text-[10px] font-mono text-zinc-400">{t(labelKey, lang)}</label>
+                  <label className="text-2xs font-normal tracking-normal text-ink-muted">{t(labelKey, lang)}</label>
                   <span
                     id={`${idPrefix}-rule-value-${key}`}
-                    className={`text-[10px] font-mono ${
-                      isDefault ? 'text-zinc-500' : inBand ? 'text-cyan-300 font-bold' : 'text-amber-300 font-bold'
+                    className={`text-2xs font-normal tracking-normal ${
+                      isDefault ? 'text-ink-dim' : inBand ? 'text-accent font-bold' : 'text-warn font-bold'
                     }`}
                   >
                     {pct(value)}
@@ -137,15 +137,15 @@ export const MatchRulesPanel: React.FC<Props> = ({
                   value={value}
                   disabled={readOnly}
                   onChange={(e) => onUpdateRules({ [key]: clampRule(key, Number(e.target.value)) })}
-                  className={`w-full h-1 ${inBand ? 'accent-cyan-400' : 'accent-amber-400'} disabled:opacity-60`}
+                  className={`w-full h-1 ${inBand ? 'accent-accent' : 'accent-warn'} disabled:opacity-60`}
                 />
-                <div className="relative h-1 rounded-full bg-zinc-900 overflow-hidden">
+                <div className="relative h-1 rounded-full bg-surface-1 overflow-hidden">
                   <div
-                    className="absolute inset-y-0 bg-emerald-500/40"
+                    className="absolute inset-y-0 bg-win/40"
                     style={{ left: `${left}%`, width: `${width}%` }}
                   />
                 </div>
-                <span className="text-[8px] font-mono text-zinc-600">
+                <span className="text-2xs font-normal tracking-normal text-ink-dim">
                   {t('rule_ranked_band', lang, { lo: pct(spec.ranked.min), hi: pct(spec.ranked.max) })}
                 </span>
               </div>
@@ -160,12 +160,12 @@ export const MatchRulesPanel: React.FC<Props> = ({
                 id={`${idPrefix}-rule-toggle-${tg.key}`}
                 disabled={readOnly}
                 onClick={() => onUpdateRules({ [tg.key]: !rules[tg.key] })}
-                className="flex items-center justify-between px-2 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 disabled:opacity-60"
+                className="flex items-center justify-between px-2 py-1.5 rounded-ctl border border-line bg-surface-3 disabled:opacity-60"
               >
-                <span className="text-[10px] font-mono text-zinc-300">{t(tg.labelKey, lang)}</span>
+                <span className="text-2xs font-normal tracking-normal text-ink">{t(tg.labelKey, lang)}</span>
                 <span
-                  className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded ${
-                    rules[tg.key] ? 'bg-cyan-950 text-cyan-300' : 'bg-zinc-800 text-zinc-500'
+                  className={`text-2xs font-bold px-1.5 py-0.5 rounded ${
+                    rules[tg.key] ? 'bg-accent/20 text-accent' : 'bg-surface-3 text-ink-dim'
                   }`}
                 >
                   {rules[tg.key] ? t('rule_on', lang) : t('rule_off', lang)}
@@ -175,7 +175,7 @@ export const MatchRulesPanel: React.FC<Props> = ({
 
           {mode === 'multiplayer' && (
             <div className="flex flex-col gap-1">
-              <label className="text-[10px] font-mono text-zinc-400">{t('rule_autoserve', lang)}</label>
+              <label className="text-2xs font-normal tracking-normal text-ink-muted">{t('rule_autoserve', lang)}</label>
               <SegmentedControl
                 columns={4}
                 ariaLabel={t('rule_autoserve', lang)}
@@ -192,7 +192,7 @@ export const MatchRulesPanel: React.FC<Props> = ({
                 }))}
               />
               {ranked && (
-                <span id={`${idPrefix}-autoserve-ranked-note`} className="text-[8px] font-mono text-zinc-600">
+                <span id={`${idPrefix}-autoserve-ranked-note`} className="text-2xs font-normal tracking-normal text-ink-dim">
                   {t('rule_autoserve_ranked', lang)}
                 </span>
               )}
@@ -203,7 +203,7 @@ export const MatchRulesPanel: React.FC<Props> = ({
             <button
               id={`${idPrefix}-rules-reset`}
               onClick={() => onUpdateRules(DEFAULT_MATCH_RULES)}
-              className="flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 text-[10px] font-mono text-zinc-300"
+              className="flex items-center justify-center gap-1.5 py-1.5 rounded-ctl border border-line bg-surface-3 text-2xs font-normal tracking-normal text-ink"
             >
               <RotateCcw className="w-3 h-3" />
               {t('rules_reset', lang)}

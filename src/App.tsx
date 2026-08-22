@@ -1,4 +1,4 @@
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BallState,
@@ -83,6 +83,7 @@ import {
   ProgressBar,
   StatTile,
   ToastHost,
+  useMotion,
   type ToastSpec,
 } from './components/ui';
 import { isLinkableId } from './profileRules';
@@ -1932,6 +1933,9 @@ export default function App() {
 
   const currentTheme: ThemeConfig = THEMES[settings.theme] || THEMES.neon;
   const missionsSummary = getMissionsStatusSummary(missions);
+  // One motion vocabulary for the whole app; it collapses to zero duration
+  // under prefers-reduced-motion without this file knowing about it.
+  const { screen: screenMotion } = useMotion();
 
   const inSplitMatch = screen === 'game' && mode === 'split';
   const inCourtMatch = screen === 'game' && mode !== 'split';
@@ -2061,8 +2065,20 @@ export default function App() {
           language={currentLanguage}
         />
 
-        {/* Out-of-match hub: mode select + pre-match settings + navigation */}
-        {screen === 'menu' && (
+        {/* Screen swap.
+            mode="wait" keeps exactly ONE branch mounted: no double CourtCanvas,
+            no two RAF loops, and the suites' negative assertions (that
+            #main-menu-screen is absent behind the device gate) cannot be
+            tripped by a lingering exit node. Never render both and hide one
+            with CSS — display:none still satisfies those assertions' opposite.
+
+            The wrappers are `absolute inset-0`, not `flex-1`: ScoreBoard, the
+            link badge, the countdown and the winner overlay all position
+            against the nearest positioned ancestor, and a wrapper becomes that
+            ancestor. Same box in, same box out. */}
+        <AnimatePresence mode="wait" initial={false}>
+        {screen === 'menu' ? (
+          <motion.div key="menu" className="absolute inset-0 flex flex-col" {...screenMotion}>
           <MainMenu
             theme={currentTheme}
             settings={settings}
@@ -2083,7 +2099,9 @@ export default function App() {
             onOpenSettings={() => setIsSettingsOpen(true)}
             onOpenTutorial={() => setIsTutorialOpen(true)}
           />
-        )}
+          </motion.div>
+        ) : (
+          <motion.div key="game" className="absolute inset-0 flex flex-col" {...screenMotion}>
 
         {/* Local 2-player classic court on one screen — offline & unranked */}
         {inSplitMatch && (
@@ -2142,7 +2160,7 @@ export default function App() {
         {mode === 'multiplayer' && opponentId && (
           <div
             id="link-status-badge"
-            className={`absolute top-14 right-2 z-30 px-2 py-0.5 rounded-full border font-mono text-[10px] tracking-wide select-none ${
+            className={`absolute top-14 right-2 z-30 rounded-chip border px-2 py-0.5 text-2xs select-none ${
               linkStatus === 'p2p'
                 ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-300'
                 : linkStatus === 'connecting'
@@ -2392,6 +2410,9 @@ export default function App() {
         )}
           </>
         )}
+          </motion.div>
+        )}
+        </AnimatePresence>
 
         {/* Daily Missions Modal */}
         <MissionsModal

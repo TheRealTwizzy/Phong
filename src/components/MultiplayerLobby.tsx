@@ -467,7 +467,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                     type="checkbox"
                     checked={p2pEnabled}
                     onChange={(e) => onToggleP2P(e.target.checked)}
-                    className="h-4 w-4 accent-cyan-500"
+                    className="h-4 w-4 accent-accent"
                   />
                 </label>
               )}
