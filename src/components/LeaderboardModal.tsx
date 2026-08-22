@@ -33,8 +33,11 @@ export const LeaderboardModal: React.FC<Props> = ({
   const [category, setCategory] = useState<SortCategory>('elo');
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  // Bot rankings hidden by default; showing them never changes a human's rank
-  const [showBots, setShowBots] = useState(false);
+  // Shown by default, and safe to be: bot rows carry `rank: null`, so a
+  // human's number is identical whether they are listed or not. Hidden by
+  // default meant a new player met an empty board — the ladder they were
+  // being invited to climb had nothing on it. The toggle still hides them.
+  const [showBots, setShowBots] = useState(true);
 
   const fetchLeaderboard = (cat: SortCategory, bots: boolean) => {
     setIsLoading(true);
