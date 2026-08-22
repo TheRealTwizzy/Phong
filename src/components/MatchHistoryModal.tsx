@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { MatchRecord } from '../types';
+import { MatchRecord, LanguageCode } from '../types';
+import { t } from '../i18n/translations';
 import { isLinkableId } from '../profileRules';
 import { Sheet, Button, Panel, StatTile } from './ui';
 import {
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react';
 
 interface MatchHistoryModalProps {
+  language: LanguageCode;
   isOpen: boolean;
   onClose: () => void;
   playerId: string;
@@ -24,6 +26,7 @@ interface MatchHistoryModalProps {
 }
 
 export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
+  language,
   isOpen,
   onClose,
   playerId,
@@ -39,11 +42,11 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
     setError(null);
     try {
       const res = await fetch('/api/matches/me');
-      if (!res.ok) throw new Error('Failed to fetch match history');
+      if (!res.ok) throw new Error(t('history_load_failed', language));
       const data = await res.json();
       setMatches(data.matches || []);
     } catch (err: any) {
-      setError(err.message || 'Could not load match records');
+      setError(err.message || t('history_load_failed', language));
     } finally {
       setIsLoading(false);
     }
@@ -88,13 +91,13 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
           </div>
           <div className="min-w-0">
             <h2 className="flex items-center gap-2 text-title">
-              MATCH HISTORY
+              {t('match_history_title', language)}
               <span className="rounded-chip border border-line bg-surface-3 px-1.5 py-0.5 text-2xs font-normal tracking-normal text-ink-muted">
-                Last 10
+                {t('history_last10', language)}
               </span>
             </h2>
             <p className="text-2xs font-normal tracking-normal text-ink-muted">
-              Chronological performance &amp; combat log
+              {t('history_subtitle', language)}
             </p>
           </div>
         </div>
@@ -104,8 +107,8 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
             id="btn-refresh-match-history"
             onClick={fetchMatches}
             disabled={isLoading}
-            title="Refresh match records"
-            aria-label="Refresh match records"
+            title={t('history_refresh', language)}
+            aria-label={t('history_refresh', language)}
             className="rounded-ctl border border-line bg-surface-3 p-2 text-ink-muted transition-colors hover:text-ink disabled:opacity-50"
           >
             <RefreshCw
@@ -116,7 +119,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
           <button
             id="btn-close-match-history"
             onClick={onClose}
-            aria-label="Close match history"
+            aria-label={t('history_close', language)}
             className="rounded-ctl border border-line bg-surface-3 p-2 text-ink-muted transition-colors hover:text-ink"
           >
             <X className="h-4 w-4" />
@@ -127,7 +130,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
       {totalRecent > 0 && (
         <div className="mt-3 grid grid-cols-3 gap-2">
           <StatTile
-            label="Record"
+            label={t('history_record', language)}
             value={
               <span>
                 <span className="text-win">{winsCount}W</span>
@@ -137,12 +140,12 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
             }
           />
           <StatTile
-            label="Win Rate"
+            label={t('win_rate', language)}
             value={`${recentWinRate}%`}
             tone={recentWinRate >= 60 ? 'win' : recentWinRate >= 40 ? 'warn' : 'loss'}
           />
           <StatTile
-            label="Peak Rally"
+            label={t('history_peak_rally', language)}
             value={maxRallyRecent}
             tone="warn"
             icon={<Flame className="h-3.5 w-3.5 fill-current" />}
@@ -155,10 +158,10 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
   const footer = (
     <>
       <span className="flex-1 text-2xs font-normal tracking-normal text-ink-muted">
-        Server-synchronized match log
+        {t('history_footer', language)}
       </span>
       <Button id="btn-dismiss-match-history" size="sm" variant="secondary" onClick={onClose}>
-        Close
+        {t('close', language)}
       </Button>
     </>
   );
@@ -182,14 +185,14 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
             data-motion-essential
           />
           <p className="text-2xs font-normal tracking-normal">
-            Fetching combat records from server...
+            {t('history_loading', language)}
           </p>
         </div>
       ) : error ? (
         <Panel accent="loss" className="space-y-2 bg-loss/10 text-center text-ink">
           <p className="text-2xs font-normal tracking-normal">{error}</p>
           <Button size="sm" variant="danger" onClick={fetchMatches}>
-            Retry
+            {t('retry', language)}
           </Button>
         </Panel>
       ) : recent10Matches.length === 0 ? (
@@ -198,14 +201,13 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
             <Swords className="h-7 w-7" />
           </div>
           <div className="space-y-1">
-            <p className="text-2xs text-ink">No match records found</p>
+            <p className="text-2xs text-ink">{t('history_empty_title', language)}</p>
             <p className="mx-auto max-w-xs text-2xs font-normal tracking-normal text-ink-dim">
-              Play solo matches against the AI or 2-phone online matches to log your match
-              history.
+              {t('history_empty_desc', language)}
             </p>
           </div>
           <Button size="md" variant="primary" onClick={onClose}>
-            Play First Match
+            {t('history_empty_cta', language)}
           </Button>
         </div>
       ) : (
@@ -235,7 +237,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                         : 'border-loss/40 bg-loss/20 text-loss'
                     }`}
                   >
-                    {isWinner ? 'VICTORY' : 'DEFEAT'}
+                    {t(isWinner ? 'result_win' : 'result_loss', language)}
                   </span>
 
                   <span className="flex items-center gap-1 rounded-chip border border-line bg-surface-3 px-2 py-0.5 text-2xs font-normal tracking-normal text-ink-muted uppercase">
@@ -247,7 +249,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                     ) : match.mode === 'practice' ? (
                       <>
                         <Target className="h-3 w-3 text-win" />
-                        Practice
+                        {t('history_practice', language)}
                       </>
                     ) : (
                       <>
@@ -268,20 +270,20 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
               <div className="flex items-center justify-between gap-2 px-1">
                 <div className="flex min-w-0 flex-col">
                   <span className="text-2xs font-normal tracking-normal text-ink-muted">
-                    Opponent
+                    {t('history_opponent', language)}
                   </span>
                   {opponentLinkable ? (
                     <button
                       id={`btn-history-opponent-${match.id || idx}`}
                       onClick={() => onViewProfile!(opponentPlayerId)}
-                      title="View profile"
+                      title={t('view_profile', language)}
                       className="max-w-[180px] truncate text-left text-2xs text-accent underline decoration-dotted underline-offset-2 transition-colors hover:text-ink"
                     >
-                      {opponentDisplayName || 'Anonymous'}
+                      {opponentDisplayName || t('history_anonymous', language)}
                     </button>
                   ) : (
                     <span className="max-w-[180px] truncate text-2xs text-ink">
-                      {opponentDisplayName || 'Anonymous'}
+                      {opponentDisplayName || t('history_anonymous', language)}
                     </span>
                   )}
                 </div>
@@ -289,7 +291,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
                 <div className="flex shrink-0 items-center gap-2">
                   <div
                     className="flex items-center gap-1 rounded-ctl border border-line bg-surface-3 px-2 py-1 text-2xs"
-                    title="Max rally count in this match"
+                    title={t('history_rally_hint', language)}
                   >
                     <Flame className="h-3.5 w-3.5 fill-warn text-warn" />
                     <span className="tnum text-warn">{match.maxRally}</span>
