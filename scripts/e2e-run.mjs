@@ -35,6 +35,7 @@ const SUITES = [
   { name: 'invite', ownsServer: false },
   { name: 'lobby', ownsServer: false },
   { name: 'eject', ownsServer: true },
+  { name: 'build-id', ownsServer: true },
 ];
 
 const argv = process.argv.slice(2);
