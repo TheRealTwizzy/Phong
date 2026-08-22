@@ -2356,7 +2356,6 @@ export default function App() {
           onClose={() => setIsMissionsOpen(false)}
           missions={missions}
           onClaimReward={handleClaimMissionReward}
-          theme={currentTheme}
           language={currentLanguage}
           onReroll={handleRerollMission}
           rerolls={rerolls}
@@ -2447,7 +2446,6 @@ export default function App() {
           isOpen={isHistoryOpen}
           onClose={() => setIsHistoryOpen(false)}
           playerId={playerId}
-          theme={currentTheme}
           onViewProfile={openPublicProfile}
         />
       </div>
