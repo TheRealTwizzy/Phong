@@ -16,6 +16,10 @@ import {
   unlockedBy,
   unlockedKeys,
   UNLOCKS,
+  DIFFICULTY_ORDER,
+  WINNING_SCORE_ORDER,
+  playableDifficulty,
+  playableWinningScore,
 } from '../src/achievements';
 import { AI_DIFFICULTIES } from '../src/rating';
 import type { AchievementBranch } from '../src/types';
@@ -491,5 +495,80 @@ describe('the tree gates the game', () => {
     expect(gate.gate?.level).toBe(10);
     expect(isUnlockable(gate.id, ['ai_pro'], { level: 9, tier: 'unranked' })).toBe(false);
     expect(isUnlockable(gate.id, ['ai_pro'], { level: 10, tier: 'unranked' })).toBe(true);
+  });
+});
+
+describe('a playable setting is never a locked one', () => {
+  // The bug this guards: the app shipped with Pro preselected, and Pro is
+  // locked until Rookie has been beaten. The menu drew it as locked and played
+  // it anyway; /api/match/record answered 403 DIFFICULTY_LOCKED, which the
+  // client treats as a verdict rather than a hiccup — so a new player's solo
+  // matches were dropped outright. No XP, no missions, no history.
+
+  it('opens the easiest rung of every ladder from the first match', () => {
+    // What makes the shipped defaults safe by construction: App.tsx takes them
+    // from the head of these ladders, so if the head is base-unlocked the
+    // default cannot be a locked option.
+    expect(hasUnlock([], 'difficulty', DIFFICULTY_ORDER[0])).toBe(true);
+    expect(hasUnlock([], 'winningScore', WINNING_SCORE_ORDER[0])).toBe(true);
+  });
+
+  it('never falls back to something harder, or to something still locked', () => {
+    // The contract, checked exhaustively rather than assumed: whatever the
+    // clamp hands back is (a) actually unlocked, (b) never further up the
+    // ladder than what was asked for, and (c) exactly what was asked for when
+    // that is already open. Handing back a HARDER option would recreate the
+    // original bug — a setting the server then refuses to record.
+    const sets: string[][] = [
+      [],
+      ['ai_rookie'],
+      ['ai_rookie', 'ai_pro'],
+      ['ai_rookie', 'ai_pro', 'ai_pro_10'],
+      ['first_win'],
+      ['first_win', 'veteran_10'],
+      // A deep rung without its parent. Not reachable by playing — gating is
+      // strict — but the clamp must not misbehave if it ever were.
+      ['veteran_10'],
+      ALL_ACHIEVEMENTS.map((a) => a.id),
+    ];
+
+    for (const earned of sets) {
+      for (const [index, wanted] of DIFFICULTY_ORDER.entries()) {
+        const got = playableDifficulty(earned, wanted);
+        expect(hasUnlock(earned, 'difficulty', got)).toBe(true);
+        expect(DIFFICULTY_ORDER.indexOf(got)).toBeLessThanOrEqual(index);
+        if (hasUnlock(earned, 'difficulty', wanted)) expect(got).toBe(wanted);
+      }
+      for (const [index, wanted] of WINNING_SCORE_ORDER.entries()) {
+        const got = playableWinningScore(earned, wanted);
+        expect(hasUnlock(earned, 'winningScore', got)).toBe(true);
+        expect(WINNING_SCORE_ORDER.indexOf(got as any)).toBeLessThanOrEqual(index);
+        if (hasUnlock(earned, 'winningScore', wanted)) expect(got).toBe(wanted);
+      }
+    }
+  });
+
+  it('clamps a difficulty the player has not earned down to one they have', () => {
+    // A brand-new profile, and the difficulty the app used to ship with.
+    expect(playableDifficulty([], 'pro')).toBe('rookie');
+    expect(playableDifficulty([], 'cyber')).toBe('rookie');
+    // Exactly the case a wipe creates: the device kept the setting, the
+    // server cleared the achievement that opened it.
+    expect(playableDifficulty(['ai_rookie'], 'cyber')).toBe('pro');
+  });
+
+  it('leaves a difficulty alone once it has actually been earned', () => {
+    expect(playableDifficulty(['ai_rookie'], 'pro')).toBe('pro');
+    expect(playableDifficulty(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'cyber')).toBe('cyber');
+    // Never promotes: asking for less than you own gives you what you asked.
+    expect(playableDifficulty(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'rookie')).toBe('rookie');
+  });
+
+  it('clamps the match length the same way', () => {
+    expect(playableWinningScore([], 10)).toBe(5);
+    expect(playableWinningScore([], 15)).toBe(5);
+    expect(playableWinningScore(['first_win'], 15)).toBe(10);
+    expect(playableWinningScore(['first_win'], 10)).toBe(10);
+    expect(playableWinningScore([], 3)).toBe(3);
   });
 });

@@ -43,6 +43,7 @@ import { START_MU, normalizeDifficulty } from './rating';
 import {
   DEFAULT_MATCH_RULES,
   DEFAULT_ROOM_CONFIG,
+  DEFAULT_WINNING_SCORE,
   MATCH_START_COUNTDOWN_SECONDS,
   duelMatchKey,
   normalizeRoomConfig,
@@ -75,6 +76,7 @@ import { TutorialModal } from './components/TutorialModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { PublicProfileModal } from './components/PublicProfileModal';
 import { isLinkableId } from './profileRules';
+import { DIFFICULTY_ORDER, playableDifficulty, playableWinningScore } from './achievements';
 import { TierBadge } from './components/TierBadge';
 import confetti from 'canvas-confetti';
 import { Trophy, RefreshCw, Home } from 'lucide-react';
@@ -91,8 +93,13 @@ const DEFAULT_SETTINGS: GameSettings = {
   tiltEnabled: false,
   showRadar: true,
   showTrails: true,
-  difficulty: 'pro',
-  winningScore: 5,
+  // Taken from the ladder rather than written out, so the shipped default is
+  // the easiest rung by construction and cannot drift into being a LOCKED one.
+  // It shipped as 'pro', which stays locked until Rookie has been beaten — so
+  // every solo match a new player played came back 403 DIFFICULTY_LOCKED and
+  // was thrown away, paying no XP, no missions and no history.
+  difficulty: DIFFICULTY_ORDER[0],
+  winningScore: DEFAULT_WINNING_SCORE,
   rules: DEFAULT_MATCH_RULES,
   theme: 'neon',
   language: 'en',
@@ -651,6 +658,26 @@ export default function App() {
     }, 500);
     return () => clearInterval(timer);
   }, [activeChatMessages]);
+
+  // Hold the match settings to what this profile has actually earned.
+  //
+  // Settings live on the device and the achievements that unlock them live on
+  // the server, so the two drift: a wipe clears the achievements while
+  // localStorage keeps the difficulty they opened, and the shipped default was
+  // itself a locked one. Either way the menu drew the option as locked and
+  // played it regardless, and every resulting solo match came back 403
+  // DIFFICULTY_LOCKED and was thrown away. Correcting the SETTING is what
+  // fixes it — refusing to record is the server being right.
+  useEffect(() => {
+    if (!profile) return;
+    const earned = profile.achievements || [];
+    setSettings((s) => {
+      const difficulty = playableDifficulty(earned, s.difficulty);
+      const winningScore = playableWinningScore(earned, s.winningScore);
+      if (difficulty === s.difficulty && winningScore === s.winningScore) return s;
+      return { ...s, difficulty, winningScore };
+    });
+  }, [profile?.achievements, profile?.id]);
 
   // Persist settings & sync audio volume engine
   useEffect(() => {
