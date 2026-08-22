@@ -2,10 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <!-- Pinch zoom stays enabled: locking it (maximum-scale/user-scalable)
-         strands players whose browser zoom or text size isn't 100%, and iOS
-         ignores the lock anyway. The canvas itself opts out via touch-none. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- The game presents at exactly device size, always. maximum-scale=1 is
+         what stops iOS Safari's auto-zoom when a sub-16px input is focused —
+         the page used to stay zoomed after typing a room code, so the match
+         started cropped. iOS still allows a deliberate pinch despite the cap
+         (it ignores it for user gestures since iOS 10); Android honors the
+         lock, which is the fixed presentation a court game wants, and its
+         "force enable zoom" accessibility setting still overrides it. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <meta name="theme-color" content="#090d16" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />

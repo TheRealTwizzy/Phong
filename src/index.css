@@ -4,6 +4,10 @@
   html, body, #root {
     width: 100%;
     height: 100%;
+    /* Track the VISIBLE viewport exactly. Plain 100% is the layout viewport,
+       which jumps when mobile browser chrome collapses or the keyboard opens
+       — the court would change size mid-session. dvh follows the real edge. */
+    height: 100dvh;
     margin: 0;
     padding: 0;
     overflow: hidden;

@@ -265,7 +265,7 @@ export const ProfileModal: React.FC<Props> = ({
                           setTempName(e.target.value);
                           setNameError(null);
                         }}
-                        className="bg-slate-800 border border-cyan-400/60 rounded-lg px-3 py-1 text-sm text-white font-bold focus:outline-none focus:ring-2 focus:ring-cyan-400 min-w-0"
+                        className="bg-slate-800 border border-cyan-400/60 rounded-lg px-3 py-1 text-base text-white font-bold focus:outline-none focus:ring-2 focus:ring-cyan-400 min-w-0"
                         autoFocus
                       />
                       <button
@@ -465,7 +465,7 @@ export const ProfileModal: React.FC<Props> = ({
                         onChange={(e) => setClaimCode(e.target.value.toUpperCase())}
                         placeholder="XXXX-XXXX"
                         maxLength={9}
-                        className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm font-mono tracking-widest text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/60"
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-base font-mono tracking-widest text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/60"
                       />
                       <button
                         id="btn-claim-profile"
