@@ -142,6 +142,52 @@ describe('GameDatabase', () => {
     expect(again.newAchievements.map((a) => a.id)).not.toContain('first_win');
   });
 
+  it('pays a match carrying a matchKey exactly once', () => {
+    // The same match legitimately arrives more than once: the relay records a
+    // duel for both seats, each phone POSTs its own copy, a failed POST is
+    // retried, and a queued one is replayed on the next load. Only the first
+    // may be paid.
+    init('p_once', 'OnceOnly');
+    const payload = match('p_once', { matchKey: 'duel:ABCD:1' });
+    const first = db.recordMatch(payload);
+    expect(first.alreadyRecorded).toBeFalsy();
+    expect(first.earnedXp).toBeGreaterThan(0);
+
+    const replay = db.recordMatch(payload);
+    expect(replay.alreadyRecorded).toBe(true);
+    // The replay is answered with what the first call paid, so a retrying
+    // client shows the player the same XP rather than a second, smaller award.
+    expect(replay.earnedXp).toBe(first.earnedXp);
+    expect(replay.newAchievements.map((a) => a.id)).toEqual(
+      first.newAchievements.map((a) => a.id)
+    );
+    // ...and the profile is the CURRENT one, not the snapshot from the first
+    // call: matches recorded since must still show.
+    expect(replay.profile.xp).toBe(db.getProfile('p_once').xp);
+
+    const p = db.getProfile('p_once');
+    expect(p.matchesPlayed).toBe(1);
+    expect(p.matchesWon).toBe(1);
+    expect(p.xp).toBe(first.profile.xp);
+  });
+
+  it('treats different matchKeys as different matches', () => {
+    init('p_keys', 'TwoKeys');
+    db.recordMatch(match('p_keys', { matchKey: 'duel:ABCD:1' }));
+    db.recordMatch(match('p_keys', { matchKey: 'duel:ABCD:2' }));
+    expect(db.getProfile('p_keys').matchesPlayed).toBe(2);
+  });
+
+  it('keys the dedupe per player, so one phone cannot suppress the other', () => {
+    init('p_key_a', 'KeyA');
+    init('p_key_b', 'KeyB');
+    const key = 'duel:WXYZ:1';
+    db.recordMatch(match('p_key_a', { matchKey: key }));
+    db.recordMatch(match('p_key_b', { matchKey: key, isWinner: false, playerScore: 3, opponentScore: 7 }));
+    expect(db.getProfile('p_key_a').matchesWon).toBe(1);
+    expect(db.getProfile('p_key_b').matchesLost).toBe(1);
+  });
+
   it('survives 50 rapid sequential match writes without losing updates', () => {
     init('p_burst', 'Burst');
     for (let i = 0; i < 50; i++) {

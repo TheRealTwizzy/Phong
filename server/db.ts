@@ -88,6 +88,13 @@ const WIPE_V3_KEY = 'wipe_v3';
 // would take turns wiping the database on every single start.
 const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY];
 
+/**
+ * How long a recorded match stays deduplicable. Long enough to cover a match
+ * parked on a device by an offline session and replayed on its next load;
+ * short enough that the table stays small.
+ */
+const RECORDED_MATCH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
 // Result of any operation that (re)names a profile. Optional fields rather
 // than a discriminated union — strictNullChecks is off in this repo, so
 // union narrowing wouldn't apply at the call sites.
@@ -365,6 +372,26 @@ class GameDatabase {
         xpAwarded INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (playerId, dayKey)
       );
+      -- One row per match actually paid out, so recording the same match
+      -- twice pays once. A duel is reported up to three times over — the
+      -- relay records it for both seats the moment the score decides it, and
+      -- each phone POSTs its own copy as the fallback for a relay that never
+      -- saw the match — and a queued match replayed from a device can arrive
+      -- days later. The PRIMARY KEY is the whole mechanism; the result column
+      -- holds the MatchEndResult that first call produced, replayed verbatim
+      -- to the ones that follow so every caller sees the same XP.
+      CREATE TABLE IF NOT EXISTS recorded_matches (
+        playerId TEXT NOT NULL,
+        matchKey TEXT NOT NULL,
+        recordedAt TEXT NOT NULL,
+        result TEXT NOT NULL,
+        PRIMARY KEY (playerId, matchKey)
+      );
+      -- Expiry runs on every recorded match, so it has to be a seek that finds
+      -- nothing rather than a scan of the whole fortnight. Recording a match
+      -- is the game's hot write; it was not going to pay for this.
+      CREATE INDEX IF NOT EXISTS idx_recorded_matches_at
+        ON recorded_matches (recordedAt);
     `);
   }
 
@@ -393,6 +420,7 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS daily_abandons');
       this.sql.exec('DROP TABLE IF EXISTS elite_completions');
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
+      this.sql.exec('DROP TABLE IF EXISTS recorded_matches');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -1253,6 +1281,16 @@ class GameDatabase {
     if (!profile.initializedAt) {
       throw new Error('PROFILE_NOT_INITIALIZED');
     }
+    // A match carries an identity now, and the same match can legitimately be
+    // reported more than once: the relay records a finished duel for both
+    // seats, each phone POSTs its own copy, a failed POST is retried, and a
+    // queued one is replayed on the next load. Paying only the first is what
+    // lets every one of those paths run without anybody being paid twice.
+    const matchKey = payload.matchKey ? String(payload.matchKey).slice(0, 120) : '';
+    if (matchKey) {
+      const seen = this.replayRecordedMatch(payload.playerId, matchKey, now);
+      if (seen) return seen;
+    }
     const prevLevel = profile.level;
     const isWin = payload.isWinner;
 
@@ -1501,21 +1539,7 @@ class GameDatabase {
       timestamp: new Date().toISOString(),
     };
 
-    this.sql.exec('BEGIN');
-    try {
-      this.upsertProfile(profile);
-      this.insertMatch(matchRecord);
-      // Keep only the most recent 500 matches (parity with the JSON store)
-      this.sql.exec(
-        'DELETE FROM matches WHERE rowid NOT IN (SELECT rowid FROM matches ORDER BY rowid DESC LIMIT 500)'
-      );
-      this.sql.exec('COMMIT');
-    } catch (e) {
-      this.sql.exec('ROLLBACK');
-      throw e;
-    }
-
-    return {
+    const result: MatchEndResult = {
       profile,
       earnedXp,
       leveledUp,
@@ -1527,6 +1551,84 @@ class GameDatabase {
       newAchievements,
       missions: this.getMissions(payload.playerId, now),
     };
+
+    this.sql.exec('BEGIN');
+    try {
+      this.upsertProfile(profile);
+      this.insertMatch(matchRecord);
+      // Keep only the most recent 500 matches (parity with the JSON store)
+      this.sql.exec(
+        'DELETE FROM matches WHERE rowid NOT IN (SELECT rowid FROM matches ORDER BY rowid DESC LIMIT 500)'
+      );
+      // Same transaction as the payout: a match is either paid and marked, or
+      // neither. Marked outside it, a crash between the two would leave the
+      // key claimed and the XP never awarded.
+      if (matchKey) this.stampRecordedMatch(payload.playerId, matchKey, result, now);
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+
+    return result;
+  }
+
+  /**
+   * The stored outcome of a match already recorded under `matchKey`, or null.
+   *
+   * The profile and today's missions are re-read live rather than replayed
+   * from the stored blob: the caller is showing the player where they stand
+   * NOW, and matches recorded since would make a frozen snapshot a lie. What
+   * IS replayed is what this particular match did — its XP, its level-up, its
+   * achievements — so a retry and the original agree.
+   */
+  private replayRecordedMatch(playerId: string, matchKey: string, now: Date): MatchEndResult | null {
+    const row = this.stmt('SELECT result FROM recorded_matches WHERE playerId = ? AND matchKey = ?')
+      .get(playerId, matchKey) as unknown as { result: string } | undefined;
+    if (!row) return null;
+    let stored: Partial<MatchEndResult>;
+    try {
+      stored = JSON.parse(row.result);
+    } catch {
+      stored = {};
+    }
+    return {
+      earnedXp: 0,
+      leveledUp: false,
+      winProbability: 0.5,
+      previousTier: null,
+      tier: null,
+      tierChanged: false,
+      ranked: false,
+      newAchievements: [],
+      ...stored,
+      profile: this.readProfile(playerId)!,
+      missions: this.getMissions(playerId, now),
+      alreadyRecorded: true,
+    };
+  }
+
+  /** Mark `matchKey` paid, keeping what it paid so a replay can be answered. */
+  private stampRecordedMatch(
+    playerId: string,
+    matchKey: string,
+    result: MatchEndResult,
+    now: Date
+  ): void {
+    // profile and missions are deliberately dropped: they are snapshots of the
+    // whole account, not of this match, and replayRecordedMatch re-reads them.
+    const { profile: _p, missions: _m, ...match } = result;
+    this.stmt(
+        `INSERT INTO recorded_matches (playerId, matchKey, recordedAt, result)
+         VALUES (?, ?, ?, ?) ON CONFLICT(playerId, matchKey) DO NOTHING`
+      )
+      .run(playerId, matchKey, now.toISOString(), JSON.stringify(match));
+    // Dedupe only has to outlive the paths that can replay a match: a retry,
+    // a relay record racing a client POST, and a queue parked on a device
+    // until its next load. A fortnight covers all three without the table
+    // growing for the life of the database.
+    const cutoff = new Date(now.getTime() - RECORDED_MATCH_TTL_MS).toISOString();
+    this.stmt('DELETE FROM recorded_matches WHERE recordedAt < ?').run(cutoff);
   }
 
   /**

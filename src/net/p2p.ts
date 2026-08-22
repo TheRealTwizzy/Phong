@@ -34,6 +34,14 @@ interface P2POptions {
   iceServers?: RTCIceServer[];
   /** The room's terms, as last broadcast by the relay. */
   config?: RoomMatchConfig;
+  /**
+   * Report the replica's match state back to the relay over the WebSocket.
+   * Nothing about a P2P match otherwise reaches the server, which left it
+   * believing every one of them was still 0-0 and never started — so it filed
+   * both players a 0-0 loss, could not tell an abandon from a finished match,
+   * and kept the room's settings editable mid-rally.
+   */
+  onMatchSync?: (sync: { matchSeq: number; p1Score: number; p2Score: number; maxRally: number }) => void;
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -54,6 +62,15 @@ export class P2PGameLink {
   private servingPlayer: 0 | 1 = 0;
   private rematchVotes: [boolean, boolean] = [false, false];
   private matchOver = false;
+  private rallyCount = 0;
+  private maxRallyInMatch = 0;
+  /**
+   * Which match of the room this is. Seeded from the relay's game_start and
+   * incremented locally for a rematch the peers agree between themselves —
+   * which the relay never runs startMatch for, so nothing else would tell the
+   * two matches apart when their results are reported.
+   */
+  private matchSeq = 0;
   // The room's terms still come from the relay — the lobby is always relayed,
   // and the config is fixed for the match once it starts. Held here so the
   // replicated rules end the match on the same number the server would.
@@ -134,11 +151,39 @@ export class P2PGameLink {
   }
 
   /** Reset replicated match state; call on every game_start. */
-  public resetMatchState(servingPlayer: 0 | 1): void {
+  public resetMatchState(servingPlayer: 0 | 1, matchSeq?: number): void {
     this.scores = [0, 0];
     this.servingPlayer = servingPlayer;
     this.rematchVotes = [false, false];
     this.matchOver = false;
+    this.rallyCount = 0;
+    this.maxRallyInMatch = 0;
+    // A relayed start names the match; a locally agreed rematch counts on.
+    this.matchSeq = matchSeq ?? this.matchSeq + 1;
+  }
+
+  /** Tell the relay where this match has got to. */
+  private syncToRelay(): void {
+    this.opts.onMatchSync?.({
+      matchSeq: this.matchSeq,
+      p1Score: this.scores[0],
+      p2Score: this.scores[1],
+      maxRally: this.maxRallyInMatch,
+    });
+  }
+
+  /**
+   * A ball over the net, from either side — the relay counts both, so the
+   * replica must too or the rally length the match is rated on would be half
+   * of what was actually played.
+   */
+  private countCrossing(): void {
+    this.rallyCount++;
+    if (this.rallyCount > this.maxRallyInMatch) this.maxRallyInMatch = this.rallyCount;
+    // The first crossing is what puts the match in play. Worth one message to
+    // the relay by itself: it is what makes a walk-out an abandon and what
+    // shuts the lobby's settings for the rest of the match.
+    if (this.rallyCount === 1) this.syncToRelay();
   }
 
   /**
@@ -168,6 +213,7 @@ export class P2PGameLink {
       msg.type === 'rematch_request'
     ) {
       this.gameChannel!.send(JSON.stringify(msg));
+      if (msg.type === 'ball_cross_net') this.countCrossing();
       if (msg.type === 'point_scored') this.applyPointScored(msg.scorer);
       if (msg.type === 'rematch_request') this.applyRematchVote(this.opts.myIndex);
       // Note: a rematch_request sent before the replica saw the final point is
@@ -224,6 +270,7 @@ export class P2PGameLink {
         break;
 
       case 'ball_cross_net':
+        this.countCrossing();
         this.opts.onMessage({ type: 'ball_incoming', ball: transformBallForOpponent(msg.ball) });
         break;
 
@@ -250,12 +297,16 @@ export class P2PGameLink {
   private applyPointScored(scorer: 'p1' | 'p2'): void {
     const scorerIndex = scorer === 'p1' ? 0 : 1;
     this.scores[scorerIndex]++;
+    this.rallyCount = 0;
     const nextServer: 0 | 1 = scorerIndex === 0 ? 1 : 0;
     this.servingPlayer = nextServer;
     if (this.scores[scorerIndex] >= this.config.winningScore) {
       this.matchOver = true;
       this.rematchVotes = [false, false];
     }
+    // Every point goes to the relay, the last one especially: that report is
+    // what has it record the finished duel onto both players' profiles.
+    this.syncToRelay();
     this.opts.onMessage({
       type: 'score_update',
       p1Score: this.scores[0],
@@ -274,7 +325,12 @@ export class P2PGameLink {
     if (this.rematchVotes[0] && this.rematchVotes[1]) {
       const nextServer: 0 | 1 = this.servingPlayer === 0 ? 1 : 0;
       this.resetMatchState(nextServer);
-      this.opts.onMessage({ type: 'game_start', servingPlayer: nextServer, config: this.config });
+      this.opts.onMessage({
+        type: 'game_start',
+        servingPlayer: nextServer,
+        config: this.config,
+        matchSeq: this.matchSeq,
+      });
     } else {
       this.opts.onMessage({ type: 'rematch_state', votes: [...this.rematchVotes] });
     }

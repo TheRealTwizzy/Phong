@@ -11,7 +11,7 @@ import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig } from './src/types';
-import { DEFAULT_ROOM_CONFIG, isRankedRules, normalizeRoomConfig } from './src/matchRules';
+import { DEFAULT_ROOM_CONFIG, duelMatchKey, isRankedRules, normalizeRoomConfig } from './src/matchRules';
 import { validateUsername } from './src/profileRules';
 import { Rating, winProbability } from './src/rating';
 
@@ -20,6 +20,13 @@ interface PlayerSession {
   playerId: string;
   playerName: string;
   playerIndex: 0 | 1;
+  /**
+   * The device id the cookie actually verified, or null for a socket that
+   * arrived without one. playerId falls back to a synthetic value so a room
+   * still works; this does not — the relay records a finished duel onto real
+   * profiles, and it must never invent one to do it.
+   */
+  deviceId: string | null;
 }
 
 interface Room {
@@ -55,6 +62,14 @@ interface Room {
    * ball over the net locks them.
    */
   inPlay: boolean;
+  /**
+   * Which match of this room is being played, counting from 1. A room outlives
+   * every match in it, so this is what tells one from the next — it is how a
+   * result reported late is matched to the match it came from instead of to
+   * whatever the room holds by then, and it is half of the key each match is
+   * recorded under (see duelMatchKey).
+   */
+  matchSeq: number;
   lastActive: number;
 }
 
@@ -77,9 +92,155 @@ function startMatch(room: Room, servingPlayer: 0 | 1): void {
   room.matchOver = false;
   room.inPlay = false;
   room.ready = [false, false];
+  room.matchSeq += 1;
   // The config rides along with every start: a phone can never begin a match
-  // on terms it has not been told, however it arrived in the room.
-  broadcast(room, { type: 'game_start', servingPlayer, config: room.config });
+  // on terms it has not been told, however it arrived in the room. So does the
+  // sequence number, so both phones can name the match they are playing when
+  // they report its result.
+  broadcast(room, {
+    type: 'game_start',
+    servingPlayer,
+    config: room.config,
+    matchSeq: room.matchSeq,
+  });
+}
+
+/** Whole number from an untrusted client field, held inside [lo, hi]. */
+function clampInt(value: unknown, lo: number, hi: number): number {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/**
+ * Fold a P2P duel's own account of itself back into the room.
+ *
+ * A P2P match scores over the DataChannel, so none of it passes through here:
+ * the relay saw a room that was still 0-0 and had never started. That was not
+ * merely a blind spot — /api/match/record cross-checks a duel against room
+ * state, so it overwrote every P2P result with 0-0 and filed BOTH players a
+ * loss, which is why a P2P win never counted toward "win a match".
+ *
+ * The report is absolute rather than a delta, and applied as a maximum, so a
+ * lost message heals on the next one and a duplicate changes nothing. Both
+ * peers send it and both agree — the replica in src/net/p2p.ts runs the relay's
+ * own scoring rules — so neither phone depends on the other's report arriving.
+ * It is no more trusted than a point_scored: gameplay is client-authoritative
+ * either way (see CLAUDE.md §5), and the scores are still held inside the
+ * room's own winning score.
+ */
+function applyMatchSync(
+  room: Room,
+  sync: { matchSeq: number; p1Score: number; p2Score: number; maxRally: number }
+): void {
+  // Nothing to sync before the host has started a match: the replica only
+  // reports from game_start onward, so a sync arriving in a lobby is noise.
+  if (room.matchSeq < 1) return;
+  const seq = Math.floor(Number(sync.matchSeq));
+  if (!Number.isFinite(seq) || seq < room.matchSeq) return;
+  // A match can only be superseded by one that follows a finished match —
+  // the same rule the relay applies to a rematch vote. Without it, a phone
+  // naming a match number out of thin air could blank a live room's score and
+  // take the result away from the other player.
+  if (seq > room.matchSeq && !room.matchOver) return;
+  if (seq > room.matchSeq) {
+    // The peers agreed a rematch between themselves, so the relay never ran
+    // startMatch for it. Adopt their numbering and start the match over here,
+    // or the new match's scores would read as a regression and be ignored.
+    room.matchSeq = seq;
+    room.scores = [0, 0];
+    room.rallyCount = 0;
+    room.maxRallyInMatch = 0;
+    room.matchOver = false;
+    room.rematchVotes = [false, false];
+    room.ready = [false, false];
+  }
+  if (room.matchOver) return;
+
+  const cap = room.config.winningScore;
+  room.scores = [
+    Math.max(room.scores[0], clampInt(sync.p1Score, 0, cap)),
+    Math.max(room.scores[1], clampInt(sync.p2Score, 0, cap)),
+  ];
+  room.maxRallyInMatch = Math.max(room.maxRallyInMatch, clampInt(sync.maxRally, 0, 100000));
+  room.inPlay = true;
+
+  if (room.scores[0] >= cap || room.scores[1] >= cap) {
+    room.matchOver = true;
+    room.rematchVotes = [false, false];
+    room.servingPlayer = room.scores[0] >= cap ? 1 : 0;
+    recordRoomMatch(room);
+  }
+}
+
+/**
+ * Write a decided duel onto BOTH players' profiles, from the score the relay
+ * owns, and hand each of them the result.
+ *
+ * A duel used to be recorded only by whichever phone POSTed it, so a result
+ * reached a profile only if that player's client survived the final point. A
+ * phone that locked, backgrounded, dropped its signal or was simply closed on
+ * the losing screen recorded nothing at all — the match had happened for one
+ * player and not for the other. The relay knows who won the moment the score
+ * decides it, so it is what writes the result; the clients' POSTs stay as the
+ * fallback for a match the relay never saw, and the shared match key means
+ * whichever of them arrives second is recognised rather than paid again.
+ */
+function recordRoomMatch(room: Room): void {
+  const seats: Array<0 | 1> = [0, 1];
+  // Both seats must still be occupied. A match decided after one player left
+  // is their abandon, already judged on the socket close; recording a result
+  // on top of it would charge the same departure twice.
+  if (!room.players[0] || !room.players[1]) return;
+
+  const matchKey = duelMatchKey(room.id, room.matchSeq);
+  const rules = room.config.rules;
+  for (const seat of seats) {
+    const me = room.players[seat];
+    const them = room.players[seat === 0 ? 1 : 0];
+    // No verified cookie, no profile to record onto — never invent one.
+    if (!me?.deviceId || !them) continue;
+
+    const mine = room.scores[seat];
+    const theirs = room.scores[seat === 0 ? 1 : 0];
+    const payload: MatchEndPayload = {
+      playerId: me.deviceId,
+      username: me.playerName,
+      opponentId: them.playerId,
+      opponentName: them.playerName,
+      playerScore: mine,
+      opponentScore: theirs,
+      maxRally: room.maxRallyInMatch,
+      mode: 'multiplayer',
+      isWinner: mine > theirs,
+      rules,
+      roomId: room.id,
+      matchSeq: room.matchSeq,
+      matchKey,
+    };
+
+    const context: RecordMatchContext = {
+      performanceWeight: performanceWeight(mine, theirs, room.maxRallyInMatch),
+    };
+    if (them.deviceId) {
+      const opp = db.getProfile(them.deviceId);
+      context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
+    }
+
+    try {
+      const result = db.recordMatch(payload, context);
+      if (me.ws.readyState === WebSocket.OPEN) {
+        me.ws.send(JSON.stringify({ type: 'match_recorded', matchKey, result }));
+      }
+    } catch (e: any) {
+      // An uninitialized profile can't hold a match (it has no identity yet);
+      // anything else is worth seeing in the log. Either way the other seat
+      // still gets its result.
+      if (e?.message !== 'PROFILE_NOT_INITIALIZED') {
+        console.error(`duel record failed for seat ${seat} in ${room.id}:`, e);
+      }
+    }
+  }
 }
 
 /**
@@ -353,7 +514,25 @@ async function startServer() {
       if (payload.mode === 'multiplayer') {
         const room = payload.roomId ? rooms.get(String(payload.roomId).toUpperCase()) : undefined;
         const seat = room?.players.findIndex((p) => p?.playerId === req.deviceId!) ?? -1;
-        if (room && seat >= 0) {
+        // Which match in that room this result is from. A client that doesn't
+        // say (an older bundle still open in a tab) means the one the room is
+        // on, which for a result being reported now is the one that just
+        // ended — so it is deduped against the relay's own record of it
+        // rather than paid a second time.
+        const claimed = Number(payload.matchSeq);
+        const seq = Number.isFinite(claimed) ? Math.floor(claimed) : room?.matchSeq;
+        // A duel is recorded under a key both the relay and this client can
+        // derive, so the relay's record of the same match (see recordRoomMatch)
+        // and this POST cannot pay it twice — whichever arrives second is
+        // answered with what the first one paid.
+        if (payload.roomId && seq !== undefined) {
+          payload.matchKey = duelMatchKey(String(payload.roomId), seq);
+        }
+        // The room may only speak for the match this result actually came
+        // from. A room is reused by every rematch and reset to 0-0 by each
+        // one, so an unqualified cross-check overwrote a slow or replayed POST
+        // with the NEXT match's blank score and filed it as a 0-0 loss.
+        if (room && seat >= 0 && room.matchSeq === seq) {
           const mine = room.scores[seat];
           const theirs = room.scores[seat === 0 ? 1 : 0];
           payload.playerScore = mine;
@@ -529,6 +708,7 @@ async function startServer() {
                 playerId: currentPlayerId,
                 playerName: hostName,
                 playerIndex: 0,
+                deviceId: cookieDeviceId || null,
               },
               null,
             ],
@@ -541,6 +721,7 @@ async function startServer() {
             matchOver: false,
             inPlay: false,
             ready: [false, false],
+            matchSeq: 0,
             lastActive: Date.now(),
           };
 
@@ -577,6 +758,7 @@ async function startServer() {
             playerId: currentPlayerId,
             playerName: guestName,
             playerIndex: 1,
+            deviceId: cookieDeviceId || null,
           };
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
@@ -713,7 +895,8 @@ async function startServer() {
           // Both phones end the match on this same number, so neither is left
           // playing on alone. Votes from before the final point are dropped:
           // a rematch is agreed about a match that is actually finished.
-          if (room.scores[scorerIndex] >= room.config.winningScore) {
+          const decided = room.scores[scorerIndex] >= room.config.winningScore;
+          if (decided) {
             room.matchOver = true;
             room.rematchVotes = [false, false];
           }
@@ -725,6 +908,18 @@ async function startServer() {
             reason: `Point to ${room.players[scorerIndex]?.playerName || `Player ${scorerIndex + 1}`}`,
             nextServer,
           });
+
+          // The score is out first — the DB write must never delay the point
+          // both phones are waiting on — and the result follows it.
+          if (decided) recordRoomMatch(room);
+        } else if (msg.type === 'match_sync' && currentRoomId && playerIndex !== null) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          room.lastActive = Date.now();
+          // Deliberately silent: in a P2P match both phones already have this
+          // score from each other, so echoing it back would be a second
+          // score_update arriving a round-trip late, mid-serve.
+          applyMatchSync(room, msg);
         } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
