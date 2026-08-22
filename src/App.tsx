@@ -72,10 +72,20 @@ import { StatsOverlay } from './components/StatsOverlay';
 import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
+import { SessionGuard } from './components/SessionGuard';
 import { TutorialModal } from './components/TutorialModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { PublicProfileModal } from './components/PublicProfileModal';
 import { isLinkableId } from './profileRules';
+import {
+  ClientSessionStatus,
+  endSession,
+  openSession,
+  probeSession,
+  refreshForBuild,
+  resetDevice,
+  watchSession,
+} from './net/session';
 import { DIFFICULTY_ORDER, playableDifficulty, playableWinningScore } from './achievements';
 import { TierBadge } from './components/TierBadge';
 import confetti from 'canvas-confetti';
@@ -192,6 +202,12 @@ export default function App() {
   // panel available, and the player opens it from the court when they want
   // it. Resets with every match so it never lingers from the last one.
   const [telemetryOpen, setTelemetryOpen] = useState<boolean>(false);
+
+  // Whether THIS device still holds the account. One account has exactly one
+  // live session; anything but 'active' means we must stop playing, because
+  // nothing played from here would be recorded.
+  const [sessionStatus, setSessionStatus] = useState<ClientSessionStatus>('connecting');
+  const [sessionBusy, setSessionBusy] = useState<boolean>(false);
 
   // 'menu' = out-of-match navigation hub; 'game' = a match is on court.
   const [screen, setScreen] = useState<'menu' | 'game'>('menu');
@@ -387,9 +403,53 @@ export default function App() {
     }
   }, []);
 
+  // Claim the account for this device before anything is allowed to act on
+  // it. Every write is gated on holding a live session, so this has to land
+  // first — and it returns the profile, which is why no separate fetch runs
+  // here any more.
+  const adoptSession = useCallback(async () => {
+    setSessionBusy(true);
+    const res = await openSession();
+    setSessionBusy(false);
+    setSessionStatus(res.status);
+    if (res.profile) {
+      setProfile(res.profile);
+      setPlayerId(res.profile.id);
+    }
+    return res.status;
+  }, []);
+
   useEffect(() => {
-    fetchProfile();
-  }, [fetchProfile]);
+    void adoptSession();
+  }, [adoptSession]);
+
+  // Hand the account back when the tab is genuinely going away, so the next
+  // device to open it is not told the account is "playing elsewhere" by a
+  // session nobody is sitting at. `persisted` filters out the bfcache case —
+  // on a phone, switching apps fires pagehide too, and that player is coming
+  // back to their match.
+  useEffect(() => {
+    const onPageHide = (e: PageTransitionEvent) => {
+      if (!e.persisted) endSession();
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, []);
+
+  // The one way off a released device: this browser gives up the identity it
+  // used to hold and starts over. Handing the old profile back instead would
+  // recreate the very two-devices-one-account state that let a whole match be
+  // played for nothing.
+  const startFreshIdentity = useCallback(async () => {
+    setSessionBusy(true);
+    const res = await resetDevice();
+    setSessionBusy(false);
+    setSessionStatus(res.status);
+    if (res.profile) {
+      setProfile(res.profile);
+      setPlayerId(res.profile.id);
+    }
+  }, []);
 
   // Refetch once the profile exists (the device cookie is set by then) and
   // again whenever the UTC day rolls over while the tab stays open.
@@ -520,6 +580,15 @@ export default function App() {
 
         const outcome = await postMatchRecord(payload);
         if (!outcome.ok) {
+          if (outcome.reason === 'evicted') {
+            // The account moved to another device while this match was being
+            // played. Nothing was saved and nothing can be — the guard says
+            // so in full, so a "couldn't save, we'll retry" toast would only
+            // promise something that is never going to happen.
+            const probe = await probeSession();
+            setSessionStatus(probe.status);
+            return;
+          }
           if (outcome.reason === 'unidentified') {
             // The server no longer recognises this device (its signing secret
             // was rotated by a reset or a deploy that lost the data volume).
@@ -1182,6 +1251,14 @@ export default function App() {
         applyMatchResult(msg.matchKey, msg.result);
         break;
 
+      case 'session_invalid':
+        // The relay refused this socket: the account is held by another
+        // device now. The heartbeat would reach the same conclusion within
+        // seconds, but the relay already knows, so act on it immediately —
+        // this is the duel half of the same eviction the REST routes enforce.
+        setSessionStatus(msg.status);
+        break;
+
       case 'opponent_left': {
         setMatchPrediction(null);
         setOpponentName(null);
@@ -1638,6 +1715,10 @@ export default function App() {
     return () => cancelAnimationFrame(animId);
   }, [winner, playerIndex]);
 
+  const resetMatchRef = useRef<() => void>(() => {});
+  const adoptSessionRef = useRef<() => Promise<ClientSessionStatus>>(async () => 'connecting');
+  adoptSessionRef.current = adoptSession;
+
   const resetMatch = () => {
     setStats((s) => ({
       ...s,
@@ -1719,8 +1800,51 @@ export default function App() {
     resetMatch();
   };
 
+  resetMatchRef.current = resetMatch;
+
   const handleLeaveRoomRef = useRef<() => void>(() => {});
   handleLeaveRoomRef.current = handleLeaveRoom;
+
+  // ---- Session ownership -------------------------------------------------
+  //
+  // One account, one live device. Losing the account mid-match used to be
+  // undetectable until the final whistle: a phone whose profile had been
+  // transferred to another device kept playing against a locally simulated
+  // AI, and only when it POSTed the finished match did the server answer that
+  // it had never heard of this player. A whole match, played for nothing, and
+  // an onboarding modal for a prize. The heartbeat is what turns that into a
+  // few seconds.
+  const stopPlayOnEviction = useCallback(() => {
+    if (modeRef.current === 'multiplayer') {
+      handleLeaveRoomRef.current();
+      return;
+    }
+    setScreen('menu');
+    resetMatchRef.current();
+  }, []);
+
+  useEffect(
+    () =>
+      watchSession(({ status, build }) => {
+        setSessionStatus(status);
+        if (status === 'stale_build' && build) {
+          // A new deployment is live. Reload onto it — the device cookie is
+          // untouched, so we come back to the same account on the new build.
+          // If we have already reloaded once for this build, re-minting the
+          // session is what carries us the rest of the way.
+          if (!refreshForBuild(build)) void adoptSessionRef.current();
+          return;
+        }
+        if (status === 'released' || status === 'superseded') {
+          stopPlayOnEviction();
+          return;
+        }
+        // Nobody is holding the account (first contact, or a session we ended
+        // ourselves). Take it back without troubling the player.
+        if (status === 'none') void adoptSessionRef.current();
+      }),
+    [stopPlayOnEviction]
+  );
 
   const currentTheme: ThemeConfig = THEMES[settings.theme] || THEMES.neon;
   const missionsSummary = getMissionsStatusSummary(missions);
@@ -1730,6 +1854,13 @@ export default function App() {
 
   return (
     <MobileGatekeeper language={currentLanguage}>
+      <SessionGuard
+        status={sessionStatus}
+        busy={sessionBusy}
+        language={currentLanguage}
+        onAdopt={() => void adoptSession()}
+        onStartFresh={() => void startFreshIdentity()}
+      >
       <div
         id="app-root-container"
         className="relative w-full h-full overflow-hidden flex flex-col font-sans select-none"
@@ -2237,6 +2368,7 @@ export default function App() {
           onViewProfile={openPublicProfile}
         />
       </div>
+      </SessionGuard>
     </MobileGatekeeper>
   );
 }

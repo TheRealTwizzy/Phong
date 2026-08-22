@@ -487,5 +487,31 @@ export type WSServerMessage =
   // one phone never manages to POST it.
   | { type: 'match_recorded'; matchKey: string; result: MatchEndResult }
   | { type: 'opponent_left' }
+  // The relay refused this socket because the account is not held by this
+  // session any more (transferred to another device, displaced by a newer
+  // load, or minted under a previous deployment). Sent immediately before the
+  // close, so the client can act on the reason rather than on a bare 1006.
+  | { type: 'session_invalid'; status: SessionStatus; build: string }
   | { type: 'pong'; timestamp: number }
   | { type: 'error'; message: string };
+
+/**
+ * Which device is holding an account right now. One account has exactly one
+ * live session; every other device that presents its cookie is told which of
+ * these it is instead of being quietly allowed to keep playing.
+ *
+ *  - `active`      this session owns the account
+ *  - `none`        no session yet on this device; mint one
+ *  - `released`    this device transferred its account away and holds nothing
+ *  - `superseded`  a newer load elsewhere took the account over
+ *  - `stale_build` minted by an earlier deployment; refresh onto the new one
+ */
+export type SessionStatus = 'active' | 'none' | 'released' | 'superseded' | 'stale_build';
+
+/** What GET /api/session answers. The client polls it while it plays. */
+export interface SessionState {
+  status: SessionStatus;
+  build: string;
+  deviceId?: string;
+  released?: boolean;
+}

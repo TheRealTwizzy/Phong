@@ -304,7 +304,9 @@ class GameDatabase {
         rankTitle TEXT,
         recoveryCode TEXT,
         initializedAt TEXT,
-        usernameChangedAt TEXT
+        usernameChangedAt TEXT,
+        activeSessionId TEXT,
+        activeSessionAt TEXT
       );
       CREATE TABLE IF NOT EXISTS matches (
         id TEXT PRIMARY KEY,
@@ -412,6 +414,18 @@ class GameDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_recent_missions_player
         ON recent_missions (playerId, tier, seq DESC);
+      -- Devices that USED to hold a profile and no longer do, because the
+      -- profile was claimed onto another device. Permanent and tiny: one row
+      -- per transfer. It exists because without it a retired device id is
+      -- indistinguishable from a browser the server has never met, and
+      -- getProfile mints a fresh profile for exactly that case — so the
+      -- device that had just handed its account away was quietly issued a
+      -- new, empty one and allowed to play a full match under it.
+      CREATE TABLE IF NOT EXISTS released_devices (
+        deviceId TEXT PRIMARY KEY,
+        movedToPlayerId TEXT NOT NULL,
+        releasedAt TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS recorded_matches (
         playerId TEXT NOT NULL,
         matchKey TEXT NOT NULL,
@@ -453,6 +467,7 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS elite_completions');
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DROP TABLE IF EXISTS recorded_matches');
+      this.sql.exec('DROP TABLE IF EXISTS released_devices');
       this.sql.exec('DROP TABLE IF EXISTS recent_missions');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
@@ -501,6 +516,9 @@ class GameDatabase {
     addColumn('proWins', 'proWins INTEGER NOT NULL DEFAULT 0');
     addColumn('cyberWins', 'cyberWins INTEGER NOT NULL DEFAULT 0');
     addColumn('abandons', 'abandons INTEGER NOT NULL DEFAULT 0');
+    // One account, one live session. Which one is recorded here.
+    addColumn('activeSessionId', 'activeSessionId TEXT');
+    addColumn('activeSessionAt', 'activeSessionAt TEXT');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
     // Uniqueness is case-insensitive and applies to chosen names only:
     // uninitialized rows keep their Paddle-XXXX placeholders outside the
@@ -1895,13 +1913,68 @@ class GameDatabase {
     this.stmt('DELETE FROM recorded_matches WHERE recordedAt < ?').run(cutoff);
   }
 
+  // ---- Device sessions ---------------------------------------------------
+  //
+  // An account is held by exactly one session at a time. Anything else was
+  // the exploit: two devices, one account, two matches at once, and whichever
+  // of them was no longer the owner finding out only when its finished match
+  // was refused.
+
+  /** The session id that currently owns `playerId`, or null if none does. */
+  public activeSessionId(playerId: string): string | null {
+    const row = this.stmt('SELECT activeSessionId FROM players WHERE id = ?').get(playerId) as
+      | { activeSessionId: string | null }
+      | undefined;
+    return row?.activeSessionId || null;
+  }
+
+  /**
+   * Hand `playerId` to `sessionId`, displacing whoever held it. The newest
+   * load wins deliberately: the player is at the device they just opened, so
+   * that is the one that should keep playing, and the other learns it has been
+   * displaced at its next heartbeat rather than at the end of its match.
+   */
+  public adoptSession(playerId: string, sessionId: string, now: Date = new Date()): void {
+    this.stmt('UPDATE players SET activeSessionId = ?, activeSessionAt = ? WHERE id = ?')
+      .run(sessionId, now.toISOString(), playerId);
+  }
+
+  /** Give up ownership, if this session is the one holding it. */
+  public endSession(playerId: string, sessionId: string): void {
+    this.stmt('UPDATE players SET activeSessionId = NULL WHERE id = ? AND activeSessionId = ?')
+      .run(playerId, sessionId);
+  }
+
+  /**
+   * What happened to a device that no longer resolves to a profile: null if
+   * the server has simply never seen it, or the transfer that retired it.
+   * The difference matters — the first is a new player, the second is a
+   * player whose account is alive and well on another device, and telling
+   * them apart is what lets the second be told so instead of silently
+   * re-minted as a stranger.
+   */
+  public releasedDevice(deviceId: string): { movedToPlayerId: string; releasedAt: string } | null {
+    const row = this.stmt('SELECT movedToPlayerId, releasedAt FROM released_devices WHERE deviceId = ?')
+      .get(deviceId) as { movedToPlayerId: string; releasedAt: string } | undefined;
+    return row || null;
+  }
+
+  /** Forget a release, because this device holds a live account again. */
+  public clearDeviceRelease(deviceId: string): void {
+    this.stmt('DELETE FROM released_devices WHERE deviceId = ?').run(deviceId);
+  }
+
   /**
    * Transfer the profile owning `code` to `newDeviceId`. The recovery code
    * rotates on use, the old device id stops resolving to anything, and any
    * throwaway profile the claiming device already had is deleted. Returns
    * null when the code matches nothing.
    */
-  public claimProfileByCode(code: string, newDeviceId: string): PlayerProfile | null {
+  public claimProfileByCode(
+    code: string,
+    newDeviceId: string,
+    claimingSessionId: string | null = null
+  ): PlayerProfile | null {
     const canonical = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     const formatted = canonical.length === 8 ? `${canonical.slice(0, 4)}-${canonical.slice(4)}` : code.trim().toUpperCase();
     const row = this.stmt('SELECT * FROM players WHERE recoveryCode = ?').get(formatted) as unknown as
@@ -1910,11 +1983,28 @@ class GameDatabase {
     if (!row) return null;
     if (row.id === newDeviceId) return this.readProfile(row.id);
 
+    const now = new Date().toISOString();
     this.sql.exec('BEGIN');
     try {
       this.stmt('DELETE FROM players WHERE id = ?').run(newDeviceId);
-      this.stmt('UPDATE players SET id = ?, recoveryCode = ?, lastActive = ? WHERE id = ?')
-        .run(newDeviceId, this.newRecoveryCode(), new Date().toISOString(), row.id);
+      // The claiming session takes ownership in the same breath as the
+      // profile. Without this the row would arrive still naming the OLD
+      // device's session as its owner, and the device that just claimed the
+      // account would be locked out of it by the one it took it from.
+      this.stmt(
+          `UPDATE players
+              SET id = ?, recoveryCode = ?, lastActive = ?,
+                  activeSessionId = ?, activeSessionAt = ?
+            WHERE id = ?`
+        )
+        .run(newDeviceId, this.newRecoveryCode(), now, claimingSessionId, now, row.id);
+      // The device left behind holds nothing now, and must be able to be TOLD
+      // that rather than being handed a fresh profile the next time it asks.
+      this.stmt('INSERT OR REPLACE INTO released_devices (deviceId, movedToPlayerId, releasedAt) VALUES (?, ?, ?)')
+        .run(row.id, newDeviceId, now);
+      // ...and this device holds one again, so whatever it gave up earlier is
+      // no longer true of it.
+      this.stmt('DELETE FROM released_devices WHERE deviceId = ?').run(newDeviceId);
       this.stmt('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, row.id);
       this.stmt('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, row.id);
       this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, row.id);

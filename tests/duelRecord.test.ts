@@ -91,12 +91,27 @@ interface Device {
   username: string;
 }
 
-/** A browser: its own cookie jar, its own profile, onboarded. */
+/** Collect Set-Cookie into a jar, keeping the newest value of each name. */
+function mergeCookies(jar: string, res: Response): string {
+  const current = new Map<string, string>();
+  for (const pair of jar.split('; ').filter(Boolean)) {
+    current.set(pair.slice(0, pair.indexOf('=')), pair);
+  }
+  for (const raw of res.headers.getSetCookie?.() ?? []) {
+    const pair = raw.split(';')[0];
+    current.set(pair.slice(0, pair.indexOf('=')), pair);
+  }
+  return [...current.values()].join('; ');
+}
+
+/**
+ * A browser: its own cookie jar, its own profile, onboarded. Opening a
+ * session is part of being a browser now — an account is held by one device
+ * at a time, and every write is gated on holding it.
+ */
 async function newDevice(username: string): Promise<Device> {
-  const first = await fetch(`${base}/api/profile/me`);
-  const cookie = (first.headers.getSetCookie?.() ?? [])
-    .map((c) => c.split(';')[0])
-    .join('; ');
+  const first = await fetch(`${base}/api/session`, { method: 'POST' });
+  const cookie = mergeCookies('', first);
   const res = await fetch(`${base}/api/profile/initialize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', cookie },

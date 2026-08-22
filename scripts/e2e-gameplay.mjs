@@ -238,28 +238,53 @@ const guest = await newPage();
   await g2.context().close();
 }
 
-// ---- Scenario 4: desktop viewports get the playable phone frame, never a wall ----
+// ---- Scenario 4: desktop and tablet are gated to a phone, at any window size ----
 {
+  // The reported bypass was that the old gate keyed on VIEWPORT SIZE, so
+  // narrowing a desktop window walked through it and the game was playable on
+  // a desktop browser. The gate now reads the platform, so every one of these
+  // window sizes must land on the same wall.
   for (const vp of [{ width: 1280, height: 900, label: 'desktop 100%' },
                     { width: 2400, height: 1400, label: 'desktop zoomed-out' },
-                    { width: 800, height: 600, label: 'small desktop window' }]) {
+                    { width: 800, height: 600, label: 'small desktop window' },
+                    { width: 420, height: 900, label: 'desktop narrowed to phone width' }]) {
     const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
     const page = await ctx.newPage();
     page.on('dialog', (d) => d.dismiss().catch(() => {}));
     await page.goto(BASE, { waitUntil: 'networkidle' });
-    const frame = await page.$('#phone-frame');
-    if (!frame) fail(`${vp.label}: no #phone-frame rendered`);
-    const wall = await page.$('#simulate-smartphone-btn');
-    if (wall) fail(`${vp.label}: lock screen still present`);
-    await onboard(page, 'Frame');
-    await page.waitForSelector('#main-menu-screen', { timeout: 5000 }).catch(() => fail(`${vp.label}: main menu missing`));
-    // The menu must be interactable without any zooming
-    await page.waitForSelector('#menu-mode-multiplayer', { timeout: 5000 }).catch(() => fail(`${vp.label}: multiplayer card missing`));
-    const box = await (await page.$('#menu-mode-multiplayer')).boundingBox();
-    if (!box || box.width < 20) fail(`${vp.label}: multiplayer card not reasonably sized (${box && box.width}px)`);
-    await page.click('#menu-mode-multiplayer');
-    await page.waitForSelector('#btn-create-room', { timeout: 5000 }).catch(() => fail(`${vp.label}: lobby did not open`));
-    console.log(`scenario 4 OK — ${vp.label}: framed, playable, menu at full size`);
+
+    const gate = await page.waitForSelector('#device-gate', { timeout: 5000 })
+      .catch(() => fail(`${vp.label}: desktop was not gated`));
+    if ((await gate.getAttribute('data-device')) !== 'desktop') {
+      fail(`${vp.label}: gated as "${await gate.getAttribute('data-device')}", expected desktop`);
+    }
+    // Nothing playable behind it: no menu, no onboarding, no court.
+    if (await page.$('#main-menu-screen')) fail(`${vp.label}: main menu rendered behind the gate`);
+    if (await page.$('#onboarding-modal-overlay')) fail(`${vp.label}: onboarding rendered behind the gate`);
+
+    // The QR is generated in-page — no request to any image host — and is a
+    // vector, so it is sharp at whatever size the panel gives it.
+    const qr = await page.$('#device-gate-qr');
+    if (!qr) fail(`${vp.label}: no QR code on the gate`);
+    const paths = await page.$eval('#device-gate-qr path', (el) => el.getAttribute('d')?.length || 0);
+    if (paths < 200) fail(`${vp.label}: QR path looks empty (${paths} chars)`);
+    const box = await qr.boundingBox();
+    if (!box || box.width < 180) fail(`${vp.label}: QR rendered too small (${box && box.width}px)`);
+    console.log(`scenario 4 OK — ${vp.label}: gated, QR ${Math.round(box.width)}px`);
+    await ctx.close();
+  }
+
+  // A tablet is turned away too, and says so in its own words.
+  const iPad = devices['iPad Pro 11'] || devices['iPad (gen 7)'];
+  if (iPad) {
+    const ctx = await browser.newContext({ ...iPad });
+    const page = await ctx.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    const gate = await page.waitForSelector('#device-gate', { timeout: 5000 })
+      .catch(() => fail('tablet was not gated'));
+    const kind = await gate.getAttribute('data-device');
+    if (kind !== 'tablet') fail(`tablet gated as "${kind}"`);
+    console.log('scenario 4 OK — tablet gated as tablet');
     await ctx.close();
   }
 }
@@ -315,16 +340,38 @@ const guest = await newPage();
   if (profB2.recoveryCode === profA1.recoveryCode) fail('recovery code did not rotate on use');
   if (!profB2.initialized) fail('claimed profile lost its initialized state');
 
-  // The old device unlinks: same device id, but a brand-new profile row
-  // that must onboard again
+  // The device left behind is TOLD, and is walled off until it acknowledges.
+  // It used to be handed a brand-new profile silently, which is what let a
+  // transferred-away phone play a whole match before finding out at the final
+  // whistle that it had been a guest the entire time.
   await a.reload({ waitUntil: 'networkidle' });
+  const guard = await a.waitForSelector('#session-guard-overlay', { timeout: 8000 })
+    .catch(() => fail('released device was not walled off after the transfer'));
+  if ((await guard.getAttribute('data-session-status')) !== 'released') {
+    fail(`released device shows "${await guard.getAttribute('data-session-status')}"`);
+  }
+  if (await a.$('#main-menu-screen')) fail('released device could still reach the menu');
+  const releasedRead = await a.evaluate(async () => {
+    const r = await fetch('/api/profile/me');
+    return { status: r.status, body: await r.json() };
+  });
+  if (releasedRead.status !== 409 || releasedRead.body.error !== 'DEVICE_RELEASED') {
+    fail(`released device still resolves a profile: ${JSON.stringify(releasedRead)}`);
+  }
+
+  // Its only way forward is to start over as a NEW player — never to be
+  // handed back the account it gave away.
+  await a.click('#btn-session-action');
+  await a.waitForSelector('#onboarding-modal-overlay', { timeout: 8000 })
+    .catch(() => fail('starting fresh did not re-open onboarding'));
   const profA3 = await me(a);
+  if (profA3.id === profA1.id) fail('fresh start kept the released device id');
   if (profA3.createdAt === profA1.createdAt) fail('old device still holds the moved profile');
   if (profA3.recoveryCode === profA1.recoveryCode || profA3.recoveryCode === profB2.recoveryCode)
     fail('fresh profile did not get its own recovery code');
   if (profA3.matchesPlayed !== 0) fail('old device profile not fresh');
   if (profA3.initialized) fail('old device fresh profile should be uninitialized');
-  console.log('scenario 5b OK — recovery code transfers the profile and rotates');
+  console.log('scenario 5b OK — transfer moves the profile, walls off the old device, rotates the code');
 
   await ctxA.close();
   await ctxB.close();

@@ -1,4 +1,5 @@
 import { MatchEndPayload, MatchEndResult } from '../types';
+import { openSession } from './session';
 
 // Recording a finished match used to be fire-and-forget: the response status
 // was never checked, so a 403, a 500, or a dropped connection left the player
@@ -54,6 +55,19 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
     if (res.status === 403 && code === 'PROFILE_NOT_INITIALIZED') {
       throw Object.assign(new Error(code), { unidentified: true });
     }
+    // This device no longer holds the account: it handed it to another device,
+    // or a newer load elsewhere took it over. The match is NOT queued — the
+    // profile it was played under is not ours any more, and replaying it later
+    // would credit whatever fresh identity this browser ends up with for a
+    // match somebody else's account played.
+    if (code === 'DEVICE_RELEASED' || code === 'SESSION_SUPERSEDED') {
+      throw Object.assign(new Error(code), { evicted: true });
+    }
+    // We simply have no live session — first contact, or one retired by a
+    // deployment. That is recoverable in place: mint a new one and try again.
+    if (code === 'SESSION_REQUIRED' || code === 'SESSION_STALE_BUILD') {
+      throw Object.assign(new Error(code), { needsSession: true });
+    }
     // Any other 4xx is a verdict, not a hiccup: replaying it fails identically.
     const permanent = res.status >= 400 && res.status < 500;
     throw Object.assign(new Error(`record failed: ${res.status}`), { permanent });
@@ -77,9 +91,10 @@ export interface RecordOutcome {
    * Why it did not land:
    *  - 'queued'       parked on the device; it will be replayed
    *  - 'unidentified' the server doesn't know this device; re-onboard needed
+   *  - 'evicted'      the account moved on; this match belongs to nobody here
    *  - 'rejected'     refused outright; replaying would fail identically
    */
-  reason?: 'queued' | 'unidentified' | 'rejected';
+  reason?: 'queued' | 'unidentified' | 'evicted' | 'rejected';
 }
 
 /**
@@ -97,9 +112,19 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
         writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
         return { ok: false, reason: 'unidentified' };
       }
+      if (e?.evicted) {
+        // Deliberately dropped rather than queued: see attempt().
+        console.warn('Match discarded — this device no longer holds the account:', e.message);
+        return { ok: false, reason: 'evicted' };
+      }
       if (e?.permanent) {
         console.error('Match rejected by the server:', e.message);
         return { ok: false, reason: 'rejected' };
+      }
+      if (e?.needsSession && tryIndex === 0) {
+        // Re-mint in place; the second pass then carries a live session.
+        await openSession();
+        continue;
       }
       if (tryIndex === 0) await sleep(RETRY_DELAY_MS);
     }
@@ -138,8 +163,16 @@ async function runFlush(): Promise<number> {
       await attempt(item.payload);
       recovered++;
     } catch (e: any) {
-      // Keep anything that might still land; drop only outright refusals.
-      if (!e?.permanent) stillPending.push(item);
+      if (e?.needsSession) {
+        // No live session yet — this queue is flushed on load, which can beat
+        // the session being minted. Keep everything and try the next time.
+        await openSession();
+        stillPending.push(item);
+        continue;
+      }
+      // Keep anything that might still land; drop outright refusals, and
+      // anything played under an account this device no longer holds.
+      if (!e?.permanent && !e?.evicted) stillPending.push(item);
     }
   }
   writeQueue(stillPending);
