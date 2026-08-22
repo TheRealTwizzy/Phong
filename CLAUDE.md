@@ -10,7 +10,7 @@ This document is the working guide to **Phong**, an arcade sports web app with a
 
 - **The Net Boundary**: the glowing top edge of the player's screen is the net.
 - **Cross-Net Jump**: when the ball exits through the net, it leaves the player's screen and appears on the opponent's, travelling downward.
-- **Opponent Radar**: a mini radar tracks the opponent's paddle and the ball while it is on their half.
+- **Opponent Radar**: a mini radar tracks the opponent's paddle and the ball while it is on their half. Solo reads the locally simulated half; a duel reads what the opponent's phone streams (`paddle_move` + `ball_pos`), so the sonar works identically in both.
 - **Physical 2-Phone Duel**: two phones placed top-to-top, connected by a 4-letter room code over WebSockets; the ball physically transitions between screens.
 - **Solo AI**: an adaptive AI opponent (Rookie / Pro / Cyber) on the hidden half. Each difficulty is a *rating*, not a fixed parameter set, and slides part-way toward the player's own skill — see §7.
 - **Practice Wall**: fully solo drill mode — no opponent exists and the ball never leaves the player's screen; the net line acts as a *return line* that bounces every ball back. HUD shows current/best return streak. Records no match and moves no rating, but banks thin streak-scaled XP on exit (`practiceXp`, server-computed, capped per UTC day) so every mode is progression.
@@ -133,6 +133,7 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 | `player_ready` | `ready` | The lobby handshake: the guest readies (and can unready) |
 | `start_match` | — | Host-only; refused until the guest has readied |
 | `paddle_move` | `x` | Relay paddle position (sent throttled from the game loop) |
+| `ball_pos` | `x`, `y` | Live ball stream (~20 Hz) for the opponent's sonar, in the sender's frame; relayed, never stored |
 | `ball_cross_net` | `ball {x,vx,vy,spin,speedMultiplier}` | Ball left this screen; server transforms & forwards |
 | `point_scored` | `scorer: 'p1'\|'p2'` | Report a point; server owns the score |
 | `quick_chat` | `text`, `senderName?` | Chat bubble (server caps at 100 chars) |
@@ -152,6 +153,7 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 | `ready_state` | `ready: [bool, bool]` | Lobby readiness, broadcast on every change |
 | `game_start` | `servingPlayer`, `config` | Match (re)start — clients fully reset on this |
 | `opponent_paddle` | `x` | Pre-mirrored (`1 - x`) opponent paddle |
+| `opponent_ball` | `x`, `y` | Relayed sonar sample in the SENDER's frame — the radar applies the mirror itself |
 | `ball_incoming` | `ball` | Post-transform ball; receiving client takes ownership |
 | `score_update` | `p1Score`, `p2Score`, `reason`, `nextServer` | Authoritative score |
 | `rematch_state` | `votes: [bool, bool]` | Rematch votes so the UI can show "waiting" |

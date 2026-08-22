@@ -151,7 +151,7 @@ export class P2PGameLink {
   public sendGame(msg: WSClientMessage): boolean {
     if (!this.isOpen) return false;
 
-    if (msg.type === 'paddle_move') {
+    if (msg.type === 'paddle_move' || msg.type === 'ball_pos') {
       if (this.fastChannel?.readyState === 'open') {
         this.fastChannel.send(JSON.stringify(msg));
         return true;
@@ -211,6 +211,16 @@ export class P2PGameLink {
     switch (msg.type) {
       case 'paddle_move':
         this.opts.onMessage({ type: 'opponent_paddle', x: 1 - msg.x });
+        break;
+
+      case 'ball_pos':
+        // Sonar telemetry, forwarded in the sender's frame like the relay
+        // does — the radar applies the head-to-head mirror itself.
+        this.opts.onMessage({
+          type: 'opponent_ball',
+          x: Math.max(0, Math.min(1, msg.x)),
+          y: Math.max(0, Math.min(1, msg.y)),
+        });
         break;
 
       case 'ball_cross_net':

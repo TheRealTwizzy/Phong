@@ -20,6 +20,10 @@ interface RadarPreviewProps {
   paddleWidthRatio: number;
   theme: ThemeConfig;
   active: boolean;
+  /** Tailwind top-* class. A duel passes a lower slot: the P2P/RELAY link
+      badge owns the top-right corner there, and the two never coexisted
+      before the sonar worked in PvP. */
+  topClass?: string;
 }
 
 export const RadarPreview: React.FC<RadarPreviewProps> = ({
@@ -28,6 +32,7 @@ export const RadarPreview: React.FC<RadarPreviewProps> = ({
   paddleWidthRatio,
   theme,
   active,
+  topClass = 'top-14',
 }) => {
   const boxEl = useRef<HTMLDivElement>(null);
   const ballEl = useRef<HTMLDivElement>(null);
@@ -68,7 +73,7 @@ export const RadarPreview: React.FC<RadarPreviewProps> = ({
     <div
       id="radar-preview-container"
       ref={boxEl}
-      className="absolute top-14 right-3 z-20 flex flex-col items-center p-2 rounded-xl backdrop-blur-md border shadow-lg pointer-events-none"
+      className={`absolute ${topClass} right-3 z-20 flex flex-col items-center p-2 rounded-xl backdrop-blur-md border shadow-lg pointer-events-none`}
       style={{
         backgroundColor: 'rgba(10, 15, 25, 0.75)',
         borderColor: theme.accentColor + '40',
@@ -100,6 +105,7 @@ export const RadarPreview: React.FC<RadarPreviewProps> = ({
         />
 
         <div
+          id="radar-opp-paddle"
           ref={paddleEl}
           className="absolute top-2 h-1.5 rounded-full shadow-sm"
           style={{
@@ -110,6 +116,7 @@ export const RadarPreview: React.FC<RadarPreviewProps> = ({
         />
 
         <div
+          id="radar-opp-ball"
           ref={ballEl}
           className="absolute w-2.5 h-2.5 rounded-full -translate-x-1/2 -translate-y-1/2 shadow-sm"
           style={{

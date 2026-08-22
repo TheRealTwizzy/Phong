@@ -431,6 +431,7 @@ export type WSClientMessage =
   | { type: 'player_ready'; ready: boolean }
   | { type: 'start_match' }
   | { type: 'paddle_move'; x: number }
+  | { type: 'ball_pos'; x: number; y: number }
   | { type: 'ball_cross_net'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'point_scored'; scorer: 'p1' | 'p2' }
   | { type: 'quick_chat'; text: string; senderName?: string }
@@ -444,6 +445,7 @@ export type WSServerMessage =
   | { type: 'room_joined'; roomId: string; playerIndex: 0 | 1; opponentName: string; opponentId: string }
   | { type: 'opponent_joined'; opponentName: string; opponentId: string }
   | { type: 'opponent_paddle'; x: number }
+  | { type: 'opponent_ball'; x: number; y: number }
   | { type: 'ball_incoming'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'quick_chat'; text: string; senderName: string; senderIdx: number }
   | { type: 'room_config'; config: RoomMatchConfig }

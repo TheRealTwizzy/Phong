@@ -652,6 +652,25 @@ async function startServer() {
               })
             );
           }
+        } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex !== null) {
+          // The sonar's ball feed: each phone streams its OWN half's ball at
+          // ~15Hz so the other side's radar has something real to draw — a
+          // duel has no local simulation of the opponent's court. Forwarded
+          // in the SENDER's frame (the radar mirrors, exactly as it does for
+          // the solo AI's half), clamped, and never stored: pure telemetry.
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const opponent = room.players[oppIdx];
+          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
+            opponent.ws.send(
+              JSON.stringify({
+                type: 'opponent_ball',
+                x: Math.max(0, Math.min(1, Number(msg.x) || 0)),
+                y: Math.max(0, Math.min(1, Number(msg.y) || 0)),
+              })
+            );
+          }
         } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
