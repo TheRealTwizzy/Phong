@@ -1057,6 +1057,13 @@ export default function App() {
 
       case 'room_joined':
         joinInFlightRef.current = false;
+        // Holding a seat means the lobby is the right surface until the match
+        // starts, so a seat granted while the lobby is shut reopens it. The
+        // player can dismiss the lobby in the moment between asking for a seat
+        // and being given one, and this case then put them on a live court
+        // with no Ready control — holding the room while the host waited for a
+        // readiness they had no way to signal.
+        setIsMultiplayerOpen(true);
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;

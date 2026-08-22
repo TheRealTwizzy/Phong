@@ -33,6 +33,7 @@ const SUITES = [
   { name: 'elite', ownsServer: false },
   { name: 'duel', ownsServer: false },
   { name: 'invite', ownsServer: false },
+  { name: 'lobby', ownsServer: false },
   { name: 'eject', ownsServer: true },
 ];
 
