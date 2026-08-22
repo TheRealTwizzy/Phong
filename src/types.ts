@@ -183,6 +183,12 @@ export interface PlayerProfile {
   proWins: number;
   cyberWins: number;
   /**
+   * Career count of duels walked out on mid-match (disconnect or quit with a
+   * live ball). Recorded by the relay, never reported by a client. The first
+   * of a UTC day is forgiven; ranked repeats cost visible rating.
+   */
+  abandons: number;
+  /**
    * Permanent unlocks banked by completing elite daily missions. Kept for
    * good: the mission's XP is a daily reward, this is not.
    */
