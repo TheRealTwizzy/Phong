@@ -305,5 +305,47 @@ for (const transport of ['relay', 'p2p']) {
   await guest.context().close();
 }
 
+// ---- Auto-serve must not start a match against nobody --------------------
+// The host sits on the court underneath the lobby from the moment the room
+// exists. Setting auto-serve while waiting used to arm the timer right away:
+// it fired, served, and the "match" began with no opponent in the room.
+{
+  console.log('\n--- auto-serve while waiting for an opponent ---');
+  const host = await newPage();
+  const code = await hostCreateRoom(host, { p2p: false });
+
+  // Set the shortest auto-serve from the lobby, then just wait it out.
+  await host.waitForSelector('#lobby-match-settings', { timeout: 8000 });
+  await host.click('#lobby-rules-toggle');
+  await host.click('#lobby-rule-autoserve-1');
+  await host.waitForTimeout(3500);
+
+  const room = await host.evaluate(async (c) => (await fetch(`/api/room/${c}`)).json(), code);
+  if (!room.exists) fail('the room disappeared while waiting');
+  if (room.playerCount !== 1) fail(`expected a lone host, got ${room.playerCount} players`);
+  if (room.inPlay) fail('auto-serve started the match with no opponent in the room');
+  if (!(await host.$('#multiplayer-lobby-modal'))) fail('the lobby closed by itself');
+  ok('a 1s auto-serve waited out 3.5s without a ball entering play');
+
+  // The guard releases: once an opponent joins and both enter the court, the
+  // same timer serves for real.
+  const guest = await newPage();
+  await guestJoin(guest, code);
+  await enterCourt(host);
+  await enterCourt(guest);
+  const live = await host
+    .waitForFunction(
+      async (c) => (await (await fetch(`/api/room/${c}`)).json()).inPlay,
+      code,
+      { timeout: 10000, polling: 1000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!live) fail('auto-serve never fired once the duel was actually ready');
+  ok('the same timer serves once an opponent is in and the lobby is closed');
+  await host.context().close();
+  await guest.context().close();
+}
+
 console.log('\nDUEL ROOM CHECKS PASSED');
 await browser.close();

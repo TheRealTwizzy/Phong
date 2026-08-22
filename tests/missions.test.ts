@@ -200,7 +200,10 @@ describe('server-owned mission state', () => {
     init('m_day', 'MissionDay');
     const today = new Date('2026-08-21T12:00:00Z');
     const tomorrow = new Date('2026-08-22T12:00:00Z');
-    db.recordMatch(match('m_day'));
+    // The fixed clock goes to recordMatch too — recording on the wall clock
+    // while querying a fixed day made this test date-dependent (it failed the
+    // moment a session crossed UTC midnight).
+    db.recordMatch(match('m_day'), {}, today);
     expect(db.getMissions('m_day', today).some((m) => m.current > 0)).toBe(true);
     const next = db.getMissions('m_day', tomorrow);
     expect(next.every((m) => m.current === 0 && !m.claimed)).toBe(true);
@@ -365,7 +368,7 @@ describe('rerolls', () => {
 
   it('deals a fresh hand the next day, discarding an unfinished one', () => {
     init('r_hand', 'RerollHand');
-    db.recordMatch(match('r_hand', { playerScore: 3, maxRally: 5 }));
+    db.recordMatch(match('r_hand', { playerScore: 3, maxRally: 5 }), {}, today);
     expect(db.getMissions('r_hand', today).some((m) => m.current > 0)).toBe(true);
 
     const next = db.getMissions('r_hand', tomorrow);

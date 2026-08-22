@@ -263,6 +263,7 @@ export default function App() {
   const dispatchRef = useRef<(msg: WSServerMessage) => void>(() => {});
   const sendNetRef = useRef<(msg: WSClientMessage) => void>(() => {});
   const playerIndexRef = useRef<0 | 1 | null>(playerIndex);
+  const opponentIdRef = useRef<string | null>(opponentId);
 
   ballRef.current = ball;
   oppBallRef.current = oppBall;
@@ -275,6 +276,7 @@ export default function App() {
   settingsRef.current = settings;
   profileRef.current = profile;
   playerIndexRef.current = playerIndex;
+  opponentIdRef.current = opponentId;
 
   // Route a gameplay message over the P2P link when it is open, otherwise
   // over the WebSocket relay. Reassigned every render so it sees fresh refs.
@@ -633,6 +635,11 @@ export default function App() {
   const handleServe = useCallback(
     (aim?: ServeAim) => {
       if (!isServingRef.current) return;
+      // A duel's serve needs someone on the other end. A host waiting in the
+      // lobby is already on the court underneath it, so without this a serve
+      // (auto or tapped) would fire the ball into an empty room, where it
+      // crosses the net and is simply gone.
+      if (modeRef.current === 'multiplayer' && !opponentIdRef.current) return;
       setIsServing(false);
       isServingRef.current = false;
       setWinner(null);
@@ -687,7 +694,13 @@ export default function App() {
   const [serveCountdown, setServeCountdown] = useState<number | null>(null);
   useEffect(() => {
     const seconds = activeConfig.rules.autoServeSeconds;
-    const active = isServing && isPlayerServer && screen === 'game' && !winner;
+    // In a duel the timer must not tick before there is a match to serve
+    // INTO: an opponent in the room, and this player out of the lobby.
+    // Hosting used to arm it the moment the room existed, so a host who set
+    // auto-serve while waiting had the game "begin" against nobody.
+    const duelReady =
+      mode !== 'multiplayer' || (opponentId !== null && !isMultiplayerOpen);
+    const active = isServing && isPlayerServer && screen === 'game' && !winner && duelReady;
     if (!active || seconds <= 0) {
       setServeCountdown(null);
       return;
@@ -703,7 +716,17 @@ export default function App() {
       }
     }, 1000);
     return () => clearInterval(tick);
-  }, [isServing, isPlayerServer, screen, winner, activeConfig.rules.autoServeSeconds, handleServe]);
+  }, [
+    isServing,
+    isPlayerServer,
+    screen,
+    winner,
+    mode,
+    opponentId,
+    isMultiplayerOpen,
+    activeConfig.rules.autoServeSeconds,
+    handleServe,
+  ]);
 
   // Solo only: the AI has no finger to tap with. When the rules hand it the
   // serve (the AI missed the last point), serve on its behalf after a short

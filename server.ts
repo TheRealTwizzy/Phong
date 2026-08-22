@@ -147,6 +147,10 @@ async function startServer() {
       roomId,
       playerCount,
       isFull: playerCount >= 2,
+      // Whether a ball has actually been put in play since the last start.
+      // Read-only; lets a client (and the e2e) tell a waiting room from a
+      // live one.
+      inPlay: room.inPlay,
     });
   });
 
