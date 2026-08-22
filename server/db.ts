@@ -78,6 +78,15 @@ const WIPE_V1_KEY = 'wipe_v1';
 // auth_secret and therefore retires every existing device cookie — see the
 // note on PROFILE_NOT_INITIALIZED in server.ts for how clients recover.
 const WIPE_V2_KEY = 'wipe_v2';
+// A third one-shot reset, requested after the progression overhaul landed:
+// ranked bands, the eight-branch achievement tree, the Cyber climb, abandon
+// penalties. Everything stored was earned under rules that no longer exist.
+const WIPE_V3_KEY = 'wipe_v3';
+// Every key, oldest first. applyWipe re-stamps ALL of them after running:
+// stamping only some would leave a hole that re-triggers an earlier wipe on
+// the next boot — and since each wipe clears `meta`, two half-stamped keys
+// would take turns wiping the database on every single start.
+const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY];
 
 // Result of any operation that (re)names a profile. Optional fields rather
 // than a discriminated union — strictNullChecks is off in this repo, so
@@ -367,6 +376,7 @@ class GameDatabase {
   private applyWipeV1(): void {
     this.applyWipe(WIPE_V1_KEY, 'wipe_v1: cleared all player data for the fresh launch (0 players)');
     this.applyWipe(WIPE_V2_KEY, 'wipe_v2: cleared all player data for the rebalanced AI ladder (0 players)');
+    this.applyWipe(WIPE_V3_KEY, 'wipe_v3: cleared all player data for the progression overhaul (0 players)');
   }
 
   private applyWipe(key: string, message: string): void {
@@ -390,9 +400,14 @@ class GameDatabase {
       throw e;
     }
     this.ensureBaseSchema();
-    // Every wipe flag is re-stamped: a later one must not re-run an earlier.
-    this.setMeta(WIPE_V1_KEY, new Date().toISOString());
-    this.setMeta(key, new Date().toISOString());
+    // EVERY wipe flag is re-stamped, earlier and later alike. Stamping only
+    // the keys up to this one used to be enough with two of them, but each
+    // wipe clears `meta`: with three keys, a wipe that forgot to re-stamp a
+    // sibling would leave that sibling unstamped, it would fire on the next
+    // boot, clear THIS stamp in turn, and the two would alternate — a full
+    // player wipe and cookie rotation on every start, forever.
+    const stamp = new Date().toISOString();
+    for (const k of WIPE_KEYS) this.setMeta(k, stamp);
     if (hadPlayers) console.log(message);
   }
 

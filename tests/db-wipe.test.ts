@@ -103,6 +103,16 @@ describe('wipe_v1 one-time player reset', () => {
     expect(board.some((e) => e.id.startsWith('bot-'))).toBe(false);
   });
 
+  it('stamps EVERY wipe key, so no sibling wipe can re-fire later', () => {
+    // Each wipe clears `meta`. If a wipe re-stamped only some keys, the
+    // unstamped sibling would fire on the next boot, clear this stamp in
+    // turn, and the two would alternate — a full player wipe and cookie
+    // rotation on every single start.
+    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3']) {
+      expect(db.getMeta(key)).toBeTruthy();
+    }
+  });
+
   it('runs exactly once: a second boot leaves post-wipe data intact', async () => {
     db.getProfile('dev_survivor000000001'.padEnd(22, '1').slice(0, 22));
     const id = 'dev_aaaaaaaaaaaaaaaa99';
@@ -113,7 +123,29 @@ describe('wipe_v1 one-time player reset', () => {
     vi.resetModules();
     const { db: db2 } = await import('../server/db');
     expect(db2.getProfile(id).username).toBe('Survivor');
-    expect(db2.getMeta('wipe_v1')).toBeTruthy();
+    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3']) {
+      expect(db2.getMeta(key)).toBeTruthy();
+    }
+  });
+
+  it('wipes a database that had already run the earlier wipes', async () => {
+    // The exact shape of the deployed server: wipe_v2 stamped, players
+    // accumulated since. The next boot must run wipe_v3 once — and only once.
+    const id = 'dev_bbbbbbbbbbbbbbbb99';
+    // db already booted past all three wipes in this suite; simulate a
+    // pre-v3 deployment by un-stamping v3 and seeding a player.
+    db.getProfile(id);
+    db.initializeProfile(id, 'PreReset');
+    db.setMeta('wipe_v3', '');
+
+    vi.resetModules();
+    const { db: db3 } = await import('../server/db');
+    expect(db3.getLeaderboard('elo', 100, true)).toHaveLength(0);
+    const gone = db3.getProfile(id);
+    expect(gone.initialized).toBe(false);
+    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3']) {
+      expect(db3.getMeta(key)).toBeTruthy();
+    }
   });
 });
 
