@@ -1,7 +1,133 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Design tokens — "competitive esports dark".
+
+   ADDITIVE BY CONSTRUCTION. Nothing here redefines a stock Tailwind scale.
+   TIER_STYLE (src/rating.ts) and around twenty components ship literal
+   palette classes like `bg-emerald-500/15`, and a `--color-*: initial` reset
+   would blank every one of them silently, with no build error. So: new names
+   only. The old classes keep working while the shell migrates onto these.
+--------------------------------------------------------------------------- */
+@theme {
+  /* -- Surface ramp. Never pure #000: OLED black smears when the page pans. */
+  --color-surface-0: #05070c;   /* scrims, gutters, below everything         */
+  --color-surface-1: #090d16;   /* screen background — the shipped body tone */
+  --color-surface-2: #0f141f;   /* card / sheet                              */
+  --color-surface-3: #151b28;   /* raised: inputs, unselected segments       */
+  --color-surface-4: #1d2534;   /* pressed / selected fill                   */
+  --color-line: #222a3a;        /* hairline                                  */
+  --color-line-strong: #303a4d; /* a divider that has to be seen             */
+
+  /* -- Ink. Contrast ratios measured against --color-surface-2. ----------- */
+  --color-ink: #f3f6fb;         /* 16.8:1                                    */
+  --color-ink-muted: #9aa5b8;   /*  6.1:1 — the floor for body text          */
+  --color-ink-dim: #6b7688;     /*  3.3:1 — >=18px or decorative ONLY        */
+  --color-ink-on-accent: #04121a;
+
+  /* -- ONE accent. Every other colour has to earn it semantically. -------- */
+  --color-accent: #19e3ff;
+  --color-accent-press: #00c7e6;
+
+  /* -- Semantic status. --------------------------------------------------- */
+  --color-win: #2fd97b;     /* victory, ready, unlocked, in-band rules       */
+  --color-loss: #ff4d6a;    /* defeat, abandon, destructive                  */
+  --color-warn: #ffb224;    /* unranked rules, waiting on someone            */
+  --color-xp: #ffc53d;      /* level and XP ONLY — never a generic highlight */
+  --color-locked: #4c5668;  /* a gated affordance                            */
+
+  /* -- Type. 11px is the FLOOR; text-[8px]..text-[10px] are retired. ------ */
+  --font-display: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1.1;
+  --text-2xs--letter-spacing: 0.06em;
+  --text-2xs--font-weight: 700;
+
+  --text-kicker: 0.75rem;              /* section labels, tab labels         */
+  --text-kicker--line-height: 1;
+  --text-kicker--letter-spacing: 0.14em;
+  --text-kicker--font-weight: 800;
+
+  --text-title: 1.375rem;              /* card and sheet titles              */
+  --text-title--line-height: 1.15;
+  --text-title--letter-spacing: 0.01em;
+  --text-title--font-weight: 800;
+
+  --text-hero: 2rem;                   /* screen title, VICTORY / DEFEAT     */
+  --text-hero--line-height: 1;
+  --text-hero--letter-spacing: 0.06em;
+  --text-hero--font-weight: 900;
+
+  --text-numeral: 3rem;                /* score, countdown, room code        */
+  --text-numeral--line-height: 0.9;
+  --text-numeral--letter-spacing: -0.01em;
+  --text-numeral--font-weight: 900;
+
+  /* -- Radius. Sharper than stock: 2xl/3xl read consumer, not competitive. */
+  --radius-chip: 0.25rem;
+  --radius-ctl: 0.5rem;
+  --radius-card: 0.875rem;
+  --radius-sheet: 1.25rem;
+
+  /* -- Elevation: a rim light plus one deep, tight drop. Coloured glow is
+        reserved for the single primary action on a screen. ---------------- */
+  --shadow-card: inset 0 1px 0 0 rgb(255 255 255 / 0.045),
+    0 10px 24px -14px rgb(0 0 0 / 0.9);
+  --shadow-sheet: inset 0 1px 0 0 rgb(255 255 255 / 0.06),
+    0 28px 64px -20px rgb(0 0 0 / 0.9);
+  --shadow-accent: 0 0 0 1px rgb(25 227 255 / 0.35),
+    0 10px 30px -12px rgb(25 227 255 / 0.45);
+
+  /* -- Motion. Fast and restrained: no spring, no overshoot, ever. -------- */
+  --ease-quick: cubic-bezier(0.22, 1, 0.36, 1); /* enter                     */
+  --ease-exit: cubic-bezier(0.64, 0, 0.78, 0);  /* leave                     */
+  --ease-std: cubic-bezier(0.4, 0, 0.2, 1);     /* state change              */
+
+  --animate-count-in: count-in 160ms var(--ease-quick) both;
+  --animate-ready-pulse: ready-pulse 1.6s var(--ease-std) infinite;
+
+  @keyframes count-in {
+    from {
+      opacity: 0;
+      transform: scale(1.22);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* For waiting states. Opacity only — never animate a coloured shadow. */
+  @keyframes ready-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+}
+
 @layer base {
-  html, body, #root {
+  :root {
+    --sa-t: env(safe-area-inset-top, 0px);
+    --sa-r: env(safe-area-inset-right, 0px);
+    --sa-b: env(safe-area-inset-bottom, 0px);
+    --sa-l: env(safe-area-inset-left, 0px);
+
+    /* The EQUIPPED COURT THEME's accent, published exactly once by App.tsx
+       onto #app-root-container. The shell reads it through a variable rather
+       than concatenating two hex digits of alpha onto a colour at forty
+       separate call sites. */
+    --theme-accent: var(--color-accent);
+  }
+
+  html,
+  body,
+  #root {
     width: 100%;
     height: 100%;
     /* Track the VISIBLE viewport exactly. Plain 100% is the layout viewport,
@@ -11,11 +137,75 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
+    /* This is the property that actually suppresses pull-to-refresh and
+       rubber-banding. `touch-action: none` used to sit here beside it, which
+       is a different thing entirely: it withdraws panning from every
+       descendant, and a descendant cannot widen what an ancestor restricted.
+       None of the app's eleven scroll regions re-declared it, so the fix is
+       to not restrict here at all. The three play surfaces each set
+       `touch-none` on themselves (CourtCanvas, SplitScreenMatch's canvas,
+       TutorialModal's practice court), which is where the paddle drag
+       actually needs the gesture reserved. */
     overscroll-behavior: none;
     user-select: none;
     -webkit-user-select: none;
     -webkit-touch-callout: none;
-    touch-action: none;
-    background-color: #090d16;
+    background-color: var(--color-surface-1);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Opt into scrolling in one word, so the scroll contract lives in exactly one
+   place. Every overflow region in the app uses this and nothing else. */
+@utility scroll-y {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* index.html ships viewport-fit=cover and a black-translucent status bar, so
+   content runs edge to edge under the notch and the home indicator. Nothing
+   in the app had ever honoured that. */
+@utility pt-safe {
+  padding-top: max(var(--sa-t), calc(var(--spacing) * 3));
+}
+@utility pb-safe {
+  padding-bottom: max(var(--sa-b), calc(var(--spacing) * 3));
+}
+@utility px-safe {
+  padding-left: max(var(--sa-l), calc(var(--spacing) * 4));
+  padding-right: max(var(--sa-r), calc(var(--spacing) * 4));
+}
+
+/* Cap sheets against the VISIBLE viewport. `max-h-[90vh]` is a lie on iOS:
+   vh resolves to the LARGE viewport, so the card overflows the screen the
+   moment Safari's toolbars are showing. */
+@utility max-h-sheet {
+  max-height: calc(
+    100dvh - var(--sa-t) - var(--sa-b) - calc(var(--spacing) * 8)
+  );
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *:not([data-motion-essential]),
+  *:not([data-motion-essential])::before,
+  *:not([data-motion-essential])::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

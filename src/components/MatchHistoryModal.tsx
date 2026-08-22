@@ -99,7 +99,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
           initial={{ opacity: 0, scale: 0.94, y: 15 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.94, y: 15 }}
-          className="bg-slate-900 border rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[90vh] text-slate-100"
+          className="bg-slate-900 border rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-sheet text-slate-100"
           style={{
             borderColor: theme.accentColor + '50',
             boxShadow: `0 0 35px ${theme.accentColor}20`,
@@ -193,7 +193,7 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
           )}
 
           {/* Matches List Content */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+          <div className="flex-1 scroll-y p-4 space-y-2.5">
             {isLoading && recent10Matches.length === 0 ? (
               <div className="py-16 text-center text-slate-400 space-y-3">
                 <RefreshCw className="w-8 h-8 mx-auto animate-spin text-cyan-400" />

@@ -121,7 +121,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   return (
     <div
       id="multiplayer-lobby-modal"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
     >
       <div
         className="w-full max-w-md rounded-2xl border p-6 shadow-2xl relative flex flex-col gap-5 text-zinc-100"

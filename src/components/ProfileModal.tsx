@@ -196,7 +196,7 @@ export const ProfileModal: React.FC<Props> = ({
           initial={{ opacity: 0, scale: 0.92, y: 20 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.92, y: 20 }}
-          className="bg-slate-900 border border-cyan-500/30 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
+          className="bg-slate-900 border border-cyan-500/30 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-sheet"
         >
           {/* Header Banner */}
           <div className="relative bg-gradient-to-r from-cyan-950 via-slate-900 to-indigo-950 p-6 border-b border-slate-800">
@@ -396,7 +396,7 @@ export const ProfileModal: React.FC<Props> = ({
           </div>
 
           {/* Tab Content */}
-          <div className="p-6 overflow-y-auto flex-1 space-y-4">
+          <div className="p-6 scroll-y flex-1 space-y-4">
             {activeTab === 'stats' ? (
               <div className="space-y-4">
                 {/* Daily Streak Highlight Banner */}

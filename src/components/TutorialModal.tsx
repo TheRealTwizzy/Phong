@@ -131,7 +131,7 @@ export const TutorialModal: React.FC<Props> = ({
           initial={{ opacity: 0, scale: 0.93, y: 15 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.93, y: 15 }}
-          className="bg-slate-900 border rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[92vh]"
+          className="bg-slate-900 border rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-sheet"
           style={{ borderColor: theme.accentColor + '50' }}
         >
           {/* Modal Header */}
@@ -168,7 +168,7 @@ export const TutorialModal: React.FC<Props> = ({
           </div>
 
           {/* Step Content */}
-          <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-4">
+          <div className="p-5 sm:p-6 scroll-y flex-1 space-y-4">
             {/* Step 1: Half Court Concept */}
             {step === 0 && (
               <motion.div

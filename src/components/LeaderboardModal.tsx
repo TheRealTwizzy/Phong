@@ -90,7 +90,7 @@ export const LeaderboardModal: React.FC<Props> = ({
           initial={{ opacity: 0, scale: 0.92, y: 20 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.92, y: 20 }}
-          className="bg-slate-900 border border-amber-500/30 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
+          className="bg-slate-900 border border-amber-500/30 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-sheet"
         >
           {/* Header */}
           <div className="p-6 bg-gradient-to-r from-amber-950/60 via-slate-900 to-indigo-950/60 border-b border-slate-800 relative">
@@ -177,7 +177,7 @@ export const LeaderboardModal: React.FC<Props> = ({
           </div>
 
           {/* List Content */}
-          <div className="p-4 overflow-y-auto flex-1 space-y-2">
+          <div className="p-4 scroll-y flex-1 space-y-2">
             {isLoading ? (
               <div className="text-center py-12 text-slate-400 text-sm flex items-center justify-center gap-2">
                 <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />

@@ -125,7 +125,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   return (
     <div
       id="main-menu-screen"
-      className="relative w-full h-full overflow-y-auto flex flex-col select-none text-zinc-100"
+      className="relative w-full h-full scroll-y flex flex-col select-none text-zinc-100"
       style={{ backgroundColor: theme.background }}
     >
       {/* Ambient glow backdrop */}
@@ -136,7 +136,11 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         }}
       />
 
-      <div className="relative flex flex-col gap-4 px-4 pt-5 pb-6 min-h-full">
+      {/* index.html ships viewport-fit=cover, so the top of this column sits
+          under the notch and the bottom under the home indicator unless the
+          safe-area insets are taken into account. max() keeps the existing
+          spacing on a phone that has no inset to honour. */}
+      <div className="relative flex flex-col gap-4 px-4 pt-[max(var(--sa-t),1.25rem)] pb-[max(var(--sa-b),1.5rem)] min-h-full">
         {/* Player identity pill */}
         <button
           id="menu-profile-pill"

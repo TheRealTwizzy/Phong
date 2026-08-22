@@ -1936,10 +1936,18 @@ export default function App() {
         onAdopt={() => void adoptSession()}
         onStartFresh={() => void startFreshIdentity()}
       >
+      {/* The equipped court theme's accent is published ONCE, here. The shell
+          reads it back as var(--theme-accent) rather than concatenating two
+          hex digits of alpha onto a colour at every call site wanting a tint. */}
       <div
         id="app-root-container"
         className="relative w-full h-full overflow-hidden flex flex-col font-sans select-none"
-        style={{ backgroundColor: currentTheme.background }}
+        style={
+          {
+            backgroundColor: currentTheme.background,
+            '--theme-accent': currentTheme.accentColor,
+          } as React.CSSProperties
+        }
       >
         {/* Pop-up achievement and level up notifications */}
         <AchievementToast
@@ -2220,7 +2228,7 @@ export default function App() {
             <div className="flex flex-col items-center gap-2">
               <span
                 key={matchCountdown}
-                className="text-7xl font-black font-mono text-cyan-300 drop-shadow-[0_0_18px_rgba(34,211,238,0.7)] animate-ping-once"
+                className="text-7xl font-black font-mono text-cyan-300 drop-shadow-[0_0_18px_rgba(34,211,238,0.7)]"
                 style={{ animation: 'pulse 1s ease-out' }}
               >
                 {matchCountdown}
@@ -2235,7 +2243,7 @@ export default function App() {
         {winner && (
           <div
             id="winner-modal-overlay"
-            className="absolute inset-0 z-40 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-300"
+            className="absolute inset-0 z-40 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
           >
             <div
               className="w-full max-w-sm rounded-2xl border p-6 flex flex-col items-center gap-4 text-center shadow-2xl text-white"

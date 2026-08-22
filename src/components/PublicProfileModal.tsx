@@ -65,11 +65,11 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
   return (
     <div
       id="public-profile-modal-overlay"
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-3xl border p-5 flex flex-col gap-4 text-zinc-100 shadow-2xl relative"
+        className="w-full max-w-sm max-h-sheet scroll-y rounded-3xl border p-5 flex flex-col gap-4 text-zinc-100 shadow-2xl relative"
         style={{
           backgroundColor: '#0f141f',
           borderColor: theme.accentColor + '50',

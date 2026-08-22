@@ -175,7 +175,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md"
     >
       <div
-        className="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-3xl border p-5 sm:p-6 flex flex-col gap-4 text-zinc-100 shadow-2xl"
+        className="w-full max-w-md max-h-sheet scroll-y rounded-3xl border p-5 sm:p-6 flex flex-col gap-4 text-zinc-100 shadow-2xl"
         style={{
           backgroundColor: '#0f141f',
           borderColor: theme.accentColor + '50',

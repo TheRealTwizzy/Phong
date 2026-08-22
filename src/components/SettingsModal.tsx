@@ -98,10 +98,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   return (
     <div
       id="settings-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md"
     >
       <div
-        className="w-full max-w-lg max-h-[92vh] rounded-3xl border p-4 sm:p-6 shadow-2xl relative flex flex-col gap-4 overflow-y-auto text-zinc-100"
+        className="w-full max-w-lg max-h-sheet rounded-3xl border p-4 sm:p-6 shadow-2xl relative flex flex-col gap-4 scroll-y text-zinc-100"
         style={{
           backgroundColor: '#0f141f',
           borderColor: currentTheme.accentColor + '50',

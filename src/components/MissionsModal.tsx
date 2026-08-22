@@ -121,7 +121,7 @@ export const MissionsModal: React.FC<Props> = ({
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.92, y: 15 }}
           transition={{ type: 'spring', damping: 25, stiffness: 350 }}
-          className="relative w-full max-w-md bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+          className="relative w-full max-w-md bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-sheet"
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 bg-slate-950/60">
@@ -175,7 +175,7 @@ export const MissionsModal: React.FC<Props> = ({
           </div>
 
           {/* Task List */}
-          <div className="p-4 space-y-3 overflow-y-auto flex-1 custom-scrollbar">
+          <div className="p-4 space-y-3 scroll-y flex-1">
             {allClear && (
               <p
                 id="missions-all-clear"
