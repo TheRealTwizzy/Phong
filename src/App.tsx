@@ -1267,6 +1267,13 @@ export default function App() {
 
     socket.onclose = () => {
       setIsConnected(false);
+      // A dead socket answers nothing, so any join waiting on one is over —
+      // released here rather than in handleJoinRoom, which stops watching the
+      // moment it sends. A socket that dies after `join_room` goes out but
+      // before `room_joined` or `error` comes back would otherwise latch the
+      // guard for good, and every later Join would return early without even
+      // opening a replacement socket.
+      joinInFlightRef.current = false;
       // The socket dying UNDER a live duel means this player was ejected —
       // the relay has already recorded the abandon and told the opponent.
       // A deliberate leave sets the flag first and lands here silently.
@@ -1328,8 +1335,8 @@ export default function App() {
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'join_room', roomId: code, playerId }));
       } else if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
-        // The socket died before the ask went out, so no answer is coming to
-        // release the guard — hand the button back rather than latching it.
+        // Stop retrying against a socket that will never open (onclose is what
+        // releases the guard; this just declines to poll a corpse forever).
         joinInFlightRef.current = false;
       } else {
         setTimeout(checkAndSend, 100);
