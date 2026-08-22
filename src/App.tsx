@@ -580,6 +580,12 @@ export default function App() {
 
         const outcome = await postMatchRecord(payload);
         if (!outcome.ok) {
+          if (outcome.reason === 'stale_build') {
+            // A newer deployment is live and the page is already reloading.
+            // The match is queued and replays under the new build, so a
+            // "couldn't save" toast would be false as well as pointless.
+            return;
+          }
           if (outcome.reason === 'evicted') {
             // The account moved to another device while this match was being
             // played. Nothing was saved and nothing can be — the guard says

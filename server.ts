@@ -38,6 +38,13 @@ interface PlayerSession {
    * profiles, and it must never invent one to do it.
    */
   deviceId: string | null;
+  /**
+   * The session that held the account when this socket was seated. The
+   * upgrade check is a snapshot: ownership can move while the socket stays
+   * open, and a displaced socket that keeps playing would have its result
+   * written by the relay, which is the exploit again with extra steps.
+   */
+  sessionId: string | null;
 }
 
 interface Room {
@@ -197,6 +204,67 @@ function applyMatchSync(
  * fallback for a match the relay never saw, and the shared match key means
  * whichever of them arrives second is recognised rather than paid again.
  */
+interface LiveSocket {
+  ws: WebSocket;
+  deviceId: string;
+  sessionId: string | null;
+}
+
+/**
+ * Every relay socket that arrived with a verified device. Small — one entry
+ * per connected phone — and the only thing it is for is displacement.
+ */
+const liveSockets = new Set<LiveSocket>();
+
+/**
+ * Whether a seat still holds the account it was seated under. The upgrade
+ * check cannot answer this on its own: ownership moves while sockets stay
+ * open, and the relay writes a finished duel onto both seats itself.
+ */
+function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: string | null }): boolean {
+  if (!seat.deviceId) return false;
+  if (db.releasedDevice(seat.deviceId)) return false;
+  const owner = db.activeSessionId(seat.deviceId);
+  // No recorded owner means nothing has displaced this seat.
+  return !owner || owner === seat.sessionId;
+}
+
+/**
+ * Close any socket this device holds under a DIFFERENT session. Called when a
+ * session is issued, so the device that just lost the account finds out in
+ * milliseconds instead of at its next heartbeat — and cannot land another
+ * point in between.
+ */
+function closeDisplacedSockets(deviceId: string, keepSessionId: string): void {
+  for (const entry of liveSockets) {
+    if (entry.deviceId !== deviceId || entry.sessionId === keepSessionId) continue;
+    try {
+      entry.ws.send(JSON.stringify({ type: 'session_invalid', status: 'superseded', build: buildId() }));
+      entry.ws.close(4001, 'session superseded');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/**
+ * Close every registered socket that no longer holds the account it was
+ * seated under, whatever made that true. Used after a transfer, where the
+ * device that gave the account away is still sitting on an open socket.
+ */
+function evictStaleSockets(): void {
+  for (const entry of liveSockets) {
+    if (seatStillHoldsAccount(entry)) continue;
+    const status = db.releasedDevice(entry.deviceId) ? 'released' : 'superseded';
+    try {
+      entry.ws.send(JSON.stringify({ type: 'session_invalid', status, build: buildId() }));
+      entry.ws.close(4001, `session ${status}`);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 function recordRoomMatch(room: Room): void {
   const seats: Array<0 | 1> = [0, 1];
   // Both seats must still be occupied. A match decided after one player left
@@ -214,7 +282,10 @@ function recordRoomMatch(room: Room): void {
     // nothing, and `getProfile` would mint it a stray empty profile to fail
     // against. The other seat is still recorded.
     if (!me?.deviceId || !them) continue;
-    if (db.releasedDevice(me.deviceId)) continue;
+    // Not just "was this device released" — also "does this seat still hold
+    // the account". A socket displaced mid-duel would otherwise have its
+    // result written here by the relay, under an account it no longer holds.
+    if (!seatStillHoldsAccount(me)) continue;
 
     const mine = room.scores[seat];
     const theirs = room.scores[seat === 0 ? 1 : 0];
@@ -237,7 +308,7 @@ function recordRoomMatch(room: Room): void {
     const context: RecordMatchContext = {
       performanceWeight: performanceWeight(mine, theirs, room.maxRallyInMatch),
     };
-    if (them.deviceId && !db.releasedDevice(them.deviceId)) {
+    if (them.deviceId && seatStillHoldsAccount(them)) {
       const opp = db.getProfile(them.deviceId);
       context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
     }
@@ -309,6 +380,12 @@ async function startServer() {
       status: session.status,
       build: buildId(),
       deviceId: req.deviceId,
+      // Which session the account is actually held by. Cookies are scoped to
+      // the ORIGIN, not to a page, so two tabs on one device share this one
+      // and the newest value wins for both — the server cannot tell them
+      // apart. Reporting the id lets a tab compare it against the one IT was
+      // given and notice it has been displaced.
+      sessionId: session.sessionId,
       // Only ever the fact of the move, never the profile it moved to: a
       // released device has no claim on the account's details any more.
       ...(session.status === 'released' ? { released: true } : {}),
@@ -324,6 +401,11 @@ async function startServer() {
         return res.status(409).json({ error: 'DEVICE_RELEASED', sessionStatus: 'released', build: buildId() });
       }
       const sessionId = issueSession(req, res, req.deviceId!);
+      // Whatever this device was holding open under an older session is over
+      // NOW, not at that client's next heartbeat — otherwise the displaced
+      // phone has seconds in which to keep scoring on an account it has just
+      // lost, and the relay would write the result.
+      closeDisplacedSockets(req.deviceId!, sessionId);
       res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(req.deviceId!) });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -335,6 +417,19 @@ async function startServer() {
   // issued a fresh device identity rather than handed the old one back.
   app.post('/api/session/reset', (req, res) => {
     try {
+      // Only a released device may take this door. It is documented and
+      // surfaced as the escape hatch for one, but the endpoint served anyone
+      // who called it — and for a device that still HELD its account, a reset
+      // swapped the cookie for a fresh identity while the initialized profile
+      // stayed behind under the old one. The account would not be deleted,
+      // merely unreachable: stranded under an id no browser holds any more.
+      if (req.session!.status !== 'released') {
+        return res.status(409).json({
+          error: 'DEVICE_NOT_RELEASED',
+          sessionStatus: req.session!.status,
+          build: buildId(),
+        });
+      }
       const previous = req.deviceId!;
       const deviceId = resetDeviceIdentity(req, res);
       // The tombstone has done its job for this browser; the identity it
@@ -342,6 +437,8 @@ async function startServer() {
       // again. Leaving it would strand the row forever.
       db.clearDeviceRelease(previous);
       const sessionId = issueSession(req, res, deviceId);
+      // The old identity's sockets belong to a device that no longer exists.
+      closeDisplacedSockets(previous, sessionId);
       res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(deviceId) });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -544,6 +641,10 @@ async function startServer() {
       if (!profile) {
         return res.status(404).json({ error: 'No profile matches that code' });
       }
+      // The device that just gave the account away may be sitting on an open
+      // socket in a live duel. It stops being able to play the moment the
+      // transfer lands, not whenever it next asks.
+      evictStaleSockets();
       res.json(profile);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -768,6 +869,7 @@ async function startServer() {
     // device, or a session displaced by a newer load, does not get a court.
     // Without this the exploit simply moved: barred from recording a solo
     // match, an evicted device could still play (and be recorded for) a duel.
+    let cookieSessionId: string | null = null;
     if (cookieDeviceId) {
       const session = resolveSession(cookieDeviceId, upgradeReq.headers.cookie);
       if (session.status !== 'active') {
@@ -775,6 +877,12 @@ async function startServer() {
         ws.close(4001, 'session not active');
         return;
       }
+      cookieSessionId = session.sessionId;
+      // Registered so a later session on this device can displace it. The
+      // check above is a snapshot; this is what keeps it true afterwards.
+      const entry: LiveSocket = { ws, deviceId: cookieDeviceId, sessionId: cookieSessionId };
+      liveSockets.add(entry);
+      ws.on('close', () => liveSockets.delete(entry));
     }
 
     let currentRoomId: string | null = null;
@@ -832,6 +940,7 @@ async function startServer() {
                 playerName: hostName,
                 playerIndex: 0,
                 deviceId: cookieDeviceId || null,
+                sessionId: cookieSessionId,
               },
               null,
             ],
@@ -882,6 +991,7 @@ async function startServer() {
             playerName: guestName,
             playerIndex: 1,
             deviceId: cookieDeviceId || null,
+            sessionId: cookieSessionId,
           };
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
@@ -1158,9 +1268,11 @@ async function startServer() {
           const bothSeated = !!(room.players[0] && room.players[1]);
           if (bothSeated && room.inPlay && !room.matchOver && currentPlayerId) {
             try {
-              // Same rule as recordRoomMatch: a device that handed its
-              // account away mid-duel has no profile to charge.
-              if (!db.releasedDevice(currentPlayerId)) {
+              // Same rule as recordRoomMatch: a seat that no longer holds
+              // its account has no profile to charge — and when the relay
+              // itself closed that socket to displace it, charging the
+              // player an abandon for our own eviction would be perverse.
+              if (seatStillHoldsAccount({ deviceId: currentPlayerId, sessionId: cookieSessionId })) {
                 db.recordAbandon(currentPlayerId, { ranked: isRankedRules(room.config.rules) });
               }
             } catch (e) {

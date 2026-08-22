@@ -16,6 +16,21 @@ import { PlayerProfile, SessionState, SessionStatus } from '../types';
 // nothing.
 
 const HEARTBEAT_MS = 15_000;
+
+/**
+ * The session THIS page load was given.
+ *
+ * `phong_session` is an origin cookie, not a per-page one, so two tabs on the
+ * same device share it and the newest value is sent by both — the server sees
+ * one caller and cannot tell them apart. Holding the id we were handed, in
+ * memory where a second tab cannot reach it, is what lets the older tab
+ * notice that the account has moved on without it.
+ *
+ * This is a correctness aid for honest clients, not a boundary: the server's
+ * guarantee is one live DEVICE, and a modified client could always decline to
+ * check. Nothing is granted on the strength of it.
+ */
+let mySessionId: string | null = null;
 /** Remembers which build we have already reloaded for, so we cannot loop. */
 const RELOAD_GUARD_KEY = 'phong_build_reload';
 
@@ -47,6 +62,7 @@ async function mintSession(): Promise<{ status: ClientSessionStatus; profile?: P
     const res = await fetch('/api/session', { method: 'POST' });
     const data = await res.json();
     if (res.ok && data?.status === 'active') {
+      mySessionId = data.sessionId || null;
       return { status: 'active', profile: data.profile as PlayerProfile };
     }
     return { status: (data?.sessionStatus as SessionStatus) || 'none' };
@@ -66,6 +82,7 @@ export async function resetDevice(): Promise<{ status: ClientSessionStatus; prof
     const res = await fetch('/api/session/reset', { method: 'POST' });
     const data = await res.json();
     if (res.ok && data?.status === 'active') {
+      mySessionId = data.sessionId || null;
       return { status: 'active', profile: data.profile as PlayerProfile };
     }
     return { status: 'none' };
@@ -88,6 +105,12 @@ async function readSession(): Promise<SessionSnapshot> {
   try {
     const res = await fetch('/api/session');
     const data = (await res.json()) as SessionState;
+    // The account is live, but held by a session this page was never given —
+    // another tab on this same device loaded after us and took it. The server
+    // cannot report that (it sees one shared cookie), so we conclude it here.
+    if (data?.status === 'active' && mySessionId && data.sessionId && data.sessionId !== mySessionId) {
+      return { status: 'superseded', build: data.build || null };
+    }
     return { status: data?.status || 'none', build: data?.build || null };
   } catch {
     // A dropped network is not an eviction. Saying otherwise would throw a
@@ -102,10 +125,15 @@ async function readSession(): Promise<SessionSnapshot> {
  * being told we are stale, stop reloading and let the session re-mint carry
  * it — a reload loop is worse than an out-of-date tab.
  */
-export function refreshForBuild(build: string): boolean {
+export function refreshForBuild(build: string | null | undefined): boolean {
+  // Normalised before it is compared: an absent build id used to be written
+  // to storage as the string "undefined" and then compared against the
+  // `undefined` value, which never matched — so the guard against looping was
+  // exactly the case that looped.
+  const key = build || 'unknown';
   try {
-    if (sessionStorage.getItem(RELOAD_GUARD_KEY) === build) return false;
-    sessionStorage.setItem(RELOAD_GUARD_KEY, build);
+    if (sessionStorage.getItem(RELOAD_GUARD_KEY) === key) return false;
+    sessionStorage.setItem(RELOAD_GUARD_KEY, key);
   } catch {
     /* private mode: fall through and reload once */
   }

@@ -136,16 +136,39 @@ const soloWin = (key: string): MatchEndPayload =>
 const record = (jar: Jar, key: string) =>
   call(jar, '/api/match/record', { method: 'POST', body: JSON.stringify(soloWin(key)) });
 
+interface DialResult {
+  message: any;
+  closed: boolean;
+  code: number;
+}
+
 /**
- * Open a relay socket with this jar's cookies and report what the relay did
- * with it: the first message, and whether it was closed.
+ * Open a relay socket with this jar's cookies. `opened` settles once the
+ * socket is up OR the relay refused it at the upgrade; `outcome` reports what
+ * finally became of it.
+ *
+ * The two are separate on purpose. A test about DISPLACEMENT has to know the
+ * socket was actually accepted before ownership moves, or it races the
+ * upgrade check and passes on the wrong mechanism entirely — which is exactly
+ * what the first version of that test did.
  */
-function dial(jar: Jar, settleMs = 1000): Promise<{ message: any; closed: boolean; code: number }> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl, { headers: { cookie: jar.header } });
-    let message: any = null;
-    // The refusal is synchronous in the connection handler, so a socket that
-    // is still open after a moment was accepted.
+function dialLive(jar: Jar, settleMs = 1000): { opened: Promise<boolean>; outcome: Promise<DialResult> } {
+  const ws = new WebSocket(wsUrl, { headers: { cookie: jar.header } });
+  let message: any = null;
+  let isOpen = false;
+
+  const opened = new Promise<boolean>((resolve) => {
+    ws.on('open', () => {
+      isOpen = true;
+      resolve(true);
+    });
+    ws.on('close', () => resolve(isOpen));
+    ws.on('error', () => resolve(false));
+  });
+
+  const outcome = new Promise<DialResult>((resolve, reject) => {
+    // A refusal is synchronous in the connection handler, so a socket still
+    // open after a moment was accepted.
     const timer = setTimeout(() => {
       ws.close();
       resolve({ message, closed: false, code: 0 });
@@ -159,7 +182,12 @@ function dial(jar: Jar, settleMs = 1000): Promise<{ message: any; closed: boolea
     });
     ws.on('error', reject);
   });
+
+  return { opened, outcome };
 }
+
+/** Dial and wait for the verdict, for tests that do not need the open moment. */
+const dial = (jar: Jar, settleMs = 1000): Promise<DialResult> => dialLive(jar, settleMs).outcome;
 
 describe('one account, one live device', () => {
   it('evicts the phone the moment the desktop claims the account', async () => {
@@ -286,6 +314,65 @@ describe('one account, one live device', () => {
     // The device that DOES hold the account is seated normally.
     const holder = await dial(desktop);
     expect(holder.closed).toBe(false);
+  }, 30000);
+
+  it('closes a live socket the moment a newer session displaces it', async () => {
+    // The upgrade check is a SNAPSHOT. Ownership moves while sockets stay
+    // open, and the relay writes a finished duel onto both seats itself — so
+    // a socket that kept playing after being displaced would have its result
+    // recorded under an account it no longer holds. Closing it at the moment
+    // of displacement is what stops that, rather than leaving it to the
+    // displaced client's next heartbeat seconds later.
+    const first = await onboard(`Displace${Date.now().toString(36).slice(-5)}`);
+    const socket = dialLive(first, 6000);
+    // Seated FIRST. Without this the displacement races the upgrade check and
+    // the test passes on the wrong mechanism.
+    expect(await socket.opened).toBe(true);
+
+    // The same device, opened again elsewhere: a newer session takes over.
+    const second = new Jar();
+    second.absorb(new Response(null, { headers: { 'set-cookie': first.raw.get('phong_device')! } }));
+    await call(second, '/api/session', { method: 'POST' });
+
+    const displaced = await socket.outcome;
+    expect(displaced.closed).toBe(true);
+    expect(displaced.code).toBe(4001);
+    expect(displaced.message?.type).toBe('session_invalid');
+    expect(displaced.message?.status).toBe('superseded');
+  }, 30000);
+
+  it('closes a live socket when the account is transferred out from under it', async () => {
+    const phone = await onboard(`Transfer${Date.now().toString(36).slice(-5)}`);
+    const socket = dialLive(phone, 6000);
+    expect(await socket.opened).toBe(true);
+
+    const code = (await call(phone, '/api/profile/me')).body.recoveryCode;
+    const desktop = new Jar();
+    await call(desktop, '/api/session', { method: 'POST' });
+    await call(desktop, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) });
+
+    const evicted = await socket.outcome;
+    expect(evicted.closed).toBe(true);
+    expect(evicted.message?.status).toBe('released');
+  }, 30000);
+
+  it('refuses an identity reset from a device that still holds its account', async () => {
+    // The escape hatch for a released device, and nothing else. For a device
+    // that still HELD its account, a reset swapped the cookie for a fresh
+    // identity while the initialized profile stayed behind under the old one
+    // — not deleted, merely unreachable.
+    const jar = await onboard(`NoReset${Date.now().toString(36).slice(-5)}`);
+    const before = (await call(jar, '/api/profile/me')).body;
+
+    const refused = await call(jar, '/api/session/reset', { method: 'POST' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toBe('DEVICE_NOT_RELEASED');
+
+    // Untouched: same device, same account, still playable.
+    const after = (await call(jar, '/api/profile/me')).body;
+    expect(after.id).toBe(before.id);
+    expect(after.username).toBe(before.username);
+    expect((await call(jar, '/api/session')).body.status).toBe('active');
   }, 30000);
 
   it('keeps the device — and so the account — across losing a session', async () => {

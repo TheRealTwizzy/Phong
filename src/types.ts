@@ -513,5 +513,12 @@ export interface SessionState {
   status: SessionStatus;
   build: string;
   deviceId?: string;
+  /**
+   * The session currently holding the account. Cookies are origin-scoped, so
+   * two tabs on one device share one and the server sees a single caller;
+   * comparing this against the id a page was handed is how that page tells it
+   * has been displaced by a later load beside it.
+   */
+  sessionId?: string | null;
   released?: boolean;
 }

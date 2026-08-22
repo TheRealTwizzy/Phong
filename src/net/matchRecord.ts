@@ -1,5 +1,5 @@
 import { MatchEndPayload, MatchEndResult } from '../types';
-import { openSession } from './session';
+import { openSession, refreshForBuild } from './session';
 
 // Recording a finished match used to be fire-and-forget: the response status
 // was never checked, so a 403, a 500, or a dropped connection left the player
@@ -39,12 +39,13 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    let code = '';
+    let body: any = null;
     try {
-      code = (await res.json())?.error || '';
+      body = await res.json();
     } catch {
       /* no body to read */
     }
+    const code = body?.error || '';
     // The server does not recognise this device. That is not the player's
     // fault and not a hiccup: the device cookie is signed with a secret held
     // in the database, so a reset or a deploy that loses the data volume
@@ -63,9 +64,18 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
     if (code === 'DEVICE_RELEASED' || code === 'SESSION_SUPERSEDED') {
       throw Object.assign(new Error(code), { evicted: true });
     }
-    // We simply have no live session — first contact, or one retired by a
-    // deployment. That is recoverable in place: mint a new one and try again.
-    if (code === 'SESSION_REQUIRED' || code === 'SESSION_STALE_BUILD') {
+    // This bundle is older than the deployment being served. Minting a fresh
+    // session here would let it keep running indefinitely on the old code —
+    // the retry would succeed, the next heartbeat would say `active`, and the
+    // one guarantee this whole mechanism exists to make ("an update always
+    // force-refreshes the field") would quietly not hold. The reload is the
+    // point, so it is what happens.
+    if (code === 'SESSION_STALE_BUILD') {
+      throw Object.assign(new Error(code), { staleBuild: true, build: body?.build });
+    }
+    // No live session at all — first contact, or one we ended ourselves.
+    // That IS recoverable in place: mint a new one and try again.
+    if (code === 'SESSION_REQUIRED') {
       throw Object.assign(new Error(code), { needsSession: true });
     }
     // Any other 4xx is a verdict, not a hiccup: replaying it fails identically.
@@ -92,9 +102,10 @@ export interface RecordOutcome {
    *  - 'queued'       parked on the device; it will be replayed
    *  - 'unidentified' the server doesn't know this device; re-onboard needed
    *  - 'evicted'      the account moved on; this match belongs to nobody here
+   *  - 'stale_build'  a newer deployment is live; queued, and the page reloads
    *  - 'rejected'     refused outright; replaying would fail identically
    */
-  reason?: 'queued' | 'unidentified' | 'evicted' | 'rejected';
+  reason?: 'queued' | 'unidentified' | 'evicted' | 'stale_build' | 'rejected';
 }
 
 /**
@@ -116,6 +127,13 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
         // Deliberately dropped rather than queued: see attempt().
         console.warn('Match discarded — this device no longer holds the account:', e.message);
         return { ok: false, reason: 'evicted' };
+      }
+      if (e?.staleBuild) {
+        // Park it first: the reload replays the queue under the new build, so
+        // the match is paid rather than lost to the refresh.
+        writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
+        refreshForBuild(e.build);
+        return { ok: false, reason: 'stale_build' };
       }
       if (e?.permanent) {
         console.error('Match rejected by the server:', e.message);
@@ -168,6 +186,12 @@ async function runFlush(): Promise<number> {
         // the session being minted. Keep everything and try the next time.
         await openSession();
         stillPending.push(item);
+        continue;
+      }
+      if (e?.staleBuild) {
+        // Keep it and go get the new bundle; the queue survives the reload.
+        stillPending.push(item);
+        refreshForBuild(e.build);
         continue;
       }
       // Keep anything that might still land; drop outright refusals, and
