@@ -108,11 +108,26 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
   return { ok: false, reason: 'queued' };
 }
 
+// Two flushes running at once would each read the same queue and each POST
+// every entry in it. Every match carries an idempotency key now, so the second
+// copy is recognised server-side rather than paid — but the second flush would
+// still rewrite the queue from a snapshot taken before the first one emptied
+// it, resurrecting matches that had already landed.
+let flushing: Promise<number> | null = null;
+
 /**
  * Replay anything parked by an earlier session. Runs on load, drops payloads
  * the server rejects outright, and keeps the rest for the next attempt.
  */
-export async function flushPendingMatches(): Promise<number> {
+export function flushPendingMatches(): Promise<number> {
+  if (flushing) return flushing;
+  flushing = runFlush().finally(() => {
+    flushing = null;
+  });
+  return flushing;
+}
+
+async function runFlush(): Promise<number> {
   const queue = readQueue();
   if (!queue.length) return 0;
 

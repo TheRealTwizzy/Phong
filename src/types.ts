@@ -382,6 +382,21 @@ export interface MatchEndPayload {
   // PvP only: lets the server cross-check the reported result against the
   // room state it owns, so scores/rallies can't be forged.
   roomId?: string;
+  /**
+   * Which match inside that room this result belongs to. The room is reused
+   * across rematches, so a roomId alone does not identify a match: without
+   * this, a replayed or slow POST was cross-checked against whatever the room
+   * held by then — a rematch already reset to 0-0 — and recorded as a 0-0
+   * loss. See duelMatchKey() in src/matchRules.ts.
+   */
+  matchSeq?: number;
+  /**
+   * Idempotency key for this match, so recording it twice pays once. Derived
+   * server-side for a duel (roomId + matchSeq) since both the relay and the
+   * client must land on the same string; minted by the client for a solo
+   * match, where only that device can report it.
+   */
+  matchKey?: string;
 }
 
 export interface MatchEndResult {
@@ -400,6 +415,13 @@ export interface MatchEndResult {
   // Today's missions after this match advanced them — server-owned, so the
   // client never computes mission progress itself.
   missions: DailyMission[];
+  /**
+   * True when this match had already been recorded under the same matchKey —
+   * a retry, a replayed queue entry, or the client's POST arriving after the
+   * relay recorded the duel for both players. The stored result is returned
+   * verbatim rather than paid a second time.
+   */
+  alreadyRecorded?: boolean;
 }
 
 // WebRTC signaling payload relayed verbatim between the two peers in a room.
@@ -434,6 +456,11 @@ export type WSClientMessage =
   | { type: 'ball_pos'; x: number; y: number }
   | { type: 'ball_cross_net'; ball: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } }
   | { type: 'point_scored'; scorer: 'p1' | 'p2' }
+  // A P2P duel scores over the DataChannel, so the relay never sees a point.
+  // This tells it where the match got to — absolute values, not a delta, so a
+  // dropped one heals itself and a duplicate is a no-op. Without it the relay
+  // believed every P2P match was still 0-0 and had never started.
+  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; maxRally: number }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
   | { type: 'rtc_signal'; payload: RTCSignalPayload }
@@ -450,11 +477,15 @@ export type WSServerMessage =
   | { type: 'quick_chat'; text: string; senderName: string; senderIdx: number }
   | { type: 'room_config'; config: RoomMatchConfig }
   | { type: 'ready_state'; ready: [boolean, boolean] }
-  | { type: 'game_start'; servingPlayer: 0 | 1; config: RoomMatchConfig }
+  | { type: 'game_start'; servingPlayer: 0 | 1; config: RoomMatchConfig; matchSeq: number }
   | { type: 'match_prediction'; winProbability: number }
   | { type: 'score_update'; p1Score: number; p2Score: number; reason: string; nextServer: 0 | 1 }
   | { type: 'rematch_state'; votes: [boolean, boolean] }
   | { type: 'rtc_signal'; payload: RTCSignalPayload; fromIdx: 0 | 1 }
+  // The relay recorded a finished duel for this player. It records for BOTH
+  // seats from the score it owns, so a result lands on both profiles even if
+  // one phone never manages to POST it.
+  | { type: 'match_recorded'; matchKey: string; result: MatchEndResult }
   | { type: 'opponent_left' }
   | { type: 'pong'; timestamp: number }
   | { type: 'error'; message: string };

@@ -164,3 +164,19 @@ export function normalizeRoomConfig(
     rules,
   };
 }
+
+/**
+ * The identity of one played match, used to record it exactly once.
+ *
+ * A duel's key is derived, not minted, because the relay and the client both
+ * have to arrive at the same string without talking to each other: the relay
+ * records a finished duel for BOTH players from the score it owns, and each
+ * phone also POSTs its own copy. Whichever lands first does the work; the
+ * other is recognised and paid nothing.
+ *
+ * `matchSeq` is what makes a room's matches distinguishable — a room is reused
+ * for every rematch, so the room code alone would fold a best-of-five evening
+ * into a single key.
+ */
+export const duelMatchKey = (roomId: string, matchSeq: number): string =>
+  `duel:${String(roomId).toUpperCase()}:${matchSeq}`;

@@ -44,6 +44,7 @@ import {
   DEFAULT_MATCH_RULES,
   DEFAULT_ROOM_CONFIG,
   MATCH_START_COUNTDOWN_SECONDS,
+  duelMatchKey,
   normalizeRoomConfig,
   normalizeRules,
   isRankedRules,
@@ -96,6 +97,15 @@ const DEFAULT_SETTINGS: GameSettings = {
   theme: 'neon',
   language: 'en',
 };
+
+/**
+ * The identity of one solo match, minted here because only this device can
+ * report it. It rides on the payload, so a retry and a replay from the
+ * on-device queue carry the key the first attempt used and the server can see
+ * they are the same match rather than three.
+ */
+const newSoloMatchKey = (): string =>
+  `solo:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
 
 export default function App() {
   const [settings, setSettings] = useState<GameSettings>(() => {
@@ -275,6 +285,20 @@ export default function App() {
   const servedThisPointRef = useRef<boolean>(true);
   const settingsRef = useRef<GameSettings>(settings);
   const profileRef = useRef<PlayerProfile | null>(profile);
+  // Which match of the room is being played, from the relay's game_start (or
+  // the P2P replica's, for a rematch the peers agreed between themselves).
+  // Half of the key this match is recorded under, so a result reported late
+  // is filed against the match it came from and not the one after it.
+  const matchSeqRef = useRef<number>(0);
+  // The key the CURRENT match will be recorded under. A duel derives it, so
+  // the relay's own record of the same match and this phone's POST land on
+  // the same row; a solo match mints one, so a retry or a queued replay of it
+  // is recognised as the same match rather than paid twice.
+  const matchKeyRef = useRef<string>('');
+  // The last match key whose result has been shown. A duel's result can
+  // arrive twice — pushed by the relay and returned by our own POST — and the
+  // player should not be congratulated twice for one match.
+  const shownMatchKeyRef = useRef<string>('');
 
   // P2P link plumbing. dispatchRef always points at the CURRENT render's
   // message handler, so both the WebSocket and the P2P link dispatch into
@@ -400,12 +424,54 @@ export default function App() {
     if (isLinkableId(id)) setPublicProfileId(id as string);
   };
 
+  /**
+   * Show what a finished match paid. Called from two places that can both
+   * describe the SAME match — the result our own POST returned, and the one
+   * the relay pushes after recording a duel for both players — so the match
+   * key decides which of them gets to speak. Whichever lands first wins; the
+   * other is dropped, rather than firing a second round of confetti for a
+   * level the player already saw themselves reach.
+   */
+  const applyMatchResult = useCallback((matchKey: string, result: MatchEndResult) => {
+    if (!result) return;
+    if (matchKey && shownMatchKeyRef.current === matchKey) return;
+    if (matchKey) shownMatchKeyRef.current = matchKey;
+
+    setLastMatchResult(result);
+    setToastRecordFailed(false);
+    if (result.profile) setProfile(result.profile);
+    // The server advanced today's missions as part of recording the match.
+    if (result.missions) setMissions(result.missions);
+
+    if (result.leveledUp) {
+      setToastLevelUp(result.profile.level);
+      confetti({ particleCount: 150, spread: 90, origin: { y: 0.5 } });
+    } else if (result.newAchievements && result.newAchievements.length > 0) {
+      setToastAchievement(result.newAchievements[0]);
+      confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+    }
+  }, []);
+
   // Record Match Result to Server Database and Track Daily Missions
   const recordMatchCompletion = useCallback(
     async (isWinner: boolean) => {
       // Practice Wall and Split Screen are unranked: no winner is ever set
       // for them, and even if one were, nothing gets recorded.
       if (modeRef.current === 'practice' || modeRef.current === 'split') return;
+
+      // A duel's key is derived so the relay lands on the same one; a solo
+      // match has only this device to report it, so it mints its own.
+      const matchKey =
+        modeRef.current === 'multiplayer' && roomId
+          ? duelMatchKey(roomId, matchSeqRef.current)
+          : matchKeyRef.current || newSoloMatchKey();
+      matchKeyRef.current = matchKey;
+
+      // The relay may already have recorded this duel for both players and
+      // handed us the result. Recording it again would be answered with the
+      // same result anyway, so this just saves a request the server would
+      // recognise and refuse to pay.
+      if (shownMatchKeyRef.current === matchKey) return;
 
       try {
         const payload: MatchEndPayload = {
@@ -428,8 +494,21 @@ export default function App() {
           // inside the ranked bands; it never takes a "ranked" flag on trust.
           rules: configRef.current.rules,
           // Lets the server cross-check this PvP result against the room
-          // state it owns instead of trusting the numbers above.
+          // state it owns instead of trusting the numbers above — against the
+          // right match in that room, which is what matchSeq names.
           roomId: modeRef.current === 'multiplayer' ? roomId || undefined : undefined,
+          // Only when the room actually told us (game_start always does). A
+          // duel that somehow never learned its number says nothing rather
+          // than claiming match 0, and the server falls back to the match the
+          // room is on — which still deduplicates against the relay's record.
+          matchSeq:
+            modeRef.current === 'multiplayer' && matchSeqRef.current > 0
+              ? matchSeqRef.current
+              : undefined,
+          // What makes recording this match idempotent. It travels with the
+          // payload, so a retry and a replay from the on-device queue carry
+          // the same key the first attempt did.
+          matchKey,
         };
 
         const outcome = await postMatchRecord(payload);
@@ -441,35 +520,20 @@ export default function App() {
             // onboarding instead of leaving the player silently unrecorded.
             fetchProfile();
           }
-          // Queued for replay; tell the player rather than silently losing it.
-          setToastRecordFailed(true);
+          // Queued for replay; tell the player rather than silently losing it
+          // — unless the relay's own record of this duel reached us while the
+          // POST was in flight, in which case the match IS saved and saying
+          // otherwise would be the lie.
+          if (shownMatchKeyRef.current !== matchKey) setToastRecordFailed(true);
           return;
         }
-        const result = outcome.result!;
-        setLastMatchResult(result);
-        setToastRecordFailed(false);
-        if (result.profile) {
-          setProfile(result.profile);
-        }
-        // The server advanced today's missions as part of recording the match.
-        if (result.missions) {
-          setMissions(result.missions);
-        }
-
-        // Show celebrations
-        if (result.leveledUp) {
-          setToastLevelUp(result.profile.level);
-          confetti({ particleCount: 150, spread: 90, origin: { y: 0.5 } });
-        } else if (result.newAchievements && result.newAchievements.length > 0) {
-          setToastAchievement(result.newAchievements[0]);
-          confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-        }
+        applyMatchResult(matchKey, outcome.result!);
       } catch (e) {
         console.error('Failed to record match on server:', e);
-        setToastRecordFailed(true);
+        if (shownMatchKeyRef.current !== matchKey) setToastRecordFailed(true);
       }
     },
-    [playerId, opponentId, opponentName, roomId]
+    [playerId, opponentId, opponentName, roomId, applyMatchResult]
   );
 
   // Trigger match completion on winner change. Guarded by a ref because the
@@ -841,6 +905,14 @@ export default function App() {
         }
       },
       onMessage: (m) => dispatchRef.current(m),
+      // The relay sees nothing of a P2P match otherwise. This is what keeps
+      // its room state — and so the recorded result, the abandon check and the
+      // settings lock — in step with what the two phones actually played.
+      onMatchSync: (sync) => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'match_sync', ...sync }));
+        }
+      },
       onStatus: (s: P2PStatus) => {
         if (s === 'p2p') {
           setLinkStatus('p2p');
@@ -915,7 +987,12 @@ export default function App() {
 
       case 'game_start':
         // The terms ride along with every start, so a phone can never begin a
-        // match on a ruleset it was not told about.
+        // match on a ruleset it was not told about. So does the room's match
+        // number: it is how the result this match produces is filed against
+        // THIS match and not the rematch that follows it.
+        matchSeqRef.current = msg.matchSeq ?? matchSeqRef.current + 1;
+        matchKeyRef.current = '';
+        shownMatchKeyRef.current = '';
         setRoomConfig(msg.config);
         p2pRef.current?.setConfig(msg.config);
         setStats({
@@ -942,7 +1019,7 @@ export default function App() {
         // walks onto the court until the room says the match exists.
         setIsMultiplayerOpen(false);
         setIsServing(true);
-        p2pRef.current?.resetMatchState(msg.servingPlayer);
+        p2pRef.current?.resetMatchState(msg.servingPlayer, matchSeqRef.current);
         break;
 
       case 'opponent_paddle':
@@ -1068,6 +1145,14 @@ export default function App() {
 
       case 'rematch_state':
         setRematchVotes(msg.votes);
+        break;
+
+      case 'match_recorded':
+        // The relay recorded this duel onto BOTH players' profiles from the
+        // score it owns, and this is our copy of it. It arrives whether or not
+        // our own POST ever lands — which is the point: a phone that dies on
+        // the final point no longer loses the match it just played.
+        applyMatchResult(msg.matchKey, msg.result);
         break;
 
       case 'opponent_left': {
@@ -1541,6 +1626,9 @@ export default function App() {
     setTelemetryOpen(false);
     setIsServing(true);
     setIsPlayerServer(true);
+    // A new match is a new thing to record and a new result to show.
+    matchKeyRef.current = '';
+    shownMatchKeyRef.current = '';
     aiRef.current.reset();
     setBall({
       x: 0.5,
