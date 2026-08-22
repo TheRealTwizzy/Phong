@@ -43,6 +43,12 @@ interface Room {
    */
   matchOver: boolean;
   /**
+   * The lobby handshake: the guest readies, and only then can the host start.
+   * Cleared whenever the terms change — a guest readied under different rules
+   * has not agreed to these — and reset by every match start.
+   */
+  ready: [boolean, boolean];
+  /**
    * Whether a ball has actually been put in play since the last start. The
    * match "begins" when the guest joins, but nobody has served yet — so the
    * lobby is still open and the host can keep setting the terms. The first
@@ -70,6 +76,7 @@ function startMatch(room: Room, servingPlayer: 0 | 1): void {
   room.servingPlayer = servingPlayer;
   room.matchOver = false;
   room.inPlay = false;
+  room.ready = [false, false];
   // The config rides along with every start: a phone can never begin a match
   // on terms it has not been told, however it arrived in the room.
   broadcast(room, { type: 'game_start', servingPlayer, config: room.config });
@@ -533,6 +540,7 @@ async function startServer() {
             config: normalizeRoomConfig(msg.config || DEFAULT_ROOM_CONFIG),
             matchOver: false,
             inPlay: false,
+            ready: [false, false],
             lastActive: Date.now(),
           };
 
@@ -601,8 +609,10 @@ async function startServer() {
             );
           }
 
-          // Start the game!
-          startMatch(room, 0);
+          // The match does NOT start on join any more: the guest readies in
+          // the lobby, then the host starts. Both begin from a clean slate.
+          room.ready = [false, false];
+          broadcast(room, { type: 'ready_state', ready: room.ready });
 
           // Tell each phone how the matchup looks BEFORE the first serve.
           // Computed server-side so neither client ever sees the other's
@@ -736,6 +746,27 @@ async function startServer() {
               })
             );
           }
+        } else if (msg.type === 'player_ready' && currentRoomId && playerIndex !== null) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          room.lastActive = Date.now();
+          room.ready[playerIndex] = !!msg.ready;
+          broadcast(room, { type: 'ready_state', ready: room.ready });
+        } else if (msg.type === 'start_match' && currentRoomId && playerIndex !== null) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          room.lastActive = Date.now();
+          // Host-only, both seated, the guest has readied, and nothing has
+          // been played yet — rematches go through the two-vote handshake.
+          const canStart =
+            playerIndex === 0 &&
+            !!room.players[0] &&
+            !!room.players[1] &&
+            room.ready[1] &&
+            !room.inPlay &&
+            !room.matchOver;
+          if (!canStart) return;
+          startMatch(room, 0);
         } else if (msg.type === 'set_room_config' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -751,6 +782,11 @@ async function startServer() {
           }
           room.config = normalizeRoomConfig(msg.config);
           broadcast(room, { type: 'room_config', config: room.config });
+          // The guest readied under the OLD terms; new terms need a new yes.
+          if (room.ready[1]) {
+            room.ready = [false, false];
+            broadcast(room, { type: 'ready_state', ready: room.ready });
+          }
         } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -792,6 +828,7 @@ async function startServer() {
           }
           room.players[playerIndex] = null;
           room.rematchVotes[playerIndex] = false;
+          room.ready[playerIndex] = false;
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opp = room.players[oppIdx];
           if (opp?.ws && opp.ws.readyState === WebSocket.OPEN) {

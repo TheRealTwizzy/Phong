@@ -101,11 +101,24 @@ async function guestJoin(page, code, points = 3) {
   await page.click('#btn-join-room-submit');
 }
 
-async function enterCourt(page) {
-  const btn = await page.waitForSelector('#btn-ready-play:not([disabled])', { timeout: 10000 }).catch(() => null);
-  if (btn) await btn.click().catch(() => {});
-  await page.waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 5000 }).catch(() => {});
-  await page.waitForSelector('#half-court-canvas', { timeout: 5000 });
+/**
+ * The lobby handshake: the GUEST readies, which enables the HOST's start
+ * button; the host starts, and game_start closes BOTH lobbies at once —
+ * neither player clicks their own way onto the court any more.
+ */
+async function startDuel(host, guest) {
+  await guest.waitForSelector('#btn-ready-play', { timeout: 8000 });
+  await guest.click('#btn-ready-play');
+  const btn = await host.waitForSelector('#btn-ready-play:not([disabled])', { timeout: 8000 });
+  await btn.click();
+  for (const [page, who] of [[host, 'host'], [guest, 'guest']]) {
+    const closed = await page
+      .waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 5000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!closed) fail(`${who}'s lobby did not close on game_start`);
+    await page.waitForSelector('#half-court-canvas', { timeout: 5000 });
+  }
 }
 
 async function tapServe(page) {
@@ -197,8 +210,7 @@ for (const transport of ['relay', 'p2p']) {
   const guest = await newPage();
   const code = await hostCreateRoom(host, { p2p: transport === 'p2p' });
   await guestJoin(guest, code);
-  await enterCourt(host);
-  await enterCourt(guest);
+  await startDuel(host, guest);
   const badge = await host.$eval('#link-status-badge', (el) => el.textContent.trim()).catch(() => '?');
   console.log(`  link badge: ${badge}`);
   await playToWinner(host, guest, transport);
@@ -219,8 +231,7 @@ for (const transport of ['relay', 'p2p']) {
   const guest = await newPage();
   const code = await hostCreateRoom(host, { p2p: false, points: 5 });
   await guestJoin(guest, code, 3);
-  await enterCourt(host);
-  await enterCourt(guest);
+  await startDuel(host, guest);
   await playToWinner(host, guest, 'mismatched');
   await rematchHandshake(host, guest, 'mismatched');
   await host.context().close();
@@ -332,8 +343,7 @@ for (const transport of ['relay', 'p2p']) {
   // same timer serves for real.
   const guest = await newPage();
   await guestJoin(guest, code);
-  await enterCourt(host);
-  await enterCourt(guest);
+  await startDuel(host, guest);
   const live = await host
     .waitForFunction(
       async (c) => (await (await fetch(`/api/room/${c}`)).json()).inPlay,
@@ -373,23 +383,27 @@ for (const transport of ['relay', 'p2p']) {
 
   await guestJoin(guest, code);
 
-  // Each phone's countdown starts when THAT phone reaches the court — not
-  // when game_start arrived, or it would burn away unseen behind the lobby.
-  // So each is asserted right after its own court entry.
-  await enterCourt(host);
-  await host.waitForSelector('#match-countdown', { timeout: 3000 });
-  ok('the host counts down from the moment they reach the court');
+  // The host cannot start until the guest readies: an opponent merely
+  // JOINING no longer enables the start button.
+  await guest.waitForSelector('#btn-ready-play', { timeout: 8000 });
+  await host.waitForTimeout(800);
+  const hostGated = await host.$eval('#btn-ready-play', (el) => el.hasAttribute('disabled'));
+  if (!hostGated) fail('the host could start before the guest readied');
+  ok('the host is gated until the guest clicks ready');
 
-  // The host holds the first serve: a tap during their countdown must not
-  // put a ball in play.
+  // game_start closes both lobbies at once now, so the two countdowns run
+  // together — and neither started early behind a lobby.
+  await startDuel(host, guest);
+  await host.waitForSelector('#match-countdown', { timeout: 3000 });
+  await guest.waitForSelector('#match-countdown', { timeout: 3000 });
+  ok('both phones count down together from the moment the host starts');
+
+  // The host holds the first serve: a tap during the countdown must not put
+  // a ball in play.
   await tapServe(host).catch(() => {});
   const early = await host.evaluate(async (c) => (await fetch(`/api/room/${c}`)).json(), code);
   if (early.inPlay) fail('a serve landed during the start countdown');
   ok('serves are refused while the countdown runs');
-
-  await enterCourt(guest);
-  await guest.waitForSelector('#match-countdown', { timeout: 3000 });
-  ok('the guest gets their own full countdown on court entry');
 
   // Countdown done + the mandated 5s timer -> the ball enters play by itself.
   const live = await host
@@ -402,6 +416,15 @@ for (const transport of ['relay', 'p2p']) {
     .catch(() => false);
   if (!live) fail('the mandated auto-serve never started the ranked match');
   ok('the mandated timer serves once the countdown clears');
+
+  // Quitting a live duel asks first — walking out is an abandon, and it
+  // should never happen off a single mis-tap.
+  await guest.click('#btn-quit-to-menu');
+  await guest.waitForSelector('#quit-confirm-modal', { timeout: 4000 });
+  await guest.click('#btn-quit-cancel');
+  await guest.waitForSelector('#quit-confirm-modal', { state: 'detached', timeout: 3000 });
+  if (!(await guest.$('#half-court-canvas'))) fail('cancelling the quit did not stay in the match');
+  ok('quitting a live match asks for confirmation; cancel stays in');
 
   // Mid-match, the guest's connection dies. The host must not be stranded on
   // a dead court: they are returned to the menu with a notice.

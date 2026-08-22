@@ -228,6 +228,12 @@ export default function App() {
   // pressed Play Match and got a match already in progress.
   const [matchCountdown, setMatchCountdown] = useState<number | null>(null);
   const [countdownArmed, setCountdownArmed] = useState<boolean>(false);
+  // The lobby handshake, as the server last broadcast it: [host, guest].
+  const [lobbyReady, setLobbyReady] = useState<[boolean, boolean]>([false, false]);
+  // "Are you sure?" gate for quitting a live duel — walking out mid-match is
+  // an abandon, so it should never happen off a single mis-tap.
+  const [quitConfirmOpen, setQuitConfirmOpen] = useState<boolean>(false);
+  const [toastEjected, setToastEjected] = useState<boolean>(false);
   // 'relay' = via server; 'connecting' = P2P handshake running; 'p2p' = direct
   const [linkStatus, setLinkStatus] = useState<'relay' | 'connecting' | 'p2p'>('relay');
   const [p2pEnabled, setP2pEnabled] = useState<boolean>(true);
@@ -278,6 +284,7 @@ export default function App() {
   const playerIndexRef = useRef<0 | 1 | null>(playerIndex);
   const opponentIdRef = useRef<string | null>(opponentId);
   const matchCountdownRef = useRef<number | null>(matchCountdown);
+  const intentionalCloseRef = useRef<boolean>(false);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
 
   ballRef.current = ball;
@@ -886,6 +893,10 @@ export default function App() {
         p2pRef.current?.setConfig(msg.config);
         break;
 
+      case 'ready_state':
+        setLobbyReady(msg.ready);
+        break;
+
       case 'game_start':
         // The terms ride along with every start, so a phone can never begin a
         // match on a ruleset it was not told about.
@@ -908,6 +919,11 @@ export default function App() {
         setRematchVotes([false, false]);
         setMatchCountdown(null);
         setCountdownArmed(true);
+        setLobbyReady([false, false]);
+        // The host starting the match is what closes BOTH lobbies: nobody
+        // walks onto the court until the room says the match exists.
+        setIsMultiplayerOpen(false);
+        setIsServing(true);
         p2pRef.current?.resetMatchState(msg.servingPlayer);
         break;
 
@@ -1077,6 +1093,22 @@ export default function App() {
 
     socket.onclose = () => {
       setIsConnected(false);
+      // The socket dying UNDER a live duel means this player was ejected —
+      // the relay has already recorded the abandon and told the opponent.
+      // A deliberate leave sets the flag first and lands here silently.
+      if (intentionalCloseRef.current) {
+        intentionalCloseRef.current = false;
+        return;
+      }
+      const midMatch =
+        modeRef.current === 'multiplayer' &&
+        screenRef.current === 'game' &&
+        !!opponentIdRef.current;
+      if (midMatch) {
+        setToastEjected(true);
+        setTimeout(() => setToastEjected(false), 8000);
+        handleLeaveRoomRef.current();
+      }
     };
 
     setWs(socket);
@@ -1139,7 +1171,22 @@ export default function App() {
     }
   };
 
+  /** Guest: signal (or withdraw) readiness. Host starts via handleStartMatch. */
+  const handleSendReady = (ready: boolean) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'player_ready', ready }));
+    }
+  };
+
+  /** Host: start the match. The server re-checks the guest actually readied. */
+  const handleStartMatch = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'start_match' }));
+    }
+  };
+
   const handleLeaveRoom = () => {
+    intentionalCloseRef.current = true;
     p2pRef.current?.close();
     p2pRef.current = null;
     setLinkStatus('relay');
@@ -1154,6 +1201,8 @@ export default function App() {
     setRoomConfig(null);
     setMatchCountdown(null);
     setCountdownArmed(false);
+    setLobbyReady([false, false]);
+    setQuitConfirmOpen(false);
     setMode('solo');
     setScreen('menu');
     resetMatch();
@@ -1461,6 +1510,14 @@ export default function App() {
 
   const quitToMenu = () => {
     if (mode === 'multiplayer') {
+      // A live duel is worth a second look before walking out: leaving
+      // mid-match is an abandon, and ranked repeats cost rating. A finished
+      // match, or a lobby with no opponent, leaves without ceremony.
+      const liveMatch = !winner && opponentId !== null && !isMultiplayerOpen;
+      if (liveMatch) {
+        setQuitConfirmOpen(true);
+        return;
+      }
       handleLeaveRoom();
       return;
     }
@@ -1470,6 +1527,9 @@ export default function App() {
     setScreen('menu');
     resetMatch();
   };
+
+  const handleLeaveRoomRef = useRef<() => void>(() => {});
+  handleLeaveRoomRef.current = handleLeaveRoom;
 
   const currentTheme: ThemeConfig = THEMES[settings.theme] || THEMES.neon;
   const missionsSummary = getMissionsStatusSummary(missions);
@@ -1514,6 +1574,51 @@ export default function App() {
           >
             {t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp })}
           </button>
+        )}
+
+        {toastEjected && (
+          <button
+            id="toast-ejected"
+            onClick={() => setToastEjected(false)}
+            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-rose-950/90 border border-rose-500/60 text-rose-200 font-mono text-[11px] shadow-lg"
+          >
+            {t('connection_lost_notice', currentLanguage)}
+          </button>
+        )}
+
+        {quitConfirmOpen && (
+          <div
+            id="quit-confirm-modal"
+            className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/80 backdrop-blur-sm"
+          >
+            <div className="w-full max-w-xs rounded-2xl border border-rose-500/40 bg-zinc-950 p-5 flex flex-col gap-3 shadow-2xl">
+              <h3 className="text-sm font-black font-mono text-white tracking-wide">
+                {t('quit_confirm_title', currentLanguage)}
+              </h3>
+              <p className="text-[11px] font-mono text-zinc-400 leading-relaxed">
+                {t('quit_confirm_body', currentLanguage)}
+              </p>
+              <div className="flex items-center gap-2 mt-1">
+                <button
+                  id="btn-quit-cancel"
+                  onClick={() => setQuitConfirmOpen(false)}
+                  className="flex-1 py-2.5 rounded-xl font-mono text-xs font-bold bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 transition active:scale-95"
+                >
+                  {t('quit_confirm_no', currentLanguage)}
+                </button>
+                <button
+                  id="btn-quit-confirm"
+                  onClick={() => {
+                    setQuitConfirmOpen(false);
+                    handleLeaveRoom();
+                  }}
+                  className="flex-1 py-2.5 rounded-xl font-mono text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white transition active:scale-95"
+                >
+                  {t('quit_confirm_yes', currentLanguage)}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {toastOpponentLeft && (
@@ -1885,12 +1990,11 @@ export default function App() {
           winProbability={matchPrediction}
           roomConfig={roomConfig}
           onUpdateRoomConfig={handleSetRoomConfig}
+          readyStates={lobbyReady}
+          onSendReady={handleSendReady}
+          onStartMatch={handleStartMatch}
           earnedAchievements={profile?.achievements || []}
           language={currentLanguage}
-          onReadyToPlay={() => {
-            setIsMultiplayerOpen(false);
-            setIsServing(true);
-          }}
           onOpenTutorial={() => setIsTutorialOpen(true)}
           p2pEnabled={p2pEnabled}
           onToggleP2P={setP2pEnabled}

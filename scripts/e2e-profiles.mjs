@@ -174,8 +174,13 @@ await bob.fill('#input-room-code', code);
 await bob.click('#btn-join-room-submit');
 await bob.waitForSelector('#scoreboard-header', { timeout: 8000 });
 
+// The lobby handshake: bob (guest) readies, which is what enables alice's
+// (host's) start button; her start closes both lobbies.
+await bob.waitForSelector('#btn-ready-play', { timeout: 8000 });
+await bob.click('#btn-ready-play');
 await alice.waitForSelector('#btn-ready-play:not([disabled])', { timeout: 8000 });
 await alice.click('#btn-ready-play');
+await alice.waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 5000 });
 await alice.waitForSelector('#scoreboard-header', { timeout: 8000 });
 
 await alice.waitForSelector('#btn-view-opponent-profile', { timeout: 8000 });
@@ -216,8 +221,12 @@ ok('a zero-progress player stays off the board; a played one is on it');
 ok('in-match opponent tap opens sanitized public profile of PlayerTwo');
 await alice.click('#btn-close-public-profile');
 
-// Leave the room, then tap a leaderboard row → public profile
+// Leave the room, then tap a leaderboard row → public profile. Quitting a
+// live duel asks for confirmation first — that is the feature, not an
+// obstacle — so the suite answers it.
 await alice.click('#btn-quit-to-menu');
+await alice.waitForSelector('#quit-confirm-modal', { timeout: 4000 });
+await alice.click('#btn-quit-confirm');
 await alice.waitForSelector('#main-menu-screen', { timeout: 5000 });
 await alice.click('#menu-nav-leaderboard');
 await alice.waitForSelector('#leaderboard-modal-container', { timeout: 5000 });

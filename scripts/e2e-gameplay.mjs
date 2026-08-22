@@ -105,17 +105,16 @@ async function waitBadge(page, expected, ms) {
   }
 }
 
-async function enterCourt(page) {
-  // Wait for the button to ENABLE (host's stays disabled until the opponent
-  // joins) and for the lobby modal to actually leave the DOM — a lingering
-  // overlay would swallow the court taps below.
-  const btn = await page
-    .waitForSelector('#btn-ready-play:not([disabled])', { timeout: 8000 })
-    .catch(() => null);
-  if (btn) await btn.click().catch(() => {});
-  await page
-    .waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 5000 })
-    .catch(() => {});
+// The lobby handshake: the guest readies, the host starts, and game_start
+// closes both lobbies at once.
+async function startDuel(host, guest) {
+  await guest.waitForSelector('#btn-ready-play', { timeout: 8000 });
+  await guest.click('#btn-ready-play');
+  const btn = await host.waitForSelector('#btn-ready-play:not([disabled])', { timeout: 8000 });
+  await btn.click();
+  for (const page of [host, guest]) {
+    await page.waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 5000 });
+  }
 }
 
 async function canvasBox(page) {
@@ -183,8 +182,7 @@ const guest = await newPage();
 // misser holds the next serve (their tap — and only theirs — starts point 2;
 // the pre-fix freeze bug times out here).
 {
-  await enterCourt(host);
-  await enterCourt(guest);
+  await startDuel(host, guest);
   await host.waitForSelector('#half-court-canvas');
   await guest.waitForSelector('#half-court-canvas');
 
