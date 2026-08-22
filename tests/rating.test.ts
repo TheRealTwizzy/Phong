@@ -8,6 +8,7 @@ import {
   AI_RATINGS,
   aiRating,
   effectiveAiMu,
+  soloMuCap,
   PLACEMENT_GAMES,
   PVP_UPDATE,
   SOLO_UPDATE,
@@ -23,7 +24,7 @@ import {
 const fresh = (): Rating => newRating();
 const soloVs = (d: keyof typeof AI_RATINGS) => ({
   ...SOLO_UPDATE,
-  cap: AI_RATINGS[d].mu,
+  cap: soloMuCap(d),
 });
 
 describe('win probability', () => {
@@ -221,23 +222,85 @@ describe('solo is capped and always lighter than PvP', () => {
     expect(pvp.sigma).toBeLessThan(solo.sigma);
   });
 
-  it('farming a weak AI converges on that AI and stops', () => {
+  it('farming the easiest rung from a standing start moves nothing', () => {
     let r = fresh();
     for (let i = 0; i < 40; i++) {
       r = updateRating(r, AI_RATINGS.rookie, true, soloVs('rookie'));
     }
-    // The cap is Rookie's own mu; a starting player already sits above it,
-    // so 40 straight wins must not move mu at all.
+    // Rookie's ceiling lands exactly on START_MU, so a starting player is
+    // already at it: 40 straight wins over the easiest AI prove nothing and
+    // must move mu not at all.
+    expect(soloMuCap('rookie')).toBe(newRating().mu);
     expect(r.mu).toBeCloseTo(newRating().mu, 6);
   });
 
-  it('the cap lifts a weak player only up to the anchor, never past it', () => {
+  it('lifts a weak player up to the rung they beat, never past it', () => {
     let r = { mu: 10, sigma: 8.333 };
     for (let i = 0; i < 50; i++) {
       r = updateRating(r, AI_RATINGS.rookie, true, soloVs('rookie'));
     }
-    expect(r.mu).toBeLessThanOrEqual(AI_RATINGS.rookie.mu + 1e-9);
+    expect(r.mu).toBeLessThanOrEqual(soloMuCap('rookie') + 1e-9);
     expect(r.mu).toBeGreaterThan(10);
+  });
+
+  it('lets a solo win move mu from the very first match', () => {
+    // The regression this guards: the cap used to be the BASE anchor, and
+    // every player starts at exactly Pro's base — so beating Pro moved mu by
+    // nothing while losing moved it freely down. The hidden rating could only
+    // ratchet DOWNWARD, and prediction, XP scaling and the AI's own upward
+    // adaptation all key off it.
+    const start = fresh();
+    const afterWin = updateRating(start, aiRating('pro', start.mu), true, soloVs('pro'));
+    expect(afterWin.mu).toBeGreaterThan(start.mu);
+    const afterLoss = updateRating(start, aiRating('pro', start.mu), false, soloVs('pro'));
+    expect(afterLoss.mu).toBeLessThan(start.mu);
+  });
+
+  it('converges on the rung being farmed and then stops', () => {
+    for (const difficulty of AI_DIFFICULTIES) {
+      let r = fresh();
+      for (let i = 0; i < 200; i++) {
+        r = updateRating(r, aiRating(difficulty, r.mu), true, soloVs(difficulty));
+      }
+      expect(r.mu).toBeCloseTo(soloMuCap(difficulty), 6);
+      // One more win changes nothing: the ceiling is a stop, not a slope.
+      const more = updateRating(r, aiRating(difficulty, r.mu), true, soloVs(difficulty));
+      expect(more.mu).toBeCloseTo(r.mu, 9);
+    }
+  });
+
+  it('never rates a rung above the hardest that rung ever plays', () => {
+    // What makes the ceiling honest rather than arbitrary: the AI adapts
+    // upward by at most AI_ADAPT_BAND, so this is the most beating it can
+    // demonstrate — and it is a CONSTANT, so it cannot chase the player up.
+    for (const difficulty of AI_DIFFICULTIES) {
+      const hardestItEverPlays = effectiveAiMu(difficulty, 1e6);
+      expect(soloMuCap(difficulty)).toBeCloseTo(hardestItEverPlays, 9);
+    }
+  });
+
+  it('lets a strong solo player outgrow the rungs below them', () => {
+    // The documented intent that was unreachable while mu was frozen at 25.
+    let r = fresh();
+    for (let i = 0; i < 60; i++) {
+      const won = i % 10 < 7; // a 70% win rate against Pro
+      r = updateRating(r, aiRating('pro', r.mu), won, soloVs('pro'));
+    }
+    expect(r.mu).toBeGreaterThan(newRating().mu);
+    // Rookie is now clearly beneath them, and Pro has come up to meet them.
+    expect(winProbability(r, aiRating('rookie', r.mu))).toBeGreaterThan(0.85);
+    expect(effectiveAiMu('pro', r.mu)).toBeGreaterThan(AI_RATINGS.pro.mu);
+  });
+
+  it('still follows a losing player down, so the ladder never hardens', () => {
+    let r = fresh();
+    for (let i = 0; i < 60; i++) {
+      const won = i % 10 < 3; // a 30% win rate against Pro
+      r = updateRating(r, aiRating('pro', r.mu), won, soloVs('pro'));
+    }
+    expect(r.mu).toBeLessThan(newRating().mu);
+    // Pro tracks them all the way down: the odds must not have worsened.
+    expect(effectiveAiMu('pro', r.mu)).toBeCloseTo(r.mu, 6);
   });
 });
 

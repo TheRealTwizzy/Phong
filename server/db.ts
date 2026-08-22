@@ -28,6 +28,7 @@ import {
   matchXp,
   levelFromXp,
   SOLO_UPDATE,
+  soloMuCap,
   PVP_UPDATE,
   PLACEMENT_GAMES,
   surpriseMultiplier,
@@ -1334,11 +1335,11 @@ class GameDatabase {
     const previousTier = profile.tier;
     const soloOpts = {
       ...SOLO_UPDATE,
-      // A solo win can't push mu past the anchor it beat: farming a weak
-      // difficulty converges on that difficulty and stops. Deliberately the
-      // BASE anchor, not the adapted one — capping at a target that rises with
-      // the player would be circular and let solo lift mu without limit.
-      cap: AI_RATINGS[difficulty].mu,
+      // A solo win can't push mu past the hardest that difficulty ever plays:
+      // farming one rung converges on it and stops. A constant per difficulty,
+      // never anything derived from the player's own mu — a cap that rose with
+      // the player would chase them upward without bound.
+      cap: soloMuCap(difficulty),
     };
     if (ranked) {
       const nextMmr = updateRating(

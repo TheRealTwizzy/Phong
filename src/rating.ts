@@ -130,6 +130,29 @@ export function effectiveAiMu(difficulty: AIDifficulty, playerMu: number): numbe
     : base + clamp(AI_ADAPT_STRENGTH * deviation, 0, AI_ADAPT_BAND);
 }
 
+/**
+ * The ceiling a solo win may lift hidden mu to, per difficulty.
+ *
+ * The cap exists so that farming one rung converges on it and stops. It used
+ * to be the difficulty's BASE anchor, which froze the whole early game: every
+ * player starts at START_MU, which is exactly Pro's base, so beating Pro moved
+ * mu by nothing at all — while losses moved it freely down. The hidden rating
+ * could only ratchet DOWNWARD until Cyber was unlocked, and Cyber is behind
+ * ten Pro wins at level 10. Prediction, XP scaling and the AI's own upward
+ * adaptation all key off this mu, so none of them could ever reflect a solo
+ * player improving.
+ *
+ * The ceiling is the hardest that difficulty ever plays: it adapts upward by
+ * at most AI_ADAPT_BAND over its anchor, so beating it cannot demonstrate more
+ * than that. Deliberately a CONSTANT per difficulty rather than anything
+ * derived from the player's own mu — a cap that rose with the player would
+ * chase them upward without bound, which is why the base anchor was chosen in
+ * the first place. Rookie's ceiling lands exactly on START_MU, so farming the
+ * easiest rung from a standing start still moves nothing.
+ */
+export const soloMuCap = (difficulty: AIDifficulty): number =>
+  AI_RATINGS[difficulty].mu + AI_ADAPT_BAND;
+
 /** The adapted anchor to rate a solo match against. */
 export function aiRating(difficulty: AIDifficulty, playerMu: number): Rating {
   return { mu: effectiveAiMu(difficulty, playerMu), sigma: AI_RATINGS[difficulty].sigma };

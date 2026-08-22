@@ -142,6 +142,49 @@ describe('GameDatabase', () => {
     expect(again.newAchievements.map((a) => a.id)).not.toContain('first_win');
   });
 
+  it('moves hidden MMR on a solo win, but never the ranked track', () => {
+    // The two currencies, asserted at the seam where they could blur. Solo
+    // wins used to move NEITHER: the mu cap was the difficulty's base anchor
+    // and every player starts at exactly Pro's base, so the hidden rating was
+    // frozen while losses moved it freely down.
+    init('p_solo_mmr', 'SoloMmr');
+    const before = db.getProfile('p_solo_mmr');
+    db.recordMatch(match('p_solo_mmr', { mode: 'solo', difficulty: 'pro', matchKey: 'solo:mmr:1' }));
+    const after = db.getProfile('p_solo_mmr');
+
+    expect(after.mmrMu).toBeGreaterThan(before.mmrMu);
+    // ...and the visible ladder is untouched, which is what makes a tier badge
+    // mean "proven against humans".
+    expect(after.rankMu).toBe(before.rankMu);
+    expect(after.rankSigma).toBe(before.rankSigma);
+    expect(after.rankedGames).toBe(0);
+    expect(after.tier).toBe('unranked');
+  });
+
+  it('lets solo losses move hidden MMR down, and solo wins bring it back', () => {
+    init('p_solo_swing', 'SoloSwing');
+    const start = db.getProfile('p_solo_swing').mmrMu;
+    for (let i = 0; i < 3; i++) {
+      db.recordMatch(
+        match('p_solo_swing', {
+          mode: 'solo', difficulty: 'pro', isWinner: false,
+          playerScore: 1, opponentScore: 5, matchKey: `solo:down:${i}`,
+        })
+      );
+    }
+    const dipped = db.getProfile('p_solo_swing').mmrMu;
+    expect(dipped).toBeLessThan(start);
+
+    for (let i = 0; i < 3; i++) {
+      db.recordMatch(
+        match('p_solo_swing', { mode: 'solo', difficulty: 'pro', matchKey: `solo:up:${i}` })
+      );
+    }
+    // Recoverable, which it was not: wins were capped to zero movement.
+    expect(db.getProfile('p_solo_swing').mmrMu).toBeGreaterThan(dipped);
+    expect(db.getProfile('p_solo_swing').rankedGames).toBe(0);
+  });
+
   it('pays a match carrying a matchKey exactly once', () => {
     // The same match legitimately arrives more than once: the relay records a
     // duel for both seats, each phone POSTs its own copy, a failed POST is
