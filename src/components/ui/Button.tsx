@@ -1,10 +1,11 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
 
-// Apple's HIG puts the minimum hit region at 44×44pt and is explicit that it
-// is the HIT AREA, not the glyph, that has to reach it. `md` and `lg` carry
-// min-h-11 (44px) for that reason; `sm` is for controls that sit inside a
-// larger tap target and is not a general-purpose size.
+// Apple's HIG puts the minimum size for a tappable control at 44×44pt, which
+// is what min-h-11 on `md` and `lg` implements. `sm` is for controls that sit
+// inside a larger tap target and is not a general-purpose size — where a
+// small glyph needs a bigger target, pad the target rather than shrinking
+// below this floor.
 
 const VARIANT = {
   primary: 'bg-accent text-ink-on-accent shadow-accent hover:bg-accent-press',
