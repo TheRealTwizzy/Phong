@@ -23,7 +23,9 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // `ownsServer` suites start and stop their own — e2e-eject kills the server
-// under a live duel, which is the whole point of it.
+// under a live duel, which is the whole point of it. `needsBrowser` is the
+// default; build-id reads /api/health and drives no page, so asking it to
+// find a Chromium it will never launch is a install step for nothing.
 const SUITES = [
   { name: 'profiles', ownsServer: false },
   { name: 'gameplay', ownsServer: false },
@@ -35,6 +37,7 @@ const SUITES = [
   { name: 'invite', ownsServer: false },
   { name: 'lobby', ownsServer: false },
   { name: 'eject', ownsServer: true },
+  { name: 'build-id', ownsServer: true, needsBrowser: false },
 ];
 
 const argv = process.argv.slice(2);
@@ -150,8 +153,10 @@ if (!exists(path.join(ROOT, 'dist', 'server.cjs')) || !exists(path.join(ROOT, 'd
   process.exit(2);
 }
 
-const chromiumPath = await resolveChromium();
-console.log(`Chromium: ${chromiumPath}`);
+// Resolved only if something selected actually launches one, so a run of the
+// browser-free suites needs no Chromium at all.
+const chromiumPath = suites.some((s) => s.needsBrowser !== false) ? await resolveChromium() : null;
+console.log(`Chromium: ${chromiumPath ?? 'not needed for these suites'}`);
 console.log(`Suites:   ${suites.map((s) => s.name).join(', ')}\n`);
 
 const results = [];
@@ -163,7 +168,7 @@ for (const suite of suites) {
   const env = {
     ...process.env,
     NODE_ENV: 'production',
-    CHROMIUM_PATH: chromiumPath,
+    ...(chromiumPath ? { CHROMIUM_PATH: chromiumPath } : {}),
     E2E_URL: base,
     E2E_PORT: String(port),
     DATA_DIR: dataDir,

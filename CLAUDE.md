@@ -80,8 +80,9 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── deploy/                    # Caddyfile, .env.example
 ├── render.yaml                # Render blueprint (alternative host)
 ├── scripts/load-test.mjs      # N-concurrent-matches relay load test
-├── scripts/e2e-*.mjs          # Browser E2E (profiles, gameplay, rating, rules,
-│                              #   achievements, elite, duel, eject, invite, lobby)
+├── scripts/e2e-*.mjs          # E2E (profiles, gameplay, rating, rules,
+│                              #   achievements, elite, duel, eject, invite,
+│                              #   lobby, build-id)
 ├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each
 ├── .github/workflows/ci.yml   # Typecheck+unit+build, and the E2E suites
 ├── index.html                 # HTML entry
