@@ -16,6 +16,7 @@ export {
 } from './SegmentedControl';
 export { RankBadge, type RankBadgeProps } from './RankBadge';
 export { QrBlock, type QrBlockProps } from './QrBlock';
+export { ToastHost, type ToastSpec } from './Toast';
 export {
   LockBadge,
   UnlockHintSheet,

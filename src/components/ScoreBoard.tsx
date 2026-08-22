@@ -3,21 +3,21 @@ import { GameMode, PlayerStats, PlayerProfile, PlayerStatus, LanguageCode } from
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
-import { TierBadge } from './TierBadge';
-import {
-  Volume2,
-  VolumeX,
-  Settings,
-  Flame,
-  RefreshCw,
-  Home,
-  User,
-  Trophy,
-} from 'lucide-react';
+import { Volume2, VolumeX, Settings, Flame, RefreshCw, Home, Trophy } from 'lucide-react';
 
 // In-match HUD. Out-of-match navigation (leaderboard, missions, history,
 // multiplayer lobby, …) lives on the MainMenu — the HUD only carries what a
 // running match needs: scores, sound, restart, device settings, and exit.
+//
+// The bar used to be `overflow-x-auto` with its scrollbar hidden, which is an
+// admission that its contents did not fit. What did not fit was the username:
+// with it gone the score cluster can be the anchor it should always have been,
+// and everything sits on one row at 390px without scrolling. You know who you
+// are; mid-match you need to know the score.
+//
+// It also carried twenty `sm:` variants. Tailwind's sm breakpoint is 640px and
+// this app is phone-only, so every one of them was dead — the HUD had only
+// ever rendered its smallest layout.
 interface ScoreBoardProps {
   stats: PlayerStats;
   mode: GameMode;
@@ -43,6 +43,26 @@ interface ScoreBoardProps {
   language?: LanguageCode;
 }
 
+const HudButton: React.FC<{
+  id: string;
+  label: string;
+  onClick: () => void;
+  tone?: 'default' | 'accent';
+  children: React.ReactNode;
+}> = ({ id, label, onClick, tone = 'default', children }) => (
+  <button
+    id={id}
+    onClick={onClick}
+    title={label}
+    aria-label={label}
+    className={`rounded-ctl border border-line bg-surface-3 p-1.5 transition-colors active:scale-95 motion-reduce:active:scale-100 ${
+      tone === 'accent' ? 'text-accent' : 'text-ink-muted'
+    }`}
+  >
+    {children}
+  </button>
+);
+
 export const ScoreBoard: React.FC<ScoreBoardProps> = ({
   stats,
   mode,
@@ -61,192 +81,166 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
   onViewOpponent,
   language = 'en',
 }) => {
-  const isHighRally = stats.rallyCount >= 5;
+  // The rally counter is noise until a rally is actually going.
+  const showRally = stats.rallyCount >= 3;
   const isPractice = mode === 'practice';
 
   return (
     <div
       id="scoreboard-header"
-      className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-2 sm:px-3 py-1.5 border-b backdrop-blur-md transition-colors duration-300 gap-1.5 sm:gap-2 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0"
-      style={{
-        backgroundColor: 'rgba(10, 15, 25, 0.88)',
-        borderColor: theme.courtBorder + '30',
-      }}
+      // No backdrop-filter: this sits over a live 60fps canvas, and blurring
+      // it would recomposite the whole court every frame.
+      className="absolute inset-x-0 top-0 z-30 flex items-center justify-between gap-2 border-b border-line bg-surface-0/92 px-2 pt-safe pb-1.5"
     >
-      {/* Left: Player Profile & Status Indicator */}
+      {/* Left: identity, without the name */}
       <button
         id="btn-open-profile"
         onClick={onOpenProfile}
-        className="flex items-center gap-1.5 p-1 pl-1.5 pr-2 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 transition active:scale-95 text-left"
-        title={`Player Profile (${playerStatus.toUpperCase()})`}
+        aria-label={t('profile', language)}
+        className="flex shrink-0 items-center gap-1.5 rounded-ctl border border-line bg-surface-3 p-1 pr-1.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
       >
         <div className="relative">
           <AvatarImage
             playerId={profile?.id}
             hasAvatar={profile?.hasAvatar}
             avatarVersion={profile?.avatarVersion}
-            size={26}
-            className="rounded-lg border border-cyan-400/40"
+            size={24}
+            className="rounded-chip border border-line-strong"
           />
-          {/* Status Indicator Dot */}
           <span
             id="player-status-dot"
-            className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border-2 border-slate-900 ${
+            className={`absolute -right-0.5 -bottom-0.5 h-2 w-2 rounded-full border-2 border-surface-3 ${
               playerStatus === 'online'
-                ? 'bg-emerald-400 shadow-sm shadow-emerald-400/80 animate-pulse'
+                ? 'bg-win'
                 : playerStatus === 'idle'
-                ? 'bg-amber-400 shadow-sm shadow-amber-400/80'
-                : 'bg-zinc-500'
+                  ? 'bg-warn'
+                  : 'bg-locked'
             }`}
-            title={`Status: ${playerStatus}`}
           />
         </div>
-
-        <div className="flex flex-col">
-          <div className="flex items-center gap-1">
-            <span className="text-[10px] sm:text-[11px] font-bold text-white max-w-[60px] sm:max-w-[85px] truncate leading-tight">
-              {profile?.username || 'Player'}
-            </span>
-            <span className="text-[8px] sm:text-[9px] font-black px-1 rounded bg-amber-400 text-slate-950">
-              LV{profile?.level || 1}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5 leading-none mt-0.5">
-            <TierBadge tier={profile?.tier || 'unranked'} language={language} />
-          </div>
-        </div>
+        <span className="rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
+          LV{profile?.level || 1}
+        </span>
       </button>
 
-      {/* Center: Score Display (match modes) or Rally Streak (practice) */}
+      {/* Centre: the anchor */}
       {isPractice ? (
-        <div className="flex items-center gap-3 sm:gap-4 font-mono">
+        <div className="flex items-center gap-4">
           <div className="flex flex-col items-center">
-            <span className="text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tight">
+            <span className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
               {t('rally', language)}
             </span>
             <span
               id="practice-rally-count"
-              className="text-lg sm:text-2xl font-black leading-none"
+              className="text-title tnum leading-none"
               style={{ color: theme.playerPaddleColor }}
             >
               {stats.rallyCount}
             </span>
           </div>
-
           <div className="flex flex-col items-center">
-            <span className="text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tight flex items-center gap-0.5">
-              <Trophy className="w-2.5 h-2.5 text-amber-400" />
+            <span className="flex items-center gap-0.5 text-2xs font-normal tracking-normal text-ink-muted uppercase">
+              <Trophy className="h-2.5 w-2.5 text-warn" />
               {t('best', language)}
             </span>
-            <span
-              id="practice-best-rally"
-              className="text-lg sm:text-2xl font-black leading-none text-amber-400"
-            >
+            <span id="practice-best-rally" className="text-title tnum leading-none text-warn">
               {stats.maxRally}
             </span>
           </div>
         </div>
       ) : (
-        <div className="flex items-center gap-2 sm:gap-3.5 font-mono">
-          {/* Opponent Side Score (name taps through to their public profile
-              when they have one) */}
+        <div className="flex min-w-0 items-center gap-2.5">
           <div className="flex flex-col items-center">
             {onViewOpponent ? (
               <button
                 id="btn-view-opponent-profile"
                 onClick={onViewOpponent}
-                className="text-[8px] sm:text-[9px] text-cyan-300 underline decoration-dotted underline-offset-2 uppercase tracking-tight truncate max-w-[45px] sm:max-w-[70px] active:scale-95 transition"
+                className="max-w-[60px] truncate text-2xs font-normal tracking-normal text-accent uppercase underline decoration-dotted underline-offset-2"
               >
                 {opponentName}
               </button>
             ) : (
-              <span className="text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tight truncate max-w-[45px] sm:max-w-[70px]">
+              <span className="max-w-[60px] truncate text-2xs font-normal tracking-normal text-ink-muted uppercase">
                 {opponentName}
               </span>
             )}
             <span
               id="score-opponent"
-              className="text-lg sm:text-2xl font-black leading-none"
+              className="text-title tnum leading-none"
               style={{ color: theme.opponentPaddleColor }}
             >
               {stats.opponentScore}
             </span>
           </div>
 
-          {/* Colon Divider */}
-          <div className="flex flex-col items-center justify-center">
-            <span className="text-zinc-600 text-xs font-bold">:</span>
-            <span className="text-[7px] sm:text-[8px] text-zinc-500 font-sans">to {winningScore}</span>
+          <div className="flex flex-col items-center">
+            <span className="text-2xs text-ink-dim">:</span>
+            <span className="text-2xs font-normal tracking-normal text-ink-dim">
+              to {winningScore}
+            </span>
           </div>
 
-          {/* Player Side Score */}
           <div className="flex flex-col items-center">
-            <span className="text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tight">
+            <span className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
               {t('you', language)}
             </span>
             <span
               id="score-player"
-              className="text-lg sm:text-2xl font-black leading-none"
+              className="text-title tnum leading-none"
               style={{ color: theme.playerPaddleColor }}
             >
               {stats.score}
             </span>
           </div>
 
-          {/* Rally Badge */}
-          <div
-            className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-bold transition-all ${
-              isHighRally
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm animate-pulse'
-                : 'bg-zinc-800/80 text-zinc-300 border border-zinc-700/50'
-            }`}
-            title="Current Volley Rally Count"
-          >
-            <Flame className={`w-3 h-3 ${isHighRally ? 'text-amber-400 fill-amber-400' : 'text-zinc-400'}`} />
-            <span>{stats.rallyCount}</span>
-          </div>
+          {showRally && (
+            <div
+              // Opacity only. This used to pulse a coloured box-shadow, which
+              // repaints rather than compositing.
+              className="animate-ready-pulse flex items-center gap-1 rounded-chip border border-warn/40 bg-warn/15 px-1.5 py-0.5 text-2xs tnum text-warn"
+              title={t('rally', language)}
+            >
+              <Flame className="h-3 w-3 fill-current" />
+              {stats.rallyCount}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Right: Action Buttons */}
-      <div className="flex items-center gap-1 sm:gap-1.5">
-        <button
-          id="btn-sound-toggle"
-          onClick={onToggleSound}
-          title={t('sound_effects', language)}
-          className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition active:scale-95"
-        >
-          {soundEnabled ? <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-zinc-500" />}
-        </button>
+      {/* Right: what a running match needs */}
+      <div className="flex shrink-0 items-center gap-1">
+        <HudButton id="btn-sound-toggle" label={t('sound_effects', language)} onClick={onToggleSound}>
+          {soundEnabled ? (
+            <Volume2 className="h-4 w-4 text-win" />
+          ) : (
+            <VolumeX className="h-4 w-4" />
+          )}
+        </HudButton>
 
         {canResetMatch && (
-          <button
-            id="btn-reset-match"
-            onClick={onResetMatch}
-            title={t('reset_match', language)}
-            className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition active:scale-95"
-          >
-            <RefreshCw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-          </button>
+          <HudButton id="btn-reset-match" label={t('reset_match', language)} onClick={onResetMatch}>
+            <RefreshCw className="h-4 w-4" />
+          </HudButton>
         )}
 
-        <button
+        <HudButton
           id="btn-open-settings"
+          label={t('settings_title', language)}
           onClick={onOpenSettings}
-          title={t('settings_title', language)}
-          className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition active:scale-95"
         >
-          <Settings className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-        </button>
+          <Settings className="h-4 w-4" />
+        </HudButton>
 
-        <button
+        {/* Clicked directly by the suites, so it can never move behind a
+            closed menu — Playwright cannot click an invisible element. */}
+        <HudButton
           id="btn-quit-to-menu"
+          label={t('exit_to_menu', language)}
           onClick={onQuitToMenu}
-          title={t('exit_to_menu', language)}
-          className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-cyan-400 border border-zinc-700 transition active:scale-95"
+          tone="accent"
         >
-          <Home className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-        </button>
+          <Home className="h-4 w-4" />
+        </HudButton>
       </div>
     </div>
   );

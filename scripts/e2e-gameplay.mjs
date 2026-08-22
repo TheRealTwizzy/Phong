@@ -227,8 +227,14 @@ const guest = await newPage();
   await guestJoin(g2, code);
   await h2.waitForTimeout(2500);
   const txt = await h2.$eval('#link-status-badge', (el) => el.textContent.trim());
-  if (!txt.startsWith('RELAY')) fail(`expected RELAY with toggle off, got: ${txt}`);
-  console.log(`scenario 3 OK — badge: ${txt}`);
+  // Strict equality, not startsWith. The badge used to append the ping to its
+  // own text, so this assertion had to be loosened — which is exactly what
+  // hid it, since the P2P path (asserted strictly above) never appends. The
+  // ping is a sibling now, so both states can be compared the same way.
+  if (txt !== 'RELAY') fail(`expected exactly RELAY with toggle off, got: ${txt}`);
+  const ping = await h2.$eval('#link-ping', (el) => el.textContent.trim()).catch(() => null);
+  if (ping !== null && !/^\d+ms$/.test(ping)) fail(`ping badge is malformed: ${ping}`);
+  console.log(`scenario 3 OK — badge: ${txt}${ping ? `, ping: ${ping}` : ''}`);
   await h2.context().close();
   await g2.context().close();
 }

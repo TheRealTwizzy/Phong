@@ -22,6 +22,12 @@ import { RefreshCw, Home } from 'lucide-react';
 interface SplitScreenMatchProps {
   settings: GameSettings;
   theme: ThemeConfig;
+  /**
+   * The room-or-menu derived target, per CLAUDE.md §9.7: match code reads
+   * activeConfig, never settings. For a split match the two are the same value
+   * by construction — this is compliance, not a behaviour change.
+   */
+  winningScore: number;
   onExitSplitMode: () => void;
 }
 
@@ -46,6 +52,7 @@ interface FullCourtBall {
 
 export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   settings,
+  winningScore,
   theme,
   onExitSplitMode,
 }) => {
@@ -200,7 +207,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         setRallyCount(0);
         p2ScoreRef.current += 1;
         setP2Score(p2ScoreRef.current);
-        if (p2ScoreRef.current >= settings.winningScore) {
+        if (p2ScoreRef.current >= winningScore) {
           winnerRef.current = 2;
           setWinner(2);
           confetti({ particleCount: 90, spread: 70, origin: { y: 0.3 } });
@@ -217,7 +224,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         setRallyCount(0);
         p1ScoreRef.current += 1;
         setP1Score(p1ScoreRef.current);
-        if (p1ScoreRef.current >= settings.winningScore) {
+        if (p1ScoreRef.current >= winningScore) {
           winnerRef.current = 1;
           setWinner(1);
           confetti({ particleCount: 90, spread: 70, origin: { y: 0.7 } });
@@ -234,7 +241,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
 
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [settings.winningScore]);
+  }, [winningScore]);
 
   // Keyboard: player 1 uses the arrow keys, player 2 uses A / D.
   useEffect(() => {
@@ -517,7 +524,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         <div className="flex items-center gap-2 font-mono text-sm">
           <span className="text-[9px] uppercase text-zinc-400">P1</span>
           <span className="text-xl font-black text-cyan-400 leading-none">{p1Score}</span>
-          <span className="text-[8px] text-zinc-500">to {settings.winningScore}</span>
+          <span className="text-[8px] text-zinc-500">to {winningScore}</span>
         </div>
         <button
           id="btn-split-reset"

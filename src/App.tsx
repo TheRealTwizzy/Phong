@@ -1,3 +1,4 @@
+import { motion } from 'motion/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BallState,
@@ -39,7 +40,7 @@ import {
   playerPressure,
   bounceOffWall,
 } from './game/physics';
-import { START_MU, normalizeDifficulty } from './rating';
+import { START_MU, normalizeDifficulty, xpForLevel } from './rating';
 import {
   DEFAULT_MATCH_RULES,
   DEFAULT_ROOM_CONFIG,
@@ -76,7 +77,14 @@ import { SessionGuard } from './components/SessionGuard';
 import { TutorialModal } from './components/TutorialModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { PublicProfileModal } from './components/PublicProfileModal';
-import { Sheet, Button } from './components/ui';
+import {
+  Sheet,
+  Button,
+  ProgressBar,
+  StatTile,
+  ToastHost,
+  type ToastSpec,
+} from './components/ui';
 import { isLinkableId } from './profileRules';
 import {
   ClientSessionStatus,
@@ -1960,37 +1968,42 @@ export default function App() {
           }}
         />
 
-        {toastUnlock && (
-          <button
-            id="toast-unlock"
-            onClick={() => setToastUnlock(null)}
-            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-amber-950/90 border border-amber-400/60 text-amber-200 font-mono text-[11px] shadow-lg"
-          >
-            {t('mission_unlock_earned', currentLanguage, {
-              name: THEMES[toastUnlock as CourtTheme]?.name || toastUnlock,
-            })}
-          </button>
-        )}
-
-        {toastPracticeXp !== null && (
-          <button
-            id="toast-practice-xp"
-            onClick={() => setToastPracticeXp(null)}
-            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-cyan-950/90 border border-cyan-500/60 text-cyan-200 font-mono text-[11px] shadow-lg"
-          >
-            {t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp })}
-          </button>
-        )}
-
-        {toastEjected && (
-          <button
-            id="toast-ejected"
-            onClick={() => setToastEjected(false)}
-            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-rose-950/90 border border-rose-500/60 text-rose-200 font-mono text-[11px] shadow-lg"
-          >
-            {t('connection_lost_notice', currentLanguage)}
-          </button>
-        )}
+        <ToastHost
+          toasts={[
+            toastUnlock && {
+              id: 'toast-unlock',
+              tone: 'xp' as const,
+              content: t('mission_unlock_earned', currentLanguage, {
+                name: THEMES[toastUnlock as CourtTheme]?.name || toastUnlock,
+              }),
+              onDismiss: () => setToastUnlock(null),
+            },
+            toastPracticeXp !== null && {
+              id: 'toast-practice-xp',
+              tone: 'info' as const,
+              content: t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp }),
+              onDismiss: () => setToastPracticeXp(null),
+            },
+            toastEjected && {
+              id: 'toast-ejected',
+              tone: 'loss' as const,
+              content: t('connection_lost_notice', currentLanguage),
+              onDismiss: () => setToastEjected(false),
+            },
+            toastOpponentLeft && {
+              id: 'toast-opponent-left',
+              tone: 'loss' as const,
+              content: t('opponent_left_notice', currentLanguage),
+              onDismiss: () => setToastOpponentLeft(false),
+            },
+            toastRecordFailed && {
+              id: 'toast-record-failed',
+              tone: 'warn' as const,
+              content: t('match_not_saved', currentLanguage),
+              onDismiss: () => setToastRecordFailed(false),
+            },
+          ].filter(Boolean) as ToastSpec[]}
+        />
 
         <Sheet
           id="quit-confirm-modal"
@@ -2028,26 +2041,6 @@ export default function App() {
             {t('quit_confirm_body', currentLanguage)}
           </p>
         </Sheet>
-
-        {toastOpponentLeft && (
-          <button
-            id="toast-opponent-left"
-            onClick={() => setToastOpponentLeft(false)}
-            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-rose-950/90 border border-rose-500/60 text-rose-200 font-mono text-[11px] shadow-lg"
-          >
-            {t('opponent_left_notice', currentLanguage)}
-          </button>
-        )}
-
-        {toastRecordFailed && (
-          <button
-            id="toast-record-failed"
-            onClick={() => setToastRecordFailed(false)}
-            className="absolute top-3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-amber-950/90 border border-amber-500/60 text-amber-200 font-mono text-[11px] shadow-lg"
-          >
-            {t('match_not_saved', currentLanguage)}
-          </button>
-        )}
 
         {/* Mandatory first-arrival onboarding: gates EVERYTHING until the
             player locks in their unique username (or restores a profile) */}
@@ -2097,6 +2090,7 @@ export default function App() {
           <SplitScreenMatch
             settings={settings}
             theme={currentTheme}
+            winningScore={activeConfig.winningScore}
             onExitSplitMode={quitToMenu}
           />
         )}
@@ -2164,7 +2158,18 @@ export default function App() {
             }
           >
             {linkStatus === 'p2p' ? 'P2P' : linkStatus === 'connecting' ? 'P2P…' : 'RELAY'}
-            {pingMs > 0 && linkStatus !== 'p2p' ? ` ${pingMs}ms` : ''}
+          </div>
+        )}
+        {/* The ping is a SIBLING. It used to live inside the badge's own
+            textContent, which e2e-gameplay compares with strict equality —
+            that assertion only passed because the suite never waits for
+            RELAY, the one state that appends it. */}
+        {inCourtMatch && mode === 'multiplayer' && pingMs > 0 && linkStatus !== 'p2p' && (
+          <div
+            id="link-ping"
+            className="absolute top-[5.5rem] right-2 z-30 rounded-chip border border-line bg-surface-0/80 px-1.5 text-2xs tnum text-ink-dim select-none"
+          >
+            {pingMs}ms
           </div>
         )}
 
@@ -2231,12 +2236,11 @@ export default function App() {
             <div className="flex flex-col items-center gap-2">
               <span
                 key={matchCountdown}
-                className="text-7xl font-black font-mono text-cyan-300 drop-shadow-[0_0_18px_rgba(34,211,238,0.7)]"
-                style={{ animation: 'pulse 1s ease-out' }}
+                className="animate-count-in text-numeral text-[4.5rem] tnum text-(--theme-accent)"
               >
                 {matchCountdown}
               </span>
-              <span className="text-[11px] font-mono uppercase tracking-widest text-zinc-400">
+              <span className="text-kicker text-ink-muted uppercase">
                 {t('match_starting', currentLanguage)}
               </span>
             </div>
@@ -2246,77 +2250,101 @@ export default function App() {
         {winner && (
           <div
             id="winner-modal-overlay"
-            className="absolute inset-0 z-40 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
+            className="absolute inset-0 z-40 flex items-center justify-center bg-surface-0/88 p-4"
           >
-            <div
-              className="w-full max-w-sm rounded-2xl border p-6 flex flex-col items-center gap-4 text-center shadow-2xl text-white"
+            <motion.div
+              className="flex w-full max-w-sm flex-col items-center gap-3 rounded-sheet border bg-surface-2 p-5 text-center shadow-sheet"
               style={{
-                backgroundColor: '#10141e',
-                borderColor: winner === 'player' ? currentTheme.playerPaddleColor : currentTheme.opponentPaddleColor,
-                boxShadow: `0 0 40px ${winner === 'player' ? currentTheme.playerPaddleGlow : currentTheme.opponentPaddleGlow}40`,
+                borderColor:
+                  winner === 'player'
+                    ? currentTheme.playerPaddleColor
+                    : currentTheme.opponentPaddleColor,
               }}
+              initial={{ opacity: 0, y: 12, scale: 0.985 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             >
-              <div
-                className="p-4 rounded-2xl border"
-                style={{
-                  backgroundColor: (winner === 'player' ? currentTheme.playerPaddleColor : currentTheme.opponentPaddleColor) + '20',
-                  borderColor: winner === 'player' ? currentTheme.playerPaddleColor : currentTheme.opponentPaddleColor,
-                }}
+              <h2
+                className={`text-hero ${winner === 'player' ? 'text-win' : 'text-loss'}`}
               >
-                <Trophy className="w-10 h-10 text-amber-400" />
+                {winner === 'player'
+                  ? t('victory', currentLanguage)
+                  : t('match_lost', currentLanguage)}
+              </h2>
+
+              {/* Paddle-coloured, because that is which score is yours. */}
+              <div className="flex items-baseline gap-3 text-numeral tnum">
+                <span style={{ color: currentTheme.playerPaddleColor }}>{stats.score}</span>
+                <span className="text-title text-ink-dim">–</span>
+                <span style={{ color: currentTheme.opponentPaddleColor }}>
+                  {stats.opponentScore}
+                </span>
               </div>
 
-              <div className="flex flex-col gap-1">
-                <h2 className="text-2xl font-black font-mono tracking-wide">
-                  {winner === 'player' ? t('victory', currentLanguage) : t('match_lost', currentLanguage)}
-                </h2>
-                <p className="text-xs text-zinc-400 font-mono">
-                  {t('final_score', currentLanguage)}: {stats.score} - {stats.opponentScore}
-                </p>
-                <p className="text-[11px] text-zinc-500 font-mono">
-                  {t('longest_rally', currentLanguage)}: {stats.maxRally} {t('rally', currentLanguage)}
-                </p>
-              </div>
-
-              {/* Progression & Rewards Earned Box */}
+              {/* The result strip. The end of a match is this game's main
+                  progression payoff and it used to be a +XP number in a grey
+                  box; the XP bar now actually moves toward the next level. */}
               {lastMatchResult && (
-                <div className="w-full bg-slate-900/80 border border-slate-800 rounded-xl p-3 flex items-center justify-around text-xs">
-                  <div>
-                    <div className="text-yellow-400 font-bold text-sm">+{lastMatchResult.earnedXp} XP</div>
-                    <div className="text-[10px] text-slate-400 uppercase">{t('progression', currentLanguage)}</div>
-                  </div>
-                  <div className="w-px h-8 bg-slate-800" />
-                  <div>
+                <div className="flex w-full flex-col gap-3">
+                  <div className="grid w-full grid-cols-3 gap-2">
+                    <StatTile
+                      label={t('progression', currentLanguage)}
+                      value={`+${lastMatchResult.earnedXp}`}
+                      tone="xp"
+                    />
+                    <StatTile
+                      label={t('longest_rally', currentLanguage)}
+                      value={stats.maxRally}
+                      tone="warn"
+                    />
                     {lastMatchResult.tier ? (
-                      <>
-                        <TierBadge tier={lastMatchResult.tier} language={currentLanguage} size="md" />
-                        <div className="text-[10px] text-slate-400 uppercase mt-0.5">
-                          {lastMatchResult.tierChanged ? t('rank_updated', currentLanguage) : t('skill_tier', currentLanguage)}
-                        </div>
-                      </>
+                      <div className="flex flex-col items-center justify-center gap-1 rounded-card border border-line bg-surface-1 px-2 py-2.5">
+                        <TierBadge tier={lastMatchResult.tier} language={currentLanguage} />
+                        <span className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
+                          {lastMatchResult.tierChanged
+                            ? t('rank_updated', currentLanguage)
+                            : t('skill_tier', currentLanguage)}
+                        </span>
+                      </div>
                     ) : (
-                      <>
-                        <div className="font-bold text-sm text-cyan-300">
-                          {Math.round(lastMatchResult.winProbability * 100)}%
-                        </div>
-                        <div className="text-[10px] text-slate-400 uppercase">
-                          {t('predicted_odds', currentLanguage)}
-                        </div>
-                      </>
+                      <StatTile
+                        label={t('predicted_odds', currentLanguage)}
+                        value={`${Math.round(lastMatchResult.winProbability * 100)}%`}
+                        tone="accent"
+                      />
                     )}
                   </div>
+
+                  {profile && (
+                    <ProgressBar
+                      value={Math.min(
+                        1,
+                        Math.max(0, profile.xp - xpForLevel(profile.level)) /
+                          Math.max(1, profile.xpNext - xpForLevel(profile.level))
+                      )}
+                      tone="xp"
+                      label={`${t('menu_level', currentLanguage)} ${profile.level}`}
+                      trailing={`${profile.xp.toLocaleString()} / ${profile.xpNext.toLocaleString()}`}
+                      ariaLabel={t('progression', currentLanguage)}
+                    />
+                  )}
                 </div>
               )}
 
-              {mode === 'multiplayer' && playerIndex !== null && rematchVotes[playerIndex === 0 ? 1 : 0] && (
-                <p className="text-[11px] text-cyan-300 font-mono animate-pulse">
-                  {opponentName || 'Opponent'}: {t('chat_rematch', currentLanguage)}
-                </p>
-              )}
+              {mode === 'multiplayer' &&
+                playerIndex !== null &&
+                rematchVotes[playerIndex === 0 ? 1 : 0] && (
+                  <p className="animate-ready-pulse text-2xs text-accent">
+                    {opponentName || 'Opponent'}: {t('chat_rematch', currentLanguage)}
+                  </p>
+                )}
 
-              <div className="flex items-center gap-2 w-full mt-2">
-                <button
+              <div className="mt-1 flex w-full items-center gap-2">
+                <Button
                   id="btn-play-again"
+                  variant="primary"
+                  size="lg"
+                  block
                   onClick={() => {
                     if (mode === 'multiplayer') {
                       sendNetRef.current({ type: 'rematch_request' });
@@ -2324,30 +2352,42 @@ export default function App() {
                       resetMatch();
                     }
                   }}
-                  disabled={mode === 'multiplayer' && (opponentId === null || (playerIndex !== null && rematchVotes[playerIndex]))}
-                  className="flex-1 py-3 rounded-xl font-mono text-xs font-bold bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-700 disabled:text-zinc-400 text-zinc-950 transition active:scale-95 shadow-lg flex items-center justify-center gap-1.5"
+                  disabled={
+                    mode === 'multiplayer' &&
+                    (opponentId === null ||
+                      (playerIndex !== null && rematchVotes[playerIndex]))
+                  }
+                  icon={
+                    <RefreshCw
+                      className={`h-4 w-4 ${
+                        mode === 'multiplayer' &&
+                        playerIndex !== null &&
+                        rematchVotes[playerIndex]
+                          ? 'animate-spin'
+                          : ''
+                      }`}
+                    />
+                  }
                 >
-                  <RefreshCw className={`w-4 h-4 ${mode === 'multiplayer' && playerIndex !== null && rematchVotes[playerIndex] ? 'animate-spin' : ''}`} />
-                  <span>
-                    {mode === 'multiplayer'
-                      ? playerIndex !== null && rematchVotes[playerIndex]
-                        ? t('waiting_for_opponent', currentLanguage)
-                        : t('rematch', currentLanguage)
-                      : t('play_again', currentLanguage)}
-                  </span>
-                </button>
+                  {mode === 'multiplayer'
+                    ? playerIndex !== null && rematchVotes[playerIndex]
+                      ? t('waiting_for_opponent', currentLanguage)
+                      : t('rematch', currentLanguage)
+                    : t('play_again', currentLanguage)}
+                </Button>
 
                 {/* Between-match navigation: back to the out-of-match hub */}
-                <button
+                <Button
                   id="btn-menu-from-win"
+                  variant="secondary"
+                  size="lg"
                   onClick={quitToMenu}
-                  className="px-4 py-3 rounded-xl font-mono text-xs font-bold bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 transition active:scale-95 flex items-center justify-center gap-1.5"
+                  icon={<Home className="h-4 w-4 text-accent" />}
                 >
-                  <Home className="w-4 h-4 text-cyan-400" />
-                  <span>{t('main_menu', currentLanguage)}</span>
-                </button>
+                  {t('main_menu', currentLanguage)}
+                </Button>
               </div>
-            </div>
+            </motion.div>
           </div>
         )}
           </>
