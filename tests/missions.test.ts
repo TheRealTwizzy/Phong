@@ -563,6 +563,63 @@ describe('a completed mission deals a free replacement', () => {
     expect(repeats).toBeGreaterThan(0);
   });
 
+  it('sweeps away a task that was claimed but left in its slot', () => {
+    // Reported after the repeating pool shipped: "3 active tasks, but 2 are
+    // complete and not auto-rolling". The auto-reroll fires at claim time, so
+    // a task claimed BEFORE these rules existed — left sitting there by a dry
+    // pool — is never revisited. The player cannot shift it either: a claimed
+    // task refuses a reroll (MISSION_COMPLETE) and a second claim
+    // (MISSION_CLAIMED). It is a dead slot until the UTC reset.
+    init('ar_stuck', 'StuckSlots');
+    const hand = db.getMissions('ar_stuck', today);
+    const dayKey = today.toISOString().slice(0, 10);
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    const stamp = raw.prepare(
+      `INSERT INTO daily_missions (playerId, dayKey, missionId, progress, claimedAt)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(playerId, dayKey, missionId)
+         DO UPDATE SET progress = excluded.progress, claimedAt = excluded.claimedAt`
+    );
+    const stuck = hand.filter((m) => m.tier === 'regular').slice(0, 2);
+    for (const m of stuck) stamp.run('ar_stuck', dayKey, m.id, m.target, today.toISOString());
+    raw.close();
+
+    const swept = db.getMissions('ar_stuck', today);
+    expect(swept.filter((m) => m.claimed)).toHaveLength(0);
+    expect(swept.filter((m) => m.tier === 'regular')).toHaveLength(REGULAR_SLOTS);
+    // ...and what replaced them starts from zero, like any other deal.
+    for (const m of swept) expect(m.current).toBe(0);
+  });
+
+  it('leaves a finished task alone until it is actually claimed', () => {
+    // The other half of the rule: a task finished but NOT claimed is the
+    // player's reward waiting to be collected. Sweeping it would quietly take
+    // the XP away.
+    init('ar_owed', 'RewardOwed');
+    const owed = db.getMissions('ar_owed', today).find((m) => m.tier === 'regular')!;
+    const dayKey = today.toISOString().slice(0, 10);
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    raw
+      .prepare(
+        `INSERT INTO daily_missions (playerId, dayKey, missionId, progress) VALUES (?, ?, ?, ?)
+         ON CONFLICT(playerId, dayKey, missionId) DO UPDATE SET progress = excluded.progress`
+      )
+      .run('ar_owed', dayKey, owed.id, owed.target);
+    raw.close();
+
+    const held = db.getMissions('ar_owed', today).find((m) => m.id === owed.id);
+    expect(held).toBeTruthy();
+    expect(held!.current).toBe(held!.target);
+    expect(held!.claimed).toBe(false);
+
+    // And claiming it still pays, and still hands back a fresh task.
+    const res = db.claimMission('ar_owed', owed.id, today);
+    expect(res.ok).toBe(true);
+    expect(res.earnedXp).toBe(findMission(owed.id)!.xpReward);
+    expect(res.newMissionId).toBeTruthy();
+    expect(db.getMissions('ar_owed', today).some((m) => m.id === owed.id)).toBe(false);
+  });
+
   it('holds a day dealt under a larger hand down to the current size', () => {
     // A player mid-day is holding whatever they were dealt this morning, so
     // lowering the hand size has to take effect on the list they already have.

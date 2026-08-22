@@ -516,6 +516,7 @@ class GameDatabase {
     this.renameAchievement('rating_1400', 'master_tier');
 
     this.releaseStrandedPlacements();
+    this.resetActiveTasks();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -554,6 +555,42 @@ class GameDatabase {
     this.setMeta(KEY, new Date().toISOString());
     if (stranded.changes) {
       console.log(`placement_sigma_v1: placed ${stranded.changes} player(s) stranded by the old placement rule`);
+    }
+  }
+
+  /**
+   * Clear everybody's active tasks once, so the day is dealt afresh.
+   *
+   * Hands dealt under the old rules carry state the new ones cannot repair on
+   * their own: five slots where there should be three, tasks marked claimed
+   * that the claim path will never revisit, and progress banked against tasks
+   * that were meant to start from zero. sweepClaimed and trimSlots heal most
+   * of that on read, but a half-finished five-task hand is still not a hand
+   * anyone was meant to be holding.
+   *
+   * Nothing permanent is touched. XP already paid stays on the profile and
+   * elite unlocks live in their own table; these three are day-keyed working
+   * state, and every player simply gets dealt a fresh set on their next read.
+   * The reroll allowances go back too — they were spent on a hand that is
+   * being taken away, and letting that stand would be charging for nothing.
+   */
+  private resetActiveTasks(): void {
+    const KEY = 'tasks_reset_v1';
+    if (this.getMeta(KEY)) return;
+    const held = this.stmt('SELECT COUNT(*) AS n FROM daily_mission_slots').get() as { n: number };
+    this.sql.exec('BEGIN');
+    try {
+      this.sql.exec('DELETE FROM daily_mission_slots');
+      this.sql.exec('DELETE FROM daily_missions');
+      this.sql.exec('DELETE FROM daily_rerolls');
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    this.setMeta(KEY, new Date().toISOString());
+    if (held.n > 0) {
+      console.log(`tasks_reset_v1: cleared ${held.n} active task slot(s); every player is dealt a fresh set`);
     }
   }
 
@@ -974,7 +1011,9 @@ class GameDatabase {
   ): { slot: number; missionId: string }[] {
     const existing = this.stmt(`SELECT slot, missionId FROM daily_mission_slots WHERE playerId = ? AND dayKey = ? ORDER BY slot`)
       .all(playerId, dayKey) as { slot: number; missionId: string }[];
-    if (existing.length) return this.trimSlots(playerId, dayKey, existing);
+    if (existing.length) {
+      return this.sweepClaimed(playerId, dayKey, this.trimSlots(playerId, dayKey, existing), now);
+    }
 
     const regular = pickHand(
       dealOrder(MISSION_POOL, playerId, dayKey, 'regular'),
@@ -1026,6 +1065,43 @@ class GameDatabase {
       retire.run(RETIRED_SLOT, playerId, dayKey, sl.slot);
       return { slot: sl.slot, missionId: RETIRED_SLOT };
     });
+  }
+
+  /**
+   * Refill any slot still holding a task that has already been PAID.
+   *
+   * The auto-reroll fires at claim time, which handles every claim made under
+   * these rules — but a slot can hold a claimed task for reasons the claim
+   * path will never revisit: a task claimed before the repeating pool existed,
+   * when a dry pool left it sitting there, is stuck for the rest of the UTC
+   * day. The player cannot shift it either; a claimed task refuses both a
+   * reroll (MISSION_COMPLETE) and a second claim (MISSION_CLAIMED). Sweeping
+   * on read makes "a paid task is not an active task" true however the slot
+   * got that way, rather than only on the path that happens to create it.
+   *
+   * Only CLAIMED tasks go. One that is finished but unclaimed stays exactly
+   * where it is — that is the player's reward waiting to be collected, and
+   * clearing it would quietly take the XP away.
+   */
+  private sweepClaimed(
+    playerId: string,
+    dayKey: string,
+    slots: { slot: number; missionId: string }[],
+    now: Date
+  ): { slot: number; missionId: string }[] {
+    const rows = this.missionRows(playerId, dayKey);
+    let current = slots;
+    for (const sl of slots) {
+      const def = findMission(sl.missionId);
+      if (!def || !rows.get(def.id)?.claimedAt) continue;
+      const replacement = this.fillSlot(playerId, dayKey, sl.slot, def.tier, current, now);
+      current = current.map((entry) =>
+        entry.slot === sl.slot
+          ? { slot: entry.slot, missionId: replacement ?? RETIRED_SLOT }
+          : entry
+      );
+    }
+    return current;
   }
 
   /** The tasks this player was dealt most recently, per tier. */
@@ -1267,6 +1343,12 @@ class GameDatabase {
     if (row?.claimedAt) return { ok: false, code: 'MISSION_CLAIMED' };
     if (progress < def.target) return { ok: false, code: 'MISSION_INCOMPLETE' };
 
+    // Which slot this task sits in, resolved BEFORE it is stamped claimed:
+    // once it is, sweepClaimed would refill the slot on the next read and this
+    // claim would have no replacement of its own to report.
+    const slots = this.ensureSlots(playerId, dayKey, now);
+    const mine = slots.find((sl) => sl.missionId === def.id);
+
     // Stamp the claim FIRST and only pay out if this call is the one that
     // stamped it, so two concurrent claims cannot both award the reward.
     const stamped = this.stmt(
@@ -1303,8 +1385,6 @@ class GameDatabase {
     // capped, since every free reroll had to be earned by finishing something.
     // The pool is finite, so an unusually productive day can run it dry; the
     // claimed mission then simply stays in its slot.
-    const slots = this.ensureSlots(playerId, dayKey);
-    const mine = slots.find((sl) => sl.missionId === def.id);
     const newMissionId = mine
       ? this.fillSlot(playerId, dayKey, mine.slot, def.tier, slots, now) ?? undefined
       : undefined;
