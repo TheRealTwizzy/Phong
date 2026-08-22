@@ -243,8 +243,33 @@ if (!afterWipe.some((m) => m.current > 0)) fail('clearing storage reset server m
 ok('clearing browser storage does not reset mission progress');
 
 // Drive one held mission to completion, then claim it — whichever it is.
+//
+// The hand is DEALT: three of a twelve-strong regular pool, seeded on the
+// player id, which is a fresh random device per run. So this loop has to
+// satisfy every mission the deal could hand it, not just a typical one.
+//
+// It used to record { opponentScore: 1, maxRally: 12 } with no aces, which
+// leaves five of the twelve uncompletable — rally_15, multi, pro_win, aces
+// and shutout — and a three-card hand drawn entirely from those five
+// completes nothing. That is C(5,3)/C(12,3), and simulating the real
+// dealOrder/pickHand over 20k player ids put it at 3.76%: roughly one CI run
+// in twenty-seven died here, on a payload detail rather than on the rule
+// being tested.
+//
+// A shutout at rally 15 with aces knocks three of those five out, leaving
+// only multi (needs a duel) and pro_win (needs a difficulty this player has
+// not unlocked). Three slots cannot be filled from two missions, so at least
+// one held mission is now always completable — not less likely to fail,
+// unable to.
 for (let i = 0; i < 12; i++) {
-  await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, maxRally: 12 });
+  await record(questPlayer, {
+    ...base,
+    difficulty: 'rookie',
+    playerScore: 5,
+    opponentScore: 0, // shutout -> mission_shutout
+    maxRally: 15, //     -> mission_rally / mission_rally_15
+    aces: 3, //          -> mission_aces
+  });
 }
 const done = (await missionsOf(questPlayer)).missions.find((m) => m.current >= m.target && !m.claimed);
 if (!done) fail('nothing completed after twelve wins');
