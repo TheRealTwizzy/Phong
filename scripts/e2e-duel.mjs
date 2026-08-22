@@ -447,5 +447,71 @@ for (const transport of ['relay', 'p2p']) {
   await host.context().close();
 }
 
+// ---- The opponent sonar in a duel: fed by the other phone's stream --------
+// The radar used to be hard-gated to solo — in PvP it simply never rendered —
+// and even ungated it had nothing to show, because a phone never simulates
+// the opponent's half in a duel. The opponent's phone now streams its live
+// ball (ball_pos → opponent_ball), so the sonar behaves exactly as in solo:
+// visible while the ball is on the half you cannot see, dark while it is on
+// yours or between points.
+for (const transport of ['relay', 'p2p']) {
+  console.log(`\n--- opponent sonar in a duel (${transport.toUpperCase()}) ---`);
+  const host = await newPage();
+  const guest = await newPage();
+  const code = await hostCreateRoom(host, { p2p: transport === 'p2p' });
+  await guestJoin(guest, code);
+  await startDuel(host, guest);
+
+  for (const [page, who] of [[host, 'host'], [guest, 'guest']]) {
+    if (!(await page.$('#radar-preview-container'))) fail(`${who} has no sonar on the court in a duel`);
+  }
+  ok('the sonar renders on both phones in a duel');
+
+  // Park the guest's paddle hard left and let the room play itself: the
+  // countdown clears, the mandated 5s auto-serve fires, the ball crosses,
+  // the parked guest misses, the next serve fires. Every crossing should
+  // flip each phone's sonar, so sample both radars until each has been seen
+  // BOTH visible and hidden, and has flipped at least twice.
+  await guest.keyboard.down('KeyA');
+  const seen = { host: new Set(), guest: new Set() };
+  const flips = { host: 0, guest: 0 };
+  const last = { host: null, guest: null };
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    for (const [page, who] of [[host, 'host'], [guest, 'guest']]) {
+      const op = await page
+        .$eval('#radar-preview-container', (el) => getComputedStyle(el).opacity)
+        .catch(() => null);
+      if (op === null) continue;
+      const vis = parseFloat(op) > 0.5 ? 'visible' : 'hidden';
+      seen[who].add(vis);
+      if (last[who] && last[who] !== vis) flips[who]++;
+      last[who] = vis;
+    }
+    if (flips.host >= 2 && flips.guest >= 2) break;
+    await host.waitForTimeout(120);
+  }
+  for (const who of ['host', 'guest']) {
+    if (!seen[who].has('visible')) fail(`${who}'s sonar never lit up while the opponent held the ball`);
+    if (!seen[who].has('hidden')) fail(`${who}'s sonar never went dark while the ball was on their own half`);
+    if (flips[who] < 2) fail(`${who}'s sonar never alternated with the ball (${flips[who]} flips)`);
+  }
+  ok('both sonars alternate as the ball changes halves');
+
+  // The mirror direction: the guest is parked hard LEFT in their own frame,
+  // which head-to-head is the host's RIGHT. Before the fix the paddle arrived
+  // pre-mirrored and the radar mirrored it AGAIN, planting it on the wrong
+  // side — exactly the kind of desync a blind half-court cannot afford.
+  const paddleLeft = await host.$eval('#radar-opp-paddle', (el) => parseFloat(el.style.left));
+  if (!(paddleLeft > 55)) {
+    fail(`host's sonar shows the guest's paddle at left=${paddleLeft}% — parked left should read on the RIGHT`);
+  }
+  ok(`the sonar mirrors the opponent's paddle head-to-head (left=${Math.round(paddleLeft)}%)`);
+
+  await guest.keyboard.up('KeyA');
+  await host.context().close();
+  await guest.context().close();
+}
+
 console.log('\nDUEL ROOM CHECKS PASSED');
 await browser.close();

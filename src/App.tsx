@@ -289,6 +289,15 @@ export default function App() {
   // Frame-accurate opponent paddle for the sonar: the loop writes it directly
   // so the radar never waits on a React render to learn where the paddle is.
   const oppPaddleXRef = useRef<number>(0.5);
+  // PvP sonar stream bookkeeping. In a duel the opponent's half is not
+  // simulated here — the opponent's phone streams its live ball position
+  // (ball_pos → opponent_ball) the same way paddles already stream. One ref
+  // throttles our outgoing stream; the other timestamps the last incoming
+  // sample so a ball whose stream has stopped can be swept away (the fast
+  // channel is unordered and unreliable, so a stale sample can slip in after
+  // the reliable clear that follows a net cross or a point).
+  const lastBallPosSentRef = useRef<number>(0);
+  const oppBallSeenRef = useRef<number>(0);
   const matchCountdownRef = useRef<number | null>(matchCountdown);
   const intentionalCloseRef = useRef<boolean>(false);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
@@ -922,6 +931,7 @@ export default function App() {
         setIsPlayerServer(msg.servingPlayer === playerIndexRef.current);
         setIsServing(true);
         setWinner(null);
+        setOppBall(null);
         setLastMatchResult(null);
         setRematchVotes([false, false]);
         setMatchCountdown(null);
@@ -936,8 +946,33 @@ export default function App() {
         break;
 
       case 'opponent_paddle':
-        oppPaddleXRef.current = msg.x;
-        setOppPaddleX(msg.x);
+        // Arrives pre-mirrored (1 − x) from the relay/P2P link. The radar
+        // applies the head-to-head mirror itself — the same one it applies to
+        // the solo AI's paddle — so what it needs stored is the SENDER-frame
+        // position. Storing the pre-mirrored value double-mirrored the paddle
+        // onto the wrong side of the sonar.
+        oppPaddleXRef.current = 1 - msg.x;
+        setOppPaddleX(1 - msg.x);
+        break;
+
+      case 'opponent_ball':
+        // The opponent's phone streaming its live ball for the sonar, in the
+        // sender's frame — the radar mirrors, exactly as it does in solo.
+        // Our own ball being live proves the sample stale (the stream rides
+        // the unordered fast channel, so one can trail the ball_incoming that
+        // handed the ball to us), and it is dropped rather than shown.
+        // Must go through state, not the ref: the per-render ref sync would
+        // clobber a direct ref write with the older state on the next render.
+        if (ballRef.current.active) break;
+        oppBallSeenRef.current = performance.now();
+        setOppBall({
+          x: msg.x,
+          y: msg.y,
+          vx: 0,
+          vy: 0,
+          radius: ballRadiusRef.current,
+          active: true,
+        });
         break;
 
       case 'ball_incoming': {
@@ -949,6 +984,9 @@ export default function App() {
         // incoming serve freezes at the net.
         setIsServing(false);
         isServingRef.current = false;
+        // The ball is on OUR half now — the sonar shows the half we can't
+        // see, so whatever the opponent's stream last drew is over.
+        setOppBall(null);
         const inc = msg.ball;
         setBall({
           x: inc.x,
@@ -970,6 +1008,9 @@ export default function App() {
       }
 
       case 'score_update': {
+        // Between points the ball is nowhere, so the sonar goes dark on both
+        // phones — the same thing the solo sim does when a point ends.
+        setOppBall(null);
         const myIdx = playerIndexRef.current;
         if (myIdx === 0) {
           setStats((s) => ({
@@ -1226,6 +1267,21 @@ export default function App() {
       const dt = Math.min((time - lastTime) / 1000, 0.05);
       lastTime = time;
 
+      // A streamed opponent ball that has stopped being refreshed is stale —
+      // its clear was reliable but the stream is not, so one late sample can
+      // re-plant a dot after a net cross or a point. Swept here, BEFORE the
+      // serving gate, because the between-points window is exactly when the
+      // gate below is closed. Solo never sweeps: its opponent ball is
+      // simulated locally and legitimately holds still during the AI's serve
+      // wind-up.
+      if (
+        modeRef.current === 'multiplayer' &&
+        oppBallRef.current?.active &&
+        time - oppBallSeenRef.current > 400
+      ) {
+        setOppBall(null);
+      }
+
       // Idle while on the menu; split mode runs its own self-contained loop.
       if (screenRef.current !== 'game' || modeRef.current === 'split' || isServingRef.current || winner) {
         animId = requestAnimationFrame(gameLoop);
@@ -1362,6 +1418,15 @@ export default function App() {
               return { ...s, opponentScore: nextOppScore, rallyCount: 0 };
             });
           }
+        }
+
+        // Stream the live ball to the opponent's sonar (~20 Hz), in OUR
+        // frame — their radar applies the head-to-head mirror, exactly as it
+        // does for the solo AI's half. Only while the ball is on this half:
+        // the silence after it leaves is what lets the far radar go dark.
+        if (currentMode === 'multiplayer' && b.active && time - lastBallPosSentRef.current > 50) {
+          lastBallPosSentRef.current = time;
+          sendNetRef.current({ type: 'ball_pos', x: b.x, y: b.y });
         }
 
         setBall(b);
@@ -1731,13 +1796,20 @@ export default function App() {
         />
 
         {/* Mini Radar Sonar Preview (Shows unseen opponent court if enabled).
-            Practice Wall has no opponent court, so no radar there. */}
+            Practice Wall has no opponent court, so no radar there. Solo reads
+            the simulated half; a duel reads the opponent phone's ball_pos
+            stream — either way the refs hold the sender-frame truth. */}
         <RadarPreview
           oppBallRef={oppBallRef}
           oppPaddleXRef={oppPaddleXRef}
           paddleWidthRatio={paddleWidthFor(activeConfig.rules)}
           theme={currentTheme}
-          active={settings.showRadar && activeConfig.rules.opponentSonar && mode === 'solo'}
+          active={
+            settings.showRadar &&
+            activeConfig.rules.opponentSonar &&
+            (mode === 'solo' || mode === 'multiplayer')
+          }
+          topClass={mode === 'multiplayer' ? 'top-[5.5rem]' : 'top-14'}
         />
 
         {/* Connection badge: direct P2P vs server relay (multiplayer only) */}
