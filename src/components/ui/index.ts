@@ -15,6 +15,7 @@ export {
   type SegmentedControlProps,
 } from './SegmentedControl';
 export { RankBadge, type RankBadgeProps } from './RankBadge';
+export { QrBlock, type QrBlockProps } from './QrBlock';
 export {
   LockBadge,
   UnlockHintSheet,

@@ -63,12 +63,10 @@ async function hostCreateRoom(page, { p2p }) {
   await page.click('#btn-create-room');
   const code = await page
     .waitForFunction(() => {
-      const els = Array.from(document.querySelectorAll('.tracking-widest'));
-      for (const el of els) {
-        const txt = (el.textContent || '').trim();
-        if (/^[A-HJ-NP-Z2-9]{4}$/.test(txt)) return txt;
-      }
-      return null;
+      // The code has its own element; hunting for it by a styling class meant
+      // any restyle of the lobby silently broke the lookup.
+      const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+      return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
     }, { timeout: 5000 })
     .then((h) => h.jsonValue());
   return code;
