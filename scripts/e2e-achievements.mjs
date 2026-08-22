@@ -3,8 +3,8 @@
 //   2. The server rejects a locked difficulty, not just the menu.
 //   3. Beating Rookie opens Pro — and only Pro.
 //   4. The tree renders per branch, with deep rungs concealed.
-// Requires: `npm i --no-save playwright-core` + CHROMIUM_PATH. Target a running
-// PRODUCTION server (NODE_ENV=production) with E2E_URL, fresh DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 
 const BASE = process.env.E2E_URL || 'http://localhost:3000';

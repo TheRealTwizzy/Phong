@@ -11,7 +11,7 @@ This document is the working guide to **Phong**, an arcade sports web app with a
 - **The Net Boundary**: the glowing top edge of the player's screen is the net.
 - **Cross-Net Jump**: when the ball exits through the net, it leaves the player's screen and appears on the opponent's, travelling downward.
 - **Opponent Radar**: a mini radar tracks the opponent's paddle and the ball while it is on their half. Solo reads the locally simulated half; a duel reads what the opponent's phone streams (`paddle_move` + `ball_pos`), so the sonar works identically in both.
-- **Physical 2-Phone Duel**: two phones placed top-to-top, connected by a 4-letter room code over WebSockets; the ball physically transitions between screens. An invitation link or QR (`?room=CODE`) **joins** rather than merely prefilling the code — held until the player has a username, so a first-time guest onboards and is then taken straight into the room.
+- **Physical 2-Phone Duel**: two phones placed top-to-top, connected by a 4-letter room code over WebSockets; the ball physically transitions between screens. An invitation link or QR (`?room=CODE`) **joins** rather than merely prefilling the code — held until the player has a username, so a first-time guest onboards and is then taken straight into the room. The lobby still renders its manual code box for the moment before `room_joined` lands, so a join is held in-flight until the server answers either way: a second `join_room` on the same socket is refused as "Room is already full", which would be about the room the player is in the middle of joining.
 - **Solo AI**: an adaptive AI opponent (Rookie / Pro / Cyber) on the hidden half. Each difficulty is a *rating*, not a fixed parameter set, and slides part-way toward the player's own skill — see §7.
 - **Practice Wall**: fully solo drill mode — no opponent exists and the ball never leaves the player's screen; the net line acts as a *return line* that bounces every ball back. HUD shows current/best return streak. Records no match and moves no rating, but banks thin streak-scaled XP on exit (`practiceXp`, server-computed, capped per UTC day) so every mode is progression.
 - **Split Screen**: local 2-player classic Pong on ONE device (`SplitScreenMatch`) — full court on a single screen, net across the middle, one player per half (multi-touch; each pointer is locked to the half it started in). No networking, no stats saved, unranked.
@@ -82,6 +82,8 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── scripts/load-test.mjs      # N-concurrent-matches relay load test
 ├── scripts/e2e-*.mjs          # Browser E2E (profiles, gameplay, rating, rules,
 │                              #   achievements, elite, duel, eject, invite)
+├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each
+├── .github/workflows/ci.yml   # Typecheck+unit+build, and the E2E suites
 ├── index.html                 # HTML entry
 ├── package.json               # npm scripts & deps (lockfile: package-lock.json)
 ├── server.ts                  # Express + ws relay + REST API + Vite middleware
@@ -260,9 +262,21 @@ npm run build    # vite build (client) + esbuild bundle (server) → dist/
 npm start        # node dist/server.cjs (production)
 npm run lint     # tsc --noEmit
 npm test         # vitest run (tests/)
+npm run test:e2e # browser E2E — needs `npm run build` first (see below)
 ```
 
 Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.example`.
+
+**CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every PR, as two
+parallel jobs. `verify` is the fast one — typecheck, `npm test`, build — and `e2e` drives
+the browser suites, which cost minutes rather than seconds, hence its own job: a red one
+names the broken flow instead of a broken build. `npm run test:e2e` is the same entry
+point locally. Every suite gets its own free port, throwaway `DATA_DIR` and
+`node dist/server.cjs` (the production entry — a suite would otherwise inherit another's
+players and leaderboard), so `npm run build` is a precondition, and Chromium is resolved
+from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. **A suite that
+asserts old behaviour is a suite that will be deleted rather than read** — when a rule
+changes, change the suite in the same commit.
 
 ## 9. Conventions
 

@@ -6,9 +6,8 @@
 //     host (paddle aside) misses → 1-1 on both. Proves the serve handoff
 //     in both directions (this scenario hangs on the pre-fix freeze bug).
 //  3. Second room with the P2P toggle off — badge stays RELAY.
-// Requires: `npm i --no-save playwright-core` and a Chromium binary
-// (set CHROMIUM_PATH, or install via `npx playwright install chromium`).
-// Target a running server with E2E_URL (default http://localhost:3000).
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
@@ -79,11 +78,9 @@ async function guestJoin(page, code) {
   await page.goto(`${BASE}/?room=${code}`, { waitUntil: 'networkidle' });
   await passGatekeeper(page);
   await onboard(page, 'Guest');
-  await page.waitForSelector('#btn-join-room-submit', { timeout: 5000 });
-  const input = await page.$('#input-room-code');
-  const val = await input.inputValue();
-  if (val !== code) await input.fill(code);
-  await page.click('#btn-join-room-submit');
+  // The link joins for them once they have a name to join under; the manual
+  // code box is the other path, driven by scripts/e2e-duel.mjs.
+  await page.waitForSelector('#btn-leave-room', { timeout: 8000 });
 }
 
 async function waitBadge(page, expected, ms) {

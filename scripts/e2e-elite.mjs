@@ -1,10 +1,25 @@
 // Browser E2E for elite daily missions and the reroll allowances:
-//   1. The hand is 5 regular + 1 elite, and the elite carries a permanent unlock.
+//   1. The hand is the dealt slot counts, and the elite carries a permanent unlock.
 //   2. Allowances are 5 regular + 1 elite, spent independently per tier.
 //   3. Each runs out at its own limit and refuses further rerolls.
-// Requires: `npm i --no-save playwright-core` + CHROMIUM_PATH. Target a running
-// PRODUCTION server (NODE_ENV=production) with E2E_URL, fresh DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
+import fs from 'node:fs';
 import { chromium, devices } from 'playwright-core';
+
+// The hand size is a product decision that has already moved once (5 regular
+// down to 3). Read it from the module that decides it rather than restating
+// it here, so tuning the slots does not leave this suite red over a number it
+// was never testing.
+const missionsSrc = fs.readFileSync(new URL('../src/game/missions.ts', import.meta.url), 'utf8');
+const slotCount = (name) => {
+  const m = missionsSrc.match(new RegExp(`export const ${name} = (\\d+);`));
+  if (!m) throw new Error(`could not read ${name} from src/game/missions.ts`);
+  return Number(m[1]);
+};
+const REGULAR_SLOTS = slotCount('REGULAR_SLOTS');
+const ELITE_SLOTS = slotCount('ELITE_SLOTS');
+const HAND = REGULAR_SLOTS + ELITE_SLOTS;
 
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
 const EXEC = process.env.CHROMIUM_PATH;
@@ -31,11 +46,11 @@ const api = (path, body) => page.evaluate(async ([p, b]) => {
 }, [path, body]);
 
 let m = await api('/api/missions');
-if (m.data.missions.length !== 6) fail(`expected 6 missions, got ${m.data.missions.length}`);
+if (m.data.missions.length !== HAND) fail(`expected ${HAND} missions, got ${m.data.missions.length}`);
 const elites = m.data.missions.filter((x) => x.tier === 'elite');
-if (elites.length !== 1) fail(`expected exactly 1 elite, got ${elites.length}`);
+if (elites.length !== ELITE_SLOTS) fail(`expected exactly ${ELITE_SLOTS} elite, got ${elites.length}`);
 if (!elites[0].unlocks) fail('elite mission carries no permanent unlock');
-ok(`hand is 5 regular + 1 elite; elite banks "${elites[0].unlocks}"`);
+ok(`hand is ${REGULAR_SLOTS} regular + ${ELITE_SLOTS} elite; elite banks "${elites[0].unlocks}"`);
 if (m.data.rerolls.regular !== 5 || m.data.rerolls.elite !== 1) {
   fail(`wrong allowance: ${JSON.stringify(m.data.rerolls)}`);
 }
@@ -47,7 +62,7 @@ const r = await api('/api/missions/reroll', { missionId: victim.id });
 if (r.status !== 200) fail(`reroll failed: ${r.status}`);
 if (r.data.rerolls.regular !== 4 || r.data.rerolls.elite !== 1) fail('reroll spent the wrong tier');
 if (r.data.missions.some((x) => x.id === victim.id)) fail('rerolled mission is still held');
-if (new Set(r.data.missions.map((x) => x.id)).size !== 6) fail('reroll produced a duplicate');
+if (new Set(r.data.missions.map((x) => x.id)).size !== HAND) fail('reroll produced a duplicate');
 ok('a regular reroll swaps the mission and spends only the regular allowance');
 
 // Exhaust regular, then confirm elite is untouched and separately limited.

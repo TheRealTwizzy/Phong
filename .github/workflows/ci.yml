@@ -27,3 +27,40 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # The browser suites drive a real Chromium against a real server, so they
+  # cost minutes where `verify` costs seconds. Kept as its own job: it runs
+  # alongside `verify` rather than in front of it, and a red one names the
+  # broken flow instead of a broken build.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Keyed on the lockfile, so a playwright-core bump fetches the matching
+      # browser instead of running against a stale one.
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Chromium
+        run: npx playwright-core install --with-deps chromium
+
+      # The suites run against `node dist/server.cjs` — the production entry,
+      # not the dev server — so a build is a precondition, not a side errand.
+      - name: Build
+        run: npm run build
+
+      - name: Browser E2E
+        run: npm run test:e2e

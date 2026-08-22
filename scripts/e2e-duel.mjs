@@ -11,8 +11,8 @@
 // disagreed about the match length before this change; and the lobby settings
 // that fixed it — the host sets the room's terms, the guest reads them.
 //
-// Requires: `npm i --no-save playwright-core` + CHROMIUM_PATH. Target a running
-// PRODUCTION server (NODE_ENV=production) with E2E_URL, fresh DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
@@ -89,8 +89,11 @@ async function hostCreateRoom(page, { p2p, points = 3 }) {
     .then((h) => h.jsonValue());
 }
 
+// The typed-code path, deliberately WITHOUT ?room= in the URL: a link joins
+// for the player by itself (scripts/e2e-invite.mjs), so driving the code box
+// from a link would be racing the auto-join rather than testing this.
 async function guestJoin(page, code, points = 3) {
-  await page.goto(`${BASE}/?room=${code}`, { waitUntil: 'networkidle' });
+  await page.goto(BASE, { waitUntil: 'networkidle' });
   await passGatekeeper(page);
   await onboard(page, 'RmGuest');
   await pickShortMatch(page, points);

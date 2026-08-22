@@ -6,8 +6,8 @@
 //   4. A 0-5 loss still pays real XP.
 //   5. Practice Wall banks capped XP and records no match.
 //   6. Drag-to-aim serves the ball.
-// Requires: `npm i --no-save playwright-core` + CHROMIUM_PATH. Target a running
-// PRODUCTION server (NODE_ENV=production) with E2E_URL, fresh DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 
 const BASE = process.env.E2E_URL || 'http://localhost:3000';

@@ -4,11 +4,11 @@
 //  2. NO raw rating number is rendered anywhere in the UI.
 //  3. Beating a hard AI pays materially more XP than beating an easy one,
 //     and a loss still pays something (XP never goes backwards).
-//  4. Solo play moves hidden MMR but never the rank: the badge stays UNRANKED
-//     and rankedGames stays 0 no matter how much solo you play.
+//  4. Solo counts for rank only at a difficulty you had to earn: Rookie is
+//     open from the first match and never moves it, Pro and Cyber do.
 //  5. A public profile exposes a tier and never mu/sigma.
-// Requires: `npm i --no-save playwright-core` + CHROMIUM_PATH. Target a
-// running server with E2E_URL (default http://localhost:3000), fresh DATA_DIR.
+// Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
+// nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
@@ -165,22 +165,37 @@ const afterLoss = await me(lossPlayer);
 if (afterLoss.xp < loss.earnedXp) fail('XP went backwards after a loss');
 ok(`a loss still pays XP (${loss.earnedXp}) and never subtracts`);
 
-// ---- 4. Solo never moves the rank ----------------------------------------
+// ---- 4. Solo counts for rank only at an EARNED difficulty ----------------
+// Rookie is open from the first match, so placing against it would be a
+// formality and the badge would stop meaning anything. Pro and Cyber have to
+// be unlocked before they can be played, and those results do carry rank.
+const rookieOnly = await newPlayer('Rook');
+const rookieBefore = await me(rookieOnly);
+for (let i = 0; i < 6; i++) {
+  await record(rookieOnly, { ...base, difficulty: 'rookie' });
+}
+const rookieAfter = await me(rookieOnly);
+if (rookieAfter.rankedGames !== 0) fail(`Rookie solo incremented rankedGames to ${rookieAfter.rankedGames}`);
+if (rookieAfter.rankMu !== rookieBefore.rankMu) fail('Rookie solo moved the ranked rating');
+if (rookieAfter.tier !== 'unranked') fail(`Rookie solo produced a tier: ${rookieAfter.tier}`);
+if (!(rookieAfter.xp > rookieBefore.xp)) fail('Rookie solo paid no XP — every match is progression');
+ok('6 Rookie wins: XP paid, rank untouched, still UNRANKED');
+
+await rookieOnly.reload({ waitUntil: 'networkidle' });
+await rookieOnly.waitForSelector('#main-menu-screen', { timeout: 8000 });
+if (!(await rookieOnly.$('#tier-badge-unranked'))) fail('badge is not UNRANKED after Rookie-only play');
+ok('UI still renders the UNRANKED badge after Rookie-only play');
+
+// Alice walked the ladder up to Cyber, so hers is an earned difficulty.
 const before = await me(alice);
 for (let i = 0; i < 6; i++) {
   await record(alice, { ...base, difficulty: 'cyber' });
 }
 const after = await me(alice);
-if (after.rankedGames !== 0) fail(`solo play incremented rankedGames to ${after.rankedGames}`);
-if (after.rankMu !== before.rankMu) fail('solo play moved the ranked rating');
-if (after.tier !== 'unranked') fail(`solo play produced a tier: ${after.tier}`);
+if (!(after.rankedGames > before.rankedGames)) fail('Cyber solo did not count toward placement');
+if (after.rankMu === before.rankMu) fail('Cyber solo did not move the ranked rating');
 if (after.mmrMu === before.mmrMu) fail('solo play did not move hidden MMR');
-ok('7 solo wins: hidden MMR moved, rank untouched, badge still UNRANKED');
-
-await alice.reload({ waitUntil: 'networkidle' });
-await alice.waitForSelector('#main-menu-screen', { timeout: 8000 });
-if (!(await alice.$('#tier-badge-unranked'))) fail('badge is not UNRANKED after solo-only play');
-ok('UI still renders the UNRANKED badge after solo-only play');
+ok(`6 Cyber wins carry rank: ${before.rankedGames} -> ${after.rankedGames} ranked games, tier "${after.tier}"`);
 
 // ---- 5. Public profile carries a tier, never mu/sigma --------------------
 const leak = await alice.evaluate(async () => {
