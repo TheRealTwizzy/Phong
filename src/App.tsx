@@ -1375,30 +1375,44 @@ export default function App() {
 
   // Display names ride the device cookie server-side; the client never sends
   // one (usernames are unique identities, not free-text callsigns).
+  /**
+   * Send once the socket is up. The relay can now REFUSE a socket outright —
+   * a device that no longer holds the account is closed at the upgrade — and
+   * a closed socket never becomes OPEN, so a bare retry would tick every
+   * 100ms for the life of the page against a door that is never opening. It
+   * gives up when the socket is gone, and `onDead` hands back whatever the
+   * caller was holding.
+   */
+  const sendWhenOpen = (socket: WebSocket | null, build: () => unknown, onDead?: () => void) => {
+    const attempt = () => {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(build()));
+        return;
+      }
+      if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+        onDead?.();
+        return;
+      }
+      setTimeout(attempt, 100);
+    };
+    attempt();
+  };
+
   const handleCreateRoom = () => {
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
     }
-    const checkAndSend = () => {
-      if (socket?.readyState === WebSocket.OPEN) {
-        // The host opens the room on their own menu choices; from then on the
-        // room owns them and the lobby is where they change.
-        socket.send(
-          JSON.stringify({
-            type: 'create_room',
-            playerId,
-            config: normalizeRoomConfig({
-              winningScore: settingsRef.current.winningScore,
-              rules: settingsRef.current.rules,
-            }),
-          })
-        );
-      } else {
-        setTimeout(checkAndSend, 100);
-      }
-    };
-    checkAndSend();
+    // The host opens the room on their own menu choices; from then on the
+    // room owns them and the lobby is where they change.
+    sendWhenOpen(socket, () => ({
+      type: 'create_room',
+      playerId,
+      config: normalizeRoomConfig({
+        winningScore: settingsRef.current.winningScore,
+        rules: settingsRef.current.rules,
+      }),
+    }));
   };
 
   const handleJoinRoom = (code: string) => {
@@ -1408,18 +1422,15 @@ export default function App() {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
     }
-    const checkAndSend = () => {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'join_room', roomId: code, playerId }));
-      } else if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
-        // Stop retrying against a socket that will never open (onclose is what
-        // releases the guard; this just declines to poll a corpse forever).
+    // onclose is what normally releases the guard; this declines to poll a
+    // socket that is already gone, which the relay's own refusal can produce.
+    sendWhenOpen(
+      socket,
+      () => ({ type: 'join_room', roomId: code, playerId }),
+      () => {
         joinInFlightRef.current = false;
-      } else {
-        setTimeout(checkAndSend, 100);
       }
-    };
-    checkAndSend();
+    );
   };
 
   /**

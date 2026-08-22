@@ -24,10 +24,21 @@ interface SessionGuardProps {
 // a full match played on a phone whose account had already moved to a
 // desktop, discovered only when the finished match was refused.
 //
-// `offline` is not on this list on purpose: a heartbeat that could not reach
-// the server is a dropped connection, not an eviction, and throwing a player
-// off the court every time a phone changes cells would be its own bug.
-const BLOCKING: ClientSessionStatus[] = ['connecting', 'none', 'released', 'superseded', 'stale_build'];
+// Only the states that MEAN something is wrong are on this list.
+//
+// `offline` is left off on purpose: a heartbeat that could not reach the
+// server is a dropped connection, not an eviction, and throwing a player off
+// the court every time a phone changes cells would be its own bug.
+//
+// `connecting` and `none` are left off for a different reason. They do not
+// mean "you may not play", they mean "we have not asked yet" — and blocking
+// on them put a network round trip in front of the first paint, so the menu
+// and the onboarding modal arrived a beat later than they used to for every
+// player on every load. Nothing is lost by rendering: writes are gated
+// server-side regardless, and a match recorded before the session lands is
+// answered SESSION_REQUIRED, which postMatchRecord resolves by minting one
+// and retrying.
+const BLOCKING: ClientSessionStatus[] = ['released', 'superseded', 'stale_build'];
 
 export const SessionGuard: React.FC<SessionGuardProps> = ({
   status,
@@ -38,8 +49,6 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
   children,
 }) => {
   if (!BLOCKING.includes(status)) return <>{children}</>;
-
-  const waiting = status === 'connecting' || status === 'none' || status === 'stale_build';
 
   const copy = {
     released: {
@@ -60,18 +69,11 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
       icon: <RefreshCw className="w-8 h-8 animate-spin" style={{ animationDuration: '2s' }} />,
       title: t('session_update_title', language),
       body: t('session_update_body', language),
+      // Nothing to press: the reload is already under way.
       action: '',
       onAction: onAdopt,
     },
-  }[status as 'released' | 'superseded' | 'stale_build'] || {
-    icon: <Loader2 className="w-8 h-8 animate-spin" />,
-    title: t('session_hold_title', language),
-    body: t('session_hold_body', language),
-    // Only offered once the first attempt has actually come back, so the
-    // splash does not present a retry for something still in flight.
-    action: busy ? '' : t('session_retry', language),
-    onAction: onAdopt,
-  };
+  }[status as 'released' | 'superseded' | 'stale_build'];
 
   return (
     <div
@@ -102,7 +104,7 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
             {busy ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : copy.action}
           </button>
         ) : (
-          waiting && <Loader2 className="w-5 h-5 animate-spin text-cyan-400/70" />
+          <Loader2 className="w-5 h-5 animate-spin text-cyan-400/70" />
         )}
       </motion.div>
     </div>
