@@ -513,30 +513,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </button>
           </div>
 
-          {/* Live Stats Overlay */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800">
-            <div className="flex items-center gap-2">
-              <Activity className="w-4 h-4 text-cyan-400" />
-              <div>
-                <div className="text-xs font-mono font-medium">{t('telemetry_overlay', lang)}</div>
-                <div className="text-[10px] text-zinc-400">Show live velocity, touches & telemetry on court</div>
-              </div>
-            </div>
-            <button
-              id="toggle-stats-overlay"
-              onClick={() => onUpdateSettings({ showStatsOverlay: !settings.showStatsOverlay })}
-              className={`w-11 h-6 rounded-full transition-colors relative p-0.5 ${
-                settings.showStatsOverlay ? 'bg-cyan-500' : 'bg-zinc-700'
-              }`}
-            >
-              <div
-                className={`w-5 h-5 rounded-full bg-white transition-transform ${
-                  settings.showStatsOverlay ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </button>
-          </div>
-
           {/* Tilt motion */}
           <div className="flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800">
             <div className="flex items-center gap-2">

@@ -89,7 +89,6 @@ const DEFAULT_SETTINGS: GameSettings = {
   screenShakeIntensity: 60,
   tiltEnabled: false,
   showRadar: true,
-  showStatsOverlay: true,
   showTrails: true,
   difficulty: 'pro',
   winningScore: 5,
@@ -172,6 +171,10 @@ export default function App() {
   // A permanent unlock banked from an elite mission — worth announcing.
   const [toastUnlock, setToastUnlock] = useState<string | null>(null);
   const [toastOpponentLeft, setToastOpponentLeft] = useState<boolean>(false);
+  // Telemetry is per-match and starts HIDDEN: enabling the rule makes the
+  // panel available, and the player opens it from the court when they want
+  // it. Resets with every match so it never lingers from the last one.
+  const [telemetryOpen, setTelemetryOpen] = useState<boolean>(false);
 
   // 'menu' = out-of-match navigation hub; 'game' = a match is on court.
   const [screen, setScreen] = useState<'menu' | 'game'>('menu');
@@ -283,6 +286,9 @@ export default function App() {
   const sendNetRef = useRef<(msg: WSClientMessage) => void>(() => {});
   const playerIndexRef = useRef<0 | 1 | null>(playerIndex);
   const opponentIdRef = useRef<string | null>(opponentId);
+  // Frame-accurate opponent paddle for the sonar: the loop writes it directly
+  // so the radar never waits on a React render to learn where the paddle is.
+  const oppPaddleXRef = useRef<number>(0.5);
   const matchCountdownRef = useRef<number | null>(matchCountdown);
   const intentionalCloseRef = useRef<boolean>(false);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
@@ -299,6 +305,7 @@ export default function App() {
   profileRef.current = profile;
   playerIndexRef.current = playerIndex;
   opponentIdRef.current = opponentId;
+  oppPaddleXRef.current = oppPaddleX;
   matchCountdownRef.current = matchCountdown;
   countdownArmedRef.current = countdownArmed;
 
@@ -920,6 +927,7 @@ export default function App() {
         setMatchCountdown(null);
         setCountdownArmed(true);
         setLobbyReady([false, false]);
+        setTelemetryOpen(false);
         // The host starting the match is what closes BOTH lobbies: nobody
         // walks onto the court until the room says the match exists.
         setIsMultiplayerOpen(false);
@@ -928,6 +936,7 @@ export default function App() {
         break;
 
       case 'opponent_paddle':
+        oppPaddleXRef.current = msg.x;
         setOppPaddleX(msg.x);
         break;
 
@@ -1379,6 +1388,7 @@ export default function App() {
 
         // Update Opponent AI Paddle tracking
         aiRef.current.update(ob, dt, paddleWidthRef.current, rulesRef.current);
+        oppPaddleXRef.current = aiRef.current.paddleX;
         setOppPaddleX(aiRef.current.paddleX);
 
         // Check Opponent Paddle Collision
@@ -1463,6 +1473,7 @@ export default function App() {
     setMatchStartTime(Date.now());
     setWinner(null);
     setLastMatchResult(null);
+    setTelemetryOpen(false);
     setIsServing(true);
     setIsPlayerServer(true);
     aiRef.current.reset();
@@ -1722,8 +1733,8 @@ export default function App() {
         {/* Mini Radar Sonar Preview (Shows unseen opponent court if enabled).
             Practice Wall has no opponent court, so no radar there. */}
         <RadarPreview
-          oppBall={oppBall}
-          oppPaddleX={oppPaddleX}
+          oppBallRef={oppBallRef}
+          oppPaddleXRef={oppPaddleXRef}
           paddleWidthRatio={paddleWidthFor(activeConfig.rules)}
           theme={currentTheme}
           active={settings.showRadar && activeConfig.rules.opponentSonar && mode === 'solo'}
@@ -1756,19 +1767,19 @@ export default function App() {
         {/* Main Single Half-Court View (The Half-Pong Table) */}
         <main className="flex-1 w-full h-full pt-14 relative flex items-center justify-center">
           {/* Real-time Telemetry Stats Overlay directly on court */}
-          <StatsOverlay
-            ball={ball}
-            paddleX={paddleX}
-            totalTouches={totalTouches}
-            rallyCount={stats.rallyCount}
-            maxRally={stats.maxRally}
-            theme={currentTheme}
-            isVisible={settings.showStatsOverlay && activeConfig.rules.trackTelemetry}
-            onToggleVisible={() =>
-              setSettings((s) => ({ ...s, showStatsOverlay: !s.showStatsOverlay }))
-            }
-            matchStartTime={matchStartTime}
-          />
+          {activeConfig.rules.trackTelemetry && (
+            <StatsOverlay
+              ball={ball}
+              paddleX={paddleX}
+              totalTouches={totalTouches}
+              rallyCount={stats.rallyCount}
+              maxRally={stats.maxRally}
+              theme={currentTheme}
+              isVisible={telemetryOpen}
+              onToggleVisible={() => setTelemetryOpen((o) => !o)}
+              matchStartTime={matchStartTime}
+            />
+          )}
 
           {/* Quick Chat overlay & popup tray (nobody to chat with in practice) */}
           {mode !== 'practice' && activeConfig.rules.quickChat && (

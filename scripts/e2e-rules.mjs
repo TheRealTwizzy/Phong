@@ -206,5 +206,71 @@ if (!served) fail('a push-release did not serve the ball');
 ok('push-up-to-aim reaches full power on screen and serves');
 
 if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
+// ---- 6. Sonar tracks sides frame-accurately; telemetry starts hidden ------
+{
+  const solo = await newPlayer('Sonar');
+  await solo.click('#menu-mode-solo');
+  await solo.click('#menu-start-solo');
+  await solo.waitForSelector('#half-court-canvas', { timeout: 5000 });
+
+  // Telemetry rule is on by default, but the PANEL starts hidden: only the
+  // small opener button is on the court until the player asks for it.
+  if (await solo.$('#court-stats-overlay')) fail('telemetry panel visible at match start');
+  if (!(await solo.$('#btn-show-stats-overlay'))) fail('no telemetry opener on the court');
+  ok('telemetry defaults hidden, with its opener on the court');
+
+  // The sonar exists to show the half you cannot see: with the ball in the
+  // player's hand (serve prompt), it must be hidden.
+  const opacity = () =>
+    solo.$eval('#radar-preview-container', (el) => parseFloat(getComputedStyle(el).opacity));
+  await solo.waitForTimeout(400);
+  if ((await opacity()) > 0.1) fail('sonar visible while the ball is on the PLAYER side');
+  ok('sonar hidden while the ball is in the player\'s view');
+
+  // Serve, then watch a few seconds of real rally: the sonar must appear
+  // while the ball is on the opponent's half and vanish when it comes back.
+  const box = await (await solo.$('#half-court-canvas')).boundingBox();
+  await solo.mouse.click(box.x + box.width / 2, box.y + box.height * 0.9);
+  let sawVisible = false;
+  let sawHidden = false;
+  let lastBallLeft = null;
+  let dotMoved = false;
+  const until = Date.now() + 9000;
+  while (Date.now() < until) {
+    const o = await opacity().catch(() => 0);
+    if (o > 0.9) {
+      sawVisible = true;
+      // The dot must actually track between samples — the old radar fed a
+      // 75ms CSS transition from throttled state and trailed the ball.
+      const left = await solo
+        .$$eval('#radar-preview-container .rounded-full.-translate-x-1\\/2', (els) =>
+          els.length ? els[0].style.left : null
+        )
+        .catch(() => null);
+      if (left && lastBallLeft && left !== lastBallLeft) dotMoved = true;
+      if (left) lastBallLeft = left;
+    }
+    if (o < 0.1) sawHidden = true;
+    if (sawVisible && sawHidden && dotMoved) break;
+    await solo.waitForTimeout(100);
+  }
+  if (!sawVisible) fail('sonar never appeared while the ball was on the opponent half');
+  if (!sawHidden) fail('sonar never hid while the ball was on the player half');
+  if (!dotMoved) fail('the sonar ball dot never moved between frames');
+  ok('sonar appears on the opponent half, hides on the player half, and the dot tracks live');
+
+  // Open telemetry mid-match, then start a NEW match: it must be hidden again.
+  await solo.click('#btn-show-stats-overlay');
+  await solo.waitForSelector('#court-stats-overlay', { timeout: 3000 });
+  ok('the player can open telemetry during the match');
+  await solo.click('#btn-quit-to-menu');
+  await solo.waitForSelector('#main-menu-screen', { timeout: 5000 });
+  await solo.click('#menu-mode-solo');
+  await solo.click('#menu-start-solo');
+  await solo.waitForSelector('#half-court-canvas', { timeout: 5000 });
+  if (await solo.$('#court-stats-overlay')) fail('telemetry stayed open into the next match');
+  ok('telemetry resets to hidden for every new match');
+}
+
 console.log('\nALL VERIFICATION CHECKS PASSED');
 await browser.close();
