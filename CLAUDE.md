@@ -81,7 +81,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── render.yaml                # Render blueprint (alternative host)
 ├── scripts/load-test.mjs      # N-concurrent-matches relay load test
 ├── scripts/e2e-*.mjs          # Browser E2E (profiles, gameplay, rating, rules,
-│                              #   achievements, elite, duel)
+│                              #   achievements, elite, duel, eject)
 ├── index.html                 # HTML entry
 ├── package.json               # npm scripts & deps (lockfile: package-lock.json)
 ├── server.ts                  # Express + ws relay + REST API + Vite middleware
@@ -129,7 +129,9 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 |---|---|---|
 | `create_room` | `playerId`, `config?` | Create a 4-letter room (unambiguous alphabet, no 0/O/1/I) on the host's terms |
 | `set_room_config` | `config` | Host-only, and only before the first ball or after the last point |
-| `join_room` | `roomId`, `playerId`, `playerName?` | Join as guest; triggers `game_start` for both |
+| `join_room` | `roomId`, `playerId` | Join as guest — the match does NOT start yet |
+| `player_ready` | `ready` | The lobby handshake: the guest readies (and can unready) |
+| `start_match` | — | Host-only; refused until the guest has readied |
 | `paddle_move` | `x` | Relay paddle position (sent throttled from the game loop) |
 | `ball_cross_net` | `ball {x,vx,vy,spin,speedMultiplier}` | Ball left this screen; server transforms & forwards |
 | `point_scored` | `scorer: 'p1'\|'p2'` | Report a point; server owns the score |
@@ -147,6 +149,7 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 | `room_joined` | `roomId`, `playerIndex`, `opponentName`, `opponentId` | Guest confirmation |
 | `opponent_joined` | `opponentName`, `opponentId` | Told to the host |
 | `room_config` | `config` | The room's terms: winning score + match rules, broadcast to both |
+| `ready_state` | `ready: [bool, bool]` | Lobby readiness, broadcast on every change |
 | `game_start` | `servingPlayer`, `config` | Match (re)start — clients fully reset on this |
 | `opponent_paddle` | `x` | Pre-mirrored (`1 - x`) opponent paddle |
 | `ball_incoming` | `ball` | Post-transform ball; receiving client takes ownership |
@@ -166,7 +169,7 @@ Plain JSON over `ws`. Message shapes are the source of truth in `src/types.ts` (
 
 **Mid-match disconnects**: a socket dying with a live, undecided ball is an **abandon**, judged by the relay from room state it owns (`db.recordAbandon`) — a client can never report one. The first of a UTC day is forgiven (`daily_abandons` is day-keyed like every other daily table); ranked repeats cost `rankMu` (−0.5 each), never XP — levels never regress. The surviving player is bounced to the main menu with a notice instead of being stranded on a dead court.
 
-**The room owns the match, not either phone** (`RoomMatchConfig` in `src/types.ts`). The winning score and every physics rule live on the room: the host sets them in the lobby while waiting, the server normalizes and broadcasts them, and `game_start` carries them again so no phone can begin a match on terms it was not told. Before this, each phone applied its own `settings.winningScore` and `settings.rules` — picked in the **Solo** panel, the only place the controls ever appeared — so a duel could be two different matches, and the shorter one ending first left the other player stuck mid-rally with a live court and no way forward. The server also tracks `inPlay` (a ball has crossed) and `matchOver` (the authoritative score reached the room's winning score): settings are editable only outside a live match, and a `rematch_request` is ignored unless the room agrees the match is finished, so a vote can never be banked mid-rally. `src/net/p2p.ts` replicates all three rules exactly.
+**The room owns the match, not either phone** (`RoomMatchConfig` in `src/types.ts`). The winning score and every physics rule live on the room: the host sets them in the lobby while waiting, the server normalizes and broadcasts them, and `game_start` carries them again so no phone can begin a match on terms it was not told. **A duel starts by handshake**: the guest clicks Ready in the lobby (readiness clears whenever the host edits the terms — a yes to old rules is not a yes to new ones), only then does the host's Start button enable, and the server-broadcast `game_start` is what closes BOTH lobbies. Quitting a live duel asks for confirmation (an abandon is at stake); a player whose own socket dies is told they were ejected and returned to the menu, exactly like the survivor. Before this, each phone applied its own `settings.winningScore` and `settings.rules` — picked in the **Solo** panel, the only place the controls ever appeared — so a duel could be two different matches, and the shorter one ending first left the other player stuck mid-rally with a live court and no way forward. The server also tracks `inPlay` (a ball has crossed) and `matchOver` (the authoritative score reached the room's winning score): settings are editable only outside a live match, and a `rematch_request` is ignored unless the room agrees the match is finished, so a vote can never be banked mid-rally. `src/net/p2p.ts` replicates all three rules exactly.
 
 **Trust model — deliberate trade-off**: gameplay physics is client-authoritative (each client simulates its own half and reports `ball_cross_net` / `point_scored`; each phone records its own result via `/api/match/record` with `isWinner`). This keeps the local half at zero latency and is fine for friendly play, but a modified client can cheat. The server validates room membership, owns the shared score, caps chat length, and clamps the transformed ball into the court. Revisit only if public leaderboards attract abuse.
 

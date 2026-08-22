@@ -22,7 +22,6 @@ interface MultiplayerLobbyProps {
   onCreateRoom: () => void;
   onJoinRoom: (roomId: string) => void;
   onLeaveRoom: () => void;
-  onReadyToPlay: () => void;
   onOpenTutorial?: () => void;
   p2pEnabled?: boolean;
   onToggleP2P?: (enabled: boolean) => void;
@@ -36,6 +35,12 @@ interface MultiplayerLobbyProps {
    */
   roomConfig?: RoomMatchConfig | null;
   onUpdateRoomConfig?: (patch: Partial<RoomMatchConfig>) => void;
+  /** The lobby handshake as the server last broadcast it: [host, guest]. */
+  readyStates?: [boolean, boolean];
+  /** Guest: signal (or withdraw) readiness. */
+  onSendReady?: (ready: boolean) => void;
+  /** Host: start the match — only meaningful once the guest has readied. */
+  onStartMatch?: () => void;
   /** The host's own achievements, so the length picker gates as the menu does. */
   earnedAchievements?: string[];
   language?: LanguageCode;
@@ -55,13 +60,15 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   onToggleP2P,
   onJoinRoom,
   onLeaveRoom,
-  onReadyToPlay,
   onOpenTutorial,
   opponentId = null,
   onViewProfile,
   winProbability = null,
   roomConfig = null,
   onUpdateRoomConfig,
+  readyStates = [false, false],
+  onSendReady,
+  onStartMatch,
   earnedAchievements = [],
   language = 'en',
 }) => {
@@ -107,6 +114,8 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   // with every control disabled.
   const isHost = playerIndex === 0;
   const config = roomConfig || DEFAULT_ROOM_CONFIG;
+  const guestReady = readyStates[1];
+  const myReady = playerIndex !== null ? readyStates[playerIndex] : false;
   const scoreOpen = (pts: number) => hasUnlock(earnedAchievements, 'winningScore', pts);
 
   return (
@@ -275,6 +284,21 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
               </div>
             )}
 
+            {isHost && opponentName && (
+              <div
+                id="lobby-opponent-ready"
+                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-mono border ${
+                  guestReady
+                    ? 'bg-emerald-950/40 text-emerald-300 border-emerald-900/60'
+                    : 'bg-zinc-900/60 text-zinc-400 border-zinc-800'
+                }`}
+              >
+                {guestReady
+                  ? t('opponent_is_ready', language)
+                  : t('opponent_not_ready', language)}
+              </div>
+            )}
+
             {/* The room's terms. Set here, by the host, while the other phone
                 is still on its way — and readable by the guest, so nobody
                 walks into a match whose rules they have not seen. */}
@@ -342,22 +366,43 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
               >
                 Leave Room
               </button>
-              <button
-                id="btn-ready-play"
-                onClick={() => {
-                  onReadyToPlay();
-                  onClose();
-                }}
-                disabled={!opponentName && playerIndex === 0}
-                className={`flex-1 py-2.5 rounded-xl font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition active:scale-95 shadow-md ${
-                  opponentName || playerIndex === 1
-                    ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:brightness-110'
-                    : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
-                }`}
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>{opponentName || playerIndex === 1 ? 'Play Match' : 'Waiting for Opponent'}</span>
-              </button>
+              {/* The handshake: the guest readies, and only then can the
+                  host start. game_start is what closes both lobbies — nobody
+                  walks onto the court until the room says the match exists. */}
+              {isHost ? (
+                <button
+                  id="btn-ready-play"
+                  onClick={() => onStartMatch?.()}
+                  disabled={!opponentName || !guestReady}
+                  className={`flex-1 py-2.5 rounded-xl font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition active:scale-95 shadow-md ${
+                    opponentName && guestReady
+                      ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:brightness-110'
+                      : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                  }`}
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>
+                    {!opponentName
+                      ? t('waiting_for_opponent', language)
+                      : guestReady
+                        ? t('start_match', language)
+                        : t('waiting_for_ready', language)}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  id="btn-ready-play"
+                  onClick={() => onSendReady?.(!myReady)}
+                  className={`flex-1 py-2.5 rounded-xl font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition active:scale-95 shadow-md ${
+                    myReady
+                      ? 'bg-emerald-600 text-white hover:brightness-110'
+                      : 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:brightness-110'
+                  }`}
+                >
+                  {myReady ? <Check className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                  <span>{myReady ? t('ready_waiting_host', language) : t('ready_up', language)}</span>
+                </button>
+              )}
             </div>
           </div>
         ) : (
