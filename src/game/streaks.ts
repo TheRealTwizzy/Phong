@@ -1,4 +1,4 @@
-import { PlayerStats } from '../types';
+import { GameMode, PlayerStats } from '../types';
 
 // A rally streak, from the client's side of it.
 //
@@ -90,4 +90,52 @@ export function clearStreaks(s: PlayerStats): PlayerStats {
     oppStreak: 0,
     oppBestStreak: 0,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Which run does the next match open on?
+// ---------------------------------------------------------------------------
+//
+// Two sources, and a precedence between them.
+//
+// The stored run lives on the profile, per mode, and that is right: it has to
+// survive a reload, a different browser and a different room. But the profile
+// only learns a match's ending run when that match's POST comes back, and Play
+// Again is a button the player can press long before that. Read from the
+// profile alone, a replay opens on the run from BEFORE the match just played —
+// throwing away a run a winning point had left intact, and then reporting the
+// smaller number, which overwrites the correct one the server is holding.
+//
+// So the page remembers what it last saw for itself. That memory is only ever
+// written by finishing a match here, which makes it at least as current as any
+// profile this page is holding, and it is deliberately never cleared: a
+// profile refreshed by the heartbeat can easily arrive BEFORE the match POST
+// does, and clearing on one would put the stale value straight back.
+
+/** What this page last saw its own run end on, per mode. */
+export type CarryStore = Partial<Record<GameMode, number>>;
+
+/**
+ * Remember where a finished match left this player's run.
+ *
+ * Split banks nothing and carries nothing — only one of the two people at that
+ * phone has an account — so it is not recorded even locally.
+ */
+export function rememberCarry(store: CarryStore, mode: GameMode, endStreak: number): void {
+  if (mode === 'split') return;
+  store[mode] = Math.max(0, Math.round(endStreak) || 0);
+}
+
+/**
+ * The run a new match in `mode` opens on.
+ *
+ * `stored` is what the profile says. What this page saw for itself wins, per
+ * the note above; the profile is the fallback, and the only source after a
+ * reload or in a browser that has not played this mode yet.
+ */
+export function carriedStreak(store: CarryStore, mode: GameMode, stored: number): number {
+  if (mode === 'split') return 0;
+  const local = store[mode];
+  if (local !== undefined) return local;
+  return Math.max(0, Math.round(stored) || 0);
 }

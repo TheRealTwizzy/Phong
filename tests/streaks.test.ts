@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { PlayerStats } from '../src/types';
 import {
+  CarryStore,
+  carriedStreak,
   clearStreaks,
   opponentMiss,
   opponentReturn,
   ownMiss,
   ownReturn,
+  rememberCarry,
   startMatchStreaks,
 } from '../src/game/streaks';
 
@@ -215,5 +218,57 @@ describe('what a match EARNED is not what its run reached', () => {
     s = opponentMiss(s);
     expect(s.earnedStreak).toBe(1);
     expect(s.streak).toBe(7);
+  });
+});
+
+describe('which run the next match opens on', () => {
+  it('falls back to the profile when this page has played nothing', () => {
+    const store: CarryStore = {};
+    expect(carriedStreak(store, 'solo', 9)).toBe(9);
+    expect(carriedStreak(store, 'practice', 0)).toBe(0);
+  });
+
+  it('prefers what this page saw over what the profile last said', () => {
+    // The bug this exists for: a solo win can leave the run intact, and Play
+    // Again is a synchronous button while the match POST is not. Read from the
+    // profile alone, the replay opens on the run from BEFORE the match just
+    // played — and then reports the smaller number back over the correct one.
+    const store: CarryStore = {};
+    rememberCarry(store, 'solo', 12);
+    expect(carriedStreak(store, 'solo', 4)).toBe(12); // 4 is the stale profile
+  });
+
+  it('carries a broken run as broken, not as the peak it reached', () => {
+    // A maximum here would be exactly the bug: a run legitimately ends at zero.
+    const store: CarryStore = {};
+    rememberCarry(store, 'solo', 12);
+    rememberCarry(store, 'solo', 0);
+    expect(carriedStreak(store, 'solo', 12)).toBe(0);
+  });
+
+  it('keeps the modes apart', () => {
+    const store: CarryStore = {};
+    rememberCarry(store, 'solo', 7);
+    expect(carriedStreak(store, 'solo', 0)).toBe(7);
+    // Practice has its own run and has not been played here, so the profile
+    // still answers for it.
+    expect(carriedStreak(store, 'practice', 3)).toBe(3);
+  });
+
+  it('carries nothing for split, from either source', () => {
+    // Only one of the two people at that phone has an account to write to.
+    const store: CarryStore = {};
+    rememberCarry(store, 'split', 40);
+    expect(store.split).toBeUndefined();
+    expect(carriedStreak(store, 'split', 40)).toBe(0);
+  });
+
+  it('refuses a nonsense ending run rather than carrying it', () => {
+    const store: CarryStore = {};
+    rememberCarry(store, 'solo', -5);
+    expect(carriedStreak(store, 'solo', 0)).toBe(0);
+    rememberCarry(store, 'solo', Number.NaN);
+    expect(carriedStreak(store, 'solo', 0)).toBe(0);
+    expect(carriedStreak({}, 'solo', Number.NaN)).toBe(0);
   });
 });

@@ -197,6 +197,13 @@ passes on the bug: `tests/streaks.test.ts` and `tests/room.test.ts` hold the cli
 counters apart, `tests/db.test.ts` holds that a carried run is not paid for twice, and
 `scripts/e2e-rules.mjs` closes the practice farm through a real server.
 
+**Where two sources can answer the same question, the precedence is a rule too.** The run a
+new match opens on has two: the profile (which survives a reload) and what this page last saw
+its own match end on (which is fresher, because Play Again fires long before the match POST
+returns). That precedence lives in `src/game/streaks.ts` as `CarryStore`, not in `App.tsx`,
+for the reason below — and it is asserted in both directions, since a test that only checks
+the fallback passes on the bug.
+
 **Asserting a game RULE through a browser is a last resort, not a first one.** The streak
 rule was attempted that way and abandoned: it needs a real solo rally, a scripted paddle
 cannot be relied on to produce one (a first-to-5 against Rookie goes 5-0 often enough to fail

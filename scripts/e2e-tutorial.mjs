@@ -162,6 +162,27 @@ if (!(await skipper.waitForSelector('#onboarding-tour-card', { timeout: 8000 }).
 }
 ok('and can be replayed from Settings');
 
+// ---------------------------------------------------------------------------
+// 7. But only from the menu. Replaying it out of a live match walked the menu
+//    steps over a court nobody had left — anchorless cards over a running
+//    game, and a duel silently swapped for the tour's Solo match, leaving the
+//    opponent alone in a room that was never told anybody had gone.
+// ---------------------------------------------------------------------------
+await skipper.click('#btn-tour-skip');
+await skipper.click('#btn-tour-skip-confirm');
+await skipper.waitForSelector('#main-menu-screen', { timeout: 8000 });
+
+await skipper.click('#menu-mode-solo');
+await skipper.waitForSelector('#menu-start-solo', { timeout: 8000 });
+await skipper.click('#menu-start-solo');
+await skipper.waitForSelector('#half-court-container', { timeout: 8000 });
+await skipper.click('#btn-open-settings');
+await skipper.waitForSelector('#btn-close-settings', { timeout: 8000 });
+if (await skipper.$('#btn-settings-start-tour')) {
+  fail('the tour could be replayed from inside a live match');
+}
+ok('and cannot be started from inside a live match');
+
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
 
 console.log('\nONBOARDING TOUR CHECKS PASSED');

@@ -77,10 +77,13 @@ import { SessionGuard } from './components/SessionGuard';
 import { OnboardingTour } from './components/OnboardingTour';
 import { TOUR_STEPS } from './game/tour';
 import {
+  CarryStore,
+  carriedStreak as carried,
   opponentMiss,
   opponentReturn,
   ownMiss,
   ownReturn,
+  rememberCarry,
   startMatchStreaks,
 } from './game/streaks';
 import { OnboardingModal } from './components/OnboardingModal';
@@ -402,6 +405,12 @@ export default function App() {
   // arrive twice — pushed by the relay and returned by our own POST — and the
   // player should not be congratulated twice for one match.
   const shownMatchKeyRef = useRef<string>('');
+  /**
+   * Where this page's own run stands, per mode — what the next match in that
+   * mode opens on, and why the profile alone is not enough to answer that.
+   * The rule, and the reasoning, are in src/game/streaks.ts.
+   */
+  const carryRef = useRef<CarryStore>({});
 
   // P2P link plumbing. dispatchRef always points at the CURRENT render's
   // message handler, so both the WebSocket and the P2P link dispatch into
@@ -619,6 +628,11 @@ export default function App() {
       // for the change that lets the tour play a match out — removing it
       // passes every test in the suite, which is exactly why it needs saying.
       if (tourMatchRef.current) return;
+
+      // Where this player's run stands now, before anything is awaited. Play
+      // Again is a synchronous button and the POST below is not, so a replay
+      // that read the profile would open on the run from before this match.
+      rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
 
       // A duel's key is derived so the relay lands on the same one; a solo
       // match has only this device to report it, so it mints its own.
@@ -1715,6 +1729,15 @@ export default function App() {
   const tourPrematchMode: GameMode | null = tourStage === 'prematch' ? 'solo' : null;
 
   const startTour = useCallback(() => {
+    // The tour starts at the menu and its first steps ARE the menu, so it can
+    // only be opened from there. Replaying it out of a live match used to walk
+    // menu steps over a court nobody had left: anchorless cards over a running
+    // game, and — because the match stage only checks whether it is already in
+    // a Solo match — a duel silently swapped for one, leaving the opponent
+    // alone in a room that was never told anybody had gone. The Settings row
+    // that calls this is hidden off the menu, so this guard is the rule
+    // written where the rule lives, matching the auto-open effect below.
+    if (screenRef.current !== 'menu') return;
     setIsSettingsOpen(false);
     setIsProfileOpen(false);
     setIsLeaderboardOpen(false);
@@ -2128,7 +2151,7 @@ export default function App() {
    * browser too.
    */
   const carriedStreak = (m: GameMode): number =>
-    m === 'split' ? 0 : (profileRef.current?.modeStats?.[m]?.currentStreak ?? 0);
+    carried(carryRef.current, m, profileRef.current?.modeStats?.[m]?.currentStreak ?? 0);
 
   const resetMatch = (forMode: GameMode = modeRef.current) => {
     setStats((s) =>
@@ -2173,9 +2196,17 @@ export default function App() {
   // otherwise be the fastest XP in the game.
   const submitPracticeSession = useCallback(
     async (bestStreak: number, earnedStreak: number, endStreak: number) => {
-      // A session worth nothing is still worth carrying: leaving the wall on a
-    // run of two does not end it, so the report goes out either way.
-    if (earnedStreak < 3 && endStreak <= 0) return;
+      // Where the run stood when the wall opened — read before the stamp
+      // below replaces it, because it is what decides whether this session
+      // has anything to say at all.
+      const carriedIn = carriedStreak('practice');
+      rememberCarry(carryRef.current, 'practice', endStreak);
+      // A session worth nothing is still worth carrying: leaving the wall on
+      // a run of two does not end it, so the report goes out either way. And
+      // a run that BROKE here is news even though it earned nothing — without
+      // that last clause the server keeps handing back, on the next load, the
+      // very run the player just lost.
+      if (earnedStreak < 3 && endStreak <= 0 && carriedIn <= 0) return;
     try {
       const res = await fetch('/api/practice/record', {
         method: 'POST',
@@ -2871,7 +2902,10 @@ export default function App() {
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
           profile={profile}
-          onStartTour={() => startTour()}
+          // Only from the menu: the tour's first steps are the menu itself,
+          // and it must never be the thing that walks a player out of a live
+          // match. In-match Settings is device preferences only anyway.
+          onStartTour={screen === 'menu' ? () => startTour() : undefined}
           onTriggerShake={() => setShakeTrigger(Date.now())}
         />
 
