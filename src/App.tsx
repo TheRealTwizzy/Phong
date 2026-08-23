@@ -2203,6 +2203,15 @@ export default function App() {
     setTelemetryOpen(false);
     setIsServing(true);
     setIsPlayerServer(true);
+    // A new match opens on a new POINT, and these three describe a point: who
+    // served it, whether the opponent has returned anything, and how many
+    // balls have crossed. Left alone across a reset they described the last
+    // point of the abandoned match — so a reset taken after the AI had
+    // returned a ball carried `oppReturned` into the next match and refused
+    // the first genuine ace of it, which is a stat the player keeps.
+    servedThisPointRef.current = true; // setIsPlayerServer(true), above
+    oppReturnedThisPointRef.current = false;
+    oppCrossingsThisPointRef.current = 0;
     // A new match is a new thing to record and a new result to show.
     matchKeyRef.current = '';
     shownMatchKeyRef.current = '';

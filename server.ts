@@ -113,6 +113,36 @@ function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: strin
 }
 
 /**
+ * Write both seats' runs for a duel that is ending WITHOUT being decided.
+ *
+ * `recordRoomMatch` writes the runs when a score decides a match. A duel can
+ * also just stop: somebody walks out, or the room is reaped for going quiet.
+ * Written from `room.streaks`, which the relay owns — a duel's runs belong to
+ * the room, not to either phone, which is why db.reportStreak refuses this
+ * mode to clients. Both seats, always: the player still sitting there is
+ * bounced just as abruptly and their run is just as real.
+ *
+ * One implementation for both endings, for the reason vacateSeat is one
+ * implementation for both departures — two copies of a rule are two rules.
+ * Counts no match and pays nothing.
+ */
+function persistDuelStreaks(room: Room): void {
+  if (!room.inPlay || room.matchOver) return;
+  if (!room.players[0] || !room.players[1]) return;
+  for (const seat of [0, 1] as const) {
+    const player = room.players[seat];
+    if (!player?.deviceId) continue;
+    try {
+      if (seatStillHoldsAccount({ deviceId: player.deviceId, sessionId: player.sessionId })) {
+        db.recordDuelStreak(player.deviceId, room.streaks[seat]);
+      }
+    } catch (e) {
+      console.error('duel streak record failed:', e);
+    }
+  }
+}
+
+/**
  * Close any socket this device holds under a DIFFERENT session. Called when a
  * session is issued, so the device that just lost the account finds out in
  * milliseconds instead of at its next heartbeat — and cannot land another
@@ -945,6 +975,16 @@ async function startServer() {
       unpairedTtlMs: ROOM_UNPAIRED_TTL_MS,
     });
     for (const { id, reason, room } of dead) {
+      // The runs, before anything else. reapRooms deletes the room from the
+      // map as it sweeps, so by the time the close below reaches a seat's
+      // handler there is no room left to find and vacateSeat returns at its
+      // first line — a duel reaped mid-rally lost both players' runs back to
+      // whatever their last COMPLETED match had stored.
+      //
+      // Streaks only, and no abandon: that is a penalty for walking out on
+      // somebody who was still playing, and a room reaped for going quiet for
+      // half an hour has nobody left to have walked out on.
+      persistDuelStreaks(room);
       // An empty room has nothing attached by definition; the other two can
       // still have somebody sitting on a court that no longer exists. Closing
       // their socket is what returns them to the menu — the client reads an
@@ -1432,25 +1472,10 @@ async function startServer() {
       // already-abandoned room records nothing.
       const bothSeated = !!(room.players[0] && room.players[1]);
       // A duel that is abandoned still HAPPENED, and both players' runs stand
-      // wherever the last crossing left them. recordRoomMatch writes those
-      // when the score decides a match; nothing wrote them when one was walked
-      // out of, so both seats went back to whatever their last COMPLETED match
-      // had stored — a miss during the abandoned duel undone, and a run built
-      // during it thrown away. Written for the leaver AND the survivor, who is
-      // about to be bounced to the menu just as abruptly.
-      if (bothSeated && room.inPlay && !room.matchOver) {
-        for (const seat of [0, 1] as const) {
-          const player = room.players[seat];
-          if (!player?.deviceId) continue;
-          try {
-            if (seatStillHoldsAccount({ deviceId: player.deviceId, sessionId: player.sessionId })) {
-              db.recordDuelStreak(player.deviceId, room.streaks[seat]);
-            }
-          } catch (e) {
-            console.error('duel streak record failed:', e);
-          }
-        }
-      }
+      // wherever the last crossing left them — recordRoomMatch writes those
+      // only when a score decides a match. Written for the leaver AND the
+      // survivor, who is about to be bounced to the menu just as abruptly.
+      persistDuelStreaks(room);
       if (bothSeated && room.inPlay && !room.matchOver && currentPlayerId) {
         try {
           // Same rule as recordRoomMatch: a seat that no longer holds
