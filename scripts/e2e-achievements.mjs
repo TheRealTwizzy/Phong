@@ -29,10 +29,28 @@ await page.click('#btn-onboarding-submit');
 await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
   .then((b) => b.click())
   .catch(() => {});
+await skipTour(page);
 await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
 
 await page.click('#menu-mode-solo');
 await page.waitForSelector('#menu-diff-rookie', { timeout: 5000 });
+// The onboarding tour opens by itself for a player who has never seen it —
+// it is part of onboarding now, not a menu row. Every suite past this point
+// wants the menu, so it is waved away here. Tolerant: a suite that reaches
+// this another way is not broken by its absence.
+async function skipTour(page) {
+  const card = await page
+    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
+    .catch(() => null);
+  if (!card) return false;
+  await page.click('#btn-tour-skip');
+  await page.click('#btn-tour-skip-confirm');
+  await page
+    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
+    .catch(() => {});
+  return true;
+}
+
 const dis = async (sel) => page.$eval(sel, (el) => el.disabled);
 if (await dis('#menu-diff-rookie')) fail('Rookie should be open from the start');
 if (!(await dis('#menu-diff-pro'))) fail('Pro should be locked for a new player');

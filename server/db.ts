@@ -204,6 +204,7 @@ interface PlayerRow {
   recoveryCode: string | null;
   initializedAt: string | null;
   usernameChangedAt: string | null;
+  tutorialCompletedAt: string | null;
   // From the LEFT JOIN on avatars; NULL when the player has no avatar.
   avatarUpdatedAt?: string | null;
 }
@@ -229,6 +230,7 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
     recoveryCode: row.recoveryCode || undefined,
     initializedAt: row.initializedAt || undefined,
     usernameChangedAt: row.usernameChangedAt || undefined,
+    tutorialCompletedAt: row.tutorialCompletedAt || undefined,
     initialized: Boolean(row.initializedAt),
     hasAvatar: Boolean(avatarUpdatedAt),
     avatarVersion: avatarUpdatedAt ? Date.parse(avatarUpdatedAt) : undefined,
@@ -317,7 +319,8 @@ class GameDatabase {
         initializedAt TEXT,
         usernameChangedAt TEXT,
         activeSessionId TEXT,
-        activeSessionAt TEXT
+        activeSessionAt TEXT,
+        tutorialCompletedAt TEXT
       );
       CREATE TABLE IF NOT EXISTS matches (
         id TEXT PRIMARY KEY,
@@ -586,6 +589,7 @@ class GameDatabase {
     // One account, one live session. Which one is recorded here.
     addColumn('activeSessionId', 'activeSessionId TEXT');
     addColumn('activeSessionAt', 'activeSessionAt TEXT');
+    addColumn('tutorialCompletedAt', 'tutorialCompletedAt TEXT');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
     // Uniqueness is case-insensitive and applies to chosen names only:
     // uninitialized rows keep their Paddle-XXXX placeholders outside the
@@ -735,8 +739,9 @@ class GameDatabase {
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins,
            winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, cyberWins, abandons, dailyStreak, lastDailyDate,
-           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt,
+           tutorialCompletedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
@@ -753,7 +758,8 @@ class GameDatabase {
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive,
            recoveryCode=excluded.recoveryCode, initializedAt=excluded.initializedAt,
-           usernameChangedAt=excluded.usernameChangedAt`
+           usernameChangedAt=excluded.usernameChangedAt,
+           tutorialCompletedAt=excluded.tutorialCompletedAt`
       )
       .run(
         p.id,
@@ -787,7 +793,8 @@ class GameDatabase {
         p.lastActive,
         p.recoveryCode ?? null,
         p.initializedAt ?? null,
-        p.usernameChangedAt ?? null
+        p.usernameChangedAt ?? null,
+        p.tutorialCompletedAt ?? null
       );
   }
 
@@ -1096,6 +1103,21 @@ class GameDatabase {
       out[mode] = rest;
     }
     return out;
+  }
+
+  /**
+   * Mark the onboarding tour as seen — walked through OR skipped, because a
+   * player who waved it away has still decided about it. One-shot: the first
+   * stamp is the one that stands, so a replay from Settings does not rewrite
+   * when they were first shown the game.
+   */
+  public completeTutorial(playerId: string): PlayerProfile {
+    const profile = this.getProfile(playerId);
+    if (!profile.tutorialCompletedAt) {
+      profile.tutorialCompletedAt = new Date().toISOString();
+      this.upsertProfile(profile);
+    }
+    return this.getProfile(playerId);
   }
 
   public recordPractice(

@@ -236,6 +236,13 @@ export interface PlayerProfile {
    * OWN device — PublicProfile is a separate, sanitized shape.
    */
   modeStats?: Record<string, ModeStats>;
+  /**
+   * When this player finished (or skipped) the onboarding tour. Server-side
+   * rather than in localStorage because an account follows the browser via
+   * device_links — a player signing in from a second browser has already been
+   * shown the game and must not be walked through it again.
+   */
+  tutorialCompletedAt?: string;
   dailyStreak: number;
   lastDailyDate?: string;
   achievements: string[]; // achievement IDs

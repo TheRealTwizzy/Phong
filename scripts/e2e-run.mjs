@@ -38,6 +38,7 @@ const SUITES = [
   { name: 'lobby', ownsServer: false },
   { name: 'split', ownsServer: false },
   { name: 'streak', ownsServer: false },
+  { name: 'tutorial', ownsServer: false },
   { name: 'eject', ownsServer: true },
   { name: 'build-id', ownsServer: true, needsBrowser: false },
 ];

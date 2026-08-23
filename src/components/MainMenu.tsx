@@ -42,7 +42,6 @@ import {
   History,
   User,
   Settings,
-  BookOpen,
   Play,
   Shield,
   Flame,
@@ -97,7 +96,12 @@ interface MainMenuProps {
   onOpenHistory: () => void;
   onOpenMissions: () => void;
   onOpenSettings: () => void;
-  onOpenTutorial: () => void;
+  /**
+   * The pre-match sheet the onboarding tour wants open. The sheet is MainMenu's
+   * own state — a duel's lives in App, because a lobby owns a room — so the
+   * tour, which does live in App, has to be able to reach in and open it.
+   */
+  tourPrematch?: GameMode | null;
 }
 
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -122,12 +126,15 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onOpenHistory,
   onOpenMissions,
   onOpenSettings,
-  onOpenTutorial,
+  tourPrematch = null,
 }) => {
   const lang = settings.language || 'en';
   // Which mode's pre-match sheet is open. A duel's lives in App (the lobby
   // owns a room, not just a form), so this only ever holds the other three.
   const [prematchMode, setPrematchMode] = useState<GameMode | null>(null);
+  // The tour's choice wins while it is running, so a step that is ABOUT the
+  // pre-match sheet always has one on screen to point at.
+  const openPrematch = tourPrematch ?? prematchMode;
   // Which gate the player tapped, so the reason a rung is shut is something
   // they can read rather than a tooltip no touch device will ever show.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
@@ -168,7 +175,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     else if (id === 'split') onStartSplit();
   };
 
-  const prematch = modes.find((m) => m.id === prematchMode) ?? null;
+  const prematch = modes.find((m) => m.id === openPrematch) ?? null;
 
   // Hidden MMR drives every prediction on this screen (solo play moves it,
   // even though it can never move the visible tier).
@@ -400,17 +407,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           </>
         )}
 
-        <button
-          id="menu-nav-tutorial"
-          onClick={onOpenTutorial}
-          className="flex shrink-0 items-center gap-2 rounded-card border border-line bg-surface-2/60 px-3 py-2.5 text-left text-ink-muted transition-colors active:scale-[0.99] motion-reduce:active:scale-100"
-        >
-          <BookOpen className="h-4 w-4 shrink-0" />
-          <span className="flex-1 text-2xs font-normal tracking-normal">
-            {t('menu_how_to_play', lang)}
-          </span>
-          <ChevronRight className="h-4 w-4 shrink-0 text-ink-dim" />
-        </button>
       </main>
 
       {/* A flex sibling, not position:fixed — dvh changes as mobile browser

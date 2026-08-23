@@ -74,7 +74,8 @@ import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
 import { SessionGuard } from './components/SessionGuard';
-import { TutorialModal } from './components/TutorialModal';
+import { OnboardingTour } from './components/OnboardingTour';
+import { TOUR_STEPS } from './game/tour';
 import {
   opponentMiss,
   opponentReturn,
@@ -193,7 +194,36 @@ export default function App() {
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [isAchievementsOpen, setIsAchievementsOpen] = useState<boolean>(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
-  const [isTutorialOpen, setIsTutorialOpen] = useState<boolean>(false);
+  /**
+   * The onboarding tour. `null` when it is not running; otherwise the step.
+   *
+   * It walks the REAL product — the real menu, the real pre-match sheet, a
+   * real Solo Rookie match frozen mid-frame, the real Settings, Profile,
+   * Leaderboard and Active Tasks — because what it replaced was a deck of
+   * static dioramas that taught none of the actual game and was never shown to
+   * a new player anyway. It grants nothing: the match it plays is not
+   * recorded, and finishing pays no XP, no missions and no achievements.
+   */
+  const [tourStep, setTourStep] = useState<number | null>(null);
+  const [tourSkipOpen, setTourSkipOpen] = useState<boolean>(false);
+  /** Set for the whole time the tour owns the court, so nothing is banked. */
+  const tourMatchRef = useRef<boolean>(false);
+  /** Physics is held mid-frame while a step is talking about it. */
+  const tourFreezeRef = useRef<boolean>(false);
+  /** Reached by the tour so a step can put a ball in the air. */
+  const tourServeRef = useRef<() => void>(() => {});
+  const tourActive = tourStep !== null;
+  const tourStepDef = tourStep === null ? null : (TOUR_STEPS[tourStep] ?? null);
+  const tourStage = tourStepDef?.stage ?? null;
+  /**
+   * Held mid-frame for every match step, so the ball, the net, the radar and
+   * the scoreboard a step describes are the real ones and are still there when
+   * the player looks up from the card. Declared here rather than beside the
+   * driver because the serve timers below have to depend on it.
+   */
+  const [tourLive, setTourLive] = useState<boolean>(false);
+  const tourFreeze = tourStage === 'match' && !tourLive;
+  tourFreezeRef.current = tourFreeze;
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
   // Any tapped username opens this player's public profile (z-[60], above
   // whichever modal spawned it). null = closed.
@@ -577,6 +607,16 @@ export default function App() {
       // Practice Wall and Split Screen are unranked: no winner is ever set
       // for them, and even if one were, nothing gets recorded.
       if (modeRef.current === 'practice' || modeRef.current === 'split') return;
+      // The onboarding tour plays a real match and banks none of it. XP,
+      // missions, achievements and rating all advance only inside the
+      // server's recordMatch, which nothing but this POST reaches.
+      //
+      // Defence in depth rather than the thing doing the work: the tour's
+      // match never reaches a winner, because a step that leaves the court
+      // tears it down, so today nothing calls this for it at all. It is here
+      // for the change that lets the tour play a match out — removing it
+      // passes every test in the suite, which is exactly why it needs saying.
+      if (tourMatchRef.current) return;
 
       // A duel's key is derived so the relay lands on the same one; a solo
       // match has only this device to report it, so it mints its own.
@@ -916,6 +956,8 @@ export default function App() {
   const handleServe = useCallback(
     (aim?: ServeAim) => {
       if (!isServingRef.current) return;
+      // Nothing is served under a frozen court.
+      if (tourFreezeRef.current) return;
       // A duel's serve needs someone on the other end. A host waiting in the
       // lobby is already on the court underneath it, so without this a serve
       // (auto or tapped) would fire the ball into an empty room, where it
@@ -1012,7 +1054,8 @@ export default function App() {
         !isMultiplayerOpen &&
         !countdownArmed &&
         (matchCountdown ?? 0) <= 0);
-    const active = isServing && isPlayerServer && screen === 'game' && !winner && duelReady;
+    const active =
+      isServing && isPlayerServer && screen === 'game' && !winner && duelReady && !tourFreeze;
     if (!active || seconds <= 0) {
       setServeCountdown(null);
       return;
@@ -1039,6 +1082,7 @@ export default function App() {
     countdownArmed,
     matchCountdown,
     activeConfig.rules.autoServeSeconds,
+    tourFreeze,
     handleServe,
   ]);
 
@@ -1048,7 +1092,7 @@ export default function App() {
   // (Practice Wall has no opponent at all: the player always serves.)
   useEffect(() => {
     if (mode !== 'solo' || screen !== 'game') return;
-    if (!isServing || isPlayerServer || winner) return;
+    if (!isServing || isPlayerServer || winner || tourFreeze) return;
     const delayMs =
       aiServeDelay(
         aiRef.current.competence(),
@@ -1060,7 +1104,7 @@ export default function App() {
       ) * 1000;
     const timer = setTimeout(() => handleServe(), delayMs);
     return () => clearTimeout(timer);
-  }, [mode, screen, isServing, isPlayerServer, winner, handleServe]);
+  }, [mode, screen, isServing, isPlayerServer, winner, tourFreeze, handleServe]);
 
   // Build (or rebuild) the P2P link for the current room. The host creates
   // the offer; the guest side is created lazily when the first offer arrives.
@@ -1658,6 +1702,125 @@ export default function App() {
     setIsMultiplayerOpen(false);
   };
 
+  // ---------------------------------------------------------------------
+  // The onboarding tour
+  // ---------------------------------------------------------------------
+  /** The pre-match sheet a `prematch` step needs open, for MainMenu to obey. */
+  const tourPrematchMode: GameMode | null = tourStage === 'prematch' ? 'solo' : null;
+
+  const startTour = useCallback(() => {
+    setIsSettingsOpen(false);
+    setIsProfileOpen(false);
+    setIsLeaderboardOpen(false);
+    setIsMissionsOpen(false);
+    setIsAchievementsOpen(false);
+    setIsHistoryOpen(false);
+    setTourStep(0);
+  }, []);
+
+  /**
+   * The steps that want the ball actually moving. Reaching the serve step with
+   * it parked on the paddle explains nothing, so the tour serves it, lets it
+   * fly, and freezes on a ball in mid-air — which is the frame the steps after
+   * this one are about.
+   */
+  useEffect(() => {
+    if (!tourActive || tourStage !== 'match' || !tourStepDef?.live) {
+      setTourLive(false);
+      return;
+    }
+    setTourLive(true);
+    // A frame for the freeze to lift before the serve goes out; handleServe
+    // refuses one under a frozen court, and rightly so.
+    const serve = setTimeout(() => tourServeRef.current(), 60);
+    const stop = setTimeout(() => setTourLive(false), tourStepDef.live);
+    return () => {
+      clearTimeout(serve);
+      clearTimeout(stop);
+    };
+  }, [tourActive, tourStage, tourStepDef?.id, tourStepDef?.live]);
+
+  /**
+   * Put the app where the step needs it. One effect rather than a branch per
+   * step: a step declares the stage it belongs to, and this is the only thing
+   * that knows how to reach one.
+   */
+  useEffect(() => {
+    if (!tourActive || !tourStage) return;
+    setIsSettingsOpen(tourStage === 'settings');
+    setIsProfileOpen(tourStage === 'profile');
+    setIsLeaderboardOpen(tourStage === 'leaderboard');
+    setIsMissionsOpen(tourStage === 'tasks');
+    if (tourStage === 'match') {
+      // A real Solo match on the shipped default rung, which is open to
+      // everybody from the first match — the tour must never be the thing
+      // that asks a new player for an unlock they do not have.
+      if (screenRef.current !== 'game' || modeRef.current !== 'solo') {
+        tourMatchRef.current = true;
+        setMode('solo');
+        setScreen('game');
+        resetMatchRef.current();
+      }
+    } else if (tourMatchRef.current) {
+      tourMatchRef.current = false;
+      setScreen('menu');
+      setMode('solo');
+      resetMatchRef.current();
+    }
+  }, [tourActive, tourStage]);
+
+  /**
+   * Show it once, to a player who has an account and has never seen it.
+   *
+   * NOT while an invitation is pending: that player tapped a link to play with
+   * somebody who is waiting for them right now, and the auto-join takes them
+   * straight into a lobby. They get it on their next load instead, which is
+   * the first moment it is not in the way of something.
+   */
+  const tourOfferedRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (tourOfferedRef.current) return;
+    if (!profile?.initialized || profile.tutorialCompletedAt) return;
+    if (pendingRoomRef.current) return;
+    if (screen !== 'menu') return;
+    tourOfferedRef.current = true;
+    setTourStep(0);
+  }, [profile?.initialized, profile?.tutorialCompletedAt, screen]);
+
+  /** Remember it was seen, whether it was walked or waved away. */
+  const markTourSeen = useCallback(async () => {
+    try {
+      const res = await fetch('/api/profile/tutorial-complete', { method: 'POST' });
+      if (res.ok) setProfile(await res.json());
+    } catch {
+      // A tour the server never heard about simply opens again next time,
+      // which is a far better failure than blocking the player on a POST.
+    }
+  }, []);
+
+  const endTour = useCallback(() => {
+    tourMatchRef.current = false;
+    tourFreezeRef.current = false;
+    setTourStep(null);
+    setTourSkipOpen(false);
+    setIsSettingsOpen(false);
+    setIsProfileOpen(false);
+    setIsLeaderboardOpen(false);
+    setIsMissionsOpen(false);
+    setScreen('menu');
+    setMode('solo');
+    resetMatchRef.current();
+    void markTourSeen();
+  }, [markTourSeen]);
+
+  const advanceTour = useCallback(() => {
+    setTourStep((i) => {
+      if (i === null) return null;
+      if (i + 1 >= TOUR_STEPS.length) return i; // endTour handles the last one
+      return i + 1;
+    });
+  }, []);
+
   // Main 60/120 FPS Physics Engine Loop
   useEffect(() => {
     let animId: number;
@@ -1683,7 +1846,15 @@ export default function App() {
       }
 
       // Idle while on the menu; split mode runs its own self-contained loop.
-      if (screenRef.current !== 'game' || modeRef.current === 'split' || isServingRef.current || winner) {
+      if (
+        screenRef.current !== 'game' ||
+        modeRef.current === 'split' ||
+        isServingRef.current ||
+        // Held mid-frame by the onboarding tour, so the court a step is
+        // describing is still exactly what it was when the card appeared.
+        tourFreezeRef.current ||
+        winner
+      ) {
         animId = requestAnimationFrame(gameLoop);
         return;
       }
@@ -1937,6 +2108,7 @@ export default function App() {
   }, [winner, playerIndex]);
 
   const resetMatchRef = useRef<() => void>(() => {});
+  tourServeRef.current = () => handleServe();
   const adoptSessionRef = useRef<() => Promise<ClientSessionStatus>>(async () => 'connecting');
   adoptSessionRef.current = adoptSession;
 
@@ -2239,6 +2411,53 @@ export default function App() {
           </p>
         </Sheet>
 
+        {/* The onboarding tour. Mounted OUTSIDE the screen swap below, like
+            the onboarding modal: it walks the player from the menu onto a
+            live court and back, and a child of either branch would be torn
+            down at the transition it exists to narrate. */}
+        <OnboardingTour
+          isOpen={tourActive && !tourSkipOpen}
+          step={tourStepDef}
+          index={tourStep ?? 0}
+          total={TOUR_STEPS.length}
+          language={currentLanguage}
+          onBack={() => setTourStep((i) => (i === null ? null : Math.max(0, i - 1)))}
+          onNext={() => {
+            if (tourStep !== null && tourStep >= TOUR_STEPS.length - 1) endTour();
+            else advanceTour();
+          }}
+          onSkip={() => setTourSkipOpen(true)}
+        />
+
+        <Sheet
+          id="tour-skip-modal"
+          isOpen={tourSkipOpen}
+          onClose={() => setTourSkipOpen(false)}
+          size="xs"
+          layer="gate"
+          accent="warn"
+          title={t('tour_skip_title', currentLanguage)}
+          footer={
+            <>
+              <Button
+                id="btn-tour-skip-cancel"
+                variant="secondary"
+                block
+                onClick={() => setTourSkipOpen(false)}
+              >
+                {t('tour_skip_no', currentLanguage)}
+              </Button>
+              <Button id="btn-tour-skip-confirm" variant="danger" block onClick={endTour}>
+                {t('tour_skip_yes', currentLanguage)}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
+            {t('tour_skip_body', currentLanguage)}
+          </p>
+        </Sheet>
+
         {/* Mandatory first-arrival onboarding: gates EVERYTHING until the
             player locks in their unique username (or restores a profile) */}
         <OnboardingModal
@@ -2298,7 +2517,7 @@ export default function App() {
             onOpenHistory={() => setIsHistoryOpen(true)}
             onOpenMissions={() => setIsMissionsOpen(true)}
             onOpenSettings={() => setIsSettingsOpen(true)}
-            onOpenTutorial={() => setIsTutorialOpen(true)}
+            tourPrematch={tourPrematchMode}
           />
           </motion.div>
         ) : (
@@ -2638,17 +2857,8 @@ export default function App() {
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
           profile={profile}
-          onOpenTutorial={() => setIsTutorialOpen(true)}
+          onStartTour={() => startTour()}
           onTriggerShake={() => setShakeTrigger(Date.now())}
-        />
-
-        {/* Tutorial & Onboarding Interactive Modal */}
-        <TutorialModal
-          isOpen={isTutorialOpen}
-          onClose={() => setIsTutorialOpen(false)}
-          onComplete={() => setIsTutorialOpen(false)}
-          theme={currentTheme}
-          language={currentLanguage}
         />
 
         {/* 2-Phone Multiplayer Lobby */}
