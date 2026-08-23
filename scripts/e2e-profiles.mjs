@@ -234,7 +234,7 @@ await bob.evaluate(async () => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      playerScore: 5, opponentScore: 3, maxRally: 9, mode: 'multiplayer', isWinner: true,
+      playerScore: 5, opponentScore: 3, bestStreak: 9, earnedStreak: 9, mode: 'multiplayer', isWinner: true,
     }),
   });
 });

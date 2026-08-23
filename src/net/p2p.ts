@@ -1,7 +1,12 @@
 import { RoomMatchConfig, RTCSignalPayload, WSClientMessage, WSServerMessage } from '../types';
 import { DEFAULT_ROOM_CONFIG } from '../matchRules';
 import { transformBallForOpponent } from '../../server/transform';
-import { StreakState, breakStreakOnPoint, countReturn, resetStreaks } from '../../server/room';
+import {
+  StreakState,
+  breakStreakOnPoint,
+  countReturn,
+  startMatchStreaks,
+} from '../../server/room';
 
 // Peer-to-peer game link over WebRTC DataChannels.
 //
@@ -47,6 +52,8 @@ interface P2POptions {
     p1Score: number;
     p2Score: number;
     bestStreaks: [number, number];
+    streaks: [number, number];
+    earnedBests: [number, number];
   }) => void;
 }
 
@@ -76,6 +83,8 @@ export class P2PGameLink {
   private streaks: StreakState = {
     streaks: [0, 0],
     bestStreaks: [0, 0],
+    earnedStreaks: [0, 0],
+    earnedBests: [0, 0],
     crossingsThisPoint: 0,
     servingPlayer: 0,
   };
@@ -165,13 +174,27 @@ export class P2PGameLink {
     this.config = config;
   }
 
-  /** Reset replicated match state; call on every game_start. */
-  public resetMatchState(servingPlayer: 0 | 1, matchSeq?: number): void {
+  /**
+   * Reset replicated match state; call on every game_start.
+   *
+   * `carried` is each seat's run as the relay has it — a streak carries
+   * between matches AND between rooms, and the relay is the only party that
+   * knows both sides of that. Starting from zero here reported the peak of
+   * only what happened after the reset, which the relay then took a maximum
+   * against its own carried value: a run of ten that gained two returns was
+   * recorded as ten.
+   */
+  public resetMatchState(
+    servingPlayer: 0 | 1,
+    matchSeq?: number,
+    carried: [number, number] = [this.streaks.streaks[0], this.streaks.streaks[1]]
+  ): void {
     this.scores = [0, 0];
     this.servingPlayer = servingPlayer;
     this.rematchVotes = [false, false];
     this.matchOver = false;
-    resetStreaks(this.streaks, servingPlayer);
+    this.streaks.streaks = [Math.max(0, carried[0] || 0), Math.max(0, carried[1] || 0)];
+    startMatchStreaks(this.streaks, servingPlayer);
     // A relayed start names the match; a locally agreed rematch counts on.
     this.matchSeq = matchSeq ?? this.matchSeq + 1;
   }
@@ -183,6 +206,11 @@ export class P2PGameLink {
       p1Score: this.scores[0],
       p2Score: this.scores[1],
       bestStreaks: [this.streaks.bestStreaks[0], this.streaks.bestStreaks[1]],
+      // Where each run IS, not only how high it got. The relay sees no
+      // crossings and no points in a P2P match, so this is the only thing that
+      // tells it what to carry into the next one.
+      streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
+      earnedBests: [this.streaks.earnedBests[0], this.streaks.earnedBests[1]],
     });
   }
 
@@ -340,12 +368,15 @@ export class P2PGameLink {
     this.rematchVotes[voterIdx] = true;
     if (this.rematchVotes[0] && this.rematchVotes[1]) {
       const nextServer: 0 | 1 = this.servingPlayer === 0 ? 1 : 0;
+      // No `carried` argument: a locally agreed rematch continues the runs the
+      // replica is already holding, which is exactly what carrying means.
       this.resetMatchState(nextServer);
       this.opts.onMessage({
         type: 'game_start',
         servingPlayer: nextServer,
         config: this.config,
         matchSeq: this.matchSeq,
+        streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
       });
     } else {
       this.opts.onMessage({ type: 'rematch_state', votes: [...this.rematchVotes] });

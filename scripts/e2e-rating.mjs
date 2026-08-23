@@ -86,7 +86,7 @@ const openLadder = (page) =>
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          playerScore: 5, opponentScore: 1, maxRally: 6,
+          playerScore: 5, opponentScore: 1, bestStreak: 6, earnedStreak: 6,
           mode: 'solo', difficulty, isWinner: true,
         }),
       });
@@ -143,7 +143,7 @@ await openLadder(climber);
 const oddsBefore = await oddsAfterSoloRun(climber);
 for (let i = 0; i < 8; i++) {
   await record(climber, {
-    playerScore: 5, opponentScore: 0, maxRally: 22,
+    playerScore: 5, opponentScore: 0, bestStreak: 22, earnedStreak: 22,
     mode: 'solo', difficulty: 'cyber', isWinner: true,
   });
 }
@@ -170,7 +170,7 @@ if (/\b1[0-9]{3}\s*(ELO|Rating)\b/i.test(bodyText)) fail('a raw rating number is
 ok('no ELO / raw rating number rendered on the menu');
 
 // ---- 3. XP scales with the prediction ------------------------------------
-const base = { playerScore: 3, opponentScore: 1, maxRally: 10, mode: 'solo', isWinner: true };
+const base = { playerScore: 3, opponentScore: 1, bestStreak: 10, earnedStreak: 10, mode: 'solo', isWinner: true };
 await openLadder(alice);
 const hardWin = await record(alice, { ...base, difficulty: 'cyber' });
 const easyPlayer = await newPlayer('Easy');
@@ -247,7 +247,7 @@ if (start.missions.some((m) => m.current > 0 || m.claimed)) fail('a fresh day st
 ok(`server serves ${start.missions.length} missions, all at zero`);
 
 // Rookie: the only difficulty a fresh player has open.
-await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, maxRally: 9 });
+await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, bestStreak: 9, earnedStreak: 9 });
 const advanced = (await missionsOf(questPlayer)).missions;
 if (!advanced.some((m) => m.current > 0)) {
   fail(`a recorded win advanced nothing: ${JSON.stringify(advanced.map((m) => [m.id, m.current]))}`);
@@ -271,7 +271,7 @@ ok('clearing browser storage does not reset mission progress');
 // player id, which is a fresh random device per run. So this loop has to
 // satisfy every mission the deal could hand it, not just a typical one.
 //
-// It used to record { opponentScore: 1, maxRally: 12 } with no aces, which
+// It used to record { opponentScore: 1, bestStreak: 12, earnedStreak: 12 } with no aces, which
 // leaves five of the twelve uncompletable — rally_15, multi, pro_win, aces
 // and shutout — and a three-card hand drawn entirely from those five
 // completes nothing. That is C(5,3)/C(12,3), and simulating the real
@@ -290,7 +290,7 @@ for (let i = 0; i < 12; i++) {
     difficulty: 'rookie',
     playerScore: 5,
     opponentScore: 0, // shutout -> mission_shutout
-    maxRally: 15, //     -> mission_rally / mission_rally_15
+    bestStreak: 15, earnedStreak: 15, //     -> mission_rally / mission_rally_15
     aces: 3, //          -> mission_aces
   });
 }

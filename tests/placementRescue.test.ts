@@ -28,7 +28,7 @@ const duel = (playerId: string, i: number, isWinner: boolean): MatchEndPayload =
   username: 'ignored',
   playerScore: isWinner ? 5 : 2,
   opponentScore: isWinner ? 2 : 5,
-  bestStreak: 8, endStreak: 0,
+  bestStreak: 8, endStreak: 0, earnedStreak: 8,
   mode: 'multiplayer',
   isWinner,
   matchKey: `${playerId}:pvp:${i}`,

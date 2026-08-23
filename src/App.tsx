@@ -271,6 +271,8 @@ export default function App() {
     opponentScore: 0,
     streak: 0,
     bestStreak: 0,
+    earnedStreak: 0,
+    earnedBest: 0,
     oppStreak: 0,
     oppBestStreak: 0,
     aces: 0,
@@ -645,6 +647,7 @@ export default function App() {
           opponentScore: statsRef.current.opponentScore,
           bestStreak: statsRef.current.bestStreak,
           endStreak: statsRef.current.streak,
+          earnedStreak: statsRef.current.earnedBest,
           aces: statsRef.current.aces,
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
@@ -1229,7 +1232,10 @@ export default function App() {
         setStats((s) =>
           startMatchStreaks(
             { ...s, score: 0, opponentScore: 0, aces: 0, matchesWon: 0 },
-            carriedStreak('multiplayer')
+            // The relay's number, not the profile's: it seeded the seat from
+            // the store and it is what this match will be recorded on, so a
+            // phone that disagrees is a phone showing something else.
+            msg.streaks?.[playerIndexRef.current] ?? carriedStreak('multiplayer')
           )
         );
         setTotalTouches(0);
@@ -1248,7 +1254,7 @@ export default function App() {
         // walks onto the court until the room says the match exists.
         setIsMultiplayerOpen(false);
         setIsServing(true);
-        p2pRef.current?.resetMatchState(msg.servingPlayer, matchSeqRef.current);
+        p2pRef.current?.resetMatchState(msg.servingPlayer, matchSeqRef.current, msg.streaks);
         break;
 
       case 'opponent_paddle':
@@ -2067,18 +2073,21 @@ export default function App() {
         if (ob.y >= 1.05) {
           ob.active = false;
           sound.playScore();
+          // An ace: I served and the AI never got it back over, so the rally
+          // never actually started. Read off whether they returned it rather
+          // than off a counter — the counter is mine now, and mine does not
+          // move when I serve.
+          //
+          // Latched BEFORE the point is opened, and read from the latch inside
+          // the updater. setStats runs later, so clearing the ref first made
+          // every point won on my own serve an ace.
+          const wasAce = servedThisPointRef.current && !oppReturnedThisPointRef.current;
           oppReturnedThisPointRef.current = false;
           oppCrossingsThisPointRef.current = 0;
 
           setStats((s) => {
             const nextScore = s.score + 1;
-            // An ace: the player served and the opponent never got the ball
-            // back over, so the rally never actually started.
-            // An ace: I served and the AI never got it back over, so the
-            // rally never actually started. Read off whether they returned it
-            // rather than off a counter — the counter is mine now, and mine
-            // does not move when I serve.
-            const ace = servedThisPointRef.current && !oppReturnedThisPointRef.current;
+            const ace = wasAce;
             if (nextScore >= configRef.current.winningScore) {
               setWinner('player');
               confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
@@ -2162,15 +2171,16 @@ export default function App() {
   // match is recorded and no rating moves — the server decides what the streak
   // is worth and holds a daily cap, since a guaranteed-return drill would
   // otherwise be the fastest XP in the game.
-  const submitPracticeSession = useCallback(async (bestStreak: number, endStreak: number) => {
-    // A session worth nothing is still worth carrying: leaving the wall on a
+  const submitPracticeSession = useCallback(
+    async (bestStreak: number, earnedStreak: number, endStreak: number) => {
+      // A session worth nothing is still worth carrying: leaving the wall on a
     // run of two does not end it, so the report goes out either way.
-    if (bestStreak < 3 && endStreak <= 0) return;
+    if (earnedStreak < 3 && endStreak <= 0) return;
     try {
       const res = await fetch('/api/practice/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bestStreak, endStreak }),
+        body: JSON.stringify({ bestStreak, earnedStreak, endStreak }),
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -2195,7 +2205,11 @@ export default function App() {
       return;
     }
     if (mode === 'practice') {
-      void submitPracticeSession(statsRef.current.bestStreak, statsRef.current.streak);
+      void submitPracticeSession(
+        statsRef.current.bestStreak,
+        statsRef.current.earnedBest,
+        statsRef.current.streak
+      );
     }
     setScreen('menu');
     resetMatch();

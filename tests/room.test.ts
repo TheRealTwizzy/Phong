@@ -36,6 +36,8 @@ const room = (over: Partial<Room> = {}): Room => ({
   scores: [0, 0],
   streaks: [0, 0],
   bestStreaks: [0, 0],
+  earnedStreaks: [0, 0],
+  earnedBests: [0, 0],
   crossingsThisPoint: 0,
   servingPlayer: 0,
   rematchVotes: [false, false],
@@ -55,6 +57,8 @@ const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
   p1Score: 0,
   p2Score: 0,
   bestStreaks: [0, 0] as [number, number],
+  streaks: [0, 0] as [number, number],
+  earnedBests: [0, 0] as [number, number],
   ...over,
 });
 
@@ -167,6 +171,8 @@ describe('startMatch', () => {
       scores: [5, 3],
       streaks: [9, 4],
       bestStreaks: [31, 12],
+      earnedStreaks: [5, 2],
+      earnedBests: [7, 3],
       crossingsThisPoint: 3,
       rematchVotes: [true, true],
       matchOver: true,
@@ -192,6 +198,10 @@ describe('startMatch', () => {
       servingPlayer: 1,
       config: r.config,
       matchSeq: 5,
+      // The runs each seat walks in on. The relay is the only party that knows
+      // both, so it is the one that tells them — including the P2P replica,
+      // which sees no other relay message all match.
+      streaks: [9, 4],
     });
   });
 
@@ -496,5 +506,51 @@ describe('rally streaks', () => {
     countReturn(r, 1);
     countReturn(r, 0);
     expect(r.streaks[0]).toBe(7);
+  });
+});
+
+
+describe('what a match earned, on the relay', () => {
+  it('opens a match having earned nothing, and counts only returns made here', () => {
+    const r = room({ streaks: [10, 4], bestStreaks: [10, 4], servingPlayer: 0 });
+    startMatchStreaks(r, 0);
+    expect(r.earnedStreaks).toEqual([0, 0]);
+    expect(r.earnedBests).toEqual([0, 0]);
+    countReturn(r, 0); // serve
+    countReturn(r, 1);
+    countReturn(r, 0);
+    expect(r.bestStreaks).toEqual([11, 5]);
+    expect(r.earnedBests).toEqual([1, 1]);
+  });
+
+  it('ends a seat’s earned run on its own miss only', () => {
+    const r = room({ servingPlayer: 1 });
+    countReturn(r, 0);
+    countReturn(r, 0);
+    expect(r.earnedStreaks[0]).toBe(2);
+    breakStreakOnPoint(r, 0, 1); // seat 0 SCORED — seat 1 missed
+    expect(r.earnedStreaks[0]).toBe(2);
+    breakStreakOnPoint(r, 1, 0); // seat 1 scored — seat 0 missed
+    expect(r.earnedStreaks[0]).toBe(0);
+    expect(r.earnedBests[0]).toBe(2);
+  });
+
+  it('takes a P2P peer’s CURRENT runs as reported, not as a maximum', () => {
+    // A P2P match sends the relay no crossings and no points, so room.streaks
+    // would otherwise sit at whatever each seat was seeded with — and that is
+    // what gets recorded as the run to carry. A run can legitimately fall to
+    // zero, so a maximum is exactly the wrong operator.
+    const r = room({ streaks: [10, 10], bestStreaks: [10, 10] });
+    applyMatchSync(r, sync({ p1Score: 1, bestStreaks: [14, 12], streaks: [14, 0], earnedBests: [4, 2] }));
+    expect(r.streaks).toEqual([14, 0]);
+    expect(r.bestStreaks).toEqual([14, 12]);
+    expect(r.earnedBests).toEqual([4, 2]);
+  });
+
+  it('refuses a peer’s claim to stand higher than its own peak', () => {
+    const r = room();
+    applyMatchSync(r, sync({ p1Score: 1, bestStreaks: [5, 5], streaks: [900, 900], earnedBests: [900, 900] }));
+    expect(r.streaks).toEqual([5, 5]);
+    expect(r.earnedBests).toEqual([5, 5]);
   });
 });

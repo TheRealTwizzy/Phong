@@ -324,7 +324,7 @@ describe('recording a duel', () => {
       body: JSON.stringify({
         playerScore: 3,
         opponentScore: 2,
-        bestStreak: 14, endStreak: 0,
+        bestStreak: 14, endStreak: 0, earnedStreak: 14,
         mode: 'multiplayer',
         isWinner: true,
         roomId,
@@ -417,7 +417,7 @@ describe('recording a duel', () => {
       body: JSON.stringify({
         playerScore: 3,
         opponentScore: 0,
-        bestStreak: 5, endStreak: 0,
+        bestStreak: 5, endStreak: 0, earnedStreak: 5,
         mode: 'multiplayer',
         isWinner: true,
         roomId,
@@ -452,7 +452,7 @@ describe('recording a duel', () => {
       body: JSON.stringify({
         playerScore: 3,
         opponentScore: 0,
-        bestStreak: 4, endStreak: 0,
+        bestStreak: 4, endStreak: 0, earnedStreak: 4,
         mode: 'multiplayer',
         isWinner: true,
         roomId,
@@ -470,7 +470,7 @@ describe('recording a duel', () => {
     const body = {
       playerScore: 5,
       opponentScore: 2,
-      bestStreak: 7, endStreak: 0,
+      bestStreak: 7, endStreak: 0, earnedStreak: 7,
       mode: 'solo',
       difficulty: 'rookie',
       isWinner: true,

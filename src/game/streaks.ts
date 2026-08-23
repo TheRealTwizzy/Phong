@@ -30,7 +30,8 @@ const bump = (current: number, best: number): [number, number] => {
 /** This player returned the ball. Their streak, and nobody else's. */
 export function ownReturn(s: PlayerStats): PlayerStats {
   const [streak, bestStreak] = bump(s.streak, s.bestStreak);
-  return { ...s, streak, bestStreak };
+  const [earnedStreak, earnedBest] = bump(s.earnedStreak, s.earnedBest);
+  return { ...s, streak, bestStreak, earnedStreak, earnedBest };
 }
 
 /**
@@ -38,7 +39,7 @@ export function ownReturn(s: PlayerStats): PlayerStats {
  * it ends theirs alone, whatever it does to the score.
  */
 export function ownMiss(s: PlayerStats): PlayerStats {
-  return { ...s, streak: 0 };
+  return { ...s, streak: 0, earnedStreak: 0 };
 }
 
 /** The opponent returned the ball. Tracked, and kept apart. */
@@ -65,10 +66,28 @@ export function opponentMiss(s: PlayerStats): PlayerStats {
  */
 export function startMatchStreaks(s: PlayerStats, carried: number): PlayerStats {
   const from = Math.max(0, Math.round(carried) || 0);
-  return { ...s, streak: from, bestStreak: from, oppStreak: 0, oppBestStreak: 0 };
+  return {
+    ...s,
+    streak: from,
+    bestStreak: from,
+    // From zero, always: this is the half that gets paid, and nothing carried
+    // in was earned here.
+    earnedStreak: 0,
+    earnedBest: 0,
+    oppStreak: 0,
+    oppBestStreak: 0,
+  };
 }
 
 /** Wipe both runs outright — for a reset, not for a new match. */
 export function clearStreaks(s: PlayerStats): PlayerStats {
-  return { ...s, streak: 0, bestStreak: 0, oppStreak: 0, oppBestStreak: 0 };
+  return {
+    ...s,
+    streak: 0,
+    bestStreak: 0,
+    earnedStreak: 0,
+    earnedBest: 0,
+    oppStreak: 0,
+    oppBestStreak: 0,
+  };
 }

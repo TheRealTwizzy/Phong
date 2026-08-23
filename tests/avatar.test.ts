@@ -85,7 +85,7 @@ describe('avatar storage', () => {
     // played to appear on one at all.
     db.recordMatch({
       playerId: id, username: 'AvatarKid', playerScore: 5, opponentScore: 2,
-      bestStreak: 6, endStreak: 0, mode: 'multiplayer', isWinner: true,
+      bestStreak: 6, endStreak: 0, earnedStreak: 6, mode: 'multiplayer', isWinner: true,
     } as never);
     const board = db.getLeaderboard('elo', 50);
     const row = board.find((e) => e.id === id)!;

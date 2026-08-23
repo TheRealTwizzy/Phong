@@ -67,7 +67,7 @@ const openLadder = (page) =>
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          playerScore: 5, opponentScore: 1, maxRally: 6,
+          playerScore: 5, opponentScore: 1, bestStreak: 6, earnedStreak: 6,
           mode: 'solo', difficulty, isWinner: true,
         }),
       });
@@ -174,7 +174,7 @@ const custom = await page.evaluate(async () => {
   const res = await fetch('/api/match/record', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      playerScore: 5, opponentScore: 0, maxRally: 12, mode: 'multiplayer', isWinner: true,
+      playerScore: 5, opponentScore: 0, bestStreak: 12, earnedStreak: 12, mode: 'multiplayer', isWinner: true,
       rules: { paddleScale: 1.5 },
     }),
   });
@@ -195,7 +195,7 @@ const beforeTuned = await me(tuner);
 const tuned = await tuner.evaluate(async () => (await fetch('/api/match/record', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    playerScore: 5, opponentScore: 3, maxRally: 14, mode: 'multiplayer', isWinner: true,
+    playerScore: 5, opponentScore: 3, bestStreak: 14, earnedStreak: 14, mode: 'multiplayer', isWinner: true,
     rules: { paddleScale: 1.15, ballScale: 0.85, ballSpeedMax: 1.2, servePowerMax: 1.15 },
   }),
 })).json());
@@ -212,31 +212,50 @@ await openLadder(loser);
 const before = (await me(loser)).xp;
 const loss = await loser.evaluate(async () => (await fetch('/api/match/record', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ playerScore: 0, opponentScore: 5, maxRally: 2, mode: 'solo', difficulty: 'pro', isWinner: false }),
+  body: JSON.stringify({ playerScore: 0, opponentScore: 5, bestStreak: 2, earnedStreak: 2, mode: 'solo', difficulty: 'pro', isWinner: false }),
 })).json());
 if (!(loss.earnedXp >= 45)) fail(`a loss paid only ${loss.earnedXp} XP`);
 if ((await me(loser)).xp <= before) fail('a loss did not move XP');
 ok(`a 0-5 loss to Pro still pays ${loss.earnedXp} XP`);
 
 // ---- 4. Practice Wall banks XP, capped, and records no match -------------
-const driller = await newPlayer('Drill');
-const p1 = await driller.evaluate(async () => (await fetch('/api/practice/record', {
+//
+// A session reports three numbers: the run's PEAK (carried run included), how
+// much of it was EARNED here, and where the run stands. Only the earned figure
+// is paid — a rally streak carries between sessions, and the wall is entered
+// and left at will, so paying on the peak let a player carry a run in, open
+// the wall, leave without touching the ball, and collect for it again.
+const drill = (page, body) => page.evaluate(async (b) => (await fetch('/api/practice/record', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ bestStreak: 40 }),
-})).json());
+  body: JSON.stringify(b),
+})).json(), body);
+
+const driller = await newPlayer('Drill');
+const p1 = await drill(driller, { bestStreak: 40, earnedStreak: 40, endStreak: 40 });
 if (!(p1.earnedXp > 0)) fail('practice paid nothing for a 40 streak');
 let total = p1.earnedXp;
 for (let i = 0; i < 30; i++) {
-  const r = await driller.evaluate(async () => (await fetch('/api/practice/record', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bestStreak: 400 }),
-  })).json());
-  total += r.earnedXp;
+  total += (await drill(driller, { bestStreak: 400, earnedStreak: 400, endStreak: 400 })).earnedXp;
 }
 const drillProfile = await me(driller);
 if (drillProfile.matchesPlayed !== 0) fail('practice recorded a match');
 if (total > 300) fail(`practice paid ${total} XP, past the daily cap`);
 ok(`practice banked ${total} XP across 31 sessions (capped), recorded 0 matches`);
+
+// The farm, closed: a session that returned nothing pays nothing, however long
+// the run it walked in with.
+const farmer = await newPlayer('Farm');
+const farmed = await drill(farmer, { bestStreak: 400, earnedStreak: 0, endStreak: 400 });
+if (farmed.earnedXp !== 0) {
+  fail(`a session that returned nothing still paid ${farmed.earnedXp} XP for a carried run`);
+}
+const farmProfile = await me(farmer);
+if (farmProfile.xp !== 0) fail(`the carried run paid ${farmProfile.xp} XP anyway`);
+// And leaving is not missing: the run is still going.
+if (farmProfile.modeStats?.practice?.currentStreak !== 400) {
+  fail(`leaving the wall ended the run (${JSON.stringify(farmProfile.modeStats?.practice)})`);
+}
+ok('a session that returned nothing pays nothing, and the run carries on');
 
 // ---- 5. The serve prompt now offers aiming ------------------------------
 await page.click('#menu-rules-toggle');

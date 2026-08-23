@@ -27,7 +27,7 @@ const win = (playerId: string): MatchEndPayload => ({
   username: 'Mover',
   playerScore: 5,
   opponentScore: 2,
-  bestStreak: 6, endStreak: 0,
+  bestStreak: 6, endStreak: 0, earnedStreak: 6,
   mode: 'multiplayer',
   isWinner: true,
 });
@@ -162,7 +162,7 @@ describe('sign-in codes and the browsers an account belongs to', () => {
     // what makes the no-duplicate-rows assertion below mean something.
     db.recordMatch({
       playerId: source, username: 'Keeper', playerScore: 5, opponentScore: 1,
-      bestStreak: 4, endStreak: 0, mode: 'multiplayer', isWinner: true,
+      bestStreak: 4, endStreak: 0, earnedStreak: 4, mode: 'multiplayer', isWinner: true,
     } as never);
     const claimed = db.signInWithCode(code, device);
     expect(claimed!.username).toBe('Keeper');
@@ -220,7 +220,7 @@ describe('a rotated signing secret retires every device cookie', () => {
         username: 'Ghost',
         playerScore: 5,
         opponentScore: 1,
-        bestStreak: 8, endStreak: 0,
+        bestStreak: 8, endStreak: 0, earnedStreak: 8,
         mode: 'solo',
         difficulty: 'pro',
         isWinner: true,

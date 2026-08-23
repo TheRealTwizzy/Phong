@@ -40,7 +40,7 @@ const match = (playerId: string, overrides: Partial<MatchEndPayload> = {}): Matc
   username: 'Tester',
   playerScore: 5,
   opponentScore: 2,
-  bestStreak: 9, endStreak: 0,
+  bestStreak: 9, endStreak: 0, earnedStreak: 9,
   mode: 'solo',
   difficulty: 'pro',
   isWinner: true,
@@ -111,7 +111,7 @@ describe('server-owned mission state', () => {
     const forType = (type: string) => MISSION_POOL.find((m) => m.type === type)!;
     const soloWin = {
       playerId: 'x', username: 'x', playerScore: 4, opponentScore: 1,
-      bestStreak: 6, endStreak: 0, mode: 'solo' as const, difficulty: 'pro' as const, isWinner: true, aces: 2,
+      bestStreak: 6, endStreak: 0, earnedStreak: 6, mode: 'solo' as const, difficulty: 'pro' as const, isWinner: true, aces: 2,
     };
     expect(applyMatchToProgress(forType('games_played'), 0, soloWin)).toBe(1);
     expect(applyMatchToProgress(forType('matches_won'), 0, soloWin)).toBe(1);
@@ -130,7 +130,7 @@ describe('server-owned mission state', () => {
     const cyberOnly = ELITE_POOL.find((m) => m.difficulty === 'cyber')!;
     const base = {
       playerId: 'x', username: 'x', playerScore: 5, opponentScore: 1,
-      bestStreak: 6, endStreak: 0, mode: 'solo' as const, isWinner: true,
+      bestStreak: 6, endStreak: 0, earnedStreak: 6, mode: 'solo' as const, isWinner: true,
     };
     expect(applyMatchToProgress(cyberOnly, 0, { ...base, difficulty: 'rookie' })).toBe(0);
     expect(applyMatchToProgress(cyberOnly, 0, { ...base, difficulty: 'cyber' })).toBe(1);
@@ -152,7 +152,7 @@ describe('server-owned mission state', () => {
     init('m_once', 'MissionOnce');
     // Drive every held mission to completion, then pick one of them.
     for (let i = 0; i < 20; i++) {
-      db.recordMatch(match('m_once', { mode: 'multiplayer', playerScore: 5, bestStreak: 45, endStreak: 0, aces: 9 }));
+      db.recordMatch(match('m_once', { mode: 'multiplayer', playerScore: 5, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9 }));
     }
     const done = db.getMissions('m_once').find((m) => m.current >= m.target && !m.claimed)!;
     expect(done).toBeTruthy();
@@ -179,7 +179,7 @@ describe('server-owned mission state', () => {
   it("bounds a day's mission XP by the hand actually dealt", () => {
     init('m_cap', 'MissionCap');
     for (let i = 0; i < 25; i++) {
-      db.recordMatch(match('m_cap', { mode: 'multiplayer', playerScore: 5, bestStreak: 45, endStreak: 0, aces: 9 }));
+      db.recordMatch(match('m_cap', { mode: 'multiplayer', playerScore: 5, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9 }));
     }
     const held = db.getMissions('m_cap');
     const maxPayout = held.reduce((sum, m) => sum + m.xpReward, 0);
@@ -239,16 +239,16 @@ describe('Practice Wall XP', () => {
     init('p_drill', 'Driller');
     let total = 0;
     for (let i = 0; i < 40; i++) {
-      total += db.recordPractice('p_drill', 500).earnedXp;
+      total += db.recordPractice('p_drill', { bestStreak: 500, earnedStreak: 500 }).earnedXp;
     }
     expect(total).toBe(PRACTICE_XP_DAILY_CAP);
-    expect(db.recordPractice('p_drill', 500).earnedXp).toBe(0);
+    expect(db.recordPractice('p_drill', { bestStreak: 500, earnedStreak: 500 }).earnedXp).toBe(0);
   });
 
   it('records no match, moves no rating, and feeds no missions', () => {
     init('p_drill2', 'Driller2');
     const before = db.getProfile('p_drill2');
-    db.recordPractice('p_drill2', 30);
+    db.recordPractice('p_drill2', { bestStreak: 30, earnedStreak: 30 });
     const after = db.getProfile('p_drill2');
     expect(after.xp).toBeGreaterThan(before.xp);
     expect(after.matchesPlayed).toBe(before.matchesPlayed);
@@ -262,9 +262,9 @@ describe('Practice Wall XP', () => {
     init('p_drill3', 'Driller3');
     const today = new Date('2026-08-21T12:00:00Z');
     const tomorrow = new Date('2026-08-22T12:00:00Z');
-    for (let i = 0; i < 40; i++) db.recordPractice('p_drill3', 500, 0, today);
-    expect(db.recordPractice('p_drill3', 500, 0, today).earnedXp).toBe(0);
-    expect(db.recordPractice('p_drill3', 500, 0, tomorrow).earnedXp).toBeGreaterThan(0);
+    for (let i = 0; i < 40; i++) db.recordPractice('p_drill3', { bestStreak: 500, earnedStreak: 500, endStreak: 0 }, today);
+    expect(db.recordPractice('p_drill3', { bestStreak: 500, earnedStreak: 500, endStreak: 0 }, today).earnedXp).toBe(0);
+    expect(db.recordPractice('p_drill3', { bestStreak: 500, earnedStreak: 500, endStreak: 0 }, tomorrow).earnedXp).toBeGreaterThan(0);
   });
 });
 
@@ -333,7 +333,7 @@ describe('rerolls', () => {
   it('refuses to reroll a mission that is already complete', () => {
     init('r_done', 'RerollDone');
     for (let i = 0; i < 20; i++) {
-      db.recordMatch(match('r_done', { mode: 'multiplayer', playerScore: 5, bestStreak: 45, endStreak: 0, aces: 9 }));
+      db.recordMatch(match('r_done', { mode: 'multiplayer', playerScore: 5, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9 }));
     }
     const done = db.getMissions('r_done').find((m) => m.current >= m.target);
     if (done) {
@@ -654,7 +654,7 @@ describe('elite missions are permanent unlocks', () => {
     for (let i = 0; i < 40; i++) {
       db.recordMatch(
         match(id, {
-          mode: 'multiplayer', playerScore: 5, opponentScore: 0, bestStreak: 45, endStreak: 0, aces: 9,
+          mode: 'multiplayer', playerScore: 5, opponentScore: 0, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
         }),
         {},
         now
@@ -662,7 +662,7 @@ describe('elite missions are permanent unlocks', () => {
       db.recordMatch(
         match(id, {
           mode: 'solo', difficulty: 'cyber', playerScore: 5, opponentScore: 0,
-          bestStreak: 45, endStreak: 0, aces: 9,
+          bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
         }),
         {},
         now
@@ -777,7 +777,7 @@ describe('permanent unlocks reach the themes', () => {
     for (let i = 0; i < 40; i++) {
       db.recordMatch(
         match('t_profile', {
-          mode: 'multiplayer', playerScore: 5, opponentScore: 0, bestStreak: 45, endStreak: 0, aces: 9,
+          mode: 'multiplayer', playerScore: 5, opponentScore: 0, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
         }),
         {},
         new Date('2026-08-21T12:00:00Z')
@@ -785,7 +785,7 @@ describe('permanent unlocks reach the themes', () => {
       db.recordMatch(
         match('t_profile', {
           mode: 'solo', difficulty: 'cyber', playerScore: 5, opponentScore: 0,
-          bestStreak: 45, endStreak: 0, aces: 9,
+          bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
         }),
         {},
         new Date('2026-08-21T12:00:00Z')
@@ -812,7 +812,7 @@ describe('a claimed task never lingers in the list', () => {
     username: 'Heavy',
     playerScore: 5,
     opponentScore: 0,
-    bestStreak: 20, endStreak: 0,
+    bestStreak: 20, endStreak: 0, earnedStreak: 20,
     aces: 4,
     mode: 'multiplayer',
     isWinner: true,

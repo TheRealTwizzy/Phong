@@ -27,7 +27,7 @@ const match = (playerId: string, overrides: Partial<MatchEndPayload> = {}): Matc
   username: `Tester-${playerId}`,
   playerScore: 7,
   opponentScore: 3,
-  bestStreak: 8, endStreak: 0,
+  bestStreak: 8, endStreak: 0, earnedStreak: 8,
   mode: 'multiplayer',
   isWinner: true,
   ...overrides,
@@ -626,7 +626,7 @@ describe('per-mode stats', () => {
   it('keeps a mode’s numbers to that mode', () => {
     const id = 'dev_modestats00000001';
     init(id, 'ModeStats');
-    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, opponentScore: 1, bestStreak: 6, endStreak: 0, aces: 2 }));
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, opponentScore: 1, bestStreak: 6, endStreak: 0, earnedStreak: 6, aces: 2 }));
     db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: false, playerScore: 2, opponentScore: 5, bestStreak: 9 }));
     db.recordMatch(match(id, { mode: 'multiplayer', isWinner: true, playerScore: 5, opponentScore: 0, bestStreak: 4 }));
 
@@ -671,7 +671,7 @@ describe('per-mode stats', () => {
   it('gives a practice session a row of its own, with no wins in it', () => {
     const id = 'dev_modepractice0001';
     init(id, 'ModePractice');
-    db.recordPractice(id, 22);
+    db.recordPractice(id, { bestStreak: 22, earnedStreak: 22 });
     const stats = db.getModeStats(id);
     expect(stats.practice).toMatchObject({
       matchesPlayed: 1,
@@ -705,7 +705,7 @@ describe('a streak carries between matches', () => {
     db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 9, endStreak: 9, matchKey: 'cm:1' }));
     expect(db.getModeStats(id).solo.currentStreak).toBe(9);
     // A duel is a different run and does not disturb it.
-    db.recordMatch(match(id, { mode: 'multiplayer', bestStreak: 3, endStreak: 0, matchKey: 'cm:2' }));
+    db.recordMatch(match(id, { mode: 'multiplayer', bestStreak: 3, endStreak: 0, earnedStreak: 3, matchKey: 'cm:2' }));
     expect(db.getModeStats(id).solo.currentStreak).toBe(9);
     expect(db.getModeStats(id).multiplayer.currentStreak).toBe(0);
   });
@@ -715,7 +715,7 @@ describe('a streak carries between matches', () => {
     init(id, 'CarryEnd');
     db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 12, endStreak: 12, matchKey: 'ce:1' }));
     expect(db.getModeStats(id).solo.currentStreak).toBe(12);
-    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 14, endStreak: 0, matchKey: 'ce:2' }));
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 14, endStreak: 0, earnedStreak: 14, matchKey: 'ce:2' }));
     // Assigned, not maxed: a run that ended is over, however high it got.
     expect(db.getModeStats(id).solo.currentStreak).toBe(0);
     expect(db.getModeStats(id).solo.bestStreak).toBe(14);
@@ -731,9 +731,9 @@ describe('a streak carries between matches', () => {
   it('carries a practice run out of the session it was built in', () => {
     const id = 'dev_carrywall0000001';
     init(id, 'CarryWall');
-    db.recordPractice(id, 31, 31);
+    db.recordPractice(id, { bestStreak: 31, earnedStreak: 31, endStreak: 31 });
     expect(db.getModeStats(id).practice.currentStreak).toBe(31);
-    db.recordPractice(id, 5, 0);
+    db.recordPractice(id, { bestStreak: 5, earnedStreak: 5, endStreak: 0 });
     expect(db.getModeStats(id).practice.currentStreak).toBe(0);
     expect(db.getModeStats(id).practice.bestStreak).toBe(31);
   });
@@ -750,5 +750,79 @@ describe('a streak carries between matches', () => {
       mode: 'solo', difficulty: 'rookie', bestStreak: 4000, endStreak: 4000, matchKey: 'cx:2',
     }));
     expect(huge.earnedXp).toBe(big.earnedXp);
+  });
+});
+
+
+describe('a carried run is not paid for twice', () => {
+  // The exploit this closes: a run carries between sessions, and the Practice
+  // Wall is entered and left at will. Paying on the run's PEAK meant a player
+  // could carry a streak in, open the wall, leave without touching the ball,
+  // and collect for it again — every day, up to the daily cap.
+
+  it('pays a practice session nothing when nothing was returned in it', () => {
+    const id = 'dev_wallfarm00000001';
+    init(id, 'WallFarm');
+    // A real session, which pays.
+    const real = db.recordPractice(id, { bestStreak: 40, earnedStreak: 40, endStreak: 40 });
+    expect(real.earnedXp).toBeGreaterThan(0);
+    expect(db.getModeStats(id).practice.currentStreak).toBe(40);
+
+    // Now open the wall and leave, carrying the same run. The peak is real and
+    // still 40; nothing was earned, so nothing is paid.
+    const farmed = db.recordPractice(id, { bestStreak: 40, earnedStreak: 0, endStreak: 40 });
+    expect(farmed.earnedXp).toBe(0);
+    // And the run is still going, because leaving is not missing.
+    expect(db.getModeStats(id).practice.currentStreak).toBe(40);
+  });
+
+  it('still banks the run’s true peak, and the rungs that go with it', () => {
+    const id = 'dev_wallpeak00000001';
+    init(id, 'WallPeak');
+    // The wall rungs hang off rally_10, so a match has to open them first.
+    db.recordMatch(match(id, {
+      mode: 'solo', difficulty: 'rookie', bestStreak: 12, earnedStreak: 12, endStreak: 0, matchKey: 'wp:1',
+    }));
+    expect(db.getProfile(id).achievements).toContain('rally_10');
+
+    // A session that earned almost nothing, on a run carried in.
+    db.recordPractice(id, { bestStreak: 95, earnedStreak: 2, endStreak: 95 });
+    // The peak is what the wall rungs and the mode's best are about — a
+    // carried run is a real run of returns, however many sessions it took.
+    expect(db.getModeStats(id).practice.bestStreak).toBe(95);
+    const earned = db.getProfile(id).achievements;
+    expect(earned).toContain('wall_30');
+    expect(earned).toContain('wall_90');
+  });
+
+  it('pays a match on what it earned, not on the run it started with', () => {
+    init('dev_carrypay00000001', 'CarryPayA');
+    init('dev_carrypay00000002', 'CarryPayB');
+    // Same match, same peak. One player built all of it here; the other walked
+    // in on it and returned one ball.
+    const built = db.recordMatch(match('dev_carrypay00000001', {
+      mode: 'solo', difficulty: 'rookie', bestStreak: 14, earnedStreak: 14, endStreak: 14, matchKey: 'cp:1',
+    }));
+    const carried = db.recordMatch(match('dev_carrypay00000002', {
+      mode: 'solo', difficulty: 'rookie', bestStreak: 14, earnedStreak: 1, endStreak: 14, matchKey: 'cp:2',
+    }));
+    expect(built.earnedXp).toBeGreaterThan(carried.earnedXp);
+    // But the career best is the run, for both of them.
+    expect(db.getProfile('dev_carrypay00000001').highestRally).toBe(14);
+    expect(db.getProfile('dev_carrypay00000002').highestRally).toBe(14);
+  });
+
+  it('refuses a claim to have earned more than the run ever reached', () => {
+    // Two players rather than two matches: a second match on one profile has
+    // moved its own rating, so the XP is no longer comparable.
+    init('dev_carrylie00000001', 'CarryLieA');
+    init('dev_carrylie00000002', 'CarryLieB');
+    const honest = db.recordMatch(match('dev_carrylie00000001', {
+      mode: 'solo', difficulty: 'rookie', bestStreak: 3, earnedStreak: 3, endStreak: 3, matchKey: 'cl:a',
+    }));
+    const liar = db.recordMatch(match('dev_carrylie00000002', {
+      mode: 'solo', difficulty: 'rookie', bestStreak: 3, earnedStreak: 9999, endStreak: 3, matchKey: 'cl:b',
+    }));
+    expect(liar.earnedXp).toBe(honest.earnedXp);
   });
 });

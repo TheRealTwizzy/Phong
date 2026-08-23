@@ -1120,10 +1120,20 @@ class GameDatabase {
     return this.getProfile(playerId);
   }
 
+  /**
+   * A Practice Wall session.
+   *
+   * Three numbers, because they answer three different questions. `bestStreak`
+   * is the run's peak, carried run included — that is a real run and it is what
+   * the wall achievements and the mode's best are about. `earnedStreak` is how
+   * much of it was built HERE, and it is the only one XP is paid on: paying on
+   * the peak let a player carry a run in, open the wall, leave without touching
+   * the ball, and collect for it again, up to the daily cap, every day.
+   * `endStreak` is where the run stands, so the next session continues it.
+   */
   public recordPractice(
     playerId: string,
-    bestStreak: number,
-    endStreak: number = 0,
+    session: { bestStreak: number; earnedStreak?: number; endStreak?: number },
     now: Date = new Date()
   ): {
     earnedXp: number;
@@ -1134,15 +1144,22 @@ class GameDatabase {
     const profile = this.getProfile(playerId);
     if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
 
+    const whole = (v: unknown): number => {
+      const n = Math.floor(Number(v));
+      return Number.isFinite(n) ? Math.max(0, n) : 0;
+    };
+    const peak = whole(session.bestStreak);
+    // Neither of these can stand higher than the run ever reached.
+    const earned = Math.min(peak, whole(session.earnedStreak));
+    const ended = Math.min(peak, whole(session.endStreak));
+
     // Practice has no opponent, so it has no wins, losses or aces — a session
     // and a streak are all there is to keep. Banked whatever the daily XP cap
     // says, because the cap is about XP, not about what happened.
-    const peak = Math.max(0, Math.floor(bestStreak || 0));
     this.bumpModeStats(playerId, 'practice', {
       played: 1,
       bestStreak: peak,
-      // A run cannot end higher than it ever reached.
-      endStreak: Math.min(peak, Math.max(0, Math.floor(endStreak || 0))),
+      endStreak: ended,
     });
 
     const dayKey = missionDayKey(now);
@@ -1152,12 +1169,14 @@ class GameDatabase {
 
     const earnedXp = Math.max(
       0,
-      Math.min(practiceXp(bestStreak), PRACTICE_XP_DAILY_CAP - alreadyPaid)
+      Math.min(practiceXp(earned), PRACTICE_XP_DAILY_CAP - alreadyPaid)
     );
 
     // The rally branch's wall rungs are the only achievements a player who
     // never records a match can reach, so they are checked here as well.
-    const streak = Math.max(0, Math.floor(bestStreak || 0));
+    // The rungs are about the run, so they read the peak — a carried run is a
+    // real run of returns, however many sessions it took.
+    const streak = peak;
     const newAchievements: Achievement[] = [];
     let budget = achievementXpCap(profile.level);
     const wallProgress = { level: profile.level, tier: profile.tier };
@@ -1815,10 +1834,15 @@ class GameDatabase {
     // The run cannot end higher than it ever reached.
     const endStreak = Math.min(bound(payload.endStreak), bestStreak);
     payload.endStreak = endStreak;
+    // Nor can a match have EARNED more than it reached. This is the number XP
+    // is paid on: bestStreak opens on whatever was carried in, so paying on
+    // that would pay for the same run again in every match it spans.
+    const earnedStreak = Math.min(bound(payload.earnedStreak), bestStreak);
+    payload.earnedStreak = earnedStreak;
 
     const earnedXp = matchXp({
       playerScore: payload.playerScore,
-      bestStreak,
+      bestStreak: earnedStreak,
       won: isWin,
       winProb,
       mode: payload.mode,

@@ -48,6 +48,14 @@ export interface Room {
   streaks: [number, number];
   bestStreaks: [number, number];
   /**
+   * The same runs counted from ZERO at the start of this match — the work
+   * actually done here. bestStreaks opens on what each seat carried in, which
+   * is right for a career best and wrong for a reward: XP is paid per rally,
+   * so a carried run would be paid for again in every match it spans.
+   */
+  earnedStreaks: [number, number];
+  earnedBests: [number, number];
+  /**
    * Balls over the net since the last point. Only ever consulted to answer
    * "was that the serve?", which is a question about the first crossing of a
    * point by whoever is serving.
@@ -109,6 +117,14 @@ export interface GameStartPayload {
   servingPlayer: 0 | 1;
   config: RoomMatchConfig;
   matchSeq: number;
+  /**
+   * The run each seat walks in on, [p1, p2]. A streak carries between matches
+   * and between rooms, and the relay is the one that knows both — it seeds a
+   * seat from the store when it is taken. Sent so a phone starts its match on
+   * the same numbers the relay will record it on, and so the P2P replica,
+   * which never sees another relay message all match, starts there too.
+   */
+  streaks: [number, number];
 }
 
 /**
@@ -136,6 +152,7 @@ export function startMatch(room: Room, servingPlayer: 0 | 1): GameStartPayload {
     servingPlayer,
     config: room.config,
     matchSeq: room.matchSeq,
+    streaks: [room.streaks[0], room.streaks[1]],
   };
 }
 
@@ -169,7 +186,14 @@ export function clampInt(value: unknown, lo: number, hi: number): number {
  */
 export function applyMatchSync(
   room: Room,
-  sync: { matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number] }
+  sync: {
+    matchSeq: number;
+    p1Score: number;
+    p2Score: number;
+    bestStreaks: [number, number];
+    streaks: [number, number];
+    earnedBests: [number, number];
+  }
 ): { decided: boolean } {
   // Nothing to sync before the host has started a match: the replica only
   // reports from game_start onward, so a sync arriving in a lobby is noise.
@@ -202,6 +226,24 @@ export function applyMatchSync(
   room.bestStreaks = [
     Math.max(room.bestStreaks[0], clampInt(sync.bestStreaks?.[0], 0, 100000)),
     Math.max(room.bestStreaks[1], clampInt(sync.bestStreaks?.[1], 0, 100000)),
+  ];
+  // ASSIGNED, not maxed. A P2P match sends the relay no crossings and no
+  // points, so room.streaks would otherwise sit at whatever each seat was
+  // seeded with — and that is what gets recorded as the run to carry into the
+  // next match: a live run saved as the value it started on, and a run that
+  // has since been broken by a miss surviving anyway. A run can legitimately
+  // go DOWN to zero, so a maximum is exactly the wrong operator here. Still
+  // bounded by the peak: a run cannot stand higher than it ever reached.
+  room.streaks = [
+    Math.min(clampInt(sync.streaks?.[0], 0, 100000), room.bestStreaks[0]),
+    Math.min(clampInt(sync.streaks?.[1], 0, 100000), room.bestStreaks[1]),
+  ];
+  // What was actually built in this match, which is what it is paid on.
+  // Bounded by the peak for the same reason as everything else here: a client
+  // reports these, and a match cannot have earned more than it reached.
+  room.earnedBests = [
+    Math.max(room.earnedBests[0], Math.min(clampInt(sync.earnedBests?.[0], 0, 100000), room.bestStreaks[0])),
+    Math.max(room.earnedBests[1], Math.min(clampInt(sync.earnedBests?.[1], 0, 100000), room.bestStreaks[1])),
   ];
   room.inPlay = true;
 
@@ -323,6 +365,8 @@ export function reapRooms(
 export interface StreakState {
   streaks: [number, number];
   bestStreaks: [number, number];
+  earnedStreaks: [number, number];
+  earnedBests: [number, number];
   crossingsThisPoint: number;
   servingPlayer: 0 | 1;
 }
@@ -337,6 +381,9 @@ export interface StreakState {
  */
 export function startMatchStreaks(state: StreakState, servingPlayer: 0 | 1): void {
   state.bestStreaks = [state.streaks[0], state.streaks[1]];
+  // From zero, always: nothing carried in was earned here.
+  state.earnedStreaks = [0, 0];
+  state.earnedBests = [0, 0];
   state.crossingsThisPoint = 0;
   state.servingPlayer = servingPlayer;
 }
@@ -345,6 +392,8 @@ export function startMatchStreaks(state: StreakState, servingPlayer: 0 | 1): voi
 export function resetStreaks(state: StreakState, servingPlayer: 0 | 1): void {
   state.streaks = [0, 0];
   state.bestStreaks = [0, 0];
+  state.earnedStreaks = [0, 0];
+  state.earnedBests = [0, 0];
   state.crossingsThisPoint = 0;
   state.servingPlayer = servingPlayer;
 }
@@ -361,6 +410,10 @@ export function countReturn(state: StreakState, seat: 0 | 1): boolean {
   if (state.streaks[seat] > state.bestStreaks[seat]) {
     state.bestStreaks[seat] = state.streaks[seat];
   }
+  state.earnedStreaks[seat] += 1;
+  if (state.earnedStreaks[seat] > state.earnedBests[seat]) {
+    state.earnedBests[seat] = state.earnedStreaks[seat];
+  }
   return true;
 }
 
@@ -369,7 +422,9 @@ export function countReturn(state: StreakState, seat: 0 | 1): boolean {
  * the only one whose streak ends. `nextServer` is who serves the next point.
  */
 export function breakStreakOnPoint(state: StreakState, scorer: 0 | 1, nextServer: 0 | 1): void {
-  state.streaks[scorer === 0 ? 1 : 0] = 0;
+  const missed = scorer === 0 ? 1 : 0;
+  state.streaks[missed] = 0;
+  state.earnedStreaks[missed] = 0;
   state.crossingsThisPoint = 0;
   state.servingPlayer = nextServer;
 }

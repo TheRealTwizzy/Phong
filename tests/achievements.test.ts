@@ -120,7 +120,7 @@ describe('level jumps', () => {
         // own consecutive returns measures about 0.72x that, and simulating
         // on the old spread against the new XP_PER_RALLY would model matches
         // nobody can actually play.
-        bestStreak: 3 + Math.floor(rnd() * 16), endStreak: 0,
+        bestStreak: 3 + Math.floor(rnd() * 16), endStreak: 0, earnedStreak: 3 + Math.floor(rnd() * 16),
         mode: 'solo',
         difficulty,
         isWinner: won,
@@ -176,7 +176,7 @@ describe('the band cap in practice', () => {
     init('p_early_rally', 'EarlyRally');
     const early = db.recordMatch({
       playerId: 'p_early_rally', username: 'EarlyRally',
-      playerScore: 5, opponentScore: 0, bestStreak: 50, endStreak: 0,
+      playerScore: 5, opponentScore: 0, bestStreak: 50, endStreak: 0, earnedStreak: 50,
       mode: 'solo', difficulty: 'cyber', isWinner: true,
     });
     const rally50 = early.newAchievements.find((a) => a.id === 'rally_50')!;
@@ -193,7 +193,7 @@ describe('the band cap in practice', () => {
     // A match that trips several achievements at once.
     const res = db.recordMatch({
       playerId: id, username: 'BatchCase',
-      playerScore: 5, opponentScore: 0, bestStreak: 30, endStreak: 0,
+      playerScore: 5, opponentScore: 0, bestStreak: 30, endStreak: 0, earnedStreak: 30,
       mode: 'solo', difficulty: 'cyber', isWinner: true,
     });
     expect(res.newAchievements.length).toBeGreaterThan(2);
@@ -341,7 +341,7 @@ describe('level and rank gates', () => {
     const play = (over: Record<string, unknown> = {}) =>
       db.recordMatch({
         playerId: 'g_bank', username: 'GateBank', playerScore: 5, opponentScore: 1,
-        bestStreak: 5, endStreak: 0, mode: 'solo', difficulty: 'rookie', isWinner: true, ...over,
+        bestStreak: 5, endStreak: 0, earnedStreak: 5, mode: 'solo', difficulty: 'rookie', isWinner: true, ...over,
       } as never);
     play({ bestStreak: 150 });
     const early = db.getProfile('g_bank');
@@ -372,7 +372,7 @@ describe('parent gating in play', () => {
   const solo = (id: string, over: Record<string, unknown> = {}) =>
     db.recordMatch({
       playerId: id, username: 'Gate', playerScore: 5, opponentScore: 1,
-      bestStreak: 5, endStreak: 0, mode: 'solo', difficulty: 'pro', isWinner: true, ...over,
+      bestStreak: 5, endStreak: 0, earnedStreak: 5, mode: 'solo', difficulty: 'pro', isWinner: true, ...over,
     } as never);
 
   it('refuses a deep rung to a player who skipped the path', () => {

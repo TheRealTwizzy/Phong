@@ -157,6 +157,17 @@ export interface PlayerStats {
    */
   streak: number;
   bestStreak: number;
+  /**
+   * The same run, counted from ZERO at the start of this match.
+   *
+   * `bestStreak` opens on whatever was carried in, which is the right number
+   * for a career best and the wrong one for a reward: XP is paid per rally, so
+   * a carried run would be paid for again in every match it spans, and a
+   * player could open Practice and leave without touching the ball to collect
+   * it. This is the work actually done here, and it is what gets paid.
+   */
+  earnedStreak: number;
+  earnedBest: number;
   /** The same two, for the opponent. Tracked separately, never mixed in. */
   oppStreak: number;
   oppBestStreak: number;
@@ -422,6 +433,12 @@ export interface MatchEndPayload {
   /** THIS player's longest rally streak in this match — see PlayerStats. */
   bestStreak: number;
   /**
+   * How much of that was built HERE, counted from zero. A carried run is real
+   * and belongs in the career best; it is not work done in this match, and
+   * paying for it again every match it spans is a farm.
+   */
+  earnedStreak: number;
+  /**
    * The streak this player finished the match ON. Zero if the last thing they
    * did was miss. A streak carries into the next match, so this is what the
    * next one starts from — and it is a different number from the peak above,
@@ -523,7 +540,7 @@ export type WSClientMessage =
   // rating it on the wrong thing. NOTE this member stays on ONE line —
   // tests/protocolParity.test.ts reads this union to the first line-ending
   // semicolon, and a multi-line member truncates the whole parse.
-  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number] }
+  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number]; streaks: [number, number]; earnedBests: [number, number] }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
   | { type: 'rtc_signal'; payload: RTCSignalPayload }
@@ -540,7 +557,7 @@ export type WSServerMessage =
   | { type: 'quick_chat'; text: string; senderName: string; senderIdx: number }
   | { type: 'room_config'; config: RoomMatchConfig }
   | { type: 'ready_state'; ready: [boolean, boolean] }
-  | { type: 'game_start'; servingPlayer: 0 | 1; config: RoomMatchConfig; matchSeq: number }
+  | { type: 'game_start'; servingPlayer: 0 | 1; config: RoomMatchConfig; matchSeq: number; streaks: [number, number] }
   | { type: 'match_prediction'; winProbability: number }
   | { type: 'score_update'; p1Score: number; p2Score: number; reason: string; nextServer: 0 | 1 }
   | { type: 'rematch_state'; votes: [boolean, boolean] }

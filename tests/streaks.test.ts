@@ -32,6 +32,8 @@ const base = (over: Partial<PlayerStats> = {}): PlayerStats => ({
   opponentScore: 0,
   streak: 0,
   bestStreak: 0,
+  earnedStreak: 0,
+  earnedBest: 0,
   oppStreak: 0,
   oppBestStreak: 0,
   aces: 0,
@@ -168,5 +170,50 @@ describe('a streak carries between matches', () => {
       expect(startMatchStreaks(base(), junk).streak).toBe(0);
     }
     expect(startMatchStreaks(base(), 7.6).streak).toBe(8);
+  });
+});
+
+
+describe('what a match EARNED is not what its run reached', () => {
+  // XP is paid per rally. bestStreak opens on whatever was carried in, so
+  // paying on it pays for the same run again in every match it spans — and on
+  // the Practice Wall, where a session is entered and left at will, that was a
+  // farm: carry a run in, open the wall, leave without touching the ball, and
+  // collect for it again, up to the daily cap, every day.
+
+  it('starts a match having earned nothing, however long the run walked in', () => {
+    const s = startMatchStreaks(base(), 40);
+    expect(s.streak).toBe(40);
+    expect(s.bestStreak).toBe(40);
+    expect(s.earnedStreak).toBe(0);
+    expect(s.earnedBest).toBe(0);
+  });
+
+  it('counts only the returns made here', () => {
+    let s = startMatchStreaks(base(), 10);
+    s = ownReturn(ownReturn(s));
+    // The run really is 12 — that is what a career best is about.
+    expect(s.bestStreak).toBe(12);
+    // Two of them were made here, and that is what gets paid.
+    expect(s.earnedBest).toBe(2);
+  });
+
+  it('ends the earned run on a miss, like the run itself', () => {
+    let s = startMatchStreaks(base(), 10);
+    s = ownReturn(ownReturn(ownReturn(s)));
+    s = ownMiss(s);
+    expect(s.streak).toBe(0);
+    expect(s.earnedStreak).toBe(0);
+    // Both peaks stand.
+    expect(s.bestStreak).toBe(13);
+    expect(s.earnedBest).toBe(3);
+  });
+
+  it('leaves the earned run alone when the OPPONENT misses', () => {
+    let s = startMatchStreaks(base(), 6);
+    s = ownReturn(s);
+    s = opponentMiss(s);
+    expect(s.earnedStreak).toBe(1);
+    expect(s.streak).toBe(7);
   });
 });

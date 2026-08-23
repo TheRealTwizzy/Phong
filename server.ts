@@ -194,6 +194,7 @@ function recordRoomMatch(room: Room): void {
       opponentScore: theirs,
       bestStreak: room.bestStreaks[seat],
       endStreak: room.streaks[seat],
+      earnedStreak: room.earnedBests[seat],
       mode: 'multiplayer',
       isWinner: mine > theirs,
       rules,
@@ -203,7 +204,7 @@ function recordRoomMatch(room: Room): void {
     };
 
     const context: RecordMatchContext = {
-      performanceWeight: performanceWeight(mine, theirs, room.bestStreaks[seat]),
+      performanceWeight: performanceWeight(mine, theirs, room.earnedBests[seat]),
     };
     if (them.deviceId && seatStillHoldsAccount(them)) {
       const opp = db.getProfile(them.deviceId);
@@ -756,6 +757,7 @@ async function startServer() {
           payload.opponentScore = theirs;
           payload.bestStreak = room.bestStreaks[seat];
           payload.endStreak = room.streaks[seat];
+          payload.earnedStreak = room.earnedBests[seat];
           payload.isWinner = mine > theirs;
 
           const opponent = room.players[seat === 0 ? 1 : 0];
@@ -763,7 +765,7 @@ async function startServer() {
             const opp = db.getProfile(opponent.playerId);
             context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
           }
-          context.performanceWeight = performanceWeight(mine, theirs, room.bestStreaks[seat]);
+          context.performanceWeight = performanceWeight(mine, theirs, room.earnedBests[seat]);
         }
       }
 
@@ -797,10 +799,17 @@ async function startServer() {
       if (!Number.isFinite(streak) || streak < 0) {
         return res.status(400).json({ error: 'BAD_REQUEST' });
       }
-      // Where the run got to, so it carries into the next session. Bounded by
-      // the peak in recordPractice — a run cannot end higher than it reached.
-      const ended = Number(req.body?.endStreak);
-      res.json(db.recordPractice(req.deviceId!, streak, Number.isFinite(ended) ? ended : 0));
+      // `bestStreak` is the run's peak; `earnedStreak` is how much of it was
+      // built in THIS session and is the only one XP is paid on; `endStreak` is
+      // where it stands, so the next session continues it. All three are
+      // bounded against each other in recordPractice.
+      res.json(
+        db.recordPractice(req.deviceId!, {
+          bestStreak: streak,
+          earnedStreak: Number(req.body?.earnedStreak),
+          endStreak: Number(req.body?.endStreak),
+        })
+      );
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -1022,6 +1031,8 @@ async function startServer() {
             // what the match is rated and paid on.
             streaks: [carriedStreak(cookieDeviceId), 0],
             bestStreaks: [carriedStreak(cookieDeviceId), 0],
+            earnedStreaks: [0, 0],
+            earnedBests: [0, 0],
             crossingsThisPoint: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],

@@ -52,7 +52,7 @@ const match = (key: string): MatchEndPayload =>
     username: 'Queued',
     playerScore: 5,
     opponentScore: 2,
-    bestStreak: 7, endStreak: 0,
+    bestStreak: 7, endStreak: 0, earnedStreak: 7,
     mode: 'solo',
     isWinner: true,
     matchKey: key,

@@ -187,6 +187,16 @@ the P2P replica; `src/game/streaks.ts` for the client, which is the only authori
 match. Pinned in `tests/room.test.ts`, `tests/streaks.test.ts`, `tests/p2pParity.test.ts` and
 — the whole chain through a real server — `tests/duelRecord.test.ts`.
 
+**Nothing is ever paid twice for one carried run.** Because a streak survives the match it
+was built in, a match's peak is not a measure of what that match did, and paying on it makes
+a farm out of simply not missing — at its worst, opening the Practice Wall on a carried run
+and leaving without touching the ball. So every reward reads the from-zero figure
+(`earnedStreak`/`earnedBests`) while the career best, the mode best and the achievements read
+the true peak. Each half is asserted separately, because a test that only checks the peak
+passes on the bug: `tests/streaks.test.ts` and `tests/room.test.ts` hold the client and relay
+counters apart, `tests/db.test.ts` holds that a carried run is not paid for twice, and
+`scripts/e2e-rules.mjs` closes the practice farm through a real server.
+
 **Asserting a game RULE through a browser is a last resort, not a first one.** The streak
 rule was attempted that way and abandoned: it needs a real solo rally, a scripted paddle
 cannot be relied on to produce one (a first-to-5 against Rookie goes 5-0 often enough to fail
