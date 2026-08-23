@@ -36,6 +36,41 @@ const RELOAD_GUARD_KEY = 'phong_build_reload';
 
 export type ClientSessionStatus = SessionStatus | 'connecting' | 'offline';
 
+/**
+ * The states in which nothing the player does counts, and so the only ones
+ * SessionGuard puts a wall in front of.
+ *
+ * Deliberately a WALL and not a toast: in these states no match records, no XP
+ * lands and no rating moves. Letting play continue behind a dismissible banner
+ * is exactly the reported bug — a full match on a phone whose account had
+ * already moved to a desktop, discovered only when the finished match was
+ * refused.
+ *
+ * `offline` is NOT on this list. A heartbeat that could not reach the server
+ * is a dropped connection, not an eviction, and throwing a player off the
+ * court every time a phone changes cells would be its own bug.
+ *
+ * `connecting` and `none` are off it for a different reason. They do not mean
+ * "you may not play", they mean "we have not asked yet" — and blocking on them
+ * put a network round trip in front of the first paint, so the menu and the
+ * onboarding modal arrived a beat later for every player on every load.
+ * Nothing is lost by rendering: writes are gated server-side regardless, and a
+ * match recorded before the session lands is answered SESSION_REQUIRED, which
+ * postMatchRecord resolves by minting one and retrying.
+ *
+ * Lives here rather than in the component so the rule can be asserted without
+ * a DOM — it is a property of the session model, not of how it is drawn.
+ */
+export const BLOCKING_STATUSES: readonly ClientSessionStatus[] = [
+  'released',
+  'superseded',
+  'stale_build',
+];
+
+/** Whether this status is one the player must be stopped on. */
+export const isBlockingStatus = (status: ClientSessionStatus): boolean =>
+  BLOCKING_STATUSES.includes(status);
+
 export interface SessionSnapshot {
   status: ClientSessionStatus;
   build: string | null;

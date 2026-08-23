@@ -1,12 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn, ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
-import net from 'node:net';
-import os from 'node:os';
-import path from 'node:path';
-import WebSocket from 'ws';
-import type { WSServerMessage } from '../src/types';
 import { findMission } from '../src/game/missions';
+import { Device, Phone as PhoneSocket, Relay, startRelay } from './helpers/relay';
 
 // A duel end-to-end through the REAL relay and the REAL record route, because
 // that seam is where duel results went missing and no unit test could see it:
@@ -19,108 +13,30 @@ import { findMission } from '../src/game/missions';
 //    died on the final point left the match on neither profile.
 //  - a room is reused by every rematch and reset to 0-0, so a slow or replayed
 //    POST for match 1 was cross-checked against match 2's blank score.
+//
+// The server, the cookie jars, the Phone socket wrapper and the lobby
+// handshake all live in tests/helpers/relay.ts now — a third suite needed
+// them. What is left here is this suite's own subject.
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-duel-test-'));
-let server: ChildProcess;
+let relay: Relay;
 let base: string;
-let wsUrl: string;
-
-const freePort = (): Promise<number> =>
-  new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const port = (probe.address() as net.AddressInfo).port;
-      probe.close(() => resolve(port));
-    });
-  });
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 beforeAll(async () => {
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  wsUrl = `ws://127.0.0.1:${port}/ws`;
-  server = spawn('npx', ['tsx', 'server.ts'], {
-    cwd: path.resolve(__dirname, '..'),
-    // production skips the Vite middleware, which is all this needs and much
-    // faster to boot; the API and the relay are the same either way.
-    env: { ...process.env, PORT: String(port), DATA_DIR: TMP, NODE_ENV: 'production' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // Its own process group, so it can be killed as a whole. `npx tsx` is a
-    // TREE — a shell, npx, then the server — and signalling only the process
-    // we spawned leaves the actual server running: every test run stranded one
-    // holding a port and a deleted temp directory, until CI reaped it as an
-    // orphan at the end of the job.
-    detached: true,
-  });
-  for (let i = 0; i < 200; i++) {
-    try {
-      const res = await fetch(`${base}/api/health`);
-      if (res.ok) return;
-    } catch {
-      /* not listening yet */
-    }
-    await sleep(100);
-  }
-  throw new Error('server did not start');
+  relay = await startRelay('duel-test');
+  base = relay.base;
 }, 40000);
 
 afterAll(async () => {
-  await stopServer();
-  fs.rmSync(TMP, { recursive: true, force: true });
+  await relay?.stop();
 });
 
-/** Kill the server's whole process group and wait for it to actually be gone. */
-async function stopServer(): Promise<void> {
-  if (!server?.pid || server.exitCode !== null) return;
-  const exited = new Promise<void>((resolve) => server.once('exit', () => resolve()));
-  try {
-    // Negative pid = the group, which is the point of spawning detached.
-    process.kill(-server.pid, 'SIGKILL');
-  } catch {
-    server.kill('SIGKILL');
-  }
-  // Don't leave the temp directory being deleted out from under a live server.
-  await Promise.race([exited, sleep(3000)]);
-}
-
-interface Device {
-  cookie: string;
-  id: string;
-  username: string;
-}
-
-/** Collect Set-Cookie into a jar, keeping the newest value of each name. */
-function mergeCookies(jar: string, res: Response): string {
-  const current = new Map<string, string>();
-  for (const pair of jar.split('; ').filter(Boolean)) {
-    current.set(pair.slice(0, pair.indexOf('=')), pair);
-  }
-  for (const raw of res.headers.getSetCookie?.() ?? []) {
-    const pair = raw.split(';')[0];
-    current.set(pair.slice(0, pair.indexOf('=')), pair);
-  }
-  return [...current.values()].join('; ');
-}
-
-/**
- * A browser: its own cookie jar, its own profile, onboarded. Opening a
- * session is part of being a browser now — an account is held by one device
- * at a time, and every write is gated on holding it.
- */
-async function newDevice(username: string): Promise<Device> {
-  const first = await fetch(`${base}/api/session`, { method: 'POST' });
-  const cookie = mergeCookies('', first);
-  const res = await fetch(`${base}/api/profile/initialize`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', cookie },
-    body: JSON.stringify({ username }),
-  });
-  const profile = await res.json();
-  if (!profile?.id) throw new Error(`onboarding failed: ${JSON.stringify(profile)}`);
-  return { cookie, id: profile.id, username };
-}
+// Bound to this suite's relay so the cases below read exactly as they did
+// when the harness was local to this file.
+const newDevice = (username: string): Promise<Device> => relay.newDevice(username);
+const newUnclaimedDevice = (): Promise<Device> => relay.newUnclaimedDevice();
+const seatDuel = (host: Device, guest: Device, winningScore = 3) =>
+  relay.seatDuel(host, guest, winningScore);
+const Phone = { open: (device: Device): Promise<PhoneSocket> => relay.openPhone(device) };
 
 const getProfile = async (device: Device) =>
   (await fetch(`${base}/api/profile/me`, { headers: { cookie: device.cookie } })).json();
@@ -152,91 +68,6 @@ async function newDeviceHoldingAWinMission(
   throw new Error('no device was dealt an unrestricted win mission');
 }
 
-/** A device that has a cookie but has NOT chosen a username yet. */
-async function newUnclaimedDevice(): Promise<Device> {
-  // A session, but no username yet — which is exactly the state a real
-  // browser is in while the onboarding modal is up: the session is minted on
-  // load, and onboarding happens after it. Without the session the relay
-  // would refuse this socket for having no live session at all, which is a
-  // true answer to a different question than the one this device is here to
-  // ask.
-  const first = await fetch(`${base}/api/session`, { method: 'POST' });
-  const cookie = mergeCookies('', first);
-  const { profile } = await first.json();
-  return { cookie, id: profile.id, username: profile.username };
-}
-
-/** A connected phone: its socket plus every server message it has received. */
-class Phone {
-  ws: WebSocket;
-  received: WSServerMessage[] = [];
-
-  private constructor(ws: WebSocket) {
-    this.ws = ws;
-    ws.on('message', (raw) => this.received.push(JSON.parse(raw.toString())));
-  }
-
-  static async open(device: Device): Promise<Phone> {
-    const ws = new WebSocket(wsUrl, { headers: { cookie: device.cookie } });
-    await new Promise<void>((resolve, reject) => {
-      ws.once('open', () => resolve());
-      ws.once('error', reject);
-    });
-    return new Phone(ws);
-  }
-
-  send(msg: unknown): void {
-    this.ws.send(JSON.stringify(msg));
-  }
-
-  /** The most recent message of `type`, or undefined. */
-  last<T extends WSServerMessage['type']>(type: T): Extract<WSServerMessage, { type: T }> | undefined {
-    for (let i = this.received.length - 1; i >= 0; i--) {
-      if (this.received[i].type === type) return this.received[i] as any;
-    }
-    return undefined;
-  }
-
-  /** Wait for a message of `type` that arrives after `after` messages. */
-  async await<T extends WSServerMessage['type']>(
-    type: T,
-    timeoutMs = 5000
-  ): Promise<Extract<WSServerMessage, { type: T }>> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const hit = this.last(type);
-      if (hit) return hit;
-      await sleep(20);
-    }
-    throw new Error(`timed out waiting for ${type}`);
-  }
-
-  clear(): void {
-    this.received = [];
-  }
-
-  close(): void {
-    this.ws.close();
-  }
-}
-
-/** Host + guest, through the lobby handshake, to the first serve of a match. */
-async function seatDuel(host: Device, guest: Device, winningScore = 3) {
-  const p1 = await Phone.open(host);
-  p1.send({ type: 'create_room', playerId: host.id, config: { winningScore, rules: {} } });
-  const created = await p1.await('room_created');
-
-  const p2 = await Phone.open(guest);
-  p2.send({ type: 'join_room', roomId: created.roomId, playerId: guest.id });
-  await p2.await('room_joined');
-
-  p2.send({ type: 'player_ready', ready: true });
-  await p1.await('ready_state');
-  p1.send({ type: 'start_match' });
-  const start = await p1.await('game_start');
-  await p2.await('game_start');
-  return { p1, p2, roomId: created.roomId, matchSeq: start.matchSeq };
-}
 
 describe('taking a seat in a room', () => {
   it('refuses a player who has not chosen a username yet', async () => {

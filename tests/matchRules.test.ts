@@ -11,6 +11,8 @@ import {
   clampRule,
   isRankedRules,
   isRuleRanked,
+  isStockPhysics,
+  duelMatchKey,
   unrankedRuleKeys,
   normalizeRules,
   normalizeRoomConfig,
@@ -258,5 +260,76 @@ describe('custom rules cost the rating, never the XP', () => {
     } as MatchEndPayload);
     expect(res.ranked).toBe(false);
     expect(res.profile.rankMu).toBe(before.rankMu);
+  });
+});
+
+// The idempotency key behind "every match is recorded, once, on every profile
+// it belongs to". A duel legitimately arrives up to three times — the relay
+// writes it for both seats, both clients POST it as a fallback, and the
+// on-device queue may replay it — and this is the only thing that tells the
+// server they are all the same match.
+//
+// It is derived independently in three places that must agree: the relay
+// (server.ts, from room state), the record route's cross-check (server.ts,
+// from the client's payload) and the client (App.tsx, from the room it
+// joined). The EFFECT is well covered by tests/duelRecord.test.ts — a match is
+// paid once — but the key's own shape was not, so the case-folding that lets a
+// client holding a lowercase room code agree with the relay was unpinned.
+describe('duelMatchKey', () => {
+  it('does not care what case the room code is written in', () => {
+    // The relay stores codes uppercase; a client can hold whatever the player
+    // typed or an invitation link carried. If these disagreed, the same match
+    // would be recorded twice under two keys and paid twice.
+    expect(duelMatchKey('abcd', 3)).toBe(duelMatchKey('ABCD', 3));
+    expect(duelMatchKey('aBcD', 3)).toBe(duelMatchKey('AbCd', 3));
+  });
+
+  it('tells one match in a room from the next', () => {
+    // A room is reused by every rematch, so the code alone would fold a
+    // best-of-five evening into a single key and pay only the first match.
+    expect(duelMatchKey('ABCD', 1)).not.toBe(duelMatchKey('ABCD', 2));
+  });
+
+  it('tells one room from another', () => {
+    expect(duelMatchKey('ABCD', 1)).not.toBe(duelMatchKey('WXYZ', 1));
+  });
+
+  it('is stable, and namespaced away from a solo key', () => {
+    expect(duelMatchKey('ABCD', 7)).toBe('duel:ABCD:7');
+    expect(duelMatchKey('ABCD', 7)).toBe(duelMatchKey('ABCD', 7));
+  });
+});
+
+describe('isStockPhysics', () => {
+  it('is true for the shipped rules and for nothing else', () => {
+    expect(isStockPhysics(null)).toBe(true);
+    expect(isStockPhysics({})).toBe(true);
+    expect(isStockPhysics(DEFAULT_MATCH_RULES)).toBe(true);
+    for (const key of PHYSICS_RULE_KEYS) {
+      const { default: def, min, max } = PHYSICS_RULES[key];
+      // Move each rule within its OWN range, downward by preference: raising
+      // ballSpeedMin alone is pinned straight back (see below), while
+      // ballSpeedMax is the one rule with no room beneath stock.
+      const altered = min < def ? Math.max(min, def - 0.3) : Math.min(max, def + 0.3);
+      expect(altered, `${key} has no room to move`).not.toBe(def);
+      expect(isStockPhysics({ [key]: altered }), key).toBe(false);
+    }
+  });
+
+  it('is unmoved by a minimum speed that normalization refuses', () => {
+    // normalizeRules pins ballSpeedMin under ballSpeedMax, and both ship at 1,
+    // so raising the floor alone cannot take effect — the match is still
+    // stock. Raising the ceiling with it is what actually changes the game.
+    expect(isStockPhysics({ ballSpeedMin: 1.3 })).toBe(true);
+    expect(isStockPhysics({ ballSpeedMin: 1.3, ballSpeedMax: 1.5 })).toBe(false);
+    expect(normalizeRules({ ballSpeedMin: 1.3 }).ballSpeedMin).toBe(1);
+  });
+
+  it('is a stricter question than whether a match is ranked', () => {
+    // The ranked band is deliberately wider than stock: a match tuned inside
+    // it still rates. Conflating the two is what the band exists to avoid.
+    const nudged = { paddleScale: 1.1 };
+    expect(isStockPhysics(nudged)).toBe(false);
+    expect(isRankedRules(normalizeRules(nudged))).toBe(true);
   });
 });

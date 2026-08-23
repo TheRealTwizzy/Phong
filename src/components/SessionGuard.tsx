@@ -2,7 +2,7 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { Loader2, MonitorSmartphone, RefreshCw, UserPlus } from 'lucide-react';
 import { LanguageCode } from '../types';
-import { ClientSessionStatus } from '../net/session';
+import { ClientSessionStatus, isBlockingStatus } from '../net/session';
 import { t } from '../i18n/translations';
 
 interface SessionGuardProps {
@@ -18,27 +18,9 @@ interface SessionGuardProps {
 
 // The visible half of "one account, one live device".
 //
-// This is deliberately a WALL and not a toast. The state it reports is one
-// where nothing the player does counts: no match records, no XP, no rating.
-// Letting them keep playing behind a dismissible banner is exactly the bug —
-// a full match played on a phone whose account had already moved to a
-// desktop, discovered only when the finished match was refused.
-//
-// Only the states that MEAN something is wrong are on this list.
-//
-// `offline` is left off on purpose: a heartbeat that could not reach the
-// server is a dropped connection, not an eviction, and throwing a player off
-// the court every time a phone changes cells would be its own bug.
-//
-// `connecting` and `none` are left off for a different reason. They do not
-// mean "you may not play", they mean "we have not asked yet" — and blocking
-// on them put a network round trip in front of the first paint, so the menu
-// and the onboarding modal arrived a beat later than they used to for every
-// player on every load. Nothing is lost by rendering: writes are gated
-// server-side regardless, and a match recorded before the session lands is
-// answered SESSION_REQUIRED, which postMatchRecord resolves by minting one
-// and retrying.
-const BLOCKING: ClientSessionStatus[] = ['released', 'superseded', 'stale_build'];
+// Which states get a wall — and, just as importantly, which do not — is
+// decided by BLOCKING_STATUSES in src/net/session.ts, next to the session
+// model it describes. The reasoning lives there.
 
 export const SessionGuard: React.FC<SessionGuardProps> = ({
   status,
@@ -48,7 +30,7 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
   onStartFresh,
   children,
 }) => {
-  if (!BLOCKING.includes(status)) return <>{children}</>;
+  if (!isBlockingStatus(status)) return <>{children}</>;
 
   const copy = {
     released: {

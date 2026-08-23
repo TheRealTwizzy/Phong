@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { classifyFromSignals, DeviceSignals } from '../src/device';
 
 // Real user-agent strings. The point of this file is the reported bypass:
@@ -75,5 +77,59 @@ describe('device classification', () => {
 
   it('falls back to desktop when it knows nothing', () => {
     expect(classifyFromSignals(signals('', 0))).toBe('desktop');
+  });
+});
+
+// Convention §9: "The device gate reads the platform, never the window."
+//
+// This is not a style rule. The gate that preceded this one decided by
+// VIEWPORT SIZE, so narrowing a browser window walked straight through it —
+// which is how the concurrent-account exploit was produced in the first place.
+// The verdict now comes from what the browser says it runs on, and the window
+// is not consulted at all.
+//
+// A source check rather than a behavioural one, because the failure mode is
+// somebody ADDING a viewport read for a plausible-sounding reason ("tablets in
+// portrait look fine"), and no set of fixtures can catch a signal that is not
+// in DeviceSignals yet.
+describe('the gate never looks at the window', () => {
+  const raw = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'device.ts'), 'utf8');
+  // Comments stripped first. The rule is about what the code READS, and a
+  // guard that fires on the word "touchscreen." in a sentence is one somebody
+  // deletes the first time it cries wolf.
+  const source = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+  it('reads nothing about the size or shape of the viewport', () => {
+    const banned = [
+      'innerWidth',
+      'innerHeight',
+      'outerWidth',
+      'outerHeight',
+      'clientWidth',
+      'clientHeight',
+      'matchMedia',
+      'orientation',
+      'devicePixelRatio',
+      'screen.',
+      'getBoundingClientRect',
+      'ResizeObserver',
+    ];
+    const found = banned.filter((token) => source.includes(token));
+    expect(
+      found,
+      `src/device.ts consults the window: ${found.join(', ')} — a window is not a device`
+    ).toEqual([]);
+  });
+
+  it('keeps the desktop bypass out of production builds', () => {
+    // `?desktop=1` exists for development. It must stay behind import.meta.env
+    // .DEV so the branch is not present in a shipped bundle at all.
+    if (!source.includes('desktop')) return;
+    // Optional chaining included: the guard is written `import.meta.env?.DEV`.
+    expect(source).toMatch(/import\.meta\.env\??\.DEV/);
+    // The bypass may read the URL — that is not the viewport, and reading the
+    // query string is the whole mechanism — but only from inside that guard.
+    const guarded = source.slice(source.indexOf('import.meta.env'));
+    expect(guarded).toContain("'desktop'");
   });
 });

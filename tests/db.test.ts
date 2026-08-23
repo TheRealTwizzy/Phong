@@ -510,3 +510,109 @@ describe('mid-match abandons', () => {
     expect(db.getProfile('p_ab_days').abandons).toBe(3);
   });
 });
+
+// Six counters that gate three concealed achievement branches and the Cyber
+// unlock, derived inside recordMatch from the result the server just accepted.
+// CLAUDE.md is precise about why that matters: "a client reports a match,
+// never a total." Across the whole suite they appeared in one incidental
+// assertion, so what a streak or a shutout actually IS was never pinned.
+describe('counters the server derives, and the client cannot report', () => {
+  const played = (id: string, over: Partial<MatchEndPayload>, n = 0) =>
+    db.recordMatch(match(id, { matchKey: `${id}:${n}`, ...over }));
+
+  it('counts a win streak up, and a single loss ends it', () => {
+    init('c_streak', 'StreakCase');
+    played('c_streak', { isWinner: true }, 1);
+    expect(db.getProfile('c_streak').winStreak).toBe(1);
+    played('c_streak', { isWinner: true }, 2);
+    played('c_streak', { isWinner: true }, 3);
+    expect(db.getProfile('c_streak').winStreak).toBe(3);
+
+    played('c_streak', { isWinner: false, playerScore: 2, opponentScore: 7 }, 4);
+    expect(db.getProfile('c_streak').winStreak).toBe(0);
+  });
+
+  it('remembers the best streak after the current one is broken', () => {
+    init('c_best', 'BestStreak');
+    for (let i = 1; i <= 4; i++) played('c_best', { isWinner: true }, i);
+    played('c_best', { isWinner: false, playerScore: 1, opponentScore: 7 }, 5);
+    played('c_best', { isWinner: true }, 6);
+
+    const p = db.getProfile('c_best');
+    expect(p.winStreak).toBe(1);
+    expect(p.bestWinStreak).toBe(4);
+  });
+
+  it('counts a shutout only for a win to nil of at least five points', () => {
+    // The floor exists so a 2-0 in a short match is not "a shutout" — the
+    // achievement it feeds is meant to mean something.
+    const cases: [string, Partial<MatchEndPayload>, number][] = [
+      ['5-0 win', { isWinner: true, playerScore: 5, opponentScore: 0 }, 1],
+      ['7-0 win', { isWinner: true, playerScore: 7, opponentScore: 0 }, 1],
+      ['5-1 win', { isWinner: true, playerScore: 5, opponentScore: 1 }, 0],
+      ['4-0 win', { isWinner: true, playerScore: 4, opponentScore: 0 }, 0],
+      ['0-5 loss', { isWinner: false, playerScore: 0, opponentScore: 5 }, 0],
+    ];
+    for (const [label, payload, expected] of cases) {
+      const id = `c_shut_${label.replace(/\W/g, '')}`;
+      init(id, `Shut${label.replace(/\W/g, '')}`);
+      played(id, payload, 1);
+      expect(db.getProfile(id).shutoutsWon, label).toBe(expected);
+    }
+  });
+
+  it('credits a solo win to its own difficulty and no other', () => {
+    init('c_diff', 'DiffCase');
+    played('c_diff', { mode: 'solo', difficulty: 'rookie', isWinner: true }, 1);
+    let p = db.getProfile('c_diff');
+    expect([p.rookieWins, p.proWins, p.cyberWins]).toEqual([1, 0, 0]);
+
+    played('c_diff', { mode: 'solo', difficulty: 'pro', isWinner: true }, 2);
+    played('c_diff', { mode: 'solo', difficulty: 'cyber', isWinner: true }, 3);
+    p = db.getProfile('c_diff');
+    expect([p.rookieWins, p.proWins, p.cyberWins]).toEqual([1, 1, 1]);
+  });
+
+  it('credits a retired difficulty to the rung that replaced it', () => {
+    // 'chaos' was removed from the ladder; a device that still has it stored
+    // must not have its wins vanish, and normalizeDifficulty maps it to cyber.
+    init('c_chaos', 'ChaosCase');
+    played('c_chaos', { mode: 'solo', difficulty: 'chaos' as any, isWinner: true }, 1);
+    expect(db.getProfile('c_chaos').cyberWins).toBe(1);
+  });
+
+  it('credits nothing per-difficulty for a loss, or for a duel', () => {
+    init('c_nodiff', 'NoDiffCase');
+    played('c_nodiff', { mode: 'solo', difficulty: 'pro', isWinner: false, playerScore: 1, opponentScore: 7 }, 1);
+    played('c_nodiff', { mode: 'multiplayer', isWinner: true }, 2);
+
+    const p = db.getProfile('c_nodiff');
+    expect([p.rookieWins, p.proWins, p.cyberWins]).toEqual([0, 0, 0]);
+    // The duel win still lands where duels are counted.
+    expect(p.multiplayerWins).toBe(1);
+  });
+
+  it('leaves the streak alone when a match is abandoned rather than lost', () => {
+    // An abandon costs rankMu and is its own counter; it is not a played
+    // match, so it neither breaks a streak nor extends one.
+    init('c_ab', 'AbandonStreak');
+    played('c_ab', { isWinner: true }, 1);
+    played('c_ab', { isWinner: true }, 2);
+    db.recordAbandon('c_ab', { ranked: true });
+
+    const p = db.getProfile('c_ab');
+    expect(p.winStreak).toBe(2);
+    expect(p.abandons).toBe(1);
+  });
+
+  it('pays a replayed match once, and counts it once', () => {
+    // The idempotency ledger has to cover the counters too, or a duel reported
+    // by three paths would read as a three-match win streak.
+    init('c_dupe', 'DupeCounters');
+    const payload = match('c_dupe', { isWinner: true, matchKey: 'dupe:1' });
+    db.recordMatch(payload);
+    db.recordMatch(payload);
+    db.recordMatch(payload);
+    expect(db.getProfile('c_dupe').winStreak).toBe(1);
+  });
+});

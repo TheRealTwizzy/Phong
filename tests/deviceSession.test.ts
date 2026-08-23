@@ -1,11 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn, ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
-import net from 'node:net';
-import os from 'node:os';
-import path from 'node:path';
 import WebSocket from 'ws';
 import type { MatchEndPayload } from '../src/types';
+import { Relay, sleep, startRelay } from './helpers/relay';
 
 // The reported exploit, reproduced against the REAL server, because every
 // piece of it lives at the HTTP seam:
@@ -22,56 +18,23 @@ import type { MatchEndPayload } from '../src/types';
 // indistinguishable from a browser the server had never met. It was quietly
 // issued a new empty profile, allowed to play a whole match under it, and
 // only told at the final whistle, when the finished match was refused.
+//
+// The server lifecycle lives in tests/helpers/relay.ts; the Jar below stays
+// here because this suite is the one that cares how cookies are REMOVED, not
+// merely replaced.
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-session-test-'));
-let server: ChildProcess;
+let relay: Relay;
 let base: string;
 let wsUrl: string;
 
-const freePort = (): Promise<number> =>
-  new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const port = (probe.address() as net.AddressInfo).port;
-      probe.close(() => resolve(port));
-    });
-  });
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 beforeAll(async () => {
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  wsUrl = `ws://127.0.0.1:${port}/ws`;
-  server = spawn('npx', ['tsx', 'server.ts'], {
-    cwd: path.resolve(__dirname, '..'),
-    env: { ...process.env, PORT: String(port), DATA_DIR: TMP, NODE_ENV: 'production' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-  });
-  for (let i = 0; i < 200; i++) {
-    try {
-      if ((await fetch(`${base}/api/health`)).ok) return;
-    } catch {
-      /* not listening yet */
-    }
-    await sleep(100);
-  }
-  throw new Error('server did not start');
+  relay = await startRelay('session-test');
+  base = relay.base;
+  wsUrl = relay.wsUrl;
 }, 40000);
 
 afterAll(async () => {
-  if (server?.pid && server.exitCode === null) {
-    const exited = new Promise<void>((resolve) => server.once('exit', () => resolve()));
-    try {
-      process.kill(-server.pid, 'SIGKILL');
-    } catch {
-      server.kill('SIGKILL');
-    }
-    await Promise.race([exited, sleep(3000)]);
-  }
-  fs.rmSync(TMP, { recursive: true, force: true });
+  await relay?.stop();
 });
 
 /** A browser's cookie jar: newest value of each cookie name wins. */

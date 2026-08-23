@@ -36,6 +36,7 @@ const SUITES = [
   { name: 'duel', ownsServer: false },
   { name: 'invite', ownsServer: false },
   { name: 'lobby', ownsServer: false },
+  { name: 'split', ownsServer: false },
   { name: 'eject', ownsServer: true },
   { name: 'build-id', ownsServer: true, needsBrowser: false },
 ];

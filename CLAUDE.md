@@ -73,6 +73,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ```
 ├── CLAUDE.md                  # This guide
 ├── README.md                  # Quickstart
+├── TESTING.md                 # The two test layers, the coverage floors, standing rules
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
 ├── DEPLOYMENT.md              # KVM/docker-compose runbook (+ Render alternative)
 ├── Dockerfile                 # Multi-stage build → slim runtime (express+ws only)
@@ -82,7 +83,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── scripts/load-test.mjs      # N-concurrent-matches relay load test
 ├── scripts/e2e-*.mjs          # E2E (profiles, gameplay, rating, rules,
 │                              #   achievements, elite, duel, eject, invite,
-│                              #   lobby, build-id)
+│                              #   lobby, split, build-id)
 ├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each
 ├── .github/workflows/ci.yml   # Typecheck+unit+build, and the E2E suites
 ├── index.html                 # HTML entry
@@ -96,11 +97,14 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 │   ├── build.ts               # Build id — retires every session on a new deployment
 │   ├── db.ts                  # SQLite store: profiles, ELO, XP, achievements, history, avatars
 │   ├── image.ts               # Dep-free 256×256 PNG avatar validation
+│   ├── room.ts                # The relay's room + its rules (pure, unit-tested)
 │   └── transform.ts           # Cross-net ball transform (unit-tested, shared with client)
-├── tests/                     # Vitest: transform, physics, db invariants, legacy import,
-│                              #   qr, device, and two that boot the real server:
+├── tests/                     # Vitest: transform, physics, room rules, db invariants,
+│                              #   protocol/P2P parity, the match queue, the session
+│                              #   heartbeat, themes, qr, device, i18n — plus two that
+│                              #   boot the real server via tests/helpers/relay.ts:
 │                              #   duelRecord (a duel end to end) and deviceSession
-│                              #   (the account-transfer eviction)
+│                              #   (the account-transfer eviction). See TESTING.md.
 └── src/
     ├── main.tsx               # React bootstrap
     ├── App.tsx                # Game controller, loop, WS client, all state
@@ -119,7 +123,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
     ├── audio/soundEffects.ts  # Procedural SFX, chiptune BGM, soundscapes
     ├── game/
     │   ├── physics.ts         # Ball movement, collisions, spin, AI opponent
-    │   ├── themes.ts          # 10 visual themes + unlock requirements
+    │   ├── themes.ts          # 20 visual themes + unlock requirements
     │   └── missions.ts        # Daily mission DEFINITIONS (shared client+server)
     ├── i18n/translations.ts   # 7-language dictionary (en es ja de fr pt zh) + t();
     │                           #   locale parity pinned by tests/i18n.test.ts
@@ -253,7 +257,7 @@ The `AudioContext` must be unlocked lazily from a user gesture — never play au
   - *One-and-done*: a finished task used to be barred from being dealt again that day, so a productive player worked through the twelve-strong pool — about four duels at five slots — and a claim then had **nothing** to hand back, leaving the finished task sitting in its slot marked "claimed". A repeating pool cannot run out. The `RETIRED_SLOT` fallback stays as a backstop (blanked, never deleted — `ensureSlots` reads "no rows for today" as "not dealt yet", so removing the last row would deal a whole fresh day), but it is now effectively unreachable.
   - *Carried progress*: progress is stored per `(player, day, task)`, so a task dealt back into a slot arrived holding whatever it collected the last time it was held — a rerolled "Point Machine" turning up at 21/25, which is a reward for nothing. `dealMission()` clears the row as the task enters the slot, so every deal is a fresh start; with repeats now allowed this is what stops one arriving already finished and claimed.
 - **Elite missions are the permanent-unlock track.** Their XP is a daily reward like any other, but the first time one is ever completed it banks a row in `elite_completions` — deliberately **not** day-keyed — which unlocks a theme for good. Repeating it later pays the XP again and grants nothing further. `profile.eliteUnlocks` carries these to the client, where `isThemeUnlocked` reads them.
-- **Themes** (`src/game/themes.ts`) — unlocked by default: `neon`, `retro-crt`, `midnight`, `cyberpunk`, `tennis`. Earned: `emerald-matrix` (first cross-net volley), `solar-flare` (10+ rally), `hyper-violet` (first match win), `monochrome-noir` (level 5), `quantum-gold` (25+ rally or Master tier).
+- **Themes** (`src/game/themes.ts`) — **twenty**, in three groups. Open from the start: `neon`, `retro-crt`, `midnight`, `cyberpunk`, `tennis`. Earned: `emerald-matrix` (first cross-net volley), `solar-flare` (10+ rally), `hyper-violet` (first match win), `monochrome-noir` (level 5), `quantum-gold` (25+ rally or Master tier), `perpetual-blue` (100-hit rally), `flawless-white` (shut out Cyber), `legend-aurora` (Legend tier), `fixture-bronze` (200 matches). Elite: `void-runner`, `crimson-tide`, `arctic-glass`, `molten-core`, `signal-lost`, `gilded-age`, one per elite mission (§ above). `isThemeUnlocked` ORs the requirements, so the four carrying a raw-stat fallback beside their achievement (`solar-flare`, `hyper-violet`, `monochrome-noir`, `quantum-gold`) open on either. Its tier arm reads `TIER_ORDER`, which has no `unranked` entry — `indexOf` returns −1 on both sides and `-1 >= -1` would pass, so the trailing `tier !== 'unranked'` check is load-bearing, not belt-and-braces. `tests/themes.test.ts` pins every route, and fails when a theme is added without one.
 - **Achievements are a branching tree AND the progression gate** (`src/achievements.ts`, shared client+server). **Eight branches, 50 nodes.** Five are open from the first match — Foundation, Rally, Ladder, Duel, Craft — and **three are concealed trees the player discovers**: Ascent (the ranked tiers; opens on a first duel), Dominion (streaks and shutouts; opens on a first shutout), Devotion (the long haul; opens at level 5). A concealed branch's tab is a lock with a hint (`BranchDef.gate`/`gateHintKey`); everything inside it is invisible until it opens — the branch itself is the silhouette. Beyond the parent rule, deep rungs can carry an `AchievementGate` — a minimum profile **level** and/or visible **tier** (`ai_pro_10` needs level 10, `cyber_10` needs Ace, `points_2000` needs level 25) — checked in `isUnlockable(id, earned, ctx)`, whose `ProgressContext` argument is deliberately required: an optional one would fail open. Gating is **strict**: a parent is never granted implicitly, because auto-granting ancestors handed out `ai_rookie` for beating Pro, a difficulty the player had never beaten. Where one result genuinely satisfies a chain (a 50-hit rally is also a 25 and a 10) the triggers fire in order and each rung opens the next. Deep rungs are `hidden` — a silhouette until their parent is earned. The counters the new rungs measure (`winStreak`/`bestWinStreak`, `shutoutsWon`, `rookieWins`/`proWins`/`cyberWins`) are **computed only inside `recordMatch`** from the result the server just accepted — a client reports a match, never a total. Achievements marked `scaled: true` — `first_win`, `shutout`, `cyber_slayer`, `duel_shutout`, `multiplayer_champ` — pay `xpReward × surpriseMultiplier`, the same multiplier the match XP uses, because the AI adapts to the player and a flat reward would pay a μ40 player the same for a Cyber win they take often as a μ25 player for one they rarely take. The award lands on `Achievement.awardedXp`. **Rally achievements stay flat on purpose**: a stronger AI returns *more* balls, so long rallies get easier as difficulty rises and scaling them would run backwards.
 - **The tree gates the game** (`UNLOCKS`, `hasUnlock`): Pro is locked until you beat Rookie; **Cyber until `ai_pro_10` — ten Pro wins at level 10+**. A single Pro win used to open Cyber, which handed a first-session player the hardest opponent in the game before they had any feel for the middle rung; simulated at real win rates the climb now lands around match 21 at level 11 instead of match 2. First-to-10 is behind a first win, first-to-15 behind 10 matches. The ladder is walked, not jumped — which also means the win odds on the menu are odds the player has a basis to judge. Enforced **server-side** in `/api/match/record` (403 `DIFFICULTY_LOCKED`), not just hidden in the menu, since the menu is the client. **A locked option must therefore never be the ACTIVE one** — the server is right to refuse it, so the setting is what has to be corrected. Match settings live on the device and the achievements that open them live on the server, so the two drift: a wipe clears the achievements while localStorage keeps the difficulty they opened. `playableDifficulty()` / `playableWinningScore()` clamp a stored setting down to the best rung the profile has actually earned, and `DEFAULT_SETTINGS` takes its difficulty from the head of `DIFFICULTY_ORDER` rather than naming one, so the shipped default cannot itself be locked. It shipped as `'pro'` — locked until Rookie is beaten — so **every solo match a new player played was answered 403 and thrown away** (a 4xx is a verdict, not a hiccup, so it was not even queued): no XP, no missions, no history, until they happened to switch to Rookie by hand. `tests/achievements.test.ts` asserts no gate is ever locked behind something that needs it — a dead end would be unrecoverable.
 - **`ACHIEVEMENT_BAND_CAP` (0.6) is what keeps progression legible.** Rewards are flat constants but level bands grow, so a value sized for the mid game lands as a windfall early — `level_10` used to pay 750 into a 790-wide band, awarding almost the whole of the level it was celebrating, and a scaled unlock times a 1.9 surprise could beat that. One budget of `0.6 × band` covers **everything a single match unlocks**, since several achievements landing together was the other route to a free level; it is measured against the level reached *after* that match's own XP applies. Level-milestone rewards are additionally held under 40% of the band they celebrate, or they feed back into themselves. Over 1440 simulated matches the only remaining two-level gains sit at levels 1–4, where the bands are narrowest; `tests/achievements.test.ts` asserts they never happen above that.
@@ -266,21 +270,30 @@ npm run build    # vite build (client) + esbuild bundle (server) → dist/
 npm start        # node dist/server.cjs (production)
 npm run lint     # tsc --noEmit
 npm test         # vitest run (tests/)
+npm run test:coverage # the same suites plus the per-module coverage floors CI enforces
 npm run test:e2e # browser E2E — needs `npm run build` first (see below)
 ```
 
 Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.example`.
 
 **CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every PR, as two
-parallel jobs. `verify` is the fast one — typecheck, `npm test`, build — and `e2e` drives
+parallel jobs. `verify` is the fast one — typecheck, `npm run test:coverage`, build — and `e2e` drives
 the browser suites, which cost minutes rather than seconds, hence its own job: a red one
 names the broken flow instead of a broken build. `npm run test:e2e` is the same entry
 point locally. Every suite gets its own free port, throwaway `DATA_DIR` and
 `node dist/server.cjs` (the production entry — a suite would otherwise inherit another's
 players and leaderboard), so `npm run build` is a precondition, and Chromium is resolved
-from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. **A suite that
+from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. `verify` runs
+`test:coverage` rather than a bare `npm test`: per-module floors on the shared pure logic,
+set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
+components are Playwright's job, and one number would either fail on that bet or be set low
+enough to measure nothing. **A suite that
 asserts old behaviour is a suite that will be deleted rather than read** — when a rule
 changes, change the suite in the same commit.
+
+**`TESTING.md` is the working guide to the suite**: what each layer owns, why a V8 coverage
+report reads 0% for `server.ts` and every `.tsx` (they run out-of-process), how the floors are
+set, and the standing invariants the tests exist to hold. Read it before adding a suite.
 
 ## 9. Conventions
 
