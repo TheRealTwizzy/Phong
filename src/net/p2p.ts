@@ -230,12 +230,22 @@ export class P2PGameLink {
    * replica reaches them the same way, through the same code.
    */
   private countCrossing(seat: 0 | 1): void {
-    const first = this.streaks.crossingsThisPoint === 0;
     countReturn(this.streaks, seat);
-    // The first crossing is what puts the match in play. Worth one message to
-    // the relay by itself: it is what makes a walk-out an abandon and what
-    // shuts the lobby's settings for the rest of the match.
-    if (first) this.syncToRelay();
+    // EVERY crossing, not just the first of the point.
+    //
+    // The first one earns a message on its own — it is what puts the match in
+    // play, which is what makes a walk-out an abandon and shuts the lobby's
+    // settings. But the relay is also where this match gets recorded, and a
+    // DataChannel can die in the middle of a rally: sendGame starts returning
+    // false and the rest of the point goes over the relay instead. Synced
+    // once per point, the relay resumes from the state it had at crossing one
+    // — every return since is simply gone from the streak, the XP, the daily
+    // tasks and the performance weight, and the phase it resumes on is wrong
+    // by the same amount, so the next relayed crossing is miscounted too.
+    //
+    // The cost is one small message per net crossing, and only in P2P mode.
+    // Relayed play already sends the relay strictly more than this.
+    this.syncToRelay();
   }
 
   /**

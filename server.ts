@@ -791,6 +791,30 @@ async function startServer() {
 
   // Practice Wall: no match is recorded and no rating moves; the client
   // reports the streak it reached and the server decides what it is worth.
+  // Where a run stands, when no match is ending to say so — a player who
+  // carried a run in, missed, and quit. It counts no match and pays nothing;
+  // solo and practice only, since the relay owns a duel's runs. See
+  // db.reportStreak for why this grants a client nothing it did not have.
+  app.post('/api/profile/me/streak', requireActiveSession, (req, res) => {
+    try {
+      const me = db.getProfile(req.deviceId!);
+      if (!me.initialized) return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+      const mode = String(req.body?.mode || '');
+      if (mode !== 'solo' && mode !== 'practice') {
+        return res.status(400).json({ error: 'BAD_MODE' });
+      }
+      const endStreak = Number(req.body?.endStreak);
+      if (!Number.isFinite(endStreak) || endStreak < 0) {
+        return res.status(400).json({ error: 'BAD_REQUEST' });
+      }
+      const out = db.reportStreak(req.deviceId!, mode, endStreak, Number(req.body?.endedAt));
+      if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
+      res.json({ modeStats: out.modeStats });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post('/api/practice/record', requireActiveSession, (req, res) => {
     try {
       const me = db.getProfile(req.deviceId!);

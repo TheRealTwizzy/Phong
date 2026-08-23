@@ -1070,30 +1070,53 @@ class GameDatabase {
       .get(playerId, mode) as
       | { winStreak: number; currentStreak: number; streakAt: number }
       | undefined;
+    // Two of these columns describe THE RUN AS IT STANDS rather than a total,
+    // and a run is a statement about a sequence — so they are the two that
+    // need the results in order, and the additive ones do not. Idempotency
+    // tells two matches apart; it does not put them in sequence. A result that
+    // failed to POST sits in the on-device queue while the player replays and
+    // lands afterwards.
+    //
+    // Clamped to the server's clock on the way in: nothing has ended in the
+    // future. A device running fast would otherwise park the stored stamp
+    // ahead of real time, and every legitimate result after the clock was
+    // corrected — or after the account moved to a device with the right time —
+    // would look older and be ignored until reality caught up.
+    const now = Date.now();
+    const claimed = Math.max(0, Math.round(Number(d.endedAt) || 0));
+    const stamp = claimed > 0 ? Math.min(claimed, now) : now;
+    const prevStamp = row?.streakAt ?? 0;
+    const isNewer = stamp >= prevStamp;
+    const describesRun = d.endStreak !== undefined || d.won !== undefined;
+
     // A win streak IN THIS MODE: unlike the profile-wide one, a duel loss does
     // not end a solo streak and vice versa. Undefined `won` (a practice
     // session) leaves both alone rather than counting as a loss.
+    //
+    // An out-of-order result does not move it. Applied on arrival, an older
+    // win landing after a newer loss extends the run THAT LOSS ENDED, and
+    // bestWinStreak is a maximum so the inflation is permanent. The cost is
+    // the mirror case — an older win that belonged to an unbroken run is not
+    // added — and that is the side to be wrong on: a run not credited is
+    // recoverable, a best that was never played is not.
     const nextWinStreak =
-      d.won === undefined ? (row?.winStreak ?? 0) : d.won ? (row?.winStreak ?? 0) + 1 : 0;
+      d.won === undefined || !isNewer
+        ? (row?.winStreak ?? 0)
+        : d.won
+          ? (row?.winStreak ?? 0) + 1
+          : 0;
     // The run that carries. Assigned, not accumulated and not maxed: it can
     // legitimately go DOWN to zero, because ending a match on a miss is
-    // exactly what ends a streak.
-    //
-    // Which is exactly why it needs ordering, and the other columns do not.
-    // Idempotency tells two matches apart; it does not put them in sequence.
-    // A result that failed to POST sits in the on-device queue while the
-    // player replays, and lands afterwards — assigning blindly, match A's run
-    // of 10 comes back over replay B's 0 and the next reload starts on a run
-    // that was already broken. An older stamp is kept for its additive part
-    // (that is still one match, and still owed) and ignored for this one.
-    const stamp = Math.max(0, Math.round(Number(d.endedAt) || 0)) || Date.now();
-    const prevStamp = row?.streakAt ?? 0;
-    const isNewer = stamp >= prevStamp;
+    // exactly what ends a streak — which is why assigning it blindly is wrong.
+    // Match A's run of 10 comes back over replay B's 0, and the next reload
+    // starts on a run that was already broken. An older result is still kept
+    // for its additive part: it happened, and it is owed the match, the points
+    // and its share of the peak.
     const nextCurrent =
       d.endStreak === undefined || !isNewer
         ? (row?.currentStreak ?? 0)
         : Math.max(0, Math.round(d.endStreak));
-    const nextStamp = d.endStreak !== undefined && isNewer ? stamp : prevStamp;
+    const nextStamp = describesRun && isNewer ? stamp : prevStamp;
     this.stmt(
         `INSERT INTO player_mode_stats
            (playerId, mode, matchesPlayed, matchesWon, matchesLost,
@@ -1125,6 +1148,41 @@ class GameDatabase {
         nextWinStreak,
         nextWinStreak
       );
+  }
+
+  /**
+   * Where a run stands, reported outside a match.
+   *
+   * Only a FINISHED match reports itself, and a run does not only change when
+   * one finishes: a player can carry a run in, miss, and walk out. Without
+   * this the stored run is whatever the last completed match left, so the miss
+   * survives a reload and every return after it extends a run that was over.
+   *
+   * Deliberately narrow. It counts no match, pays nothing, and moves no
+   * rating — it writes one number. `multiplayer` is refused because the relay
+   * owns a duel's runs and writes them itself from state no client can touch;
+   * `split` banks nothing at all. What is left is solo and practice, both of
+   * which are already client-authoritative (see the trust model in CLAUDE.md
+   * §5) and already report this exact number through their own routes, so
+   * this adds no reach a modified client did not have.
+   */
+  public reportStreak(
+    playerId: string,
+    mode: GameMode,
+    endStreak: number,
+    endedAt?: number
+  ): { ok: boolean; modeStats: Record<string, ModeStats> } {
+    if (mode !== 'solo' && mode !== 'practice') return { ok: false, modeStats: {} };
+    const profile = this.getProfile(playerId);
+    if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
+    const n = Math.floor(Number(endStreak));
+    if (!Number.isFinite(n) || n < 0) return { ok: false, modeStats: this.getModeStats(playerId) };
+    // No `played`, no `won`: nothing here says a match happened.
+    this.bumpModeStats(playerId, mode, {
+      endStreak: Math.min(100000, n),
+      endedAt: Number(endedAt) || undefined,
+    });
+    return { ok: true, modeStats: this.getModeStats(playerId) };
   }
 
   /** Every mode this player has a row for, keyed by mode. */

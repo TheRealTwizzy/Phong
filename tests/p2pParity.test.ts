@@ -89,7 +89,11 @@ const CONFIG = normalizeRoomConfig({ winningScore: 3 });
 interface Side {
   link: InstanceType<typeof P2PGameLink>;
   got: WSServerMessage[];
-  syncs: { matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number] }[];
+  /**
+   * Whatever the replica reports, in full — narrowing this to the fields a
+   * test happened to need is how a new one goes unasserted.
+   */
+  syncs: Parameters<NonNullable<ConstructorParameters<typeof P2PGameLink>[0]['onMatchSync']>>[0][];
 }
 
 /** Two linked peers, channels open, seeded on match 1 exactly as game_start does. */
@@ -300,21 +304,35 @@ describe('the replica applies the relay rules it owns alone', () => {
     b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2 serves
     a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 2
     b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 1
-    // A point is what always reports, and the last one is what the match is
-    // recorded from — mid-rally the relay is only told on the first crossing.
+    // A point always reports, and the last one is what the match is recorded
+    // from — but so does every crossing before it, so the relay is never more
+    // than one event behind the rally.
     a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
     expect(a.syncs.at(-1)!.bestStreaks).toEqual([2, 1]);
     expect(b.syncs.at(-1)!.bestStreaks).toEqual([2, 1]);
   });
 
-  it('tells the relay the match is live on the FIRST crossing, and once', async () => {
+  it('tells the relay about EVERY crossing, not just the first of the point', async () => {
     const [a] = await pairedPeers();
     a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    // That one report is what makes a walk-out an abandon and what shuts the
-    // lobby's settings; the ones after it would be noise at 20Hz.
+    // The first still earns its report on its own — it is what puts the match
+    // in play, which is what makes a walk-out an abandon and shuts the lobby's
+    // settings.
     expect(a.syncs).toHaveLength(1);
+    expect(a.syncs.at(-1)!.crossingsThisPoint).toBe(1);
+
+    // And so does each one after it. This used to stop at one per point, on
+    // the grounds that the rest would be "noise at 20Hz" — which confused this
+    // with ball_pos. A crossing is one message per trip over the net, and the
+    // relay is where the match gets RECORDED: a DataChannel dying mid-rally
+    // hands the rest of the point back over the relay, which then resumes from
+    // whatever it was last told. Stale, every return since is gone from the
+    // streak, the XP and the daily tasks, and the point phase is wrong by the
+    // same amount so the next relayed crossing is miscounted too.
     a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    expect(a.syncs).toHaveLength(1);
+    expect(a.syncs).toHaveLength(2);
+    expect(a.syncs.at(-1)!.crossingsThisPoint).toBe(2);
+    expect(a.syncs.at(-1)!.bestStreaks).toEqual([1, 0]);
   });
 
   it('reports every point to the relay, the last one especially', async () => {

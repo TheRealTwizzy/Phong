@@ -773,6 +773,53 @@ describe('per-mode stats', () => {
     expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
   });
 
+  it('does not let a delayed win extend a run a newer loss had ended', () => {
+    // Same disease as currentStreak, different column: winStreak accumulates,
+    // and bestWinStreak is a maximum of it, so an out-of-order win inflates a
+    // best permanently. An older result does not move the run at all.
+    const id = 'dev_modewinord000001';
+    init(id, 'ModeWinOrder');
+    const t = 1_700_000_000_000;
+    const solo = (won: boolean, at: number, key: string) =>
+      match(id, {
+        mode: 'solo', difficulty: 'rookie', isWinner: won,
+        playerScore: won ? 5 : 1, opponentScore: won ? 1 : 5,
+        bestStreak: 4, endStreak: won ? 4 : 0, earnedStreak: 4,
+        endedAt: at, matchKey: key,
+      });
+
+    db.recordMatch(solo(false, t + 1000, 'win-b')); // newer loss lands first
+    db.recordMatch(solo(true, t + 2000, 'win-c')); // then a newer win
+    expect(db.getModeStats(id).solo?.bestWinStreak).toBe(1);
+
+    // Now the queued older win arrives. It must not make that a run of two.
+    db.recordMatch(solo(true, t, 'win-a'));
+    expect(db.getModeStats(id).solo?.bestWinStreak).toBe(1);
+    // The match itself is still counted — it happened, and it is owed that.
+    expect(db.getModeStats(id).solo?.matchesPlayed).toBe(3);
+    expect(db.getModeStats(id).solo?.matchesWon).toBe(2);
+  });
+
+  it('refuses a clock running ahead of the server', () => {
+    // Stored unbounded, a fast device parks the row's stamp in the future and
+    // every legitimate result after the clock is corrected — or after the
+    // account moves to a device with the right time — looks older and is
+    // ignored until reality catches up.
+    const id = 'dev_modefuture000001';
+    init(id, 'ModeFuture');
+    const wayAhead = Date.now() + 40 * 24 * 60 * 60 * 1000;
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 8, endStreak: 8, earnedStreak: 8, endedAt: wayAhead, matchKey: 'fut-a' })
+    );
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(8);
+
+    // A match ending NOW, which is genuinely later, is still taken.
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: false, playerScore: 1, bestStreak: 8, endStreak: 0, earnedStreak: 0, endedAt: Date.now(), matchKey: 'fut-b' })
+    );
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+  });
+
   it('runs a win streak per mode, so a loss in one does not end the other', () => {
     const id = 'dev_modestreak000001';
     init(id, 'ModeStreak');
@@ -811,6 +858,67 @@ describe('per-mode stats', () => {
     expect(db.getProfile(id).modeStats?.solo?.bestStreak).toBe(5);
     // But never on the sanitized public shape.
     expect((db.getPublicProfile(id) as unknown as Record<string, unknown>).modeStats).toBeUndefined();
+  });
+});
+
+describe('reporting a run with no match to report it', () => {
+  // Only a finished match reports itself, and a run does not only change when
+  // one finishes: carry a run in, miss, walk out. Without a way to say so the
+  // stored run stays where the last COMPLETED match left it, so the miss
+  // survives a reload and every return after it extends a run that was over.
+
+  it('writes the run without counting a match or paying anything', () => {
+    const id = 'dev_report0000000001';
+    init(id, 'Reporter');
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 9, endStreak: 9, earnedStreak: 9, matchKey: 'rep-a' })
+    );
+    const before = db.getProfile(id);
+    expect(before.modeStats?.solo?.currentStreak).toBe(9);
+
+    const out = db.reportStreak(id, 'solo', 0, Date.now() + 1);
+    expect(out.ok).toBe(true);
+    expect(out.modeStats.solo?.currentStreak).toBe(0);
+    // Nothing else moved: no match, no XP, no peak, no rating.
+    const after = db.getProfile(id);
+    expect(after.modeStats?.solo?.matchesPlayed).toBe(1);
+    expect(after.modeStats?.solo?.bestStreak).toBe(9);
+    expect(after.xp).toBe(before.xp);
+    expect(after.matchesPlayed).toBe(before.matchesPlayed);
+    expect(after.highestRally).toBe(before.highestRally);
+  });
+
+  it('refuses the modes it has no business writing', () => {
+    // The relay owns a duel's runs and writes them from state no client can
+    // touch; split banks nothing at all.
+    const id = 'dev_report0000000002';
+    init(id, 'Reporter2');
+    expect(db.reportStreak(id, 'multiplayer', 0).ok).toBe(false);
+    expect(db.reportStreak(id, 'split', 0).ok).toBe(false);
+    expect(db.getModeStats(id).multiplayer).toBeUndefined();
+  });
+
+  it('is ordered like every other write to that run', () => {
+    const id = 'dev_report0000000003';
+    init(id, 'Reporter3');
+    const t = 1_700_000_000_000;
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 6, endStreak: 6, earnedStreak: 6, endedAt: t + 5000, matchKey: 'rep3-a' })
+    );
+    // An older report cannot undo a newer match.
+    db.reportStreak(id, 'solo', 0, t);
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(6);
+    // A newer one can.
+    db.reportStreak(id, 'solo', 0, t + 6000);
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+  });
+
+  it('refuses nonsense rather than storing it', () => {
+    const id = 'dev_report0000000004';
+    init(id, 'Reporter4');
+    expect(db.reportStreak(id, 'solo', -3).ok).toBe(false);
+    expect(db.reportStreak(id, 'solo', Number.NaN).ok).toBe(false);
+    expect(db.getModeStats(id).solo).toBeUndefined();
   });
 });
 

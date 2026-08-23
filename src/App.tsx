@@ -2261,6 +2261,27 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * Tell the server where a run stands when no match is ending to say so.
+   *
+   * Fire-and-forget on purpose: this is a correction, not a result. Failing to
+   * send it leaves the server on the old value, which is exactly where it was
+   * without this — while blocking the walk back to the menu on a request would
+   * make a network stall look like a frozen button.
+   */
+  const reportStreak = useCallback(async (m: GameMode, endStreak: number) => {
+    if (m !== 'solo' && m !== 'practice') return;
+    try {
+      await fetch('/api/profile/me/streak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: m, endStreak, endedAt: Date.now() }),
+      });
+    } catch {
+      // See above: the server simply keeps what it had.
+    }
+  }, []);
+
   const quitToMenu = () => {
     if (mode === 'multiplayer') {
       // A live duel is worth a second look before walking out: leaving
@@ -2288,7 +2309,12 @@ export default function App() {
       // extending a run that should have been over. Practice says the same
       // thing through its own report above; the tour says nothing at all,
       // because the match it plays never happened.
+      //
+      // Told to the server as well as remembered here, or the miss survives a
+      // reload: the stored run is what a fresh page reads, and it would still
+      // hold whatever the last COMPLETED match left there.
       rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
+      void reportStreak(modeRef.current, statsRef.current.streak);
     }
     setScreen('menu');
     resetMatch();
