@@ -1,0 +1,260 @@
+import { describe, expect, it } from 'vitest';
+import {
+  applyMatchSync,
+  clampInt,
+  generateRoomCode,
+  performanceWeight,
+  Room,
+  ROOM_CODE_ALPHABET,
+  startMatch,
+} from '../server/room';
+import { normalizeRoomConfig } from '../src/matchRules';
+
+// The relay's room rules, tested directly for the first time.
+//
+// These lived in server.ts, where the only way to reach them was to spawn a
+// process — so the honest cases got covered by tests/duelRecord.test.ts and
+// the ADVERSARIAL ones got covered by nothing. applyMatchSync in particular
+// takes a score from a peer over a channel the server cannot see, and its own
+// comment describes an attack ("a phone naming a match number out of thin air
+// could blank a live room's score and take the result away from the other
+// player") that no test had ever exercised.
+//
+// Gameplay is client-authoritative by design (CLAUDE.md §5). That makes these
+// guards the whole of what stands between a modified client and the other
+// player's result, which is a poor thing to leave unpinned.
+
+const room = (over: Partial<Room> = {}): Room => ({
+  id: 'ABCD',
+  players: [null, null],
+  scores: [0, 0],
+  rallyCount: 0,
+  maxRallyInMatch: 0,
+  servingPlayer: 0,
+  rematchVotes: [false, false],
+  config: normalizeRoomConfig({ winningScore: 5 }),
+  matchOver: false,
+  ready: [false, false],
+  inPlay: false,
+  matchSeq: 1,
+  lastActive: 0,
+  ...over,
+});
+
+const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
+  matchSeq: 1,
+  p1Score: 0,
+  p2Score: 0,
+  maxRally: 0,
+  ...over,
+});
+
+describe('applyMatchSync — a score reported by a peer', () => {
+  it('ignores anything arriving before the host has started a match', () => {
+    // The replica only reports from game_start onward, so a sync against a
+    // room still in its lobby did not come from a match.
+    const r = room({ matchSeq: 0 });
+    expect(applyMatchSync(r, sync({ matchSeq: 1, p1Score: 5 })).decided).toBe(false);
+    expect(r.scores).toEqual([0, 0]);
+    expect(r.inPlay).toBe(false);
+  });
+
+  it('ignores a report from a match that has already been replaced', () => {
+    const r = room({ matchSeq: 3 });
+    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 4 }));
+    expect(r.scores).toEqual([0, 0]);
+  });
+
+  it('REFUSES to adopt a match number invented mid-rally', () => {
+    // The attack the guard exists for: a live 3-1 room, and one phone claims
+    // to be playing match 9. Adopting that would blank the score and take the
+    // other player's result away from them.
+    const r = room({ matchSeq: 1, scores: [3, 1], inPlay: true, matchOver: false });
+    const result = applyMatchSync(r, sync({ matchSeq: 9, p1Score: 0, p2Score: 0 }));
+    expect(result.decided).toBe(false);
+    expect(r.matchSeq).toBe(1);
+    expect(r.scores).toEqual([3, 1]);
+  });
+
+  it('adopts a higher match number once the last match is genuinely over', () => {
+    // The peers agreed a rematch between themselves; the relay never ran
+    // startMatch for it, so their numbering is the only thing that tells the
+    // two results apart.
+    const r = room({ matchSeq: 1, scores: [5, 2], matchOver: true, ready: [true, true] });
+    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 1, p2Score: 0, maxRally: 4 }));
+    expect(r.matchSeq).toBe(2);
+    expect(r.scores).toEqual([1, 0]);
+    expect(r.matchOver).toBe(false);
+    expect(r.rematchVotes).toEqual([false, false]);
+    expect(r.ready).toEqual([false, false]);
+  });
+
+  it('takes the score as a maximum, so a stale report cannot walk it back', () => {
+    // Reports are absolute, not deltas, and arrive from both peers over an
+    // unordered link. A late one carrying an older score must not undo a point.
+    const r = room();
+    applyMatchSync(r, sync({ p1Score: 3, p2Score: 2, maxRally: 12 }));
+    applyMatchSync(r, sync({ p1Score: 1, p2Score: 0, maxRally: 2 }));
+    expect(r.scores).toEqual([3, 2]);
+    expect(r.maxRallyInMatch).toBe(12);
+  });
+
+  it('holds a reported score inside the room own winning score', () => {
+    // Nothing stops a modified client claiming 9999. The room's terms do.
+    const r = room();
+    applyMatchSync(r, sync({ p1Score: 9999, p2Score: -40 }));
+    expect(r.scores).toEqual([5, 0]);
+  });
+
+  it('survives junk in every numeric field', () => {
+    const r = room();
+    applyMatchSync(r, sync({ p1Score: NaN, p2Score: Infinity, maxRally: -12 } as any));
+    // Note Infinity lands on 0, not on the winning score. clampInt treats a
+    // non-finite number as unusable rather than as "very large", so claiming
+    // an infinite score does not hand anyone the match — it reports nothing.
+    expect(r.scores).toEqual([0, 0]);
+    expect(r.maxRallyInMatch).toBe(0);
+
+    const r2 = room();
+    applyMatchSync(r2, sync({ p1Score: 'three', maxRally: 'lots' } as any));
+    expect(r2.scores).toEqual([0, 0]);
+    expect(Number.isFinite(r2.maxRallyInMatch)).toBe(true);
+  });
+
+  it('does not let a NaN match number pass for the current one', () => {
+    const r = room({ matchSeq: 2, scores: [1, 1] });
+    applyMatchSync(r, sync({ matchSeq: NaN, p1Score: 5 } as any));
+    expect(r.scores).toEqual([1, 1]);
+  });
+
+  it('puts the match in play, which is what makes a walk-out an abandon', () => {
+    const r = room();
+    expect(r.inPlay).toBe(false);
+    applyMatchSync(r, sync({ p1Score: 1 }));
+    expect(r.inPlay).toBe(true);
+  });
+
+  it('reports the match decided exactly once, and leaves the loser serving', () => {
+    const r = room();
+    expect(applyMatchSync(r, sync({ p1Score: 4, p2Score: 1 })).decided).toBe(false);
+    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 1 })).decided).toBe(true);
+    expect(r.matchOver).toBe(true);
+    expect(r.servingPlayer).toBe(1);
+    // A second report of the same finished match must not record it again —
+    // that is the difference between a duel being paid once and twice.
+    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 1 })).decided).toBe(false);
+  });
+
+  it('clears rematch votes when the match decides, so none are banked early', () => {
+    const r = room({ rematchVotes: [true, false] });
+    applyMatchSync(r, sync({ p1Score: 5 }));
+    expect(r.rematchVotes).toEqual([false, false]);
+  });
+});
+
+describe('startMatch', () => {
+  it('resets everything the last match left behind', () => {
+    const r = room({
+      scores: [5, 3],
+      rallyCount: 9,
+      maxRallyInMatch: 31,
+      rematchVotes: [true, true],
+      matchOver: true,
+      inPlay: true,
+      ready: [true, true],
+      matchSeq: 4,
+    });
+    const payload = startMatch(r, 1);
+
+    expect(r.scores).toEqual([0, 0]);
+    expect(r.rallyCount).toBe(0);
+    expect(r.maxRallyInMatch).toBe(0);
+    expect(r.rematchVotes).toEqual([false, false]);
+    expect(r.matchOver).toBe(false);
+    expect(r.inPlay).toBe(false);
+    expect(r.ready).toEqual([false, false]);
+    expect(r.servingPlayer).toBe(1);
+    // A room outlives its matches; the sequence is what tells them apart.
+    expect(r.matchSeq).toBe(5);
+    expect(payload).toEqual({
+      type: 'game_start',
+      servingPlayer: 1,
+      config: r.config,
+      matchSeq: 5,
+    });
+  });
+
+  it('carries the room terms, so no phone can start on terms it was not told', () => {
+    const r = room({ config: normalizeRoomConfig({ winningScore: 10 }) });
+    expect(startMatch(r, 0).config.winningScore).toBe(10);
+  });
+});
+
+describe('performanceWeight', () => {
+  it('is neutral for a match with no points at all', () => {
+    expect(performanceWeight(0, 0, 0)).toBe(1);
+  });
+
+  it('rewards a dominant win over a narrow one', () => {
+    expect(performanceWeight(5, 0, 10)).toBeGreaterThan(performanceWeight(5, 4, 10));
+  });
+
+  it('punishes a heavy loss more than a close one', () => {
+    expect(performanceWeight(0, 5, 10)).toBeLessThan(performanceWeight(4, 5, 10));
+  });
+
+  it('softens a loss that came with long rallies', () => {
+    expect(performanceWeight(2, 5, 40)).toBeGreaterThan(performanceWeight(2, 5, 0));
+  });
+
+  it('stays inside a band narrower than its own clamp', () => {
+    // CLAUDE.md §7 describes this as "bounded to a 0.5-1.5 weight", which is
+    // the clamp — but the clamp is unreachable. margin maxes at +/-1 and
+    // rallyQuality at 0..1, so the real range is 0.625..1.375. Pinned as it
+    // actually behaves: a rating nudge, never a driver.
+    const samples: number[] = [];
+    for (const mine of [0, 1, 3, 5, 10, 15]) {
+      for (const theirs of [0, 1, 3, 5, 10, 15]) {
+        for (const rally of [0, 5, 20, 100, 5000]) {
+          samples.push(performanceWeight(mine, theirs, rally));
+        }
+      }
+    }
+    expect(Math.min(...samples)).toBeCloseTo(0.625, 5);
+    expect(Math.max(...samples)).toBeCloseTo(1.375, 5);
+    expect(samples.every((w) => w >= 0.5 && w <= 1.5)).toBe(true);
+  });
+});
+
+describe('generateRoomCode', () => {
+  it('is four characters a player can read off a phone', () => {
+    for (let i = 0; i < 200; i++) expect(generateRoomCode()).toMatch(/^[A-Z0-9]{4}$/);
+  });
+
+  it('never uses the characters people transcribe wrongly', () => {
+    // 0/O and 1/I are the pairs a player gets wrong copying a code between two
+    // phones, which is the only way a code is ever entered.
+    for (const bad of ['0', 'O', '1', 'I']) {
+      expect(ROOM_CODE_ALPHABET).not.toContain(bad);
+    }
+    const codes = Array.from({ length: 500 }, generateRoomCode).join('');
+    expect(codes).not.toMatch(/[01OI]/);
+  });
+
+  it('draws on the whole alphabet', () => {
+    // A generator stuck on a subset would collide far sooner than 32^4 says.
+    const seen = new Set(Array.from({ length: 4000 }, generateRoomCode).join(''));
+    expect(seen.size).toBe(ROOM_CODE_ALPHABET.length);
+  });
+});
+
+describe('clampInt', () => {
+  it('floors, bounds, and refuses to pass junk through', () => {
+    expect(clampInt(3.9, 0, 10)).toBe(3);
+    expect(clampInt(-5, 0, 10)).toBe(0);
+    expect(clampInt(99, 0, 10)).toBe(10);
+    expect(clampInt(NaN, 2, 10)).toBe(2);
+    expect(clampInt(undefined, 2, 10)).toBe(2);
+    expect(clampInt('7', 0, 10)).toBe(7);
+  });
+});
