@@ -491,6 +491,12 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DROP TABLE IF EXISTS recorded_matches');
       this.sql.exec('DROP TABLE IF EXISTS released_devices');
+      // Added with the multi-browser rework and missed here at the time. A
+      // surviving device_links row points at a playerId that no longer exists,
+      // and resolveSession reads "linked but not holding" as `superseded` — so
+      // a wipe would have left devices walled off from an account that had
+      // been deleted out from under them.
+      this.sql.exec('DROP TABLE IF EXISTS device_links');
       this.sql.exec('DROP TABLE IF EXISTS recent_missions');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');

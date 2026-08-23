@@ -149,6 +149,33 @@ describe('wipe_v1 one-time player reset', () => {
   });
 });
 
+describe('a wipe takes device_links with it', () => {
+  it('leaves no browser linked to an account that no longer exists', async () => {
+    // device_links arrived with the multi-browser rework and was missed from
+    // the wipe's DROP list. A surviving row points at a playerId that is gone,
+    // and resolveSession reads "linked but not holding" as `superseded` — so a
+    // wipe would have walled devices off from an account deleted out from
+    // under them, which is the exact state a wipe exists to clear.
+    const owner = 'dev_cccccccccccccccc01';
+    const second = 'dev_cccccccccccccccc02';
+    db.getProfile(owner);
+    db.initializeProfile(owner, 'LinkedUp');
+    db.linkDevice(owner, owner);
+    db.linkDevice(second, owner);
+    expect(db.linkedAccount(second)).toEqual({ playerId: owner, holdsIt: false });
+
+    // Un-stamp the newest wipe so the next boot runs one.
+    db.setMeta('wipe_v3', '');
+    vi.resetModules();
+    const { db: booted } = await import('../server/db');
+
+    expect(booted.getLeaderboard('elo', 100, true)).toHaveLength(0);
+    expect(booted.getProfile(owner).initialized).toBe(false);
+    expect(booted.linkedAccount(owner)).toBeNull();
+    expect(booted.linkedAccount(second)).toBeNull();
+  });
+});
+
 describe('manual db:reset script', () => {
   it('refuses without --yes and deletes the database files with it', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-reset-script-'));

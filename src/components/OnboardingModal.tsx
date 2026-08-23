@@ -4,10 +4,10 @@ import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { Sheet } from './ui';
 import { validateUsername, USERNAME_MAX } from '../profileRules';
-import { detectInAppBrowser } from '../device';
+import { detectInAppBrowser, openInRealBrowserUrl } from '../device';
 import { processAvatarFile, uploadAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
-import { Check, ImagePlus, KeyRound, Loader2, Play, ShieldCheck, X } from 'lucide-react';
+import { Check, ExternalLink, ImagePlus, KeyRound, Loader2, Play, ShieldCheck, X } from 'lucide-react';
 
 // Mandatory first-arrival onboarding: every new player MUST lock in a unique
 // username before touching the game (365-day rename lock starts here).
@@ -194,6 +194,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   // Naming the app is what turns "I got signed out" into "I am in the wrong
   // browser" — a problem the player can actually act on.
   const inApp = detectInAppBrowser(typeof navigator === 'undefined' ? '' : navigator.userAgent);
+  // Android can hand the page to the real browser outright; iOS cannot, so it
+  // gets the link to carry across by hand. Both beat "your account is
+  // somewhere else, good luck".
+  const handOff =
+    typeof navigator === 'undefined' || typeof window === 'undefined'
+      ? null
+      : openInRealBrowserUrl(navigator.userAgent, window.location.href);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   return (
     <Sheet
@@ -334,6 +342,35 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               ? t('onboarding_in_app_browser', language, { app: inApp })
               : t('onboarding_other_browser', language)}
           </p>
+        )}
+
+        {/* The way out of the wrong browser. On Android this genuinely opens
+            the system default browser; on iOS there is no supported mechanism,
+            so the link goes to the clipboard for the player to paste. */}
+        {invited && inApp && (
+          handOff ? (
+            <a
+              id="btn-open-real-browser"
+              href={handOff}
+              className="w-full py-3 rounded-2xl font-mono text-xs font-black tracking-widest uppercase bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 text-center active:scale-[0.98] transition flex items-center justify-center gap-2"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              {t('onboarding_open_real_browser', language)}
+            </a>
+          ) : (
+            <button
+              id="btn-copy-invite-link"
+              onClick={() => {
+                navigator.clipboard?.writeText(window.location.href).catch(() => {});
+                setLinkCopied(true);
+                setTimeout(() => setLinkCopied(false), 2500);
+              }}
+              className="w-full py-3 rounded-2xl font-mono text-xs font-black tracking-widest uppercase bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 active:scale-[0.98] transition flex items-center justify-center gap-2"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              {linkCopied ? t('lobby_copied', language) : t('onboarding_copy_link', language)}
+            </button>
+          )
         )}
 
         {/* Username (required, unique, 365-day lock) */}
