@@ -1931,21 +1931,20 @@ class GameDatabase {
     // the achievements being once-only.
     profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
     if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
-    // The same result, kept per mode as well as pooled.
-    this.bumpModeStats(profile.id, payload.mode, {
+    // The same result, kept per mode as well as pooled — written down in the
+    // transaction below rather than here. It is the one write in this function
+    // with no ceiling of its own: mission progress caps at its target and the
+    // profile is upserted whole, but matchesPlayed and the rest only ever add,
+    // so a bump that landed while the match went unstamped would be counted
+    // again by the retry, and again by the one after that.
+    const modeDelta = {
       played: 1,
       won: isWin,
       pointsScored: payload.playerScore,
       aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
       bestStreak: payload.bestStreak,
-      endStreak: endStreak,
-    });
-    // Read back what that just wrote. `profile` was loaded before the bump, so
-    // its per-mode snapshot is the one from BEFORE this match — and it is the
-    // object handed to the client in MatchEndResult, which installs it whole.
-    // Left stale, the first match's row was missing entirely and every later
-    // one was a match behind for the rest of the page session.
-    profile.modeStats = this.getModeStats(profile.id);
+      endStreak,
+    };
     // Streaks, shutouts and per-difficulty wins are derived here and only
     // here, from the result the server just accepted — a client can report a
     // match, never a total.
@@ -2136,6 +2135,15 @@ class GameDatabase {
 
     this.sql.exec('BEGIN');
     try {
+      this.bumpModeStats(profile.id, payload.mode, modeDelta);
+      // Read back what that just wrote, from inside the transaction that wrote
+      // it. `profile` was loaded before the bump, so its per-mode snapshot is
+      // the one from BEFORE this match — and it is the object handed to the
+      // client in MatchEndResult, which installs it whole. Left stale, the
+      // first match's row was missing entirely and every later one was a match
+      // behind for the rest of the page session. `result` holds this same
+      // object, so the stamp below records the fresh rows too.
+      profile.modeStats = this.getModeStats(profile.id);
       this.upsertProfile(profile);
       this.insertMatch(matchRecord);
       // Keep only the most recent 500 matches (parity with the JSON store)

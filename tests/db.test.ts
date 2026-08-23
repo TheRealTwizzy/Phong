@@ -674,6 +674,47 @@ describe('per-mode stats', () => {
     expect(second.profile.modeStats).toEqual(db.getModeStats(id));
   });
 
+  it('does not bank a mode row for a match that failed to record', () => {
+    // The per-mode row is the one write in recordMatch with no ceiling of its
+    // own — mission progress caps at its target and the profile is upserted
+    // whole, but matchesPlayed and the rest only ever add. Written outside the
+    // transaction, a failure anywhere after it left the row bumped and the
+    // match unstamped, so the client's retry counted the same match again.
+    const id = 'dev_modeatomic000001';
+    init(id, 'ModeAtomic');
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 6, endStreak: 6, earnedStreak: 6 })
+    );
+    const before = db.getModeStats(id).solo;
+    expect(before?.matchesPlayed).toBe(1);
+
+    // Fail the transaction after the bump, the way a constraint violation or
+    // a full disk would.
+    const store = db as unknown as { insertMatch: (m: unknown) => void };
+    const real = store.insertMatch;
+    store.insertMatch = () => {
+      throw new Error('injected: the match record could not be written');
+    };
+    try {
+      expect(() =>
+        db.recordMatch(
+          match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 9, endStreak: 9, earnedStreak: 9, matchKey: 'atomic-1' })
+        )
+      ).toThrow(/injected/);
+    } finally {
+      store.insertMatch = real;
+    }
+
+    // Nothing moved: not the count, not the streak the next match carries.
+    expect(db.getModeStats(id).solo).toEqual(before);
+
+    // And the retry that follows counts it exactly once.
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 9, endStreak: 9, earnedStreak: 9, matchKey: 'atomic-1' })
+    );
+    expect(db.getModeStats(id).solo?.matchesPlayed).toBe(2);
+  });
+
   it('runs a win streak per mode, so a loss in one does not end the other', () => {
     const id = 'dev_modestreak000001';
     init(id, 'ModeStreak');
