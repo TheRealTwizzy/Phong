@@ -59,6 +59,34 @@ export function detectInAppBrowser(userAgent: string): string | null {
   return null;
 }
 
+/**
+ * A URL that hands the current page to the phone's REAL browser, or null when
+ * the platform offers no way to do that.
+ *
+ * Android only, and not for want of trying. An `intent://` URL is Android's
+ * documented way for a WebView to hand a request to whatever browser the user
+ * has set as default, and it works from inside the in-app browsers that cause
+ * this problem. iOS has no supported equivalent: `x-safari-https://` exists
+ * and often works, but it is undocumented, has never been blessed by Apple,
+ * and can stop working in any release — a recovery path for someone locked out
+ * of their account is the last place to spend an unofficial trick, so iOS gets
+ * the honest instruction to use the in-app browser's own menu instead.
+ */
+export function openInRealBrowserUrl(userAgent: string, href: string): string | null {
+  if (!/\bAndroid\b/.test(userAgent || '')) return null;
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  const scheme = url.protocol.slice(0, -1);
+  // Everything after the scheme, which is what intent:// carries verbatim.
+  const rest = `${url.host}${url.pathname}${url.search}`;
+  return `intent://${rest}#Intent;scheme=${scheme};action=android.intent.action.VIEW;end`;
+}
+
 export function classifyFromSignals(signals: DeviceSignals): DeviceClass {
   const ua = signals.userAgent || '';
   const touch = signals.maxTouchPoints > 0;

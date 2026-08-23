@@ -90,22 +90,6 @@ The app then mints time-limited TURN credentials per client via `/api/rtc-config
 
 ### Backups
 
-## One-time player reset on the next deploy (`wipe_v4`)
-
-The build carrying this note clears **all player data exactly once**, on its
-first boot against a given database: profiles, matches, avatars, device links,
-and `auth_secret` — which retires every device cookie in the field, so every
-browser comes back as a first-time visitor rather than half-recognised. It is
-flagged in `meta`, so later deploys and restarts never repeat it. The log line
-to look for is `wipe_v4: cleared all player data ...`.
-
-**Take a backup first if you want the option of reading the old rows** — the
-wipe is irreversible and fires the moment the new container starts:
-
-```bash
-node -e "new (require('node:sqlite').DatabaseSync)('/data/phong.db').exec(\"VACUUM INTO '/data/pre-wipe-backup.db'\")"
-```
-
 ## Support: an account somebody can't get back into
 
 Identity is bound to the browser's device cookie, so "I lost my account" is a

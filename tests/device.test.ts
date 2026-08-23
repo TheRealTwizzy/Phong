@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { classifyFromSignals, DeviceSignals } from '../src/device';
+import { classifyFromSignals, DeviceSignals, openInRealBrowserUrl } from '../src/device';
 
 // Real user-agent strings. The point of this file is the reported bypass:
 // the gate used to key on viewport size, so narrowing a desktop browser
@@ -131,5 +131,32 @@ describe('the gate never looks at the window', () => {
     // query string is the whole mechanism — but only from inside that guard.
     const guarded = source.slice(source.indexOf('import.meta.env'));
     expect(guarded).toContain("'desktop'");
+  });
+});
+
+describe('handing a webview back to the real browser', () => {
+  it('builds an Android intent:// url that carries the room code', () => {
+    const url = openInRealBrowserUrl(
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 [FBAN/…]',
+      'https://phong.example.com/?room=AB12'
+    );
+    expect(url).toBe(
+      'intent://phong.example.com/?room=AB12#Intent;scheme=https;action=android.intent.action.VIEW;end'
+    );
+  });
+
+  it('offers nothing on iOS, where no supported mechanism exists', () => {
+    // x-safari-https:// often works and is undocumented. A player locked out
+    // of their account is the last place to spend an unofficial trick, so iOS
+    // gets the in-app browser's own menu instead.
+    expect(
+      openInRealBrowserUrl('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) [FBAN/…]', 'https://p.example.com/')
+    ).toBeNull();
+  });
+
+  it('refuses anything that is not an ordinary web url', () => {
+    const android = 'Mozilla/5.0 (Linux; Android 14) Mobile';
+    expect(openInRealBrowserUrl(android, 'javascript:alert(1)')).toBeNull();
+    expect(openInRealBrowserUrl(android, 'not a url')).toBeNull();
   });
 });

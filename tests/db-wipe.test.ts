@@ -108,7 +108,7 @@ describe('wipe_v1 one-time player reset', () => {
     // unstamped sibling would fire on the next boot, clear this stamp in
     // turn, and the two would alternate — a full player wipe and cookie
     // rotation on every single start.
-    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4']) {
+    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3']) {
       expect(db.getMeta(key)).toBeTruthy();
     }
   });
@@ -123,7 +123,7 @@ describe('wipe_v1 one-time player reset', () => {
     vi.resetModules();
     const { db: db2 } = await import('../server/db');
     expect(db2.getProfile(id).username).toBe('Survivor');
-    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4']) {
+    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3']) {
       expect(db2.getMeta(key)).toBeTruthy();
     }
   });
@@ -143,20 +143,19 @@ describe('wipe_v1 one-time player reset', () => {
     expect(db3.getLeaderboard('elo', 100, true)).toHaveLength(0);
     const gone = db3.getProfile(id);
     expect(gone.initialized).toBe(false);
-    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4']) {
+    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3']) {
       expect(db3.getMeta(key)).toBeTruthy();
     }
   });
 });
 
-describe('wipe_v4: the multi-browser account reset', () => {
-  it('takes device_links with it, so no browser is walled off from a deleted account', async () => {
+describe('a wipe takes device_links with it', () => {
+  it('leaves no browser linked to an account that no longer exists', async () => {
     // device_links arrived with the multi-browser rework and was missed from
-    // the drop list. A surviving row points at a playerId that no longer
-    // exists, and resolveSession reads "linked but not holding" as
-    // `superseded` — so a wipe would have left devices walled off from an
-    // account that had been deleted out from under them, which is the exact
-    // state the wipe is meant to clear.
+    // the wipe's DROP list. A surviving row points at a playerId that is gone,
+    // and resolveSession reads "linked but not holding" as `superseded` — so a
+    // wipe would have walled devices off from an account deleted out from
+    // under them, which is the exact state a wipe exists to clear.
     const owner = 'dev_cccccccccccccccc01';
     const second = 'dev_cccccccccccccccc02';
     db.getProfile(owner);
@@ -165,33 +164,15 @@ describe('wipe_v4: the multi-browser account reset', () => {
     db.linkDevice(second, owner);
     expect(db.linkedAccount(second)).toEqual({ playerId: owner, holdsIt: false });
 
-    // A deployment that has not yet run wipe_v4.
-    db.setMeta('wipe_v4', '');
+    // Un-stamp the newest wipe so the next boot runs one.
+    db.setMeta('wipe_v3', '');
     vi.resetModules();
     const { db: booted } = await import('../server/db');
 
     expect(booted.getLeaderboard('elo', 100, true)).toHaveLength(0);
     expect(booted.getProfile(owner).initialized).toBe(false);
-    // The links are gone too — not left pointing at a player that isn't there.
     expect(booted.linkedAccount(owner)).toBeNull();
     expect(booted.linkedAccount(second)).toBeNull();
-    for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4']) {
-      expect(booted.getMeta(key)).toBeTruthy();
-    }
-  });
-
-  it('takes the auth secret with it, retiring every device cookie in the field', async () => {
-    // The secret is minted lazily by server/auth.ts, so a live deployment
-    // always has one; this suite never imports auth, hence setting it here.
-    db.setMeta('auth_secret', 'secret-in-the-field-right-now');
-    db.setMeta('wipe_v4', '');
-    vi.resetModules();
-    const { db: booted } = await import('../server/db');
-    // Gone means every cookie signed under it stops verifying, so a browser
-    // comes back as a first-time visitor rather than half-recognised — which
-    // is the point of resetting rather than merely deleting the rows. The
-    // next auth call mints a fresh one.
-    expect(booted.getMeta('auth_secret')).not.toBe('secret-in-the-field-right-now');
   });
 });
 

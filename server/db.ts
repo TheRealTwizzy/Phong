@@ -89,22 +89,11 @@ const WIPE_V2_KEY = 'wipe_v2';
 // ranked bands, the eight-branch achievement tree, the Cyber climb, abandon
 // penalties. Everything stored was earned under rules that no longer exist.
 const WIPE_V3_KEY = 'wipe_v3';
-// A fourth, for the release that made an account reachable from more than one
-// browser. The device→account binding itself changed shape underneath the
-// players on the subdomain: a `device_links` table now decides which browsers
-// an account answers to, and the accounts that predate it have no rows in it.
-// Several players had already been handed fresh identities by the time it was
-// noticed, so the field was a mix of accounts that had been signed in to and
-// accounts that had not, with no way to tell them apart from the outside.
-// Starting everyone from the same place is cheap here — a handful of players,
-// less than a week of history — and it also rotates auth_secret, which retires
-// every device cookie still in the field and closes any half-state left over.
-const WIPE_V4_KEY = 'wipe_v4';
 // Every key, oldest first. applyWipe re-stamps ALL of them after running:
 // stamping only some would leave a hole that re-triggers an earlier wipe on
 // the next boot — and since each wipe clears `meta`, two half-stamped keys
 // would take turns wiping the database on every single start.
-const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY, WIPE_V4_KEY];
+const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY];
 
 /**
  * How long a recorded match stays deduplicable. Long enough to cover a match
@@ -484,7 +473,6 @@ class GameDatabase {
     this.applyWipe(WIPE_V1_KEY, 'wipe_v1: cleared all player data for the fresh launch (0 players)');
     this.applyWipe(WIPE_V2_KEY, 'wipe_v2: cleared all player data for the rebalanced AI ladder (0 players)');
     this.applyWipe(WIPE_V3_KEY, 'wipe_v3: cleared all player data for the progression overhaul (0 players)');
-    this.applyWipe(WIPE_V4_KEY, 'wipe_v4: cleared all player data for the multi-browser account rework (0 players)');
   }
 
   private applyWipe(key: string, message: string): void {
