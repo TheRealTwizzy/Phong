@@ -40,6 +40,7 @@ coverage number.
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
 | `physics` `spin` `transform` | Ball, collisions, spin, AI competence, the cross-net mirror |
+| `streaks` | A rally streak: whose it is, what ends it, and what it carries into |
 | `room` | The relay's room rules, the reaper, and the adversarial `match_sync` guards |
 | `matchRules` | Ranked bands, normalization, `duelMatchKey` |
 | `themes` | All 20 themes × every route that unlocks them |
@@ -52,7 +53,7 @@ coverage number.
 ### Browser layer
 
 `profiles` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `split` · `eject` · `build-id`
+`lobby` · `split` · `streak` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -171,6 +172,20 @@ their noise. The ladder-spread check flaked at roughly 3 runs in 400 until its s
 tripled and its threshold moved below the tail rather than beside the mean — it surfaced as
 `expected 0.19999999999999996 to be greater than 0.2` on a docs-only PR. Measure the
 distribution before picking a bound; do not tune it until the red goes away.
+
+**A rally streak belongs to one player, and only their own miss ends it.** It carries across
+points and across matches, so the run is stored per mode rather than kept in a component.
+The rule is written once and shared: `server/room.ts` for the relay, imported wholesale by
+the P2P replica; `src/game/streaks.ts` for the client, which is the only authority in a solo
+match. Pinned in `tests/room.test.ts`, `tests/streaks.test.ts`, `tests/p2pParity.test.ts` and
+— the whole chain through a real server — `tests/duelRecord.test.ts`.
+
+**Asserting a game RULE through a browser is a last resort, not a first one.** The streak
+rule was attempted that way and abandoned: it needs a real solo rally, a scripted paddle
+cannot be relied on to produce one (a first-to-5 against Rookie goes 5-0 often enough to fail
+the suite for a reason that is not the rule), and the fix was to move the rule somewhere it
+could be stated — `src/game/streaks.ts` — rather than to loosen the assertion until it
+passed. `scripts/e2e-streak.mjs` keeps only what a browser can say without luck.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit.

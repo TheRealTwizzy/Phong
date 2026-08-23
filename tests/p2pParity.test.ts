@@ -89,7 +89,7 @@ const CONFIG = normalizeRoomConfig({ winningScore: 3 });
 interface Side {
   link: InstanceType<typeof P2PGameLink>;
   got: WSServerMessage[];
-  syncs: { matchSeq: number; p1Score: number; p2Score: number; maxRally: number }[];
+  syncs: { matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number] }[];
 }
 
 /** Two linked peers, channels open, seeded on match 1 exactly as game_start does. */
@@ -266,17 +266,45 @@ describe('the replica applies the relay rules it owns alone', () => {
     expect(a.got.find((m) => m.type === 'ball_incoming')).toBeUndefined();
   });
 
-  it('counts a crossing from either side toward the rally', async () => {
+  it('credits each crossing to the streak of the player who made it', async () => {
     const [a, b] = await pairedPeers();
-    // A rally is a ball going back and forth; counting only your own strokes
-    // would report half the rally the match is actually rated on.
-    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    b.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    // A rally streak belongs to one player: their own consecutive returns,
+    // never the opponent's. p1 serves, so p1's first ball opens the point
+    // rather than continuing one and counts for nobody. After that the two
+    // alternate, and each crossing is its sender's own return.
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1 serves
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 1
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 1
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 2
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 2
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 3
+    // p1 takes the point, so p2 is the one who let it past.
     a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
 
-    expect(a.syncs.at(-1)!.maxRally).toBe(3);
-    expect(b.syncs.at(-1)!.maxRally).toBe(3);
+    // Both peers reach the same two numbers from the same events — which is
+    // the whole point of the replica, and the thing that drifted before.
+    expect(a.syncs.at(-1)!.bestStreaks).toEqual([2, 3]);
+    expect(b.syncs.at(-1)!.bestStreaks).toEqual([2, 3]);
+  });
+
+  it('ends only the streak of the player who missed, and carries the other across the point', async () => {
+    const [a, b] = await pairedPeers();
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1 serves
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 1
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 1
+    a.link.sendGame({ type: 'point_scored', scorer: 'p1' }); // p2 let it past
+    // p2 serves the next point, so p1's next ball is a genuine return — and it
+    // CONTINUES the streak p1 already had. Winning a point was never a reason
+    // to lose your own streak, which is exactly what the shared counter did to
+    // both players every time either of them scored.
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2 serves
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 2
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 1
+    // A point is what always reports, and the last one is what the match is
+    // recorded from — mid-rally the relay is only told on the first crossing.
+    a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
+    expect(a.syncs.at(-1)!.bestStreaks).toEqual([2, 1]);
+    expect(b.syncs.at(-1)!.bestStreaks).toEqual([2, 1]);
   });
 
   it('tells the relay the match is live on the FIRST crossing, and once', async () => {

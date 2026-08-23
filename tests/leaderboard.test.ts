@@ -28,7 +28,7 @@ beforeAll(async () => {
     username: name,
     playerScore: 5,
     opponentScore: 0,
-    maxRally: 3,
+    bestStreak: 3, endStreak: 0,
     mode: 'multiplayer',
     isWinner: true,
   });
@@ -122,7 +122,7 @@ describe('a board only lists players with progress on what it measures', () => {
       username: 'SoloOnly',
       playerScore: 5,
       opponentScore: 2,
-      maxRally: 12,
+      bestStreak: 12, endStreak: 0,
       mode: 'solo',
       difficulty: 'rookie',
       isWinner: true,
@@ -147,7 +147,7 @@ describe('a board only lists players with progress on what it measures', () => {
       username: 'FirstLoss',
       playerScore: 0,
       opponentScore: 5,
-      maxRally: 0,
+      bestStreak: 0, endStreak: 0,
       mode: 'multiplayer',
       isWinner: false,
     });

@@ -378,7 +378,21 @@ export const TIER_STYLE: Record<Tier, string> = {
 // match earns it (solo included), it is scaled by how surprising the result
 // was, and it NEVER decreases — levels can't regress.
 export const XP_PER_POINT = 12;
-export const XP_PER_RALLY = 4;
+// Raised from 4 with the counting change. A rally number is one player's own
+// consecutive returns now rather than a whole point's worth of both players',
+// which measures about 0.72x the old figure across the ladder — so the rate
+// goes up by roughly the reciprocal and the XP a rally is worth stays put.
+export const XP_PER_RALLY = 6;
+/**
+ * How much of a rally streak one match may be paid for.
+ *
+ * A streak carries between matches, so without a ceiling the SAME run is paid
+ * for again in every match it spans — a player who stops missing earns steadily
+ * more per match for something they did once, and it never stops rising. The
+ * cap sits around the 99th percentile of a streak built inside a single match,
+ * so ordinary play never reaches it and only a carried run does.
+ */
+export const RALLY_XP_CAP = 25;
 export const XP_WIN_BONUS = 40;
 export const XP_PVP_MULTIPLIER = 1.5;
 // Every finished match is progression, win or lose. Playing one is the part
@@ -404,7 +418,8 @@ export function surpriseMultiplier(winProb: number, won: boolean): number {
 
 export function matchXp(params: {
   playerScore: number;
-  maxRally: number;
+  /** This player's longest rally STREAK in the match — their own returns. */
+  bestStreak: number;
   won: boolean;
   winProb: number;
   mode: GameMode;
@@ -412,7 +427,7 @@ export function matchXp(params: {
   const base =
     XP_PLAY_BONUS +
     params.playerScore * XP_PER_POINT +
-    params.maxRally * XP_PER_RALLY +
+    Math.min(params.bestStreak, RALLY_XP_CAP) * XP_PER_RALLY +
     (params.won ? XP_WIN_BONUS : 0);
   const modeMult = params.mode === 'multiplayer' ? XP_PVP_MULTIPLIER : 1;
   const xp = base * surpriseMultiplier(params.winProb, params.won) * modeMult;

@@ -27,7 +27,7 @@ const match = (playerId: string, overrides: Partial<MatchEndPayload> = {}): Matc
   username: `Tester-${playerId}`,
   playerScore: 7,
   opponentScore: 3,
-  maxRally: 8,
+  bestStreak: 8, endStreak: 0,
   mode: 'multiplayer',
   isWinner: true,
   ...overrides,
@@ -189,7 +189,7 @@ describe('GameDatabase', () => {
   it('keeps uncertainty above the floor after a long losing streak', () => {
     init('p_floor', 'FloorCase');
     for (let i = 0; i < 40; i++) {
-      db.recordMatch(match('p_floor', { isWinner: false, playerScore: 0, maxRally: 1 }));
+      db.recordMatch(match('p_floor', { isWinner: false, playerScore: 0, bestStreak: 1 }));
     }
     const p = db.getProfile('p_floor');
     expect(p.rankSigma).toBeGreaterThanOrEqual(0.6);
@@ -375,12 +375,12 @@ describe('scaled achievement rewards', () => {
     // then ten Pro wins at level 10 or above. The whole path has to be walked
     // before it can be earned at all.
     init('p_ach_hard', 'AchHard');
-    db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'rookie', maxRally: 5 }));
+    db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'rookie', bestStreak: 5 }));
     for (let i = 0; i < 60 && !db.getProfile('p_ach_hard').achievements.includes('ai_pro_10'); i++) {
-      db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'pro', maxRally: 5 }));
+      db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'pro', bestStreak: 5 }));
     }
     expect(db.getProfile('p_ach_hard').achievements).toContain('ai_pro_10');
-    const res = db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'cyber', maxRally: 5 }));
+    const res = db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'cyber', bestStreak: 5 }));
     const hard = res.newAchievements.find((a) => a.id === 'cyber_slayer')!;
     expect(hard).toBeTruthy();
     expect(hard.awardedXp).toBeGreaterThan(0);
@@ -390,7 +390,7 @@ describe('scaled achievement rewards', () => {
 
   it('leaves unscaled achievements exactly at their listed reward', () => {
     init('p_ach_flat', 'AchFlat');
-    const res = db.recordMatch(match('p_ach_flat', { maxRally: 12 }));
+    const res = db.recordMatch(match('p_ach_flat', { bestStreak: 12 }));
     const flat = res.newAchievements.find((a) => a.id === 'rally_10')!;
     expect(flat.awardedXp).toBe(flat.xpReward);
   });
@@ -614,5 +614,141 @@ describe('counters the server derives, and the client cannot report', () => {
     db.recordMatch(payload);
     db.recordMatch(payload);
     expect(db.getProfile('c_dupe').winStreak).toBe(1);
+  });
+});
+
+
+describe('per-mode stats', () => {
+  // The career totals on the profile pool solo and duel into one number,
+  // which answers "how much have you played" and nothing at all about how you
+  // play each mode. These are the same measures kept apart.
+
+  it('keeps a mode’s numbers to that mode', () => {
+    const id = 'dev_modestats00000001';
+    init(id, 'ModeStats');
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, opponentScore: 1, bestStreak: 6, endStreak: 0, aces: 2 }));
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: false, playerScore: 2, opponentScore: 5, bestStreak: 9 }));
+    db.recordMatch(match(id, { mode: 'multiplayer', isWinner: true, playerScore: 5, opponentScore: 0, bestStreak: 4 }));
+
+    const stats = db.getModeStats(id);
+    expect(stats.solo).toMatchObject({
+      matchesPlayed: 2,
+      matchesWon: 1,
+      matchesLost: 1,
+      pointsScored: 7,
+      aces: 2,
+      bestStreak: 9,
+    });
+    expect(stats.multiplayer).toMatchObject({
+      matchesPlayed: 1,
+      matchesWon: 1,
+      matchesLost: 0,
+      pointsScored: 5,
+      bestStreak: 4,
+    });
+    // And the pooled totals are untouched by the split.
+    const profile = db.getProfile(id);
+    expect(profile.matchesPlayed).toBe(3);
+    expect(profile.highestRally).toBe(9);
+  });
+
+  it('runs a win streak per mode, so a loss in one does not end the other', () => {
+    const id = 'dev_modestreak000001';
+    init(id, 'ModeStreak');
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true }));
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true }));
+    // A duel loss between them must not touch the solo run.
+    db.recordMatch(match(id, { mode: 'multiplayer', isWinner: false }));
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true }));
+
+    const stats = db.getModeStats(id);
+    expect(stats.solo.bestWinStreak).toBe(3);
+    expect(stats.multiplayer.bestWinStreak).toBe(0);
+    // The profile-wide streak DOES mix them, which is what it is for.
+    expect(db.getProfile(id).bestWinStreak).toBe(2);
+  });
+
+  it('gives a practice session a row of its own, with no wins in it', () => {
+    const id = 'dev_modepractice0001';
+    init(id, 'ModePractice');
+    db.recordPractice(id, 22);
+    const stats = db.getModeStats(id);
+    expect(stats.practice).toMatchObject({
+      matchesPlayed: 1,
+      matchesWon: 0,
+      matchesLost: 0,
+      bestStreak: 22,
+    });
+    // Practice has never touched the career rally, and still does not.
+    expect(db.getProfile(id).highestRally).toBe(0);
+  });
+
+  it('rides along on the profile the device reads for itself', () => {
+    const id = 'dev_modeonprofile001';
+    init(id, 'ModeOnProfile');
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 5 }));
+    expect(db.getProfile(id).modeStats?.solo?.bestStreak).toBe(5);
+    // But never on the sanitized public shape.
+    expect((db.getPublicProfile(id) as unknown as Record<string, unknown>).modeStats).toBeUndefined();
+  });
+});
+
+describe('a streak carries between matches', () => {
+  // "Streaks must carry over between matches." A match ending is not a miss,
+  // and a miss is the only thing that ends a run — so the run outlives the
+  // match, and it has to outlive a reload and a different browser too, which
+  // is why it is stored here rather than kept in the client.
+
+  it('remembers the run a match ended ON, per mode', () => {
+    const id = 'dev_carrymode0000001';
+    init(id, 'CarryMode');
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 9, endStreak: 9, matchKey: 'cm:1' }));
+    expect(db.getModeStats(id).solo.currentStreak).toBe(9);
+    // A duel is a different run and does not disturb it.
+    db.recordMatch(match(id, { mode: 'multiplayer', bestStreak: 3, endStreak: 0, matchKey: 'cm:2' }));
+    expect(db.getModeStats(id).solo.currentStreak).toBe(9);
+    expect(db.getModeStats(id).multiplayer.currentStreak).toBe(0);
+  });
+
+  it('ends the run when the match ended on a miss', () => {
+    const id = 'dev_carryend00000001';
+    init(id, 'CarryEnd');
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 12, endStreak: 12, matchKey: 'ce:1' }));
+    expect(db.getModeStats(id).solo.currentStreak).toBe(12);
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 14, endStreak: 0, matchKey: 'ce:2' }));
+    // Assigned, not maxed: a run that ended is over, however high it got.
+    expect(db.getModeStats(id).solo.currentStreak).toBe(0);
+    expect(db.getModeStats(id).solo.bestStreak).toBe(14);
+  });
+
+  it('refuses a run that claims to have ended higher than it ever reached', () => {
+    const id = 'dev_carryliar0000001';
+    init(id, 'CarryLiar');
+    db.recordMatch(match(id, { mode: 'solo', difficulty: 'rookie', bestStreak: 4, endStreak: 900, matchKey: 'cl:1' }));
+    expect(db.getModeStats(id).solo.currentStreak).toBe(4);
+  });
+
+  it('carries a practice run out of the session it was built in', () => {
+    const id = 'dev_carrywall0000001';
+    init(id, 'CarryWall');
+    db.recordPractice(id, 31, 31);
+    expect(db.getModeStats(id).practice.currentStreak).toBe(31);
+    db.recordPractice(id, 5, 0);
+    expect(db.getModeStats(id).practice.currentStreak).toBe(0);
+    expect(db.getModeStats(id).practice.bestStreak).toBe(31);
+  });
+
+  it('pays a match for a carried run only up to the cap', () => {
+    // Without a ceiling the SAME run is paid for again in every match it
+    // spans, and a player who stops missing earns more and more for it.
+    init('dev_carryxp000000001', 'CarryXpA');
+    init('dev_carryxp000000002', 'CarryXpB');
+    const big = db.recordMatch(match('dev_carryxp000000001', {
+      mode: 'solo', difficulty: 'rookie', bestStreak: 400, endStreak: 400, matchKey: 'cx:1',
+    }));
+    const huge = db.recordMatch(match('dev_carryxp000000002', {
+      mode: 'solo', difficulty: 'rookie', bestStreak: 4000, endStreak: 4000, matchKey: 'cx:2',
+    }));
+    expect(huge.earnedXp).toBe(big.earnedXp);
   });
 });

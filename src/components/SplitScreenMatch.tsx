@@ -60,7 +60,12 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
 
   const [p1Score, setP1Score] = useState<number>(0);
   const [p2Score, setP2Score] = useState<number>(0);
-  const [rallyCount, setRallyCount] = useState<number>(0);
+  // One streak per side, and they belong to their own player: a streak counts
+  // that player's own consecutive returns and ends only when THEY miss. The
+  // other player letting the ball past is a point won, not a streak broken.
+  // Split Screen records nothing on any profile, so these live and die with
+  // the match — but they are the same rule the rest of the game plays by.
+  const [streaks, setStreaks] = useState<[number, number]>([0, 0]);
   const [isServing, setIsServing] = useState<boolean>(true);
   const [server, setServer] = useState<1 | 2>(1);
   const [winner, setWinner] = useState<1 | 2 | null>(null);
@@ -83,7 +88,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   const winnerRef = useRef<1 | 2 | null>(null);
   const p1ScoreRef = useRef<number>(0);
   const p2ScoreRef = useRef<number>(0);
-  const rallyRef = useRef<number>(0);
+  const rallyRef = useRef<[number, number]>([0, 0]);
   // Which paddle each active pointer drives, so two thumbs can play at once.
   const pointerOwnersRef = useRef<Map<number, 1 | 2>>(new Map());
 
@@ -97,8 +102,6 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     const from = serverRef.current;
     setIsServing(false);
     isServingRef.current = false;
-    setRallyCount(0);
-    rallyRef.current = 0;
 
     const vx = (Math.random() - 0.5) * 0.45;
     ballRef.current = {
@@ -130,8 +133,8 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     p2ScoreRef.current = 0;
     setP1Score(0);
     setP2Score(0);
-    setRallyCount(0);
-    rallyRef.current = 0;
+    setStreaks([0, 0]);
+    rallyRef.current = [0, 0];
     setWinner(null);
     winnerRef.current = null;
     p1PaddleRef.current = 0.5;
@@ -182,8 +185,8 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         b.vx = speed * Math.sin(p1Hit.angle);
         b.y = P1_PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
         sound.playPaddleHit(speed / SERVE_SPEED);
-        rallyRef.current += 1;
-        setRallyCount(rallyRef.current);
+        rallyRef.current = [rallyRef.current[0] + 1, rallyRef.current[1]];
+        setStreaks(rallyRef.current);
       }
 
       // Player 2's paddle is the same geometry flipped about the net, so the
@@ -196,15 +199,16 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         b.vx = speed * Math.sin(p2Hit.angle);
         b.y = P2_PADDLE_Y + PADDLE_HEIGHT / 2 + b.radius;
         sound.playOpponentPaddleHit();
-        rallyRef.current += 1;
-        setRallyCount(rallyRef.current);
+        rallyRef.current = [rallyRef.current[0], rallyRef.current[1] + 1];
+        setStreaks(rallyRef.current);
       }
 
       // Baselines: a ball past a player's baseline is a point for the other.
       if (b.y >= 1.05) {
         sound.playScore();
-        rallyRef.current = 0;
-        setRallyCount(0);
+        // P1 let it past, so P1's streak ends — and only P1's.
+        rallyRef.current = [0, rallyRef.current[1]];
+        setStreaks(rallyRef.current);
         p2ScoreRef.current += 1;
         setP2Score(p2ScoreRef.current);
         if (p2ScoreRef.current >= winningScore) {
@@ -220,8 +224,9 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
 
       if (b.y <= -0.05) {
         sound.playScore();
-        rallyRef.current = 0;
-        setRallyCount(0);
+        // P2 let it past, so P2's streak ends — and only P2's.
+        rallyRef.current = [rallyRef.current[0], 0];
+        setStreaks(rallyRef.current);
         p1ScoreRef.current += 1;
         setP1Score(p1ScoreRef.current);
         if (p1ScoreRef.current >= winningScore) {
@@ -506,7 +511,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         {/* Unranked reminder, parked on the net line */}
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
           <span className="px-2 py-0.5 rounded-full bg-black/50 border border-zinc-700 text-[8px] font-mono text-zinc-400 uppercase tracking-widest">
-            {t('mode_split', lang)} · {t('rally', lang)} {rallyCount}
+            {t('mode_split', lang)} · {t('rally', lang)} {streaks[0]} — {streaks[1]}
           </span>
         </div>
       </div>

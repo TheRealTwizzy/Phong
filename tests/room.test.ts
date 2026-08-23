@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyMatchSync,
+  breakStreakOnPoint,
   clampInt,
+  countReturn,
+  resetStreaks,
+  startMatchStreaks,
   generateRoomCode,
   isRoomEmpty,
   performanceWeight,
@@ -30,8 +34,9 @@ const room = (over: Partial<Room> = {}): Room => ({
   id: 'ABCD',
   players: [null, null],
   scores: [0, 0],
-  rallyCount: 0,
-  maxRallyInMatch: 0,
+  streaks: [0, 0],
+  bestStreaks: [0, 0],
+  crossingsThisPoint: 0,
   servingPlayer: 0,
   rematchVotes: [false, false],
   config: normalizeRoomConfig({ winningScore: 5 }),
@@ -49,7 +54,7 @@ const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
   matchSeq: 1,
   p1Score: 0,
   p2Score: 0,
-  maxRally: 0,
+  bestStreaks: [0, 0] as [number, number],
   ...over,
 });
 
@@ -85,7 +90,7 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // startMatch for it, so their numbering is the only thing that tells the
     // two results apart.
     const r = room({ matchSeq: 1, scores: [5, 2], matchOver: true, ready: [true, true] });
-    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 1, p2Score: 0, maxRally: 4 }));
+    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 1, p2Score: 0, bestStreaks: [4, 4] as any }));
     expect(r.matchSeq).toBe(2);
     expect(r.scores).toEqual([1, 0]);
     expect(r.matchOver).toBe(false);
@@ -97,10 +102,10 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // Reports are absolute, not deltas, and arrive from both peers over an
     // unordered link. A late one carrying an older score must not undo a point.
     const r = room();
-    applyMatchSync(r, sync({ p1Score: 3, p2Score: 2, maxRally: 12 }));
-    applyMatchSync(r, sync({ p1Score: 1, p2Score: 0, maxRally: 2 }));
+    applyMatchSync(r, sync({ p1Score: 3, p2Score: 2, bestStreaks: [12, 12] as any }));
+    applyMatchSync(r, sync({ p1Score: 1, p2Score: 0, bestStreaks: [2, 2] as any }));
     expect(r.scores).toEqual([3, 2]);
-    expect(r.maxRallyInMatch).toBe(12);
+    expect(r.bestStreaks[0]).toBe(12);
   });
 
   it('holds a reported score inside the room own winning score', () => {
@@ -112,17 +117,17 @@ describe('applyMatchSync — a score reported by a peer', () => {
 
   it('survives junk in every numeric field', () => {
     const r = room();
-    applyMatchSync(r, sync({ p1Score: NaN, p2Score: Infinity, maxRally: -12 } as any));
+    applyMatchSync(r, sync({ p1Score: NaN, p2Score: Infinity, bestStreaks: [-12, -12] as any } as any));
     // Note Infinity lands on 0, not on the winning score. clampInt treats a
     // non-finite number as unusable rather than as "very large", so claiming
     // an infinite score does not hand anyone the match — it reports nothing.
     expect(r.scores).toEqual([0, 0]);
-    expect(r.maxRallyInMatch).toBe(0);
+    expect(r.bestStreaks[0]).toBe(0);
 
     const r2 = room();
-    applyMatchSync(r2, sync({ p1Score: 'three', maxRally: 'lots' } as any));
+    applyMatchSync(r2, sync({ p1Score: 'three', bestStreaks: ['lots', 'lots'] as any } as any));
     expect(r2.scores).toEqual([0, 0]);
-    expect(Number.isFinite(r2.maxRallyInMatch)).toBe(true);
+    expect(Number.isFinite(r2.bestStreaks[0])).toBe(true);
   });
 
   it('does not let a NaN match number pass for the current one', () => {
@@ -160,8 +165,9 @@ describe('startMatch', () => {
   it('resets everything the last match left behind', () => {
     const r = room({
       scores: [5, 3],
-      rallyCount: 9,
-      maxRallyInMatch: 31,
+      streaks: [9, 4],
+      bestStreaks: [31, 12],
+      crossingsThisPoint: 3,
       rematchVotes: [true, true],
       matchOver: true,
       inPlay: true,
@@ -171,8 +177,9 @@ describe('startMatch', () => {
     const payload = startMatch(r, 1);
 
     expect(r.scores).toEqual([0, 0]);
-    expect(r.rallyCount).toBe(0);
-    expect(r.maxRallyInMatch).toBe(0);
+    // Streaks are deliberately NOT among the things a match start resets —
+    // see the rally-streak cases below.
+    expect(r.crossingsThisPoint).toBe(0);
     expect(r.rematchVotes).toEqual([false, false]);
     expect(r.matchOver).toBe(false);
     expect(r.inPlay).toBe(false);
@@ -369,5 +376,125 @@ describe('isRoomEmpty', () => {
   it('reads a seat holding a dead socket as vacant', () => {
     expect(isRoomEmpty(room({ players: [seat(false, 0), null] }), live as never)).toBe(true);
     expect(isRoomEmpty(room({ players: [seat(true, 0), null] }), live as never)).toBe(false);
+  });
+});
+
+
+describe('rally streaks', () => {
+  // Reported as a bug: "a rally streak must never be determined by the
+  // opponent's hit/miss". It was, twice over — a single counter both players
+  // incremented, reset whenever EITHER of them scored. So your rally number
+  // went up when your opponent returned a ball and back to zero when they
+  // missed one, and told you almost nothing about your own play.
+
+  const st = (over: Partial<Room> = {}) => room(over);
+
+  it('does not count the serve for the player serving it', () => {
+    const r = st({ servingPlayer: 0 });
+    expect(countReturn(r, 0)).toBe(false);
+    expect(r.streaks).toEqual([0, 0]);
+    // And the receiver's return of it IS their first.
+    expect(countReturn(r, 1)).toBe(true);
+    expect(r.streaks).toEqual([0, 1]);
+  });
+
+  it("counts a crossing that only looks like a serve for the player who did not serve", () => {
+    // First ball of the point, but from the seat that is NOT serving — which
+    // is what a receiver's return is. Keying the exclusion on "first crossing"
+    // alone would have swallowed it.
+    const r = st({ servingPlayer: 1 });
+    expect(countReturn(r, 0)).toBe(true);
+    expect(r.streaks).toEqual([1, 0]);
+  });
+
+  it('credits each return to its own player and nobody else', () => {
+    const r = st({ servingPlayer: 0 });
+    countReturn(r, 0); // serve
+    countReturn(r, 1);
+    countReturn(r, 0);
+    countReturn(r, 1);
+    countReturn(r, 1); // two in a row is physically odd but must still only be theirs
+    expect(r.streaks).toEqual([1, 3]);
+    expect(r.bestStreaks).toEqual([1, 3]);
+  });
+
+  it('ends only the streak of the player who let the ball past', () => {
+    const r = st({ servingPlayer: 0 });
+    countReturn(r, 0); // serve
+    countReturn(r, 1);
+    countReturn(r, 0);
+    countReturn(r, 1);
+    expect(r.streaks).toEqual([1, 2]);
+    // Seat 0 takes the point, so seat 1 is the one who missed.
+    breakStreakOnPoint(r, 0, 1);
+    expect(r.streaks).toEqual([1, 0]);
+    // THE rule: winning a point is not a reason to lose your own streak.
+    expect(r.bestStreaks).toEqual([1, 2]);
+  });
+
+  it('carries a surviving streak across the point rather than restarting it', () => {
+    const r = st({ servingPlayer: 0 });
+    countReturn(r, 0); // serve
+    countReturn(r, 1);
+    countReturn(r, 0);
+    breakStreakOnPoint(r, 0, 1); // seat 0 scores, seat 1 missed
+    // Seat 1 now serves; seat 0's return of that continues their run.
+    countReturn(r, 1); // serve, not a return
+    countReturn(r, 0);
+    expect(r.streaks[0]).toBe(2);
+    expect(r.bestStreaks[0]).toBe(2);
+  });
+
+  it('opens a fresh point after one is scored, so the next serve is a serve', () => {
+    const r = st({ servingPlayer: 0 });
+    countReturn(r, 0);
+    countReturn(r, 1);
+    breakStreakOnPoint(r, 1, 0);
+    expect(r.crossingsThisPoint).toBe(0);
+    expect(r.servingPlayer).toBe(0);
+    expect(countReturn(r, 0)).toBe(false);
+  });
+
+  it('keeps a best streak once it has been set, however the streak ends', () => {
+    const r = st({ servingPlayer: 1 });
+    for (let i = 0; i < 9; i++) countReturn(r, 0);
+    expect(r.bestStreaks[0]).toBe(9);
+    breakStreakOnPoint(r, 1, 1);
+    expect(r.streaks[0]).toBe(0);
+    expect(r.bestStreaks[0]).toBe(9);
+  });
+
+  it('is cleared wholesale by resetStreaks, best streaks included', () => {
+    const r = st({ streaks: [4, 7], bestStreaks: [9, 12], crossingsThisPoint: 5 });
+    resetStreaks(r, 1);
+    expect(r.streaks).toEqual([0, 0]);
+    expect(r.bestStreaks).toEqual([0, 0]);
+    expect(r.crossingsThisPoint).toBe(0);
+    expect(r.servingPlayer).toBe(1);
+  });
+
+  // A streak carries between matches, not only between points: a new match is
+  // not a miss, and a miss is the only thing that ends one.
+  it('survives a new match, with the per-match peak reset TO it', () => {
+    const r = st({ streaks: [4, 7], bestStreaks: [9, 12], crossingsThisPoint: 5 });
+    startMatchStreaks(r, 1);
+    expect(r.streaks).toEqual([4, 7]);
+    expect(r.bestStreaks).toEqual([4, 7]);
+    expect(r.crossingsThisPoint).toBe(0);
+    expect(r.servingPlayer).toBe(1);
+  });
+
+  it('carries through startMatch, so a rematch continues the run', () => {
+    const r = st({ scores: [5, 3], streaks: [6, 0], bestStreaks: [11, 4], matchSeq: 1 });
+    startMatch(r, 0);
+    expect(r.scores).toEqual([0, 0]);
+    expect(r.streaks).toEqual([6, 0]);
+    // The last match's peak does not follow it into the next one.
+    expect(r.bestStreaks).toEqual([6, 0]);
+    // And one more return continues rather than restarts.
+    countReturn(r, 0); // serve
+    countReturn(r, 1);
+    countReturn(r, 0);
+    expect(r.streaks[0]).toBe(7);
   });
 });

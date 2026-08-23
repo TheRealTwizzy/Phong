@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { findMission } from '../src/game/missions';
-import { Device, Phone as PhoneSocket, Relay, startRelay } from './helpers/relay';
+import { Device, Phone as PhoneSocket, Relay, sleep, startRelay } from './helpers/relay';
 
 // A duel end-to-end through the REAL relay and the REAL record route, because
 // that seam is where duel results went missing and no unit test could see it:
@@ -118,6 +118,131 @@ describe('recording a duel', () => {
     p1.close();
   });
 
+  // Two sockets, one relay: messages from DIFFERENT clients have no ordering
+  // guarantee between them, and these cases are entirely about order. So each
+  // crossing waits for the effect the relay broadcasts for it — the opponent's
+  // ball_incoming — before the next one is sent. Without the barrier the tests
+  // pass nearly always, which is the worst kind.
+  const BALL = { x: 0.5, vx: 0.1, vy: -1, spin: 0, speedMultiplier: 1 };
+  const cross = async (from: PhoneSocket, to: PhoneSocket, nth: number): Promise<void> => {
+    from.send({ type: 'ball_cross_net', ball: BALL });
+    await to.awaitCount('ball_incoming', nth);
+  };
+  const point = async (from: PhoneSocket, scorer: 'p1' | 'p2', nth: number): Promise<void> => {
+    from.send({ type: 'point_scored', scorer });
+    await from.awaitCount('score_update', nth);
+  };
+
+  it('records each seat its OWN rally streak, counted from its own returns', async () => {
+    // The whole chain, through the real relay: ball_cross_net decides whose
+    // return it was, point_scored decides whose streak ended, recordRoomMatch
+    // writes each seat the number that belongs to it, and the profile banks
+    // it. Before this, one shared counter — fed by both players and reset
+    // whenever either scored — was written to BOTH profiles as if it were
+    // each player's own.
+    const host = await newDevice('StreakHost');
+    const guest = await newDevice('StreakGuest');
+    // 3 is the shortest match normalizeRoomConfig will allow.
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+    expect(matchSeq).toBe(1);
+
+    // p1 serves (seatDuel leaves servingPlayer at 0), so p1's first ball opens
+    // the point and counts for nobody. After that each crossing is its own
+    // sender's return.
+    await cross(p1, p2, 1); // serve
+    await cross(p2, p1, 1); // p2: 1
+    await cross(p1, p2, 2); // p1: 1
+    await cross(p2, p1, 2); // p2: 2
+    await cross(p1, p2, 3); // p1: 2
+    await cross(p2, p1, 3); // p2: 3
+    await cross(p2, p1, 4); // p2: 4
+    // p2 let the next one past, so p1 takes the point — and two more after
+    // it, neither of which is a rally.
+    await point(p2, 'p1', 1);
+    await point(p2, 'p1', 2);
+    await point(p2, 'p1', 3);
+
+    await p1.await('match_recorded');
+    await p2.await('match_recorded');
+
+    const hostProfile = await getProfile(host);
+    const guestProfile = await getProfile(guest);
+    // Two different numbers, from one match, for the two players in it.
+    expect(hostProfile.highestRally).toBe(2);
+    expect(guestProfile.highestRally).toBe(4);
+    p1.close();
+    p2.close();
+  });
+
+  it('keeps a winner’s streak running across the point they won', async () => {
+    // "A rally streak must never be determined by the opponent's hit/miss."
+    // The opponent missing is a point WON, and it used to zero the winner's
+    // counter along with the loser's.
+    const host = await newDevice('CarryHost');
+    const guest = await newDevice('CarryGuest');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+    expect(matchSeq).toBe(1);
+
+    await cross(p1, p2, 1); // p1 serves
+    await cross(p2, p1, 1); // p2: 1
+    await cross(p1, p2, 2); // p1: 1
+    await point(p2, 'p1', 1); // p2 missed; p2 serves next
+
+    await cross(p2, p1, 2); // p2 serves
+    await cross(p1, p2, 3); // p1: 2 — CARRIED, not restarted
+    await point(p2, 'p1', 2);
+    await point(p2, 'p1', 3);
+
+    await p1.await('match_recorded');
+    const hostProfile = await getProfile(host);
+    expect(hostProfile.highestRally).toBe(2);
+    p1.close();
+    p2.close();
+  });
+
+  it('carries a duel run into the next ROOM, not just the next match', async () => {
+    // "Streaks must carry over between matches." A new room is not a miss
+    // either, so a seat opens on whatever run this player already had going in
+    // this mode — read from the store by the relay, never taken from the
+    // client, because it decides what the match is rated and paid on.
+    const host = await newDevice('CarryRoomA');
+    const guest = await newDevice('CarryRoomB');
+
+    {
+      const { p1, p2 } = await seatDuel(host, guest, 3);
+      await cross(p1, p2, 1); // p1 serves
+      await cross(p2, p1, 1); // p2: 1
+      await cross(p1, p2, 2); // p1: 1
+      await cross(p2, p1, 2); // p2: 2
+      await cross(p1, p2, 3); // p1: 2
+      // p2 misses, so p1 takes the point on a live run of 2 and two more after.
+      await point(p2, 'p1', 1);
+      await point(p2, 'p1', 2);
+      await point(p2, 'p1', 3);
+      await p1.await('match_recorded');
+      await p2.await('match_recorded');
+      p1.close();
+      p2.close();
+    }
+    await sleep(300);
+
+    // A brand new room, and p1's run is still going.
+    const second = await seatDuel(host, guest, 3);
+    await cross(second.p1, second.p2, 1); // p1 serves — not a return
+    await cross(second.p2, second.p1, 1); // p2: 1
+    await cross(second.p1, second.p2, 2); // p1: 3, carried from the last room
+    await point(second.p2, 'p1', 1);
+    await point(second.p2, 'p1', 2);
+    await point(second.p2, 'p1', 3);
+    await second.p1.await('match_recorded');
+
+    const hostProfile = await getProfile(host);
+    expect(hostProfile.highestRally).toBe(3);
+    expect(hostProfile.modeStats?.multiplayer?.currentStreak).toBe(3);
+    second.p1.close();
+    second.p2.close();
+  }, 45000);
+
   it('records a P2P duel for BOTH players, with the winner marked as one', async () => {
     const host = await newDevice('P2PWinner');
     const guest = await newDevice('P2PLoser');
@@ -126,9 +251,9 @@ describe('recording a duel', () => {
     // Exactly what a P2P match looks like from the relay's side: no
     // point_scored ever arrives, only the peers' own account of the score.
     // Before match_sync existed the relay saw 0-0 here and filed both a loss.
-    p1.send({ type: 'match_sync', matchSeq, p1Score: 1, p2Score: 0, maxRally: 6 });
-    p2.send({ type: 'match_sync', matchSeq, p1Score: 1, p2Score: 0, maxRally: 6 });
-    p1.send({ type: 'match_sync', matchSeq, p1Score: 3, p2Score: 1, maxRally: 11 });
+    p1.send({ type: 'match_sync', matchSeq, p1Score: 1, p2Score: 0, bestStreaks: [6, 6] });
+    p2.send({ type: 'match_sync', matchSeq, p1Score: 1, p2Score: 0, bestStreaks: [6, 6] });
+    p1.send({ type: 'match_sync', matchSeq, p1Score: 3, p2Score: 1, bestStreaks: [11, 11] });
 
     const hostRecord = await p1.await('match_recorded');
     const guestRecord = await p2.await('match_recorded');
@@ -159,7 +284,7 @@ describe('recording a duel', () => {
     const guest = await newDevice('MissionFoe');
     const { p1, p2, matchSeq } = await seatDuel(host.device, guest, 3);
 
-    p1.send({ type: 'match_sync', matchSeq, p1Score: 3, p2Score: 0, maxRally: 9 });
+    p1.send({ type: 'match_sync', matchSeq, p1Score: 3, p2Score: 0, bestStreaks: [9, 9] });
     await p1.await('match_recorded');
 
     const winner = await getMissions(host.device);
@@ -188,7 +313,7 @@ describe('recording a duel', () => {
     const guest = await newDevice('DedupeGuest');
     const { p1, p2, roomId, matchSeq } = await seatDuel(host, guest, 3);
 
-    p1.send({ type: 'match_sync', matchSeq, p1Score: 3, p2Score: 2, maxRally: 14 });
+    p1.send({ type: 'match_sync', matchSeq, p1Score: 3, p2Score: 2, bestStreaks: [14, 14] });
     await p1.await('match_recorded');
     const afterRelay = await getProfile(host);
 
@@ -199,7 +324,7 @@ describe('recording a duel', () => {
       body: JSON.stringify({
         playerScore: 3,
         opponentScore: 2,
-        maxRally: 14,
+        bestStreak: 14, endStreak: 0,
         mode: 'multiplayer',
         isWinner: true,
         roomId,
@@ -292,7 +417,7 @@ describe('recording a duel', () => {
       body: JSON.stringify({
         playerScore: 3,
         opponentScore: 0,
-        maxRally: 5,
+        bestStreak: 5, endStreak: 0,
         mode: 'multiplayer',
         isWinner: true,
         roomId,
@@ -327,7 +452,7 @@ describe('recording a duel', () => {
       body: JSON.stringify({
         playerScore: 3,
         opponentScore: 0,
-        maxRally: 4,
+        bestStreak: 4, endStreak: 0,
         mode: 'multiplayer',
         isWinner: true,
         roomId,
@@ -345,7 +470,7 @@ describe('recording a duel', () => {
     const body = {
       playerScore: 5,
       opponentScore: 2,
-      maxRally: 7,
+      bestStreak: 7, endStreak: 0,
       mode: 'solo',
       difficulty: 'rookie',
       isWinner: true,

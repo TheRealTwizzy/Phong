@@ -82,7 +82,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
   language = 'en',
 }) => {
   // The rally counter is noise until a rally is actually going.
-  const showRally = stats.rallyCount >= 3;
+  const showRally = stats.streak >= 3;
   const isPractice = mode === 'practice';
 
   return (
@@ -135,7 +135,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
               className="text-title tnum leading-none"
               style={{ color: theme.playerPaddleColor }}
             >
-              {stats.rallyCount}
+              {stats.streak}
             </span>
           </div>
           <div className="flex flex-col items-center">
@@ -144,7 +144,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
               {t('best', language)}
             </span>
             <span id="practice-best-rally" className="text-title tnum leading-none text-warn">
-              {stats.maxRally}
+              {stats.bestStreak}
             </span>
           </div>
         </div>
@@ -201,7 +201,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
               title={t('rally', language)}
             >
               <Flame className="h-3 w-3 fill-current" />
-              {stats.rallyCount}
+              {stats.streak}
             </div>
           )}
         </div>

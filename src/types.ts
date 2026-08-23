@@ -143,10 +143,47 @@ export interface Ripple {
 export interface PlayerStats {
   score: number;
   opponentScore: number;
-  rallyCount: number;
-  maxRally: number;
+  /**
+   * A rally streak belongs to ONE player: it counts their own consecutive
+   * successful returns and it breaks only when THEY fail to return one. The
+   * opponent missing — a point YOU just won — leaves it alone, so a streak
+   * runs across points and ends only on your own miss. The serve is not a hit:
+   * the receiver's return of it is the receiver's first, and the server's
+   * streak resumes on their first return of that.
+   *
+   * What this replaced was a single shared counter that both players
+   * incremented and that reset whenever either of them scored, so your "rally"
+   * number was mostly a statement about your opponent.
+   */
+  streak: number;
+  bestStreak: number;
+  /** The same two, for the opponent. Tracked separately, never mixed in. */
+  oppStreak: number;
+  oppBestStreak: number;
   aces: number;
   matchesWon: number;
+}
+
+/**
+ * One mode's own stats. The career totals on PlayerProfile pool solo and duel
+ * into one number; these keep them apart. Practice has no opponent, so its
+ * wins, losses and aces stay zero and only sessions and the streak move.
+ * Split Screen is absent: two people share one phone and only one of them has
+ * an account, so there is nobody to write the other side's numbers to.
+ */
+export interface ModeStats {
+  matchesPlayed: number;
+  matchesWon: number;
+  matchesLost: number;
+  pointsScored: number;
+  aces: number;
+  bestStreak: number;
+  /**
+   * The run still going in this mode. A streak carries across matches, so a
+   * new match in this mode starts from here rather than from zero.
+   */
+  currentStreak: number;
+  bestWinStreak: number;
 }
 
 export interface PlayerProfile {
@@ -194,6 +231,11 @@ export interface PlayerProfile {
    * good: the mission's XP is a daily reward, this is not.
    */
   eliteUnlocks?: string[];
+  /**
+   * Stats kept per mode, keyed by GameMode. Only ever sent to the profile's
+   * OWN device — PublicProfile is a separate, sanitized shape.
+   */
+  modeStats?: Record<string, ModeStats>;
   dailyStreak: number;
   lastDailyDate?: string;
   achievements: string[]; // achievement IDs
@@ -370,7 +412,15 @@ export interface MatchEndPayload {
   opponentName?: string;
   playerScore: number;
   opponentScore: number;
-  maxRally: number;
+  /** THIS player's longest rally streak in this match — see PlayerStats. */
+  bestStreak: number;
+  /**
+   * The streak this player finished the match ON. Zero if the last thing they
+   * did was miss. A streak carries into the next match, so this is what the
+   * next one starts from — and it is a different number from the peak above,
+   * which is what the match is rated and paid on.
+   */
+  endStreak: number;
   mode: GameMode;
   difficulty?: AIDifficulty;
   isWinner: boolean;
@@ -460,7 +510,13 @@ export type WSClientMessage =
   // This tells it where the match got to — absolute values, not a delta, so a
   // dropped one heals itself and a duplicate is a no-op. Without it the relay
   // believed every P2P match was still 0-0 and had never started.
-  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; maxRally: number }
+  // `bestStreaks` is per SEAT, [p1, p2]. One number for the whole match was
+  // fine when the counter was shared and is not now: the relay writes each
+  // seat its own result, and rating it on the other player's streak would be
+  // rating it on the wrong thing. NOTE this member stays on ONE line —
+  // tests/protocolParity.test.ts reads this union to the first line-ending
+  // semicolon, and a multi-line member truncates the whole parse.
+  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number] }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
   | { type: 'rtc_signal'; payload: RTCSignalPayload }

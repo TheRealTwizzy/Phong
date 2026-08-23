@@ -75,6 +75,13 @@ import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
 import { SessionGuard } from './components/SessionGuard';
 import { TutorialModal } from './components/TutorialModal';
+import {
+  opponentMiss,
+  opponentReturn,
+  ownMiss,
+  ownReturn,
+  startMatchStreaks,
+} from './game/streaks';
 import { OnboardingModal } from './components/OnboardingModal';
 import { PublicProfileModal } from './components/PublicProfileModal';
 import {
@@ -232,8 +239,10 @@ export default function App() {
   const [stats, setStats] = useState<PlayerStats>({
     score: 0,
     opponentScore: 0,
-    rallyCount: 0,
-    maxRally: 0,
+    streak: 0,
+    bestStreak: 0,
+    oppStreak: 0,
+    oppBestStreak: 0,
     aces: 0,
     matchesWon: 0,
   });
@@ -332,6 +341,19 @@ export default function App() {
   // Who served the point currently in play — an ace is a point won directly
   // off your own serve, so the winner alone doesn't identify one.
   const servedThisPointRef = useRef<boolean>(true);
+  const isPlayerServerRef = useRef<boolean>(true);
+  /**
+   * Whether the opponent has put the ball over yet THIS point.
+   *
+   * Both of these answer the same question in the two shapes it arrives in: a
+   * serve is not a return, so the opponent's first ball of a point is theirs
+   * only when they are not the one serving. In a duel the opponent's returns
+   * are only ever observed as balls arriving, so the count is what tells the
+   * serve from a rally; in solo they are observed directly as a paddle hit,
+   * and the flag is what tells an ace from a point won off a rally.
+   */
+  const oppCrossingsThisPointRef = useRef<number>(0);
+  const oppReturnedThisPointRef = useRef<boolean>(false);
   const settingsRef = useRef<GameSettings>(settings);
   const profileRef = useRef<PlayerProfile | null>(profile);
   // Which match of the room is being played, from the relay's game_start (or
@@ -382,6 +404,7 @@ export default function App() {
   screenRef.current = screen;
   wsRef.current = ws;
   isServingRef.current = isServing;
+  isPlayerServerRef.current = isPlayerServer;
   statsRef.current = stats;
   settingsRef.current = settings;
   profileRef.current = profile;
@@ -580,7 +603,8 @@ export default function App() {
               : `AI (${settingsRef.current.difficulty})`,
           playerScore: statsRef.current.score,
           opponentScore: statsRef.current.opponentScore,
-          maxRally: statsRef.current.maxRally,
+          bestStreak: statsRef.current.bestStreak,
+          endStreak: statsRef.current.streak,
           aces: statsRef.current.aces,
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
@@ -1031,7 +1055,7 @@ export default function App() {
         playerPressure({
           playerScore: statsRef.current.score,
           opponentScore: statsRef.current.opponentScore,
-          maxRally: statsRef.current.maxRally,
+          maxRally: statsRef.current.bestStreak,
         })
       ) * 1000;
     const timer = setTimeout(() => handleServe(), delayMs);
@@ -1158,14 +1182,12 @@ export default function App() {
         shownMatchKeyRef.current = '';
         setRoomConfig(msg.config);
         p2pRef.current?.setConfig(msg.config);
-        setStats({
-          score: 0,
-          opponentScore: 0,
-          rallyCount: 0,
-          maxRally: 0,
-          aces: 0,
-          matchesWon: 0,
-        });
+        setStats((s) =>
+          startMatchStreaks(
+            { ...s, score: 0, opponentScore: 0, aces: 0, matchesWon: 0 },
+            carriedStreak('multiplayer')
+          )
+        );
         setTotalTouches(0);
         setMatchStartTime(Date.now());
         setIsPlayerServer(msg.servingPlayer === playerIndexRef.current);
@@ -1240,10 +1262,16 @@ export default function App() {
           spin: inc.spin || 0,
           speedMultiplier: inc.speedMultiplier,
         });
-        setStats((s) => {
-          const nextRally = s.rallyCount + 1;
-          return { ...s, rallyCount: nextRally, maxRally: Math.max(s.maxRally, nextRally) };
-        });
+        // The opponent put this ball over, so it is THEIR return and their
+        // streak — except when it is their serve, which opens the point
+        // rather than continuing one. Same rule the relay applies to a
+        // ball_cross_net; the client tracks it too so the HUD can show both
+        // streaks without waiting to be told.
+        {
+          const isOppServe = oppCrossingsThisPointRef.current === 0 && !isPlayerServerRef.current;
+          oppCrossingsThisPointRef.current += 1;
+          if (!isOppServe) setStats(opponentReturn);
+        }
         break;
       }
 
@@ -1253,12 +1281,7 @@ export default function App() {
         setOppBall(null);
         const myIdx = playerIndexRef.current;
         if (myIdx === 0) {
-          setStats((s) => ({
-            ...s,
-            score: msg.p1Score,
-            opponentScore: msg.p2Score,
-            rallyCount: 0,
-          }));
+          setStats((s) => applyDuelPoint(s, msg.p1Score, msg.p2Score));
           if (msg.p1Score >= configRef.current.winningScore) {
             setWinner('player');
             confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
@@ -1269,12 +1292,7 @@ export default function App() {
             setIsServing(true);
           }
         } else {
-          setStats((s) => ({
-            ...s,
-            score: msg.p2Score,
-            opponentScore: msg.p1Score,
-            rallyCount: 0,
-          }));
+          setStats((s) => applyDuelPoint(s, msg.p2Score, msg.p1Score));
           if (msg.p2Score >= configRef.current.winningScore) {
             setWinner('player');
             confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
@@ -1566,6 +1584,23 @@ export default function App() {
     }
   };
 
+  /**
+   * A point landed in a duel. Only the player who let the ball past loses
+   * their streak, and this client already knows which that was: it sent the
+   * point_scored itself when the ball crossed its own baseline, and cleared
+   * its streak there. So what is left to do here is the OPPONENT's — their
+   * streak ends exactly when my score goes up — and to open a fresh point.
+   */
+  const applyDuelPoint = (s: PlayerStats, mine: number, theirs: number): PlayerStats => {
+    const iScored = mine > s.score;
+    oppCrossingsThisPointRef.current = 0;
+    oppReturnedThisPointRef.current = false;
+    const next = { ...s, score: mine, opponentScore: theirs };
+    // My own miss already ended my streak locally, a frame before the relay
+    // said so. What is left is the opponent's, and only when I scored.
+    return iScored ? opponentMiss(next) : next;
+  };
+
   /** Guest: signal (or withdraw) readiness. Host starts via handleStartMatch. */
   const handleSendReady = (ready: boolean) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1696,16 +1731,10 @@ export default function App() {
 
           sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
           setTotalTouches((t) => t + 1);
-          setStats((s) => {
-            const nextRally = s.rallyCount + 1;
-            // Practice Wall and Split Screen never record a match, so their
-            // guaranteed returns still can't feed the rally mission.
-            return {
-              ...s,
-              rallyCount: nextRally,
-              maxRally: Math.max(s.maxRally, nextRally),
-            };
-          });
+          // My own return, and my own streak. The serve never reaches here —
+          // handleServe sets the ball's velocity directly and seeds it clear
+          // of the paddle — so this site is already exactly "a return".
+          setStats(ownReturn);
         }
 
         // ==============================================================
@@ -1758,6 +1787,13 @@ export default function App() {
         if (b.y >= 1.05) {
           b.active = false;
           sound.playLose();
+          // Whatever the mode, the ball got past ME — so mine is the streak
+          // that ends, and only mine. In a duel the relay reaches the same
+          // conclusion from the point_scored below; this is the local half of
+          // the same rule, so the HUD does not wait for a round trip.
+          setStats(ownMiss);
+          oppReturnedThisPointRef.current = false;
+          oppCrossingsThisPointRef.current = 0;
 
           if (currentMode === 'multiplayer') {
             sendNetRef.current({
@@ -1765,9 +1801,8 @@ export default function App() {
               scorer: playerIndexRef.current === 0 ? 'p2' : 'p1',
             });
           } else if (currentMode === 'practice') {
-            // No opponent, no score — the streak just resets and the player
-            // serves again. Best streak stays on the board.
-            setStats((s) => ({ ...s, rallyCount: 0 }));
+            // No opponent, no score — the streak just reset above and the
+            // player serves again. Best streak stays on the board.
             setIsServing(true);
             setIsPlayerServer(true);
           } else {
@@ -1780,7 +1815,9 @@ export default function App() {
                 setIsServing(true);
                 setIsPlayerServer(true); // Player serves next
               }
-              return { ...s, opponentScore: nextOppScore, rallyCount: 0 };
+              // I let it past, so mine is the streak that ends. The AI's is
+              // untouched: a streak is never decided by the other player.
+              return { ...s, opponentScore: nextOppScore, streak: 0 };
             });
           }
         }
@@ -1836,7 +1873,8 @@ export default function App() {
 
           sound.playOpponentPaddleHit();
           setTotalTouches((t) => t + 1);
-          setStats((s) => ({ ...s, rallyCount: s.rallyCount + 1 }));
+          oppReturnedThisPointRef.current = true;
+          setStats(opponentReturn);
         }
 
         // Check Ball Crossing TOP Net BACK into Player's Court!
@@ -1858,12 +1896,18 @@ export default function App() {
         if (ob.y >= 1.05) {
           ob.active = false;
           sound.playScore();
+          oppReturnedThisPointRef.current = false;
+          oppCrossingsThisPointRef.current = 0;
 
           setStats((s) => {
             const nextScore = s.score + 1;
             // An ace: the player served and the opponent never got the ball
             // back over, so the rally never actually started.
-            const ace = servedThisPointRef.current && s.rallyCount <= 1;
+            // An ace: I served and the AI never got it back over, so the
+            // rally never actually started. Read off whether they returned it
+            // rather than off a counter — the counter is mine now, and mine
+            // does not move when I serve.
+            const ace = servedThisPointRef.current && !oppReturnedThisPointRef.current;
             if (nextScore >= configRef.current.winningScore) {
               setWinner('player');
               confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
@@ -1871,13 +1915,14 @@ export default function App() {
               setIsServing(true);
               setIsPlayerServer(false); // AI serves next
             }
-            return {
+            // The AI let it past, so theirs is the streak that ends — and
+            // mine is untouched, which is the whole rule.
+            return opponentMiss({
               ...s,
               score: nextScore,
               aces: s.aces + (ace ? 1 : 0),
               matchesWon: nextScore >= configRef.current.winningScore ? s.matchesWon + 1 : s.matchesWon,
-              rallyCount: 0,
-            };
+            });
           });
         }
 
@@ -1895,14 +1940,19 @@ export default function App() {
   const adoptSessionRef = useRef<() => Promise<ClientSessionStatus>>(async () => 'connecting');
   adoptSessionRef.current = adoptSession;
 
-  const resetMatch = () => {
-    setStats((s) => ({
-      ...s,
-      score: 0,
-      opponentScore: 0,
-      rallyCount: 0,
-      maxRally: 0,
-    }));
+  /**
+   * The run this player already has going in a mode. A streak carries between
+   * matches, so a new one opens on it — and it is read from the profile rather
+   * than kept in memory, because it has to survive a reload and a different
+   * browser too.
+   */
+  const carriedStreak = (m: GameMode): number =>
+    m === 'split' ? 0 : (profileRef.current?.modeStats?.[m]?.currentStreak ?? 0);
+
+  const resetMatch = (forMode: GameMode = modeRef.current) => {
+    setStats((s) =>
+      startMatchStreaks({ ...s, score: 0, opponentScore: 0 }, carriedStreak(forMode))
+    );
     setTotalTouches(0);
     setMatchStartTime(Date.now());
     setWinner(null);
@@ -1930,7 +1980,8 @@ export default function App() {
   const startMatch = (newMode: GameMode) => {
     setMode(newMode);
     setScreen('game');
-    resetMatch();
+    // Named explicitly: modeRef still holds the mode being left.
+    resetMatch(newMode);
   };
 
   // Court → menu, from the HUD home button or the winner overlay. Multiplayer
@@ -1939,13 +1990,15 @@ export default function App() {
   // match is recorded and no rating moves — the server decides what the streak
   // is worth and holds a daily cap, since a guaranteed-return drill would
   // otherwise be the fastest XP in the game.
-  const submitPracticeSession = useCallback(async (bestStreak: number) => {
-    if (bestStreak < 3) return;
+  const submitPracticeSession = useCallback(async (bestStreak: number, endStreak: number) => {
+    // A session worth nothing is still worth carrying: leaving the wall on a
+    // run of two does not end it, so the report goes out either way.
+    if (bestStreak < 3 && endStreak <= 0) return;
     try {
       const res = await fetch('/api/practice/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bestStreak }),
+        body: JSON.stringify({ bestStreak, endStreak }),
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -1970,7 +2023,7 @@ export default function App() {
       return;
     }
     if (mode === 'practice') {
-      void submitPracticeSession(statsRef.current.maxRally);
+      void submitPracticeSession(statsRef.current.bestStreak, statsRef.current.streak);
     }
     setScreen('menu');
     resetMatch();
@@ -2348,8 +2401,10 @@ export default function App() {
               ball={ball}
               paddleX={paddleX}
               totalTouches={totalTouches}
-              rallyCount={stats.rallyCount}
-              maxRally={stats.maxRally}
+              streak={stats.streak}
+              bestStreak={stats.bestStreak}
+              oppStreak={stats.oppStreak}
+              oppBestStreak={stats.oppBestStreak}
               theme={currentTheme}
               isVisible={telemetryOpen}
               onToggleVisible={() => setTelemetryOpen((o) => !o)}
@@ -2386,7 +2441,7 @@ export default function App() {
               (oppBall?.active || (!ball.active && !(isServing && isPlayerServer)))
             }
             oppEstimatedX={oppBall?.active ? 1 - oppBall.x : 0.5}
-            rallyCount={stats.rallyCount}
+            rallyCount={stats.streak}
             language={currentLanguage}
             shakeTrigger={shakeTrigger}
             netLabel={mode === 'practice' ? t('return_line', currentLanguage) : undefined}
@@ -2462,7 +2517,7 @@ export default function App() {
                     />
                     <StatTile
                       label={t('longest_rally', currentLanguage)}
-                      value={stats.maxRally}
+                      value={stats.bestStreak}
                       tone="warn"
                     />
                     {lastMatchResult.tier ? (

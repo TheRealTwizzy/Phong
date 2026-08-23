@@ -10,6 +10,8 @@ import {
   LeaderboardEntry,
   MatchEndPayload,
   MatchEndResult,
+  ModeStats,
+  GameMode,
   DailyMission,
 } from '../src/types';
 import { validateUsername, usernameLockExpiry } from '../src/profileRules';
@@ -89,11 +91,19 @@ const WIPE_V2_KEY = 'wipe_v2';
 // ranked bands, the eight-branch achievement tree, the Cyber climb, abandon
 // penalties. Everything stored was earned under rules that no longer exist.
 const WIPE_V3_KEY = 'wipe_v3';
+// A fourth, for the rally rework. A rally number used to be a single counter
+// both players incremented, reset whenever either of them scored; it is now
+// one player's own consecutive returns, broken only by their own miss. Every
+// banked highestRally, every matches.maxRally and every rally mission's
+// progress was measured on the old rule and is not comparable to the new one
+// — and the thresholds moved under them in the same release. There is no
+// conversion that would be honest, so the slate is cleared.
+const WIPE_V4_KEY = 'wipe_v4';
 // Every key, oldest first. applyWipe re-stamps ALL of them after running:
 // stamping only some would leave a hole that re-triggers an earlier wipe on
 // the next boot — and since each wipe clears `meta`, two half-stamped keys
 // would take turns wiping the database on every single start.
-const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY];
+const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY, WIPE_V4_KEY];
 
 /**
  * How long a recorded match stays deduplicable. Long enough to cover a match
@@ -326,6 +336,32 @@ class GameDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
       CREATE INDEX IF NOT EXISTS idx_matches_p2 ON matches(player2Id);
+      -- Per-mode stats. The career totals on the players table mix solo and
+      -- duel into a single number, which answers "how much have you played"
+      -- and nothing at all about how you play each mode. A separate table
+      -- rather than four times the columns: upsertProfile is a hand-written
+      -- INSERT whose column list, VALUES tuple, DO UPDATE SET and positional
+      -- args all have to agree, and every column added there is four chances
+      -- to get it wrong. Split Screen is absent by design — it is two people
+      -- on one phone and only one of them has an account.
+      CREATE TABLE IF NOT EXISTS player_mode_stats (
+        playerId TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        matchesPlayed INTEGER NOT NULL DEFAULT 0,
+        matchesWon INTEGER NOT NULL DEFAULT 0,
+        matchesLost INTEGER NOT NULL DEFAULT 0,
+        pointsScored INTEGER NOT NULL DEFAULT 0,
+        aces INTEGER NOT NULL DEFAULT 0,
+        bestStreak INTEGER NOT NULL DEFAULT 0,
+        -- The run still going. A rally streak carries across matches, not just
+        -- across points, so it has to outlive the match it was built in — and
+        -- across a reload and a different browser too, which means it lives
+        -- here rather than in the client.
+        currentStreak INTEGER NOT NULL DEFAULT 0,
+        winStreak INTEGER NOT NULL DEFAULT 0,
+        bestWinStreak INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, mode)
+      );
       CREATE TABLE IF NOT EXISTS avatars (
         playerId TEXT PRIMARY KEY,
         data BLOB NOT NULL,
@@ -473,6 +509,7 @@ class GameDatabase {
     this.applyWipe(WIPE_V1_KEY, 'wipe_v1: cleared all player data for the fresh launch (0 players)');
     this.applyWipe(WIPE_V2_KEY, 'wipe_v2: cleared all player data for the rebalanced AI ladder (0 players)');
     this.applyWipe(WIPE_V3_KEY, 'wipe_v3: cleared all player data for the progression overhaul (0 players)');
+    this.applyWipe(WIPE_V4_KEY, 'wipe_v4: cleared all player data for the rally-streak rework (0 players)');
   }
 
   private applyWipe(key: string, message: string): void {
@@ -498,6 +535,7 @@ class GameDatabase {
       // been deleted out from under them.
       this.sql.exec('DROP TABLE IF EXISTS device_links');
       this.sql.exec('DROP TABLE IF EXISTS recent_missions');
+      this.sql.exec('DROP TABLE IF EXISTS player_mode_stats');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -786,7 +824,11 @@ class GameDatabase {
     if (!row) return null;
     // Elite unlocks live in their own permanent table; the client checks them
     // when deciding which themes are available, so they ride the profile.
-    return { ...rowToProfile(row), eliteUnlocks: this.eliteUnlocks(id) };
+    return {
+      ...rowToProfile(row),
+      eliteUnlocks: this.eliteUnlocks(id),
+      modeStats: this.getModeStats(id),
+    };
   }
 
   public getProfile(id: string): PlayerProfile {
@@ -965,9 +1007,101 @@ class GameDatabase {
     return { counted: true, penalized, abandonsToday: row.count };
   }
 
+  /**
+   * Fold one result into a mode's own row.
+   *
+   * The career totals on `players` mix solo and duel into a single number,
+   * which answers "how much have you played" and nothing at all about how you
+   * play each mode. These are the same measures kept apart, per mode.
+   *
+   * Additive and derived here, like every other counter: a client reports a
+   * match, never a total. Split Screen never reaches this — it is two people
+   * on one phone and only one of them has an account to write to.
+   */
+  private bumpModeStats(
+    playerId: string,
+    mode: GameMode,
+    d: {
+      played?: number;
+      won?: boolean;
+      pointsScored?: number;
+      aces?: number;
+      bestStreak?: number;
+      /**
+       * The run still going when the match ended — zero if it ended on a miss.
+       * Absent means "leave it alone", which is what a write that is not about
+       * a finished match wants.
+       */
+      endStreak?: number;
+    }
+  ): void {
+    const row = this.stmt(
+        `SELECT winStreak, currentStreak FROM player_mode_stats WHERE playerId = ? AND mode = ?`
+      )
+      .get(playerId, mode) as { winStreak: number; currentStreak: number } | undefined;
+    // A win streak IN THIS MODE: unlike the profile-wide one, a duel loss does
+    // not end a solo streak and vice versa. Undefined `won` (a practice
+    // session) leaves both alone rather than counting as a loss.
+    const nextWinStreak =
+      d.won === undefined ? (row?.winStreak ?? 0) : d.won ? (row?.winStreak ?? 0) + 1 : 0;
+    // The run that carries. Assigned, not accumulated and not maxed: it can
+    // legitimately go DOWN to zero, because ending a match on a miss is
+    // exactly what ends a streak.
+    const nextCurrent =
+      d.endStreak === undefined
+        ? (row?.currentStreak ?? 0)
+        : Math.max(0, Math.round(d.endStreak));
+    this.stmt(
+        `INSERT INTO player_mode_stats
+           (playerId, mode, matchesPlayed, matchesWon, matchesLost,
+            pointsScored, aces, bestStreak, currentStreak, winStreak, bestWinStreak)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(playerId, mode) DO UPDATE SET
+           matchesPlayed = matchesPlayed + excluded.matchesPlayed,
+           matchesWon    = matchesWon    + excluded.matchesWon,
+           matchesLost   = matchesLost   + excluded.matchesLost,
+           pointsScored  = pointsScored  + excluded.pointsScored,
+           aces          = aces          + excluded.aces,
+           bestStreak    = MAX(bestStreak, excluded.bestStreak),
+           currentStreak = excluded.currentStreak,
+           winStreak     = excluded.winStreak,
+           bestWinStreak = MAX(bestWinStreak, excluded.winStreak)`
+      )
+      .run(
+        playerId,
+        mode,
+        d.played ?? 0,
+        d.won === true ? 1 : 0,
+        d.won === false ? 1 : 0,
+        Math.max(0, Math.round(d.pointsScored ?? 0)),
+        Math.max(0, Math.round(d.aces ?? 0)),
+        Math.max(0, Math.round(d.bestStreak ?? 0)),
+        nextCurrent,
+        nextWinStreak,
+        nextWinStreak
+      );
+  }
+
+  /** Every mode this player has a row for, keyed by mode. */
+  public getModeStats(playerId: string): Record<string, ModeStats> {
+    const rows = this.stmt(
+        `SELECT mode, matchesPlayed, matchesWon, matchesLost, pointsScored,
+                aces, bestStreak, currentStreak, bestWinStreak
+           FROM player_mode_stats WHERE playerId = ?`
+      )
+      .all(playerId) as unknown as (ModeStats & { mode: string })[];
+    const out: Record<string, ModeStats> = {};
+    for (const r of rows) {
+      const { mode, ...rest } = r;
+      out[mode] = rest;
+    }
+    return out;
+  }
+
   public recordPractice(
     playerId: string,
     bestStreak: number,
+    endStreak: number = 0,
     now: Date = new Date()
   ): {
     earnedXp: number;
@@ -977,6 +1111,17 @@ class GameDatabase {
   } {
     const profile = this.getProfile(playerId);
     if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
+
+    // Practice has no opponent, so it has no wins, losses or aces — a session
+    // and a streak are all there is to keep. Banked whatever the daily XP cap
+    // says, because the cap is about XP, not about what happened.
+    const peak = Math.max(0, Math.floor(bestStreak || 0));
+    this.bumpModeStats(playerId, 'practice', {
+      played: 1,
+      bestStreak: peak,
+      // A run cannot end higher than it ever reached.
+      endStreak: Math.min(peak, Math.max(0, Math.floor(endStreak || 0))),
+    });
 
     const dayKey = missionDayKey(now);
     const row = this.stmt(`SELECT xpAwarded FROM daily_practice WHERE playerId = ? AND dayKey = ?`)
@@ -1634,9 +1779,24 @@ class GameDatabase {
     const winProb = winProbability(myMmr, oppRating);
 
     // 2. Experience — always positive, never subtracted: levels can't regress.
+    // Coerced, not trusted. A client that omits the field — an older bundle
+    // mid-deploy, or a malformed POST — used to reach matchXp with undefined,
+    // which multiplies to NaN, lands NaN in profile.xp and only surfaces as
+    // "NOT NULL constraint failed: players.xp" from a write three functions
+    // later. Everything else read off the payload is bounded; this is too.
+    const bound = (v: unknown): number => {
+      const n = Math.floor(Number(v));
+      return Number.isFinite(n) ? Math.max(0, Math.min(100000, n)) : 0;
+    };
+    const bestStreak = bound(payload.bestStreak);
+    payload.bestStreak = bestStreak;
+    // The run cannot end higher than it ever reached.
+    const endStreak = Math.min(bound(payload.endStreak), bestStreak);
+    payload.endStreak = endStreak;
+
     const earnedXp = matchXp({
       playerScore: payload.playerScore,
-      maxRally: payload.maxRally,
+      bestStreak,
       won: isWin,
       winProb,
       mode: payload.mode,
@@ -1725,6 +1885,15 @@ class GameDatabase {
     // the achievements being once-only.
     profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
     if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
+    // The same result, kept per mode as well as pooled.
+    this.bumpModeStats(profile.id, payload.mode, {
+      played: 1,
+      won: isWin,
+      pointsScored: payload.playerScore,
+      aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
+      bestStreak: payload.bestStreak,
+      endStreak: endStreak,
+    });
     // Streaks, shutouts and per-difficulty wins are derived here and only
     // here, from the result the server just accepted — a client can report a
     // match, never a total.
@@ -1737,8 +1906,10 @@ class GameDatabase {
       else if (difficulty === 'pro') profile.proWins += 1;
       else if (difficulty === 'cyber') profile.cyberWins += 1;
     }
-    if (payload.maxRally > profile.highestRally) {
-      profile.highestRally = payload.maxRally;
+    // The career best rally STREAK — this player's own consecutive returns,
+    // never the opponent's, and never a whole point's worth of both.
+    if (payload.bestStreak > profile.highestRally) {
+      profile.highestRally = payload.bestStreak;
     }
     profile.lastActive = new Date().toISOString();
 
@@ -1794,7 +1965,13 @@ class GameDatabase {
     const placed = isPlaced(profile.rankedGames, profile.rankSigma);
 
     // Foundation
-    if (payload.maxRally >= 1) unlock('first_serve');
+    // Finishing a match at all. This used to read `payload.maxRally >= 1`,
+    // which under the shared counter was true of anyone who had touched the
+    // ball once. A streak is one player's own returns now, so a player who
+    // never returns a single ball has a best streak of zero — and first_serve
+    // is what opens `mode:multiplayer`, so keying it on that would have left
+    // them unable to reach a duel at all.
+    unlock('first_serve');
     if (isWin) unlock('first_win');
     if (shutOut) unlock('shutout');
     if (profile.matchesPlayed >= 10) unlock('veteran_10');
@@ -1805,11 +1982,16 @@ class GameDatabase {
     // Rally. Measured on the profile's banked best, not this match's rally,
     // so a feat performed before a gate opened is not lost — the rung lands
     // on the first match after the gate is met.
-    if (profile.highestRally >= 10) unlock('rally_10');
-    if (profile.highestRally >= 25) unlock('rally_25');
-    if (profile.highestRally >= 50) unlock('rally_50');
-    if (profile.highestRally >= 100) unlock('rally_100');
-    if (profile.highestRally >= 150) unlock('rally_150');
+    // Rescaled by 0.72 with the counting change: a rally number is one
+    // player's own consecutive returns now rather than a whole point's worth
+    // of both players', which measures about 0.72x the old figure across the
+    // ladder and both winning scores. These rungs are therefore as far away as
+    // they always were.
+    if (profile.highestRally >= 7) unlock('rally_10');
+    if (profile.highestRally >= 18) unlock('rally_25');
+    if (profile.highestRally >= 36) unlock('rally_50');
+    if (profile.highestRally >= 72) unlock('rally_100');
+    if (profile.highestRally >= 108) unlock('rally_150');
 
     // Ladder. The rungs fire in order so a single result can climb a chain
     // it genuinely satisfies, and each one opens the next.
@@ -1881,7 +2063,7 @@ class GameDatabase {
       winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
       scoreP1: payload.playerScore,
       scoreP2: payload.opponentScore,
-      maxRally: payload.maxRally,
+      maxRally: payload.bestStreak,
       mode: payload.mode,
       difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
       timestamp: new Date().toISOString(),

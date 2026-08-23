@@ -41,8 +41,18 @@ export interface Room {
   id: string;
   players: (PlayerSession | null)[];
   scores: [number, number];
-  rallyCount: number;
-  maxRallyInMatch: number;
+  /**
+   * A rally streak per SEAT: that player's own consecutive successful returns,
+   * broken only when THAT player fails to return one. See StreakState.
+   */
+  streaks: [number, number];
+  bestStreaks: [number, number];
+  /**
+   * Balls over the net since the last point. Only ever consulted to answer
+   * "was that the serve?", which is a question about the first crossing of a
+   * point by whoever is serving.
+   */
+  crossingsThisPoint: number;
   servingPlayer: 0 | 1;
   rematchVotes: [boolean, boolean];
   /**
@@ -110,8 +120,7 @@ export interface GameStartPayload {
  */
 export function startMatch(room: Room, servingPlayer: 0 | 1): GameStartPayload {
   room.scores = [0, 0];
-  room.rallyCount = 0;
-  room.maxRallyInMatch = 0;
+  startMatchStreaks(room, servingPlayer);
   room.rematchVotes = [false, false];
   room.servingPlayer = servingPlayer;
   room.matchOver = false;
@@ -160,7 +169,7 @@ export function clampInt(value: unknown, lo: number, hi: number): number {
  */
 export function applyMatchSync(
   room: Room,
-  sync: { matchSeq: number; p1Score: number; p2Score: number; maxRally: number }
+  sync: { matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number] }
 ): { decided: boolean } {
   // Nothing to sync before the host has started a match: the replica only
   // reports from game_start onward, so a sync arriving in a lobby is noise.
@@ -178,8 +187,7 @@ export function applyMatchSync(
     // or the new match's scores would read as a regression and be ignored.
     room.matchSeq = seq;
     room.scores = [0, 0];
-    room.rallyCount = 0;
-    room.maxRallyInMatch = 0;
+    startMatchStreaks(room, room.servingPlayer);
     room.matchOver = false;
     room.rematchVotes = [false, false];
     room.ready = [false, false];
@@ -191,7 +199,10 @@ export function applyMatchSync(
     Math.max(room.scores[0], clampInt(sync.p1Score, 0, cap)),
     Math.max(room.scores[1], clampInt(sync.p2Score, 0, cap)),
   ];
-  room.maxRallyInMatch = Math.max(room.maxRallyInMatch, clampInt(sync.maxRally, 0, 100000));
+  room.bestStreaks = [
+    Math.max(room.bestStreaks[0], clampInt(sync.bestStreaks?.[0], 0, 100000)),
+    Math.max(room.bestStreaks[1], clampInt(sync.bestStreaks?.[1], 0, 100000)),
+  ];
   room.inPlay = true;
 
   if (room.scores[0] >= cap || room.scores[1] >= cap) {
@@ -209,11 +220,11 @@ export function applyMatchSync(
  * a loser who sustained long rallies is punished a little less. Deliberately
  * bounded so it nudges the rating rather than driving it.
  */
-export function performanceWeight(myScore: number, oppScore: number, maxRally: number): number {
+export function performanceWeight(myScore: number, oppScore: number, bestStreak: number): number {
   const total = myScore + oppScore;
   if (total <= 0) return 1;
   const margin = (myScore - oppScore) / total; // -1..1
-  const rallyQuality = Math.min(1, maxRally / 20); // 0..1
+  const rallyQuality = Math.min(1, bestStreak / 14); // 0..1
   const weight = 1 + 0.3 * margin + 0.15 * (rallyQuality - 0.5);
   return Math.max(0.5, Math.min(1.5, weight));
 }
@@ -286,6 +297,81 @@ export function reapRooms(
   }
   for (const { id } of dead) rooms.delete(id);
   return dead;
+}
+
+// ---------------------------------------------------------------------------
+// Rally streaks
+// ---------------------------------------------------------------------------
+
+/**
+ * A rally streak belongs to ONE player. It counts that player's own
+ * consecutive successful returns, and it breaks only when THAT player fails to
+ * return one — the opponent missing, which is a point you just won, leaves it
+ * untouched. So a streak runs across points and ends on your own miss.
+ *
+ * The serve is not a return: the receiver's return OF the serve is the
+ * receiver's first, and the server's own streak resumes on their first return
+ * of that. Identifying the serve is the only reason crossingsThisPoint exists.
+ *
+ * What this replaced was a single counter both players incremented, reset
+ * whenever either of them scored — so a player's rally number was mostly a
+ * statement about their opponent, which is exactly what it was reported as.
+ *
+ * Kept here, pure, because the P2P replica in src/net/p2p.ts has to reach the
+ * same numbers from the same events without a relay in the middle.
+ */
+export interface StreakState {
+  streaks: [number, number];
+  bestStreaks: [number, number];
+  crossingsThisPoint: number;
+  servingPlayer: 0 | 1;
+}
+
+/**
+ * Open a new MATCH without ending anybody's run.
+ *
+ * A streak carries across matches, not only across points, so a match start is
+ * not a reason to lose one — only a miss is. What resets is the per-match
+ * high-water mark, and it resets TO the run each player walked in on, because
+ * that run is genuinely part of the match's longest.
+ */
+export function startMatchStreaks(state: StreakState, servingPlayer: 0 | 1): void {
+  state.bestStreaks = [state.streaks[0], state.streaks[1]];
+  state.crossingsThisPoint = 0;
+  state.servingPlayer = servingPlayer;
+}
+
+/** Wipe both runs outright. For a fresh room, not for a fresh match. */
+export function resetStreaks(state: StreakState, servingPlayer: 0 | 1): void {
+  state.streaks = [0, 0];
+  state.bestStreaks = [0, 0];
+  state.crossingsThisPoint = 0;
+  state.servingPlayer = servingPlayer;
+}
+
+/**
+ * A ball crossed the net from `seat`. Returns whether it counted as a return —
+ * false for the serve, which opens a point rather than continuing one.
+ */
+export function countReturn(state: StreakState, seat: 0 | 1): boolean {
+  const isServe = state.crossingsThisPoint === 0 && seat === state.servingPlayer;
+  state.crossingsThisPoint += 1;
+  if (isServe) return false;
+  state.streaks[seat] += 1;
+  if (state.streaks[seat] > state.bestStreaks[seat]) {
+    state.bestStreaks[seat] = state.streaks[seat];
+  }
+  return true;
+}
+
+/**
+ * `scorer` won the point, so the OTHER seat is the one that missed — and it is
+ * the only one whose streak ends. `nextServer` is who serves the next point.
+ */
+export function breakStreakOnPoint(state: StreakState, scorer: 0 | 1, nextServer: 0 | 1): void {
+  state.streaks[scorer === 0 ? 1 : 0] = 0;
+  state.crossingsThisPoint = 0;
+  state.servingPlayer = nextServer;
 }
 
 /**

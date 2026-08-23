@@ -33,6 +33,8 @@ import {
   Room,
   startMatch as resetRoomForMatch,
   reapRooms,
+  breakStreakOnPoint,
+  countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig } from './src/types';
@@ -42,6 +44,21 @@ import { Rating, winProbability } from './src/rating';
 
 
 const rooms = new Map<string, Room>();
+
+/**
+ * The duel run this device already has going. A rally streak carries between
+ * matches, and a new ROOM is not a reason to lose one — so a seat opens on it
+ * rather than on zero. Server-side, from the store, because a client-supplied
+ * streak would be a client-supplied rating input.
+ */
+function carriedStreak(deviceId: string | null): number {
+  if (!deviceId) return 0;
+  try {
+    return Math.max(0, Math.round(db.getModeStats(deviceId).multiplayer?.currentStreak ?? 0));
+  } catch {
+    return 0;
+  }
+}
 
 function broadcast(room: Room, payload: unknown): void {
   const json = JSON.stringify(payload);
@@ -175,7 +192,8 @@ function recordRoomMatch(room: Room): void {
       opponentName: them.playerName,
       playerScore: mine,
       opponentScore: theirs,
-      maxRally: room.maxRallyInMatch,
+      bestStreak: room.bestStreaks[seat],
+      endStreak: room.streaks[seat],
       mode: 'multiplayer',
       isWinner: mine > theirs,
       rules,
@@ -185,7 +203,7 @@ function recordRoomMatch(room: Room): void {
     };
 
     const context: RecordMatchContext = {
-      performanceWeight: performanceWeight(mine, theirs, room.maxRallyInMatch),
+      performanceWeight: performanceWeight(mine, theirs, room.bestStreaks[seat]),
     };
     if (them.deviceId && seatStillHoldsAccount(them)) {
       const opp = db.getProfile(them.deviceId);
@@ -726,7 +744,8 @@ async function startServer() {
           const theirs = room.scores[seat === 0 ? 1 : 0];
           payload.playerScore = mine;
           payload.opponentScore = theirs;
-          payload.maxRally = room.maxRallyInMatch;
+          payload.bestStreak = room.bestStreaks[seat];
+          payload.endStreak = room.streaks[seat];
           payload.isWinner = mine > theirs;
 
           const opponent = room.players[seat === 0 ? 1 : 0];
@@ -734,7 +753,7 @@ async function startServer() {
             const opp = db.getProfile(opponent.playerId);
             context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
           }
-          context.performanceWeight = performanceWeight(mine, theirs, room.maxRallyInMatch);
+          context.performanceWeight = performanceWeight(mine, theirs, room.bestStreaks[seat]);
         }
       }
 
@@ -768,7 +787,10 @@ async function startServer() {
       if (!Number.isFinite(streak) || streak < 0) {
         return res.status(400).json({ error: 'BAD_REQUEST' });
       }
-      res.json(db.recordPractice(req.deviceId!, streak));
+      // Where the run got to, so it carries into the next session. Bounded by
+      // the peak in recordPractice — a run cannot end higher than it reached.
+      const ended = Number(req.body?.endStreak);
+      res.json(db.recordPractice(req.deviceId!, streak, Number.isFinite(ended) ? ended : 0));
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -984,8 +1006,13 @@ async function startServer() {
               null,
             ],
             scores: [0, 0],
-            rallyCount: 0,
-            maxRallyInMatch: 0,
+            // A duel streak carries between matches, so a seat starts on
+            // whatever run this player already had going in this mode. Read
+            // from the store rather than taken from the client: it decides
+            // what the match is rated and paid on.
+            streaks: [carriedStreak(cookieDeviceId), 0],
+            bestStreaks: [carriedStreak(cookieDeviceId), 0],
+            crossingsThisPoint: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],
             config: normalizeRoomConfig(msg.config || DEFAULT_ROOM_CONFIG),
@@ -1034,6 +1061,8 @@ async function startServer() {
             deviceId: cookieDeviceId || null,
             sessionId: cookieSessionId,
           };
+          room.streaks[1] = carriedStreak(cookieDeviceId);
+          room.bestStreaks[1] = Math.max(room.bestStreaks[1], room.streaks[1]);
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
           // Never cleared once set: a room that has been a duel is a room a
@@ -1136,10 +1165,10 @@ async function startServer() {
           room.lastActive = Date.now();
           // A ball over the net is the moment the terms stop being editable.
           room.inPlay = true;
-          room.rallyCount++;
-          if (room.rallyCount > room.maxRallyInMatch) {
-            room.maxRallyInMatch = room.rallyCount;
-          }
+          // A ball over the net from this seat is that player's return — and
+          // it belongs to their streak alone. The serve is not one, which is
+          // the only thing crossingsThisPoint is consulted for.
+          countReturn(room, playerIndex);
 
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
@@ -1164,11 +1193,13 @@ async function startServer() {
           // msg.scorer is either 'p1' or 'p2'
           const scorerIndex = msg.scorer === 'p1' ? 0 : 1;
           room.scores[scorerIndex]++;
-          room.rallyCount = 0;
 
           // Next server
           const nextServer: 0 | 1 = scorerIndex === 0 ? 1 : 0;
-          room.servingPlayer = nextServer;
+          // The scorer's OPPONENT is the one who let the ball past, so theirs
+          // is the only streak that ends here. The scorer's runs on into the
+          // next point — a rally streak is never decided by the other player.
+          breakStreakOnPoint(room, scorerIndex, nextServer);
           // Both phones end the match on this same number, so neither is left
           // playing on alone. Votes from before the final point are dropped:
           // a rematch is agreed about a match that is actually finished.

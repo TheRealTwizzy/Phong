@@ -127,8 +127,10 @@ describe('isThemeUnlocked', () => {
 
 describe('the raw-stat fallbacks are thresholds, not approximations', () => {
   it('opens at the stated number and not one short of it', () => {
-    expect(isThemeUnlocked('solar-flare', base({ highestRally: 9 }))).toBe(false);
-    expect(isThemeUnlocked('solar-flare', base({ highestRally: 10 }))).toBe(true);
+    // Rescaled with the rally rework: a rally number is one player's own
+    // consecutive returns now, which measures ~0.72x the old figure.
+    expect(isThemeUnlocked('solar-flare', base({ highestRally: 6 }))).toBe(false);
+    expect(isThemeUnlocked('solar-flare', base({ highestRally: 7 }))).toBe(true);
 
     expect(isThemeUnlocked('monochrome-noir', base({ level: 4 }))).toBe(false);
     expect(isThemeUnlocked('monochrome-noir', base({ level: 5 }))).toBe(true);
@@ -136,8 +138,8 @@ describe('the raw-stat fallbacks are thresholds, not approximations', () => {
     expect(isThemeUnlocked('hyper-violet', base({ matchesWon: 0 }))).toBe(false);
     expect(isThemeUnlocked('hyper-violet', base({ matchesWon: 1 }))).toBe(true);
 
-    expect(isThemeUnlocked('quantum-gold', base({ highestRally: 24 }))).toBe(false);
-    expect(isThemeUnlocked('quantum-gold', base({ highestRally: 25 }))).toBe(true);
+    expect(isThemeUnlocked('quantum-gold', base({ highestRally: 17 }))).toBe(false);
+    expect(isThemeUnlocked('quantum-gold', base({ highestRally: 18 }))).toBe(true);
   });
 });
 

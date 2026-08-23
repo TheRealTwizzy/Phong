@@ -209,7 +209,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'rally_10',
     title: 'Rally Apprentice',
-    description: 'Sustain a rally of 10 or more hits in a single point.',
+    description: 'Sustain a streak of 7 returns without missing one.',
     branch: 'rally',
     category: 'mastery',
     xpReward: 60,
@@ -218,7 +218,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'rally_25',
     title: 'Sonic Speed',
-    description: 'Sustain a lightning-fast rally of 25 or more hits.',
+    description: 'Sustain a streak of 18 returns without missing one.',
     branch: 'rally',
     parent: 'rally_10',
     category: 'mastery',
@@ -228,7 +228,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'rally_50',
     title: 'Quantum Reflexes',
-    description: 'Reach a legendary 50-hit rally without missing.',
+    description: 'Sustain a legendary streak of 36 returns.',
     branch: 'rally',
     parent: 'rally_25',
     category: 'mastery',
@@ -238,7 +238,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'rally_100',
     title: 'Perpetual Motion',
-    description: 'Reach a 100-hit rally without missing.',
+    description: 'Sustain a streak of 72 returns.',
     branch: 'rally',
     parent: 'rally_50',
     category: 'mastery',
@@ -271,7 +271,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'rally_150',
     title: 'Immovable Object',
-    description: 'Sustain a 150-hit rally.',
+    description: 'Sustain a streak of 108 returns.',
     branch: 'rally',
     parent: 'rally_100',
     category: 'mastery',

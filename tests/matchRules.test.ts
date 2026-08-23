@@ -207,7 +207,7 @@ describe('custom rules cost the rating, never the XP', () => {
     username: 'Ruler',
     playerScore: 5,
     opponentScore: 1,
-    maxRally: 9,
+    bestStreak: 9, endStreak: 0,
     mode: 'multiplayer',
     isWinner: true,
     rules,

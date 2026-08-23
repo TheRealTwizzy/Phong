@@ -181,7 +181,7 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     unlockRequirement: {
       description: 'Unlock with a 10+ hit rally in a single point',
       achievementId: 'rally_10',
-      minRally: 10,
+      minRally: 7,
     },
   },
   'hyper-violet': {
@@ -256,7 +256,7 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     unlockRequirement: {
       description: 'Reach 25+ Rally or Master tier',
       achievementId: 'rally_25',
-      minRally: 25,
+      minRally: 18,
       minTier: 'master',
     },
   },
