@@ -652,6 +652,28 @@ describe('per-mode stats', () => {
     expect(profile.highestRally).toBe(9);
   });
 
+  it('hands the client the row it just wrote, not the one before it', () => {
+    // MatchEndResult.profile is installed whole by the client, and `profile`
+    // is read at the top of recordMatch — before the per-mode row is bumped.
+    // Stale, the first match's row was missing outright and every later one
+    // was a match behind for the rest of the page session.
+    const id = 'dev_modefresh0000001';
+    init(id, 'ModeFresh');
+    const first = db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 9, endStreak: 9, earnedStreak: 9 })
+    );
+    expect(first.profile.modeStats?.solo?.matchesPlayed).toBe(1);
+    expect(first.profile.modeStats?.solo?.currentStreak).toBe(9);
+
+    const second = db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 12, endStreak: 12, earnedStreak: 3 })
+    );
+    expect(second.profile.modeStats?.solo?.matchesPlayed).toBe(2);
+    expect(second.profile.modeStats?.solo?.currentStreak).toBe(12);
+    // And it agrees with what the database actually holds.
+    expect(second.profile.modeStats).toEqual(db.getModeStats(id));
+  });
+
   it('runs a win streak per mode, so a loss in one does not end the other', () => {
     const id = 'dev_modestreak000001';
     init(id, 'ModeStreak');

@@ -1940,6 +1940,12 @@ class GameDatabase {
       bestStreak: payload.bestStreak,
       endStreak: endStreak,
     });
+    // Read back what that just wrote. `profile` was loaded before the bump, so
+    // its per-mode snapshot is the one from BEFORE this match — and it is the
+    // object handed to the client in MatchEndResult, which installs it whole.
+    // Left stale, the first match's row was missing entirely and every later
+    // one was a match behind for the rest of the page session.
+    profile.modeStats = this.getModeStats(profile.id);
     // Streaks, shutouts and per-difficulty wins are derived here and only
     // here, from the result the server just accepted — a client can report a
     // match, never a total.

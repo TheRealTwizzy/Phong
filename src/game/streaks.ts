@@ -89,18 +89,6 @@ export function startMatchStreaks(
   };
 }
 
-/** Wipe both runs outright — for a reset, not for a new match. */
-export function clearStreaks(s: PlayerStats): PlayerStats {
-  return {
-    ...s,
-    streak: 0,
-    bestStreak: 0,
-    earnedStreak: 0,
-    earnedBest: 0,
-    oppStreak: 0,
-    oppBestStreak: 0,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Which run does the next match open on?

@@ -3,7 +3,6 @@ import { PlayerStats } from '../src/types';
 import {
   CarryStore,
   carriedStreak,
-  clearStreaks,
   opponentMiss,
   opponentReturn,
   ownMiss,
@@ -107,18 +106,13 @@ describe('a rally streak belongs to one player', () => {
 
   it('never touches the score, which is somebody else’s job', () => {
     const s = base({ score: 3, opponentScore: 2, aces: 1, matchesWon: 5 });
-    for (const f of [ownReturn, ownMiss, opponentReturn, opponentMiss, clearStreaks]) {
+    for (const f of [ownReturn, ownMiss, opponentReturn, opponentMiss]) {
       const out = f(s);
       expect(out.score).toBe(3);
       expect(out.opponentScore).toBe(2);
       expect(out.aces).toBe(1);
       expect(out.matchesWon).toBe(5);
     }
-  });
-
-  it('clears both sides, bests included, when something really is reset', () => {
-    const s = clearStreaks(base({ streak: 4, bestStreak: 9, oppStreak: 2, oppBestStreak: 7 }));
-    expect(s).toMatchObject({ streak: 0, bestStreak: 0, oppStreak: 0, oppBestStreak: 0 });
   });
 });
 

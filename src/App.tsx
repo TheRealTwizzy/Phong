@@ -2180,9 +2180,17 @@ export default function App() {
   const carriedStreak = (m: GameMode): number =>
     carried(carryRef.current, m, profileRef.current?.modeStats?.[m]?.currentStreak ?? 0);
 
-  const resetMatch = (forMode: GameMode = modeRef.current) => {
+  /**
+   * `carried` overrides where the run opens. Only the HUD's Reset passes it —
+   * see handleResetMatch, which is also why it is a plain number here rather
+   * than something the caller has to know how to look up.
+   */
+  const resetMatch = (forMode: GameMode = modeRef.current, carried?: number) => {
     setStats((s) =>
-      startMatchStreaks({ ...s, score: 0, opponentScore: 0 }, carriedStreak(forMode))
+      startMatchStreaks(
+        { ...s, score: 0, opponentScore: 0 },
+        carried ?? carriedStreak(forMode)
+      )
     );
     setTotalTouches(0);
     setMatchStartTime(Date.now());
@@ -2271,6 +2279,24 @@ export default function App() {
     }
     setScreen('menu');
     resetMatch();
+  };
+
+  /**
+   * The HUD's Reset. Restarts the match; the run stands exactly where it
+   * stands, which is what Play Again does too — a restart is not a miss, and
+   * these are two buttons for the same intent. So a run broken by a miss
+   * stays broken and an unbroken one is not confiscated for pressing a button.
+   *
+   * It takes no arguments ON PURPOSE. Wired straight to onClick, resetMatch
+   * received the React event as its `forMode` — which happened to look up
+   * nothing and seed zero, so Reset cleared the run by accident rather than
+   * by decision, and tidying the wiring to `() => resetMatch()` would have
+   * silently turned that into "reload the stored carry", resurrecting a run
+   * the player had already missed away. Nothing in the component tree is
+   * typechecked (no @types/react), so this is the guard.
+   */
+  const handleResetMatch = () => {
+    resetMatch(modeRef.current, statsRef.current.streak);
   };
 
   resetMatchRef.current = resetMatch;
@@ -2624,7 +2650,7 @@ export default function App() {
           onToggleSound={() => setSettings((s) => ({ ...s, soundEnabled: !s.soundEnabled }))}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenProfile={() => setIsProfileOpen(true)}
-          onResetMatch={resetMatch}
+          onResetMatch={handleResetMatch}
           canResetMatch={mode !== 'multiplayer'}
           onQuitToMenu={quitToMenu}
           winningScore={activeConfig.winningScore}

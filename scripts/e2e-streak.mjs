@@ -123,6 +123,29 @@ console.log('A match banks its streak where it belongs, and carries it onward');
   if (opened.opp !== '0') fail(`the opponent carried a run in too (${opened.opp})`);
   ok('and a new match opens on it, with the opponent starting from nothing');
 
+  // The HUD's Reset restarts the match; it is not a miss, so the run stands
+  // where it stands — the same thing Play Again does. Nothing has touched the
+  // ball here, so 11 in must be 11 out. Wired straight to onClick, resetMatch
+  // was handed the React event as its mode and looked up nothing, so Reset
+  // confiscated the run by accident; tidying that to `() => resetMatch()`
+  // would instead have RELOADED the stored carry, resurrecting a run the
+  // player had already missed away. Neither is what a restart means.
+  await carrier.click('#btn-reset-match');
+  // A reset closes the telemetry overlay along with everything else it clears.
+  await carrier.waitForSelector('#court-stats-overlay', { state: 'detached', timeout: 5000 });
+  await carrier.click('#btn-show-stats-overlay');
+  await carrier.waitForSelector('#court-stats-overlay', { timeout: 5000 });
+  await sleep(400);
+  const afterReset = await carrier.evaluate(() => ({
+    mine: document.querySelector('#telemetry-my-streak')?.textContent,
+    best: document.querySelector('#telemetry-my-best')?.textContent,
+  }));
+  if (afterReset.mine !== '11') {
+    fail(`Reset took the run from 11 to ${afterReset.mine} without a miss`);
+  }
+  if (afterReset.best !== '11') fail(`Reset reopened the match peak at ${afterReset.best}`);
+  ok('and the HUD Reset restarts the match without ending the run');
+
   // Modes keep their own runs: solo does not seed practice.
   await carrier.click('#btn-quit-to-menu');
   await carrier.waitForSelector('#main-menu-screen', { timeout: 8000 });
