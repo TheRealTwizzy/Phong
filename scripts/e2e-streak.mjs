@@ -180,11 +180,17 @@ console.log('A match banks its streak where it belongs, and carries it onward');
 
   // Quitting an UNFINISHED match ends the run wherever it stands — which for
   // an untouched ball is exactly where it came in. Only a finished match
-  // reports itself, so the run has to be remembered on the way out; the case
-  // that bites is a miss before quitting, which a scripted paddle cannot be
-  // relied on to produce (see TESTING.md). What IS deterministic is the other
-  // direction, and it is the likelier over-correction: quitting must not
-  // CONFISCATE a run either.
+  // reports itself, so the run has to be remembered on the way out. Same two
+  // halves as Reset above, and asserted the same two ways: the run survives
+  // the walk out (quitting must not CONFISCATE one either), and the server is
+  // told, which is checkable without the miss the first half would need.
+  await carrier.evaluate(() =>
+    fetch('/api/profile/me/streak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'solo', endStreak: 2 }),
+    }).then((r) => r.json())
+  );
   await carrier.click('#btn-quit-to-menu');
   await carrier.waitForSelector('#main-menu-screen', { timeout: 8000 });
   await carrier.click('#menu-mode-solo');
@@ -200,7 +206,11 @@ console.log('A match banks its streak where it belongs, and carries it onward');
   if (afterQuit !== '11') {
     fail(`quitting an unfinished match took the run from 11 to ${afterQuit}`);
   }
-  ok('and quitting an unfinished match does not end the run either');
+  const reportedAfterQuit = await storedSolo(carrier);
+  if (reportedAfterQuit !== 11) {
+    fail(`quitting did not tell the server where the run stands (server says ${reportedAfterQuit})`);
+  }
+  ok('and quitting an unfinished match neither ends the run nor forgets to say so');
 
   // Modes keep their own runs: solo does not seed practice.
   await carrier.click('#btn-quit-to-menu');
