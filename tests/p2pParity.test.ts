@@ -333,6 +333,25 @@ describe('the replica applies the relay rules it owns alone', () => {
     expect(a.syncs).toHaveLength(2);
     expect(a.syncs.at(-1)!.crossingsThisPoint).toBe(2);
     expect(a.syncs.at(-1)!.bestStreaks).toEqual([1, 0]);
+
+    // Each one carries a revision that only goes up, so the relay can spot a
+    // snapshot arriving behind one it already applied — the fields saying
+    // where a run IS are assigned, so a late one would walk it backwards.
+    expect(a.syncs.map((s) => s.rev)).toEqual([1, 2]);
+  });
+
+  it('counts a new match’s revisions from the start again', async () => {
+    const [a] = await pairedPeers();
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    expect(a.syncs.at(-1)!.rev).toBe(2);
+    // The relay resets its high-water mark on game_start, so the replica has
+    // to reset with it or every snapshot of the new match is rejected.
+    a.link.resetMatchState(0, 2);
+    a.syncs.length = 0;
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    expect(a.syncs.at(-1)!.rev).toBe(1);
+    expect(a.syncs.at(-1)!.matchSeq).toBe(2);
   });
 
   it('reports every point to the relay, the last one especially', async () => {

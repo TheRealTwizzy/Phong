@@ -61,6 +61,18 @@ export interface Room {
    * point by whoever is serving.
    */
   crossingsThisPoint: number;
+  /**
+   * The highest P2P snapshot revision applied to the CURRENT match.
+   *
+   * Both peers report every crossing, over two separate sockets, and the
+   * fields saying where a run IS are assigned rather than maxed — they have to
+   * be, since a run legitimately falls to zero. A snapshot arriving BEHIND one
+   * already applied would therefore lower a live run back to a value the rally
+   * has passed, and a fallback to the relay in that window would resume from
+   * it. The peers process the same events in the same order, so their
+   * revisions mean the same thing and either one's is good for the pair.
+   */
+  syncRev: number;
   servingPlayer: 0 | 1;
   rematchVotes: [boolean, boolean];
   /**
@@ -143,6 +155,9 @@ export function startMatch(room: Room, servingPlayer: 0 | 1): GameStartPayload {
   room.inPlay = false;
   room.ready = [false, false];
   room.matchSeq += 1;
+  // Each match's snapshot revisions count from zero, so the last match's
+  // high-water mark must not outlive it and reject all of this one's.
+  room.syncRev = 0;
   // The config rides along with every start: a phone can never begin a match
   // on terms it has not been told, however it arrived in the room. So does the
   // sequence number, so both phones can name the match they are playing when
@@ -195,6 +210,7 @@ export function applyMatchSync(
     earnedBests: [number, number];
     servingPlayer: 0 | 1;
     crossingsThisPoint: number;
+    rev: number;
   }
 ): { decided: boolean } {
   // Nothing to sync before the host has started a match: the replica only
@@ -217,8 +233,18 @@ export function applyMatchSync(
     room.matchOver = false;
     room.rematchVotes = [false, false];
     room.ready = [false, false];
+    // A new match's revisions start over, so the old high-water mark would
+    // reject every snapshot of it.
+    room.syncRev = 0;
   }
   if (room.matchOver) return { decided: false };
+  // Behind one already applied: this describes a moment the rally has passed,
+  // and the assigned fields below would walk a live run backwards. Equal is
+  // kept — the two peers report the same revision for the same event, and the
+  // second copy is harmless because it says the same thing.
+  const rev = clampInt(sync.rev, 0, Number.MAX_SAFE_INTEGER);
+  if (rev < room.syncRev) return { decided: false };
+  room.syncRev = rev;
 
   const cap = room.config.winningScore;
   room.scores = [

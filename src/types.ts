@@ -562,7 +562,7 @@ export type WSClientMessage =
   // rating it on the wrong thing. NOTE this member stays on ONE line —
   // tests/protocolParity.test.ts reads this union to the first line-ending
   // semicolon, and a multi-line member truncates the whole parse.
-  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number]; streaks: [number, number]; earnedBests: [number, number]; servingPlayer: 0 | 1; crossingsThisPoint: number }
+  | { type: 'match_sync'; matchSeq: number; rev: number; p1Score: number; p2Score: number; bestStreaks: [number, number]; streaks: [number, number]; earnedBests: [number, number]; servingPlayer: 0 | 1; crossingsThisPoint: number }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
   | { type: 'rtc_signal'; payload: RTCSignalPayload }

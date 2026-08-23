@@ -39,6 +39,7 @@ const room = (over: Partial<Room> = {}): Room => ({
   earnedStreaks: [0, 0],
   earnedBests: [0, 0],
   crossingsThisPoint: 0,
+  syncRev: 0,
   servingPlayer: 0,
   rematchVotes: [false, false],
   config: normalizeRoomConfig({ winningScore: 5 }),
@@ -61,6 +62,10 @@ const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
   earnedBests: [0, 0] as [number, number],
   servingPlayer: 0 as 0 | 1,
   crossingsThisPoint: 0,
+  // A logical clock, so the room can spot a snapshot arriving behind one it
+  // already applied. Nothing before this cared, so a high default keeps every
+  // existing case describing "the latest thing the peers have seen".
+  rev: 1000,
   ...over,
 });
 
@@ -570,6 +575,43 @@ describe('what a match earned, on the relay', () => {
     // And the very next relayed crossing is a return, not a serve.
     expect(countReturn(r, 1)).toBe(true);
     expect(r.streaks[1]).toBe(1);
+  });
+
+  it('ignores a snapshot that arrives behind one already applied', () => {
+    // Both peers report every crossing, over two separate sockets, so one can
+    // overtake the other. The fields saying where a run IS are assigned — they
+    // have to be, since a run legitimately falls to zero — so a late snapshot
+    // would walk a live run backwards to a moment the rally has passed, and a
+    // fallback to the relay in that window would resume from it.
+    const r = room({ syncRev: 0 });
+    applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
+    expect(r.streaks).toEqual([9, 4]);
+    expect(r.crossingsThisPoint).toBe(6);
+
+    // Crossing 3's snapshot, arriving after crossing 5's.
+    const stale = applyMatchSync(r, sync({ rev: 3, p1Score: 1, bestStreaks: [7, 4], streaks: [7, 4], earnedBests: [7, 4], crossingsThisPoint: 4 }));
+    expect(stale.decided).toBe(false);
+    expect(r.streaks).toEqual([9, 4]);
+    expect(r.crossingsThisPoint).toBe(6);
+
+    // The same revision is kept, not rejected: the two peers report the same
+    // number for the same event, and the second copy says the same thing.
+    applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
+    expect(r.streaks).toEqual([9, 4]);
+
+    // And the rally moves on.
+    applyMatchSync(r, sync({ rev: 6, p1Score: 1, bestStreaks: [9, 5], streaks: [9, 5], earnedBests: [9, 5], crossingsThisPoint: 7 }));
+    expect(r.streaks).toEqual([9, 5]);
+  });
+
+  it('starts a new match’s revisions over', () => {
+    // Revisions count from zero per match, so the last match's high-water mark
+    // must not outlive it and reject every snapshot of the next one.
+    const r = room({ syncRev: 400, matchOver: true, matchSeq: 1, scores: [5, 2] });
+    applyMatchSync(r, sync({ matchSeq: 2, rev: 1, p1Score: 1, bestStreaks: [1, 0], streaks: [1, 0], earnedBests: [1, 0] }));
+    expect(r.matchSeq).toBe(2);
+    expect(r.scores).toEqual([1, 0]);
+    expect(r.streaks).toEqual([1, 0]);
   });
 
   it('does not let a peer name a seat that does not exist as the server', () => {

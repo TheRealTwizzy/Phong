@@ -2278,17 +2278,36 @@ export default function App() {
    * without this — while blocking the walk back to the menu on a request would
    * make a network stall look like a frozen button.
    */
-  const reportStreak = useCallback(async (m: GameMode, endStreak: number) => {
-    if (m !== 'solo' && m !== 'practice') return;
-    try {
-      await fetch('/api/profile/me/streak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: m, endStreak }),
+  /**
+   * One at a time, in the order they were made.
+   *
+   * These go out fire-and-forget from Reset and from quitting, and both can
+   * happen within a second of each other — Reset on a run of 8, then a miss
+   * and a walk-out on 0. Two overlapping requests over separate connections
+   * can land in either order, and the server has nothing to tell it which
+   * describes the later moment: both say "now". The older one landing last
+   * restores the run the newer one had ended, permanently, for anyone who
+   * reloads. Chaining them is what makes call order arrival order — and one
+   * page's reports are the only ones that can race like this, because a
+   * recorded match carries a real age and is ordered by that instead.
+   */
+  const reportChainRef = useRef<Promise<void>>(Promise.resolve());
+  const reportStreak = useCallback((m: GameMode, endStreak: number): Promise<void> => {
+    if (m !== 'solo' && m !== 'practice') return Promise.resolve();
+    reportChainRef.current = reportChainRef.current
+      .catch(() => {})
+      .then(async () => {
+        try {
+          await fetch('/api/profile/me/streak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: m, endStreak }),
+          });
+        } catch {
+          // A correction, not a result: the server simply keeps what it had.
+        }
       });
-    } catch {
-      // See above: the server simply keeps what it had.
-    }
+    return reportChainRef.current;
   }, []);
 
   const quitToMenu = () => {

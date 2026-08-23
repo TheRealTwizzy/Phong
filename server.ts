@@ -1105,6 +1105,7 @@ async function startServer() {
             earnedStreaks: [0, 0],
             earnedBests: [0, 0],
             crossingsThisPoint: 0,
+            syncRev: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],
             config: normalizeRoomConfig(msg.config || DEFAULT_ROOM_CONFIG),

@@ -56,6 +56,7 @@ interface P2POptions {
     earnedBests: [number, number];
     servingPlayer: 0 | 1;
     crossingsThisPoint: number;
+    rev: number;
   }) => void;
 }
 
@@ -197,14 +198,26 @@ export class P2PGameLink {
     this.matchOver = false;
     this.streaks.streaks = [Math.max(0, carried[0] || 0), Math.max(0, carried[1] || 0)];
     startMatchStreaks(this.streaks, servingPlayer);
+    // A new match's revisions count from zero, matching the relay's reset.
+    this.syncRev = 0;
     // A relayed start names the match; a locally agreed rematch counts on.
     this.matchSeq = matchSeq ?? this.matchSeq + 1;
   }
 
+  /**
+   * How many events this match has produced here — a logical clock the relay
+   * uses to spot a snapshot that arrives behind one it has already applied.
+   * Both peers process the same events in the same order, so the same number
+   * means the same moment on either side of the link.
+   */
+  private syncRev = 0;
+
   /** Tell the relay where this match has got to. */
   private syncToRelay(): void {
+    this.syncRev += 1;
     this.opts.onMatchSync?.({
       matchSeq: this.matchSeq,
+      rev: this.syncRev,
       p1Score: this.scores[0],
       p2Score: this.scores[1],
       bestStreaks: [this.streaks.bestStreaks[0], this.streaks.bestStreaks[1]],
