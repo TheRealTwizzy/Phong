@@ -22,8 +22,13 @@ jobs:
       - name: Typecheck
         run: npm run lint
 
-      - name: Test
-        run: npm test
+      # Coverage rather than a bare `npm test`: same suites, plus the floors on
+      # the shared pure logic. There is no global threshold — src/components is
+      # Playwright's job (see the `e2e` job below), and a global number would
+      # either fail on that or be set low enough to measure nothing. The floors
+      # and the reasoning live in vite.config.ts.
+      - name: Test + coverage floors
+        run: npm run test:coverage
 
       - name: Build
         run: npm run build
