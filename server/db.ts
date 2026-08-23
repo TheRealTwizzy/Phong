@@ -427,6 +427,28 @@ class GameDatabase {
         movedToPlayerId TEXT NOT NULL,
         releasedAt TEXT NOT NULL
       );
+      -- Every browser that has ever signed in to an account, including the one
+      -- currently holding it.
+      --
+      -- A player's identity is their device cookie, and cookie jars do not
+      -- cross browsers: an invitation tapped in Messenger opens a webview that
+      -- is not the browser the account was made in, and the server cannot tell
+      -- it from a stranger. There is no device identifier on the web to fix
+      -- that with — so instead an account remembers the browsers it belongs
+      -- to. Signing in with the account's code adds this browser to the set.
+      --
+      -- The account still LIVES on exactly one row at a time (players.id is a
+      -- device id, and moves), and exactly one session may hold it — the
+      -- concurrency rule is untouched. What changes is that a browser which is
+      -- not currently holding it is a known browser of the account rather than
+      -- a stranger, so it is offered the account back instead of a fresh empty
+      -- profile or a one-way "start over" wall.
+      CREATE TABLE IF NOT EXISTS device_links (
+        deviceId TEXT PRIMARY KEY,
+        playerId TEXT NOT NULL,
+        linkedAt TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_device_links_player ON device_links (playerId);
       CREATE TABLE IF NOT EXISTS recorded_matches (
         playerId TEXT NOT NULL,
         matchKey TEXT NOT NULL,
@@ -2003,59 +2025,165 @@ class GameDatabase {
   }
 
   /**
-   * Transfer the profile owning `code` to `newDeviceId`. The recovery code
-   * rotates on use, the old device id stops resolving to anything, and any
-   * throwaway profile the claiming device already had is deleted. Returns
-   * null when the code matches nothing.
+   * The account this browser belongs to, and where that account currently
+   * lives — or null if this browser has never signed in to one.
+   *
+   * `holdsIt` is the whole point: a linked browser that is NOT holding the
+   * account is a known browser of it, not a stranger. It gets offered the
+   * account back rather than a fresh empty profile.
    */
-  public claimProfileByCode(
-    code: string,
-    newDeviceId: string,
-    claimingSessionId: string | null = null
-  ): PlayerProfile | null {
-    const canonical = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const formatted = canonical.length === 8 ? `${canonical.slice(0, 4)}-${canonical.slice(4)}` : code.trim().toUpperCase();
-    const row = this.stmt('SELECT * FROM players WHERE recoveryCode = ?').get(formatted) as unknown as
-      | PlayerRow
+  public linkedAccount(deviceId: string): { playerId: string; holdsIt: boolean } | null {
+    const row = this.stmt('SELECT playerId FROM device_links WHERE deviceId = ?').get(deviceId) as
+      | { playerId: string }
       | undefined;
     if (!row) return null;
-    if (row.id === newDeviceId) return this.readProfile(row.id);
+    return { playerId: row.playerId, holdsIt: row.playerId === deviceId };
+  }
 
+  /** Add a browser to an account's set. Idempotent. */
+  public linkDevice(deviceId: string, playerId: string, now: Date = new Date()): void {
+    this.stmt(
+      'INSERT OR REPLACE INTO device_links (deviceId, playerId, linkedAt) VALUES (?, ?, ?)'
+    ).run(deviceId, playerId, now.toISOString());
+  }
+
+  /** Every browser signed in to this account, newest link first. */
+  public linkedDevices(playerId: string): Array<{ deviceId: string; linkedAt: string }> {
+    return this.stmt(
+      'SELECT deviceId, linkedAt FROM device_links WHERE playerId = ? ORDER BY linkedAt DESC'
+    ).all(playerId) as unknown as Array<{ deviceId: string; linkedAt: string }>;
+  }
+
+  /**
+   * Bring an account back to a browser that is already signed in to it.
+   *
+   * No code is asked for, and deliberately: presenting the device cookie of a
+   * linked browser IS the credential, exactly as it is for the browser
+   * currently holding the account. The code is what gets a browser INTO the
+   * set; membership is what lets it take its turn afterwards. Returns null if
+   * this device is not linked, or the account has since gone.
+   */
+  public reclaimLinkedAccount(deviceId: string, sessionId: string | null): PlayerProfile | null {
+    const link = this.linkedAccount(deviceId);
+    if (!link) return null;
+    if (link.holdsIt) return this.readProfile(deviceId);
+    const row = this.stmt('SELECT id FROM players WHERE id = ?').get(link.playerId) as
+      | { id: string }
+      | undefined;
+    if (!row) return null;
+    return this.moveAccount(link.playerId, deviceId, sessionId);
+  }
+
+  /**
+   * Move an account's row onto `newDeviceId`, carrying everything that keys
+   * off the id with it, and record both browsers as belonging to it.
+   *
+   * Extracted from claimProfileByCode so the code path and the no-code
+   * reclaim below cannot drift: a move that updated matches but forgot the
+   * links, or tombstoned a browser that is a member of the account, is the
+   * class of bug this whole area keeps producing.
+   */
+  private moveAccount(
+    fromId: string,
+    newDeviceId: string,
+    sessionId: string | null
+  ): PlayerProfile | null {
     const now = new Date().toISOString();
     this.sql.exec('BEGIN');
     try {
+      // A placeholder row on the claiming device is in the way and carries
+      // nothing; server.ts refuses the sign-in outright if it is initialized,
+      // so nothing with a username or progress is ever dropped here.
       this.stmt('DELETE FROM players WHERE id = ?').run(newDeviceId);
-      // The claiming session takes ownership in the same breath as the
-      // profile. Without this the row would arrive still naming the OLD
-      // device's session as its owner, and the device that just claimed the
-      // account would be locked out of it by the one it took it from.
       this.stmt(
           `UPDATE players
-              SET id = ?, recoveryCode = ?, lastActive = ?,
-                  activeSessionId = ?, activeSessionAt = ?
+              SET id = ?, lastActive = ?, activeSessionId = ?, activeSessionAt = ?
             WHERE id = ?`
         )
-        .run(newDeviceId, this.newRecoveryCode(), now, claimingSessionId, now, row.id);
-      // The device left behind holds nothing now, and must be able to be TOLD
-      // that rather than being handed a fresh profile the next time it asks.
-      this.stmt('INSERT OR REPLACE INTO released_devices (deviceId, movedToPlayerId, releasedAt) VALUES (?, ?, ?)')
-        .run(row.id, newDeviceId, now);
-      // ...and this device holds one again, so whatever it gave up earlier is
-      // no longer true of it.
-      this.stmt('DELETE FROM released_devices WHERE deviceId = ?').run(newDeviceId);
-      this.stmt('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, row.id);
-      this.stmt('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, row.id);
-      this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, row.id);
-      // The avatar moves with the profile; whatever throwaway avatar the
-      // claiming device had is replaced.
+        .run(newDeviceId, now, sessionId, now, fromId);
+      this.stmt('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, fromId);
+      this.stmt('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, fromId);
+      this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, fromId);
       this.stmt('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
-      this.stmt('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, row.id);
+      this.stmt('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
+      // Everything already pointed at the account follows it, and both ends of
+      // the move are members from here on.
+      this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
+      for (const id of [fromId, newDeviceId]) {
+        this.stmt('INSERT OR REPLACE INTO device_links (deviceId, playerId, linkedAt) VALUES (?, ?, ?)')
+          .run(id, newDeviceId, now);
+      }
+      // The browser handing the account over is a MEMBER now, not a stranger,
+      // so it must not be tombstoned: `released` is the state whose only exit
+      // used to be destroying the account. A linked browser resolves as
+      // `superseded` instead, which has always had a way back.
+      this.stmt('DELETE FROM released_devices WHERE deviceId = ?').run(fromId);
+      this.stmt('DELETE FROM released_devices WHERE deviceId = ?').run(newDeviceId);
       this.sql.exec('COMMIT');
     } catch (e) {
       this.sql.exec('ROLLBACK');
       throw e;
     }
     return this.readProfile(newDeviceId);
+  }
+
+  /** Mint a new sign-in code for an account, retiring the old one. */
+  public rotateRecoveryCode(playerId: string): string | null {
+    const code = this.newRecoveryCode();
+    const res = this.stmt('UPDATE players SET recoveryCode = ? WHERE id = ?').run(code, playerId);
+    return res.changes ? code : null;
+  }
+
+  /**
+   * Sign in to the account owning `code` on this browser.
+   *
+   * This used to be a one-way TRANSFER: the row moved, the losing browser was
+   * tombstoned as `released`, and the code rotated so it could never be used
+   * again. Every part of that fought the thing players actually need. An
+   * invitation tapped in Messenger opens a webview that is not the browser
+   * the account was made in, so "sign in over there" is the normal case, not
+   * an emergency — and under the old rules doing it cost the player their real
+   * browser and burned the only credential that could undo it.
+   *
+   * So: the row still moves (players.id IS a device id), but both browsers are
+   * recorded as belonging to the account, nothing is tombstoned, and the code
+   * is NOT spent. It is a sign-in credential the player keeps, and any browser
+   * that has used it can take the account back with no code at all.
+   *
+   * Returns null when the code matches nothing.
+   */
+  /** The account a sign-in code belongs to, without moving anything. */
+  public profileByRecoveryCode(code: string): { id: string } | null {
+    const canonical = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const formatted =
+      canonical.length === 8 ? `${canonical.slice(0, 4)}-${canonical.slice(4)}` : code.trim().toUpperCase();
+    const row = this.stmt('SELECT id FROM players WHERE recoveryCode = ?').get(formatted) as
+      | { id: string }
+      | undefined;
+    return row || null;
+  }
+
+  public signInWithCode(
+    code: string,
+    newDeviceId: string,
+    claimingSessionId: string | null = null
+  ): PlayerProfile | null {
+    const canonical = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const formatted =
+      canonical.length === 8 ? `${canonical.slice(0, 4)}-${canonical.slice(4)}` : code.trim().toUpperCase();
+    const row = this.stmt('SELECT id FROM players WHERE recoveryCode = ?').get(formatted) as
+      | { id: string }
+      | undefined;
+    if (!row) return null;
+    if (row.id === newDeviceId) {
+      // Already here. Make sure the membership is recorded even so — an
+      // account created before device_links existed has no row for the very
+      // browser holding it, and would otherwise be a stranger to itself the
+      // first time it signed in somewhere else.
+      this.linkDevice(newDeviceId, newDeviceId);
+      return this.readProfile(newDeviceId);
+    }
+    return this.moveAccount(row.id, newDeviceId, claimingSessionId);
   }
 
   public getLeaderboard(

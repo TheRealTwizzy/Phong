@@ -28,6 +28,37 @@ export interface DeviceSignals {
   uaDataMobile?: boolean;
 }
 
+/**
+ * Whether this is an app's embedded browser rather than the phone's own.
+ *
+ * It matters because a cookie jar does not cross browsers and the web has no
+ * device identifier to bridge them. An invitation link tapped in Messenger
+ * opens Messenger's webview, which has never met this player: onboarding
+ * opens, and their own username comes back taken. Nothing can stop that — but
+ * being able to NAME it turns "I got signed out" into "I am in the wrong
+ * browser", which is a problem with an obvious fix the player can act on.
+ *
+ * Detection is by the tokens these apps append to the UA, which is the only
+ * signal they offer. It is a hint, not a verdict: a false negative just means
+ * the player sees the ordinary copy, and nothing is gated on it.
+ */
+export function detectInAppBrowser(userAgent: string): string | null {
+  const ua = userAgent || '';
+  // Facebook's apps (Messenger included) both carry FBAN/FBAV.
+  if (/\bFBAN\b|\bFBAV\b|FB_IAB/.test(ua)) return 'Facebook';
+  if (/\bInstagram\b/.test(ua)) return 'Instagram';
+  if (/\bLine\/|\bLIFF\b/.test(ua)) return 'LINE';
+  if (/\bTwitter\b/.test(ua)) return 'Twitter';
+  if (/musical_ly|\bBytedance\b|\bTikTok\b/i.test(ua)) return 'TikTok';
+  if (/\bSnapchat\b/.test(ua)) return 'Snapchat';
+  if (/\bWhatsApp\b/.test(ua)) return 'WhatsApp';
+  if (/\bLinkedInApp\b/.test(ua)) return 'LinkedIn';
+  // Android's generic WebView marker. Deliberately last and deliberately
+  // narrow: "wv" is what a webview adds, and Chrome proper never carries it.
+  if (/\bAndroid\b.*;\s*wv\)/.test(ua)) return 'an app';
+  return null;
+}
+
 export function classifyFromSignals(signals: DeviceSignals): DeviceClass {
   const ua = signals.userAgent || '';
   const touch = signals.maxTouchPoints > 0;

@@ -68,7 +68,7 @@ describe('device tokens', () => {
   });
 });
 
-describe('recovery codes and profile transfer', () => {
+describe('sign-in codes and the browsers an account belongs to', () => {
   it('every new profile gets a well-formed unique code', () => {
     const a = db.getProfile('dev_aaaaaaaaaaaaaaaaaa');
     const b = db.getProfile('dev_bbbbbbbbbbbbbbbbbb');
@@ -77,42 +77,83 @@ describe('recovery codes and profile transfer', () => {
     expect(a.recoveryCode).not.toBe(b.recoveryCode);
   });
 
-  it('claiming moves the profile, its history, and rotates the code', () => {
+  it('signing in moves the profile and its history, and the code still works', () => {
+    // A cookie jar does not cross browsers, so signing in somewhere else is
+    // the ordinary case — an invitation tapped in a chat app opens a webview
+    // that is not the browser the account was made in. It used to be a one-way
+    // transfer that also spent the only credential that could undo it.
     const oldDevice = 'dev_111111111111111111';
     const newDevice = 'dev_222222222222222222';
-    const original = init(oldDevice, 'Mover');
+    init(oldDevice, 'Mover');
     db.recordMatch(win(oldDevice));
     const code = db.getProfile(oldDevice).recoveryCode!;
 
-    const claimed = db.claimProfileByCode(code, newDevice);
-    expect(claimed).not.toBeNull();
-    expect(claimed!.id).toBe(newDevice);
-    expect(claimed!.username).toBe('Mover');
-    expect(claimed!.matchesWon).toBe(1);
-    // Code rotated on use
-    expect(claimed!.recoveryCode).toBeDefined();
-    expect(claimed!.recoveryCode).not.toBe(code);
-    // Old device no longer resolves to the moved profile: a fresh one appears
-    const fresh = db.getProfile(oldDevice);
-    expect(fresh.matchesPlayed).toBe(0);
-    expect(fresh.createdAt).not.toBe(original.createdAt);
+    const signedIn = db.signInWithCode(code, newDevice);
+    expect(signedIn).not.toBeNull();
+    expect(signedIn!.id).toBe(newDevice);
+    expect(signedIn!.username).toBe('Mover');
+    expect(signedIn!.matchesWon).toBe(1);
+    // The code is a credential the player keeps, not a one-shot token.
+    expect(signedIn!.recoveryCode).toBe(code);
     // Match history followed the move
     const hist = db.getMatchHistory(newDevice);
     expect(hist.length).toBe(1);
     expect(hist[0].winnerId).toBe(newDevice);
+
+    // Both browsers now belong to the account, and the one that handed it
+    // over is NOT tombstoned — `released` is the state whose only exit used to
+    // be destroying the account.
+    expect(db.releasedDevice(oldDevice)).toBeNull();
+    expect(db.linkedAccount(oldDevice)).toEqual({ playerId: newDevice, holdsIt: false });
+    expect(db.linkedAccount(newDevice)).toEqual({ playerId: newDevice, holdsIt: true });
   });
 
-  it('claim accepts unformatted input and rejects unknown codes', () => {
+  it('a browser that has signed in can take the account back with no code', () => {
+    const first = 'dev_777777777777777771';
+    const second = 'dev_777777777777777772';
+    init(first, 'RoamsBack');
+    const code = db.getProfile(first).recoveryCode!;
+    db.signInWithCode(code, second);
+    expect(db.linkedAccount(first)!.holdsIt).toBe(false);
+
+    // Presenting the device cookie of a member IS the credential; the code is
+    // what gets a browser into the set, not what it shows every time after.
+    const back = db.reclaimLinkedAccount(first, 'ses_000000000000000000000001');
+    expect(back).not.toBeNull();
+    expect(back!.id).toBe(first);
+    expect(back!.username).toBe('RoamsBack');
+    expect(db.linkedAccount(second)).toEqual({ playerId: first, holdsIt: false });
+    // ...and it can go back and forth, which is the point.
+    expect(db.reclaimLinkedAccount(second, null)!.id).toBe(second);
+  });
+
+  it('refuses to reclaim for a browser that never signed in', () => {
+    expect(db.reclaimLinkedAccount('dev_999999999999999999', null)).toBeNull();
+  });
+
+  it('rotating the code retires the old one', () => {
+    const dev = 'dev_888888888888888881';
+    init(dev, 'Rotator');
+    const first = db.getProfile(dev).recoveryCode!;
+    const next = db.rotateRecoveryCode(dev);
+    expect(next).not.toBe(first);
+    expect(db.getProfile(dev).recoveryCode).toBe(next);
+    // The retired code no longer opens anything.
+    expect(db.profileByRecoveryCode(first)).toBeNull();
+    expect(db.profileByRecoveryCode(next!)!.id).toBe(dev);
+  });
+
+  it('sign-in accepts unformatted input and rejects unknown codes', () => {
     const dev = 'dev_333333333333333333';
     const target = 'dev_444444444444444444';
     const code = init(dev, 'CaseTest').recoveryCode!;
     const sloppy = code.toLowerCase().replace('-', ' ');
-    const claimed = db.claimProfileByCode(sloppy, target);
+    const claimed = db.signInWithCode(sloppy, target);
     expect(claimed?.username).toBe('CaseTest');
-    expect(db.claimProfileByCode('ZZZZ-ZZZZ', target)).toBeNull();
+    expect(db.signInWithCode('ZZZZ-ZZZZ', target)).toBeNull();
   });
 
-  it('claiming replaces the throwaway profile already on the device', () => {
+  it('signing in replaces the throwaway profile already on the device', () => {
     const source = 'dev_555555555555555555';
     const device = 'dev_666666666666666666';
     db.getProfile(device); // uninitialized throwaway
@@ -123,21 +164,21 @@ describe('recovery codes and profile transfer', () => {
       playerId: source, username: 'Keeper', playerScore: 5, opponentScore: 1,
       maxRally: 4, mode: 'multiplayer', isWinner: true,
     } as never);
-    const claimed = db.claimProfileByCode(code, device);
+    const claimed = db.signInWithCode(code, device);
     expect(claimed!.username).toBe('Keeper');
     // The throwaway row is gone (no duplicate ids, leaderboard stays clean)
     const board = db.getLeaderboard('elo', 100);
     expect(board.filter((e) => e.id === device).length).toBe(1);
   });
 
-  it('the avatar follows the profile on claim', () => {
+  it('the avatar follows the profile on sign-in', () => {
     const source = 'dev_aaaaaaaaaaaaaaaa01';
     const device = 'dev_aaaaaaaaaaaaaaaa02';
     init(source, 'AvatarOwner');
     db.setAvatar(source, new Uint8Array([1, 2, 3, 4]));
     const code = db.getProfile(source).recoveryCode!;
 
-    const claimed = db.claimProfileByCode(code, device);
+    const claimed = db.signInWithCode(code, device);
     expect(claimed!.hasAvatar).toBe(true);
     expect(db.getAvatar(device)).not.toBeNull();
     expect(db.getAvatar(source)).toBeNull();

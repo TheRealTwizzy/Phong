@@ -51,6 +51,11 @@ const newPlayer = async (prefix) => {
     await page.fill('#input-onboarding-username', `${prefix}${Date.now().toString(36).slice(-4)}${n++}`);
     await page.waitForSelector('#username-status-available', { timeout: 5000 });
     await page.click('#btn-onboarding-submit');
+    // Onboarding now ends on the sign-in code. Tolerant, so a suite that
+    // reaches here another way is not broken by its absence.
+    await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
+      .then((b) => b.click())
+      .catch(() => {});
     await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
   }
   return page;

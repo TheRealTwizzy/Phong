@@ -4,6 +4,7 @@ import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { Sheet } from './ui';
 import { validateUsername, USERNAME_MAX } from '../profileRules';
+import { detectInAppBrowser } from '../device';
 import { processAvatarFile, uploadAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
 import { Check, ImagePlus, KeyRound, Loader2, Play, ShieldCheck, X } from 'lucide-react';
@@ -52,6 +53,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [showRestore, setShowRestore] = useState(false);
+  // The account exists; the player has not been shown how to get back into it
+  // yet. Held here rather than closing straight to the menu — see the panel.
+  const [savedProfile, setSavedProfile] = useState<PlayerProfile | null>(null);
+  const [codeCopied, setCodeCopied] = useState(false);
   const [claimCode, setClaimCode] = useState('');
   const [claimBusy, setClaimBusy] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
@@ -147,7 +152,13 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         }
         // Avatar failures don't block onboarding — it's optional anyway.
       }
-      onInitialized(finalProfile);
+      // NOT onInitialized yet. A sign-in code the player has never seen is a
+      // code they do not have: identity here is the browser's cookie, and a
+      // cookie jar does not cross browsers, so the first time they open a link
+      // in Messenger's webview the code is the only thing that gets them back
+      // to this account. The one moment they are guaranteed to be looking is
+      // right now, having just made it.
+      setSavedProfile(finalProfile);
     } catch {
       setSubmitError('username_invalid');
     } finally {
@@ -180,6 +191,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   };
 
   const canSubmit = nameStatus.kind === 'available' && !submitting;
+  // Naming the app is what turns "I got signed out" into "I am in the wrong
+  // browser" — a problem the player can actually act on.
+  const inApp = detectInAppBrowser(typeof navigator === 'undefined' ? '' : navigator.userAgent);
 
   return (
     <Sheet
@@ -190,6 +204,60 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       accent="accent"
       bodyClassName="p-5 flex flex-col gap-4"
     >
+        {savedProfile ? (
+          /* The account is made. Before the player is let anywhere near the
+             game, they are shown the one thing that gets them back into it
+             from a browser this one cannot reach — which, on a phone where
+             invitation links open in whatever webview sent them, is a matter
+             of when rather than if. It is deliberately a step and not a toast:
+             a code nobody read is a code nobody has. */
+          <div id="onboarding-code-step" className="flex flex-col gap-4">
+            <div className="flex flex-col items-center text-center gap-1.5">
+              <div
+                className="w-12 h-12 rounded-2xl border flex items-center justify-center"
+                style={{
+                  color: theme.accentColor,
+                  borderColor: theme.accentColor + '50',
+                  backgroundColor: theme.accentColor + '15',
+                }}
+              >
+                <KeyRound className="w-6 h-6" />
+              </div>
+              <h2 className="text-lg font-black tracking-wider uppercase text-white">
+                {t('onboarding_code_title', language)}
+              </h2>
+              <p className="text-[11px] font-mono text-zinc-400 leading-relaxed">
+                {t('onboarding_code_body', language)}
+              </p>
+            </div>
+
+            <button
+              id="onboarding-code-value"
+              onClick={() => {
+                navigator.clipboard?.writeText(savedProfile.recoveryCode || '').catch(() => {});
+                setCodeCopied(true);
+                setTimeout(() => setCodeCopied(false), 2000);
+              }}
+              className="w-full py-4 rounded-2xl bg-slate-950 border border-dashed text-2xl font-black font-mono tracking-[0.3em] text-center active:scale-[0.99] transition"
+              style={{ color: theme.accentColor, borderColor: theme.accentColor + '60' }}
+            >
+              {savedProfile.recoveryCode || '····-····'}
+            </button>
+            <p className="text-[10px] font-mono text-zinc-500 text-center -mt-2">
+              {codeCopied ? t('lobby_copied', language) : t('onboarding_code_copy', language)}
+            </p>
+
+            <button
+              id="btn-onboarding-code-continue"
+              onClick={() => onInitialized(savedProfile)}
+              className="w-full py-3.5 rounded-2xl font-mono text-sm font-black tracking-widest uppercase bg-cyan-500 hover:bg-cyan-400 text-zinc-950 transition active:scale-95 shadow-lg flex items-center justify-center gap-2"
+            >
+              <Play className="w-4 h-4" />
+              {t('onboarding_code_continue', language)}
+            </button>
+          </div>
+        ) : (
+        <>
         {/* Header */}
         <div className="flex flex-col items-center text-center gap-1.5">
           <div
@@ -262,7 +330,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             id="onboarding-other-browser-note"
             className="text-[11px] font-mono text-cyan-300/80 leading-relaxed bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3"
           >
-            {t('onboarding_other_browser', language)}
+            {inApp
+              ? t('onboarding_in_app_browser', language, { app: inApp })
+              : t('onboarding_other_browser', language)}
           </p>
         )}
 
@@ -375,6 +445,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <p className="text-[10px] font-mono text-rose-400 text-center">{claimError}</p>
           )}
         </div>
+        </>
+        )}
     </Sheet>
   );
 };

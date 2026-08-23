@@ -177,19 +177,23 @@ describe('one account, one live device', () => {
     // THE BUG. The phone used to be handed a brand-new empty profile here and
     // allowed to play a full match on it. Now it is told, in one round trip,
     // that this device holds nothing — before a ball is served.
+    // `superseded`, not `released`: signing in elsewhere now LINKS both
+    // browsers to the account rather than tombstoning the one left behind.
+    // The eviction is the same either way — what changes is that this state
+    // has a way back, which `released` did not.
     const heartbeat = await call(phone, '/api/session');
-    expect(heartbeat.body.status).toBe('released');
+    expect(heartbeat.body.status).toBe('superseded');
 
     // ...and it cannot record a match even if it plays one anyway.
     const after = await record(phone, `solo-after-${Date.now()}`);
     expect(after.status).toBe(409);
-    expect(after.body.error).toBe('DEVICE_RELEASED');
+    expect(after.body.error).toBe('SESSION_SUPERSEDED');
 
     // Reading a profile must not mint one either — that lazy mint is what made
-    // the released device look like a new player in the first place.
+    // an evicted device look like a new player in the first place.
     const read = await call(phone, '/api/profile/me');
     expect(read.status).toBe(409);
-    expect(read.body.error).toBe('DEVICE_RELEASED');
+    expect(read.body.error).toBe('ACCOUNT_ELSEWHERE');
 
     // The desktop, meanwhile, holds a working account with the history intact.
     const moved = (await call(desktop, '/api/profile/me')).body;
@@ -198,29 +202,35 @@ describe('one account, one live device', () => {
     expect((await record(desktop, `solo-desktop-${Date.now()}`)).status).toBe(200);
   }, 30000);
 
-  it('lets an evicted device start over as a new player, and only that way', async () => {
-    const phone = await onboard(`Start${Date.now().toString(36).slice(-5)}`);
+  it('lets a browser that signed in elsewhere take its account back', async () => {
+    // The thing this whole area exists for. A cookie jar does not cross
+    // browsers, so an invitation tapped in a chat app opens a webview that is
+    // not the browser the account was made in — signing in over there is the
+    // ordinary case, and it must not cost the player the browser they play in.
+    const name = `Start${Date.now().toString(36).slice(-5)}`;
+    const phone = await onboard(name);
     const code = (await call(phone, '/api/profile/me')).body.recoveryCode;
-    const desktop = new Jar();
-    await call(desktop, '/api/session', { method: 'POST' });
-    await call(desktop, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) });
+    const webview = new Jar();
+    await call(webview, '/api/session', { method: 'POST' });
+    await call(webview, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) });
+    expect((await call(webview, '/api/profile/me')).body.username).toBe(name);
 
-    // A released device cannot simply mint itself a session back onto the
-    // account it gave away.
-    const retry = await call(phone, '/api/session', { method: 'POST' });
-    expect(retry.status).toBe(409);
-    expect(retry.body.error).toBe('DEVICE_RELEASED');
+    // The browser left behind is evicted — but it is a member of the account,
+    // so taking a session brings the account back rather than minting it the
+    // empty profile that used to be the whole bug.
+    const back = await call(phone, '/api/session', { method: 'POST' });
+    expect(back.status).toBe(200);
+    expect(back.body.status).toBe('active');
+    expect(back.body.profile.username).toBe(name);
+    expect(back.body.profile.initialized).toBe(true);
+    expect((await call(phone, '/api/profile/me')).body.username).toBe(name);
 
-    // It has to take a fresh identity, which lands it on an EMPTY profile —
-    // a new player, not the one it handed over.
-    const beforeDevice = phone.raw.get('phong_device');
-    const reset = await call(phone, '/api/session/reset', { method: 'POST' });
-    expect(reset.status).toBe(200);
-    expect(reset.body.status).toBe('active');
-    expect(phone.raw.get('phong_device')).not.toBe(beforeDevice);
-    expect(reset.body.profile.initialized).toBe(false);
-    expect(reset.body.profile.matchesPlayed).toBe(0);
-    expect((await call(phone, '/api/session')).body.status).toBe('active');
+    // ...and exactly one of them holds it at a time. The webview is now the
+    // one that has to ask for it back.
+    expect((await call(webview, '/api/session')).body.status).toBe('superseded');
+    const webviewWrite = await record(webview, `solo-webview-${Date.now()}`);
+    expect(webviewWrite.status).toBe(409);
+    expect(webviewWrite.body.error).toBe('SESSION_SUPERSEDED');
   }, 30000);
 
   it('refuses a second concurrent session on the same account', async () => {
@@ -272,7 +282,7 @@ describe('one account, one live device', () => {
     // Told WHY before the close, so the client acts on the reason rather than
     // on a bare disconnect it would otherwise try to reconnect through.
     expect(evicted.message?.type).toBe('session_invalid');
-    expect(evicted.message?.status).toBe('released');
+    expect(evicted.message?.status).toBe('superseded');
 
     // The device that DOES hold the account is seated normally.
     const holder = await dial(desktop);
@@ -316,7 +326,7 @@ describe('one account, one live device', () => {
 
     const evicted = await socket.outcome;
     expect(evicted.closed).toBe(true);
-    expect(evicted.message?.status).toBe('released');
+    expect(evicted.message?.status).toBe('superseded');
   }, 30000);
 
   it('refuses an identity reset from a device that still holds its account', async () => {

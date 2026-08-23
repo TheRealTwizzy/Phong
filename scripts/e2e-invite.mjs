@@ -53,6 +53,11 @@ async function onboard(page, prefix) {
   await page.fill('#input-onboarding-username', name);
   await page.waitForSelector('#username-status-available', { timeout: 8000 });
   await page.click('#btn-onboarding-submit');
+  // Onboarding now ends on the sign-in code. Tolerant, so a suite that
+  // reaches here another way is not broken by its absence.
+  await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
+    .then((b) => b.click())
+    .catch(() => {});
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 10000 });
   return name;
 }
@@ -149,11 +154,11 @@ if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
 // "They were not only unable to join the lobby, they got signed out and their
 // account still exists but they lost access somehow."
 //
-// Nothing can stop a foreign browser being a foreign browser. What had to stop
-// was every door out of it being one-way: restoring the account into the
-// throwaway browser RELEASED the real one, and the wall a released device gets
-// offered exactly one button — "start as a new player" — which mints a new
-// device identity and leaves the account reachable by nobody, forever.
+// Nothing can stop a foreign browser being a foreign browser — cookie jars do
+// not cross browsers and the web offers no device identifier to bridge them.
+// What had to stop was signing in over there costing the player the browser
+// they actually play in. It now LINKS both browsers to the account: either can
+// take it back, with one tap and no code, and the sign-in code is not spent.
 console.log('\nThe same link, followed by a player who already has an account');
 
 const homeCtx = await browser.newContext({ ...devices['iPhone 13'] });
@@ -215,22 +220,23 @@ await home.bringToFront();
 // every 15s. Poll rather than guess: a fixed sleep here is either flaky or
 // slower than it needs to be.
 let wall = null;
-for (let i = 0; i < 45 && wall !== 'released'; i++) {
+for (let i = 0; i < 45 && wall !== 'superseded'; i++) {
   await sleep(700);
   wall = await home.evaluate(
     () => document.querySelector('#session-guard-overlay')?.getAttribute('data-session-status') || null
   );
 }
-if (wall !== 'released') fail(`the browser that lost the account should be walled as released, got ${wall}`);
-if (!(await home.$('#input-session-claim-code'))) fail('the released wall offers no way to keep the account');
-if (await home.$('#btn-session-action')) fail('starting over is still one press away from irreversible');
-ok('the released wall leads with restoring, and starting over is not the only button');
+// `superseded`, not `released`: signing in somewhere else LINKS both browsers
+// to the account rather than tombstoning the one left behind. The eviction is
+// the same either way — what changed is that this state has a way back.
+if (wall !== 'superseded') fail(`the browser that lost the account should be walled as superseded, got ${wall}`);
+ok('the browser they play in is evicted, but as a member of the account');
 
-const rotated = await foreign.evaluate(() => fetch('/api/profile/me').then((r) => r.json()).then((p) => p.recoveryCode));
-await home.fill('#input-session-claim-code', rotated);
-await home.click('#btn-session-claim');
-// The restore reloads the page, so wait for the wall to actually go rather
-// than for a guess at how long a reload takes.
+// And the way back is ONE TAP, with no code. A member's device cookie is the
+// credential; the code is what got this browser into the set, not what it has
+// to present every time afterwards. This is the whole point: an account is
+// reachable from any browser on the phone that has signed in to it once.
+await home.click('#btn-session-action');
 let stillWalled = 'unknown';
 for (let i = 0; i < 30; i++) {
   await sleep(700);
@@ -239,10 +245,15 @@ for (let i = 0; i < 30; i++) {
     .catch(() => 'navigating');
   if (stillWalled === null) break;
 }
-if (stillWalled !== null) fail(`restoring did not clear the wall (still ${stillWalled})`);
+if (stillWalled !== null) fail(`taking the account back did not clear the wall (still ${stillWalled})`);
 const recovered = await home.evaluate(() => fetch('/api/profile/me').then((r) => r.json()).then((p) => p.username));
 if (recovered !== homeName) fail(`the account did not come home: expected ${homeName}, got ${recovered}`);
-ok(`${homeName} took their account back without spending it`);
+ok(`${homeName} took their account back with one tap and no code`);
+
+// The code was not spent by signing in — a player keeps it.
+const codeNow = await home.evaluate(() => fetch('/api/profile/me').then((r) => r.json()).then((p) => p.recoveryCode));
+if (codeNow !== homeCode) fail('signing in should not spend the code');
+ok('the sign-in code survives being used');
 
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
 

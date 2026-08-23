@@ -80,8 +80,29 @@ async function onboard(page, username) {
   await page.fill('#input-onboarding-username', username);
   await page.waitForSelector('#username-status-available', { timeout: 5000 });
   await page.click('#btn-onboarding-submit');
+
+  // Onboarding ends on the sign-in code, and this suite is where that is
+  // PINNED rather than merely tolerated. Identity is the browser's cookie and
+  // a cookie jar does not cross browsers, so the code is the only way back
+  // into this account from a browser this one cannot reach — an invitation
+  // opened in a chat app's webview, a new phone. A code the player was never
+  // shown is a code they do not have, and the one moment they are certain to
+  // be looking is here, having just made the account.
+  await page.waitForSelector('#onboarding-code-step', { timeout: 10000 })
+    .catch(() => fail('onboarding never showed the player their sign-in code'));
+  const shown = (await page.textContent('#onboarding-code-value'))?.trim();
+  if (!/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(shown || '')) {
+    fail(`the code step showed "${shown}" instead of a code`);
+  }
+  const real = await page.evaluate(() =>
+    fetch('/api/profile/me').then((r) => r.json()).then((p) => p.recoveryCode)
+  );
+  if (shown !== real) fail(`shown code ${shown} is not the account's (${real})`);
+
+  await page.click('#btn-onboarding-code-continue');
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
   await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
+  return shown;
 }
 
 // ---- 1. Forced onboarding with live validation --------------------------
