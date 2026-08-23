@@ -48,6 +48,11 @@ async function onboard(page, prefix = 'E2E') {
   await page.fill('#input-onboarding-username', uniqueName(prefix));
   await page.waitForSelector('#username-status-available', { timeout: 5000 });
   await page.click('#btn-onboarding-submit');
+  // Onboarding now ends on the sign-in code. Tolerant, so a suite that
+  // reaches here another way is not broken by its absence.
+  await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
+    .then((b) => b.click())
+    .catch(() => {});
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
 }
 
@@ -304,6 +309,11 @@ const guest = await newPage();
   await a.fill('#input-onboarding-username', keeperName);
   await a.waitForSelector('#username-status-available', { timeout: 5000 });
   await a.click('#btn-onboarding-submit');
+  // Onboarding now ends on the sign-in code. Tolerant, so a suite that
+  // reaches here another way is not broken by its absence.
+  await a.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
+    .then((b) => b.click())
+    .catch(() => {});
   await a.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
   const profA1 = await me(a);
   if (!/^dev_[0-9a-f]{18}$/.test(profA1.id)) fail(`server-issued id malformed: ${profA1.id}`);

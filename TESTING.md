@@ -133,6 +133,12 @@ device may restore with the account's own recovery code, and the release row sur
 so an abandoned account stays traceable. The matching browser assertions are in
 `scripts/e2e-invite.mjs`.
 
+**Onboarding ends on the sign-in code.** It is the only way back into an account from a
+browser the current one cannot reach, so a player who was never shown it does not have it.
+Every browser suite's onboarding helper clicks through that step; `e2e-profiles` is where it is
+pinned rather than tolerated — the step appears, shows a well-formed code, and it is the
+account's own.
+
 **One account, one live holder — however many browsers belong to it.** Signing in links a
 browser to an account rather than transferring it away, so a player can reach their account from
 any browser on their phone. That must never become two of them playing at once:

@@ -30,6 +30,11 @@ async function newPlayer(prefix) {
   await page.fill('#input-onboarding-username', `${prefix}${Date.now().toString(36).slice(-5)}`);
   await page.waitForSelector('#username-status-available', { timeout: 6000 });
   await page.click('#btn-onboarding-submit');
+  // Onboarding now ends on the sign-in code. Tolerant, so a suite that
+  // reaches here another way is not broken by its absence.
+  await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
+    .then((b) => b.click())
+    .catch(() => {});
   await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
   return page;
 }
