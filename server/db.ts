@@ -99,6 +99,32 @@ const WIPE_V3_KEY = 'wipe_v3';
 // — and the thresholds moved under them in the same release. There is no
 // conversion that would be honest, so the slate is cleared.
 const WIPE_V4_KEY = 'wipe_v4';
+
+/**
+ * The oldest a reported result may claim to be, for ordering purposes.
+ *
+ * A nonsense age — a clock that jumped, a hand-written payload — should sort
+ * as simply old rather than place a row before the epoch. Thirty days is well
+ * past anything the on-device queue realistically holds.
+ */
+const MAX_RESULT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long before it was SENT a reported match ended, in ms.
+ *
+ * Both readings come from the reporting device's own clock — one at the
+ * whistle, one as the attempt goes out — so the difference is an elapsed
+ * duration and carries none of that clock's offset. Either missing means
+ * "just now", which is what a first attempt that landed, or a payload the
+ * relay built itself, actually is.
+ */
+const resultAgeMs = (payload: { endedAt?: number; clientNow?: number }): number | undefined => {
+  const ended = Number(payload.endedAt);
+  const sent = Number(payload.clientNow);
+  if (!Number.isFinite(ended) || !Number.isFinite(sent)) return undefined;
+  const age = sent - ended;
+  return age > 0 ? age : undefined;
+};
 // Every key, oldest first. applyWipe re-stamps ALL of them after running:
 // stamping only some would leave a hole that re-triggers an earlier wipe on
 // the next boot — and since each wipe clears `meta`, two half-stamped keys
@@ -1057,11 +1083,12 @@ class GameDatabase {
        */
       endStreak?: number;
       /**
-       * When the match this describes ENDED, by the reporting device's clock.
-       * Absent means "now", which is what a write happening as it happens
-       * wants — the relay's own record of a duel, or a practice session.
+       * How long before it was SENT the match ended, in ms — see the note on
+       * `stamp` below. Absent means "just now", which is what a write
+       * happening as it happens wants: the relay's own record of a duel, a
+       * practice session, or a first attempt that landed.
        */
-      endedAt?: number;
+      ageMs?: number;
     }
   ): void {
     const row = this.stmt(
@@ -1077,14 +1104,23 @@ class GameDatabase {
     // failed to POST sits in the on-device queue while the player replays and
     // lands afterwards.
     //
-    // Clamped to the server's clock on the way in: nothing has ended in the
-    // future. A device running fast would otherwise park the stored stamp
-    // ahead of real time, and every legitimate result after the clock was
-    // corrected — or after the account moved to a device with the right time —
-    // would look older and be ignored until reality caught up.
+    // Ordered on the SERVER's clock, from how stale the caller says it is.
+    //
+    // A device's absolute clock cannot be used for this in either direction. A
+    // phone running fast parks the stored stamp ahead of real time and freezes
+    // the column until reality catches up; a phone running slow has every
+    // result it ever sends look older than what is stored and be ignored the
+    // same way. Both are one bug — comparing two clocks — and clamping only
+    // the upper end fixes only half of it.
+    //
+    // An AGE has neither problem: it is the difference between two readings of
+    // one clock, so whatever offset that clock carries cancels. The caller
+    // measures how long ago the match ended and the server places it on its
+    // own timeline. Bounded, because a nonsense age is still possible and a
+    // result from "sixty years ago" should just sort as old, not underflow.
     const now = Date.now();
-    const claimed = Math.max(0, Math.round(Number(d.endedAt) || 0));
-    const stamp = claimed > 0 ? Math.min(claimed, now) : now;
+    const age = Math.min(MAX_RESULT_AGE_MS, Math.max(0, Math.round(Number(d.ageMs) || 0)));
+    const stamp = now - age;
     const prevStamp = row?.streakAt ?? 0;
     const isNewer = stamp >= prevStamp;
     const describesRun = d.endStreak !== undefined || d.won !== undefined;
@@ -1170,7 +1206,7 @@ class GameDatabase {
     playerId: string,
     mode: GameMode,
     endStreak: number,
-    endedAt?: number
+    ageMs?: number
   ): { ok: boolean; modeStats: Record<string, ModeStats> } {
     if (mode !== 'solo' && mode !== 'practice') return { ok: false, modeStats: {} };
     const profile = this.getProfile(playerId);
@@ -1180,9 +1216,30 @@ class GameDatabase {
     // No `played`, no `won`: nothing here says a match happened.
     this.bumpModeStats(playerId, mode, {
       endStreak: Math.min(100000, n),
-      endedAt: Number(endedAt) || undefined,
+      ageMs: Number(ageMs) || undefined,
     });
     return { ok: true, modeStats: this.getModeStats(playerId) };
+  }
+
+  /**
+   * A duel seat's run, written by the RELAY.
+   *
+   * `reportStreak` refuses `multiplayer` on purpose — a duel's runs belong to
+   * the room, not to either phone. This is the room's own way to say the same
+   * thing, and it exists because a duel does not only end by being decided: a
+   * player walks out and it is abandoned. `recordRoomMatch` writes the runs
+   * when the score decides it; without this, an abandoned duel left both seats
+   * on whatever the last COMPLETED match stored, so a miss during it was
+   * undone and a run built during it was thrown away.
+   *
+   * Counts no match and pays nothing — the abandon itself is recorded
+   * separately, and it is the only thing an abandoned duel costs.
+   */
+  public recordDuelStreak(playerId: string, endStreak: number): void {
+    const n = Math.floor(Number(endStreak));
+    if (!Number.isFinite(n) || n < 0) return;
+    if (!this.readProfile(playerId)?.initializedAt) return;
+    this.bumpModeStats(playerId, 'multiplayer', { endStreak: Math.min(100000, n) });
   }
 
   /** Every mode this player has a row for, keyed by mode. */
@@ -2040,10 +2097,12 @@ class GameDatabase {
       aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
       bestStreak: payload.bestStreak,
       endStreak,
-      // The device's own clock at the final whistle, so a result that queued
-      // through a replay does not land back on top of it. Absent — an older
-      // client, or a payload the relay built itself — means "now".
-      endedAt: Number(payload.endedAt) || undefined,
+      // How long ago this match ended, by the reporting device's own clock —
+      // the gap between the whistle and the moment this attempt went out. A
+      // result that queued through a replay therefore says so and does not
+      // land back on top of a newer one. Absent (an older client, or a payload
+      // the relay built itself) means "just now".
+      ageMs: resultAgeMs(payload),
     };
     // Streaks, shutouts and per-difficulty wins are derived here and only
     // here, from the result the server just accepted — a client can report a

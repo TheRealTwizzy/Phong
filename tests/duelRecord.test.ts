@@ -497,4 +497,35 @@ describe('recording a duel', () => {
     expect(profile.matchesWon).toBe(1);
     expect(profile.xp).toBe(first.profile.xp);
   });
+
+  it('keeps both seats’ runs when a duel is abandoned', async () => {
+    // A decided duel is written by recordRoomMatch; an abandoned one is
+    // written by nobody, so both seats went back to whatever their last
+    // COMPLETED match had stored — a miss during it undone, and a run built
+    // during it thrown away. The survivor counts too: they are bounced to the
+    // menu just as abruptly, and their run is just as real.
+    const host = await newDevice('AbandonHost');
+    const guest = await newDevice('AbandonGuest');
+    const { p1, p2 } = await seatDuel(host, guest, 3);
+
+    await cross(p1, p2, 1); // p1 serves — counts for nobody
+    await cross(p2, p1, 1); // p2: 1
+    await cross(p1, p2, 2); // p1: 1
+    await cross(p2, p1, 2); // p2: 2
+    await cross(p2, p1, 3); // p2: 3
+
+    // The host walks out mid-rally. Nothing decides the match.
+    p1.close();
+    await sleep(400);
+
+    const hostProfile = await getProfile(host);
+    const guestProfile = await getProfile(guest);
+    // Each seat's own run, stored where the next duel will read it.
+    expect(hostProfile.modeStats?.multiplayer?.currentStreak).toBe(1);
+    expect(guestProfile.modeStats?.multiplayer?.currentStreak).toBe(3);
+    // And nothing else: an abandoned duel is not a match either of them played.
+    expect(hostProfile.matchesPlayed).toBe(0);
+    expect(guestProfile.matchesPlayed).toBe(0);
+    p2.close();
+  });
 });

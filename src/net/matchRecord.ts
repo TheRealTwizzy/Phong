@@ -36,7 +36,13 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
   const res = await fetch('/api/match/record', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    // `clientNow` is read HERE rather than in the payload, so it is this
+    // attempt's clock and not the whistle's. The server never uses either
+    // absolute value: it takes the DIFFERENCE, which says how long ago the
+    // match ended and cancels whatever offset this device's clock carries.
+    // Every path lands here — first try, retry, and a replay off the queue
+    // days later — so each says how stale it really is.
+    body: JSON.stringify({ ...payload, clientNow: Date.now() }),
   });
   if (!res.ok) {
     let body: any = null;

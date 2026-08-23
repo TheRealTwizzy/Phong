@@ -807,7 +807,9 @@ async function startServer() {
       if (!Number.isFinite(endStreak) || endStreak < 0) {
         return res.status(400).json({ error: 'BAD_REQUEST' });
       }
-      const out = db.reportStreak(req.deviceId!, mode, endStreak, Number(req.body?.endedAt));
+      // Sent as it happens, so it is never stale — the age argument exists
+      // for results that queue, and this one does not.
+      const out = db.reportStreak(req.deviceId!, mode, endStreak);
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
       res.json({ modeStats: out.modeStats });
     } catch (e: any) {
@@ -1429,6 +1431,26 @@ async function startServer() {
       // never report one, and the second player's departure from an
       // already-abandoned room records nothing.
       const bothSeated = !!(room.players[0] && room.players[1]);
+      // A duel that is abandoned still HAPPENED, and both players' runs stand
+      // wherever the last crossing left them. recordRoomMatch writes those
+      // when the score decides a match; nothing wrote them when one was walked
+      // out of, so both seats went back to whatever their last COMPLETED match
+      // had stored — a miss during the abandoned duel undone, and a run built
+      // during it thrown away. Written for the leaver AND the survivor, who is
+      // about to be bounced to the menu just as abruptly.
+      if (bothSeated && room.inPlay && !room.matchOver) {
+        for (const seat of [0, 1] as const) {
+          const player = room.players[seat];
+          if (!player?.deviceId) continue;
+          try {
+            if (seatStillHoldsAccount({ deviceId: player.deviceId, sessionId: player.sessionId })) {
+              db.recordDuelStreak(player.deviceId, room.streaks[seat]);
+            }
+          } catch (e) {
+            console.error('duel streak record failed:', e);
+          }
+        }
+      }
       if (bothSeated && room.inPlay && !room.matchOver && currentPlayerId) {
         try {
           // Same rule as recordRoomMatch: a seat that no longer holds

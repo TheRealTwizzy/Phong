@@ -445,10 +445,21 @@ export interface MatchEndPayload {
    * a maximum. `endStreak` is neither: it is assigned, so the last write wins
    * — and the last write is not the last match. A result can sit in the
    * on-device queue through a whole replay and land afterwards, restoring a
-   * run the replay had already broken. This is what orders them; the server
-   * ignores a stamp older than the one it already has.
+   * run the replay had already broken. This is what orders them.
+   *
+   * Never compared against the SERVER's clock: paired with `clientNow`, read
+   * at send time, it gives an elapsed age instead — and an age from two
+   * readings of one clock is free of whatever offset that clock carries. A
+   * phone set a week slow would otherwise have every result it ever sent look
+   * older than what is already stored, and be ignored forever.
    */
   endedAt?: number;
+  /**
+   * That same clock, read as this attempt goes out — see `endedAt`. Set by
+   * the transport rather than the caller, so a retry or a queued replay says
+   * how stale it actually is rather than repeating the first attempt's answer.
+   */
+  clientNow?: number;
   /**
    * The streak this player finished the match ON. Zero if the last thing they
    * did was miss. A streak carries into the next match, so this is what the

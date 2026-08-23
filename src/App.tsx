@@ -2275,7 +2275,7 @@ export default function App() {
       await fetch('/api/profile/me/streak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: m, endStreak, endedAt: Date.now() }),
+        body: JSON.stringify({ mode: m, endStreak }),
       });
     } catch {
       // See above: the server simply keeps what it had.
