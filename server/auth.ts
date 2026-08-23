@@ -296,3 +296,31 @@ export function blockReleasedDevice(req: Request, res: Response, next: NextFunct
   }
   next();
 }
+
+/**
+ * Gate for restoring an account onto this device with its recovery code.
+ *
+ * `requireActiveSession` refused a RELEASED device, which made the one state
+ * that most needs this door the one state that could not reach it. A released
+ * device is a browser whose account was transferred away; the session wall it
+ * gets offered exactly one button, "start as a new player", and that button is
+ * irreversible — it mints a new device identity, so the account left behind is
+ * reachable by nobody, ever. A player who followed an invitation link into a
+ * second browser and then wanted their own account back had no move that did
+ * not destroy it.
+ *
+ * Letting a released device claim grants nothing new. The credential is the
+ * account's own recovery code, and the same device could already reach the
+ * same call by pressing "start fresh" first and restoring from the fresh
+ * identity — it just lost its device id and its release record on the way.
+ * The only thing this changes is that the non-destructive order is available.
+ */
+export function requireRestorableSession(req: Request, res: Response, next: NextFunction): void {
+  const status = req.session?.status ?? 'none';
+  if (status === 'active' || status === 'released') return next();
+  res.status(status === 'superseded' ? 409 : 401).json({
+    error: status === 'superseded' ? 'SESSION_SUPERSEDED' : status === 'stale_build' ? 'SESSION_STALE_BUILD' : 'SESSION_REQUIRED',
+    sessionStatus: status,
+    build: buildId(),
+  });
+}

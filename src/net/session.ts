@@ -162,15 +162,30 @@ export async function resetDevice(): Promise<{ status: ClientSessionStatus; prof
   }
 }
 
-/** Hand the account back on the way out. Best-effort; never awaited. */
+/**
+ * Hand the account back on the way out. Best-effort; never awaited.
+ *
+ * The session id THIS page was given rides along, and the server ends nothing
+ * unless it matches. Without it a closing tab handed back whatever the shared
+ * origin cookie happened to hold — which, with two tabs open, is the session
+ * the OTHER tab just minted. Closing the stale tab therefore signed the live
+ * one out: its next request carried no session at all, the relay refused its
+ * socket at the upgrade, and a join in flight died with it.
+ */
 export function endSession(): void {
   try {
     // keepalive so it still goes out while the page is being torn down.
-    void fetch('/api/session/end', { method: 'POST', keepalive: true });
+    void fetch('/api/session/end', {
+      method: 'POST',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: mySessionId }),
+    });
   } catch {
     /* nothing useful to do while unloading */
   }
 }
+
 
 async function readSession(): Promise<SessionSnapshot> {
   try {

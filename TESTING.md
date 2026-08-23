@@ -46,7 +46,7 @@ coverage number.
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
-| `duelRecord` `deviceSession` | Two suites that boot the real server (see §4) |
+| `duelRecord` `deviceSession` `accountRecovery` | Three suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` | The one-shot migrations |
 
 ### Browser layer
@@ -63,7 +63,8 @@ else system Chrome.
 
 V8 coverage measures **in-process execution only**. Two consequences that will mislead you:
 
-- **`server.ts` reads 0%.** It is not untested — `duelRecord` and `deviceSession` spawn it,
+- **`server.ts` reads 0%.** It is not untested — `duelRecord`, `deviceSession` and
+  `accountRecovery` spawn it,
   and all twelve browser suites drive it. The instrumentation cannot see across a process
   boundary.
 - **Every `.tsx` reads 0%,** for the same reason. Playwright covers them.
@@ -122,6 +123,19 @@ a decision about that list.
 
 **`SESSION_STALE_BUILD` is never handled as "mint one and retry."** The reload is the point;
 minting under the new build is how an old bundle survives a deploy.
+
+**No state the app can reach may have a destructive action as its only way out.** `released`
+did: a full-screen wall whose single button minted a new device identity, leaving the account
+behind reachable by nobody and its username unclaimable forever. A player follows an invitation
+link into a browser that is not the one holding their account, restores there, comes back, and
+presses the only thing offered. `tests/accountRecovery.test.ts` pins the way back — a released
+device may restore with the account's own recovery code, and the release row survives a reset
+so an abandoned account stays traceable. The matching browser assertions are in
+`scripts/e2e-invite.mjs`.
+
+**One tab closing may not sign another out.** `phong_session` is an ORIGIN cookie, so two tabs
+present the same value and the server cannot tell them apart; `POST /api/session/end` therefore
+carries the session id the page was actually given and ends nothing else.
 
 **The device gate reads the platform, never the window.** `tests/device.test.ts` scans
 `src/device.ts` for viewport reads. A source check, because the failure mode is somebody
