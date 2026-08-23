@@ -1,6 +1,6 @@
 import React from 'react';
 import { LanguageCode } from '../../types';
-import { Tier, PLACEMENT_GAMES, isPlaced, tierProgress } from '../../rating';
+import { Tier, PLACEMENT_GAMES, TIER_STYLE, isPlaced, tierProgress } from '../../rating';
 import { t } from '../../i18n/translations';
 import { TierBadge } from '../TierBadge';
 
@@ -36,6 +36,10 @@ const RING = 72;
 const STROKE = 5;
 const R = (RING - STROKE) / 2;
 const C = 2 * Math.PI * R;
+// A round cap draws a blob of its own width at each end, so an arc shorter than
+// the cap is ALL cap: at a tier floor the meter rendered as a detached cyan dot
+// beside the badge with no ring to explain it, which is what it was reported as.
+const MIN_ARC = STROKE * 1.6;
 
 export const RankBadge: React.FC<RankBadgeProps> = ({
   tier,
@@ -54,34 +58,48 @@ export const RankBadge: React.FC<RankBadgeProps> = ({
   const progress = placed ? tierProgress(rankMu) : played / PLACEMENT_GAMES;
 
   return (
-    <div id={id} className="flex shrink-0 flex-col items-center gap-1">
-      <div className="relative" style={{ width: RING, height: RING }}>
+    <div id={id} className="flex shrink-0 flex-col items-center gap-1.5">
+      <div className="relative shrink-0" style={{ width: RING, height: RING }}>
         <svg width={RING} height={RING} className="-rotate-90" aria-hidden="true">
+          {/* The track is NOT stroke-surface-3: this renders inside
+              <Panel variant="raised">, which IS bg-surface-3. The track was the
+              same colour as the card behind it, so the meter had no ring at all
+              — just an accent arc floating in space beside the badge. */}
           <circle
             cx={RING / 2}
             cy={RING / 2}
             r={R}
             fill="none"
             strokeWidth={STROKE}
-            className="stroke-surface-3"
+            className="stroke-line"
           />
-          <circle
-            cx={RING / 2}
-            cy={RING / 2}
-            r={R}
-            fill="none"
-            strokeWidth={STROKE}
-            strokeLinecap="round"
-            strokeDasharray={C}
-            strokeDashoffset={C * (1 - progress)}
-            className={placed ? 'stroke-accent' : 'stroke-warn'}
-            style={{ transition: 'stroke-dashoffset var(--tw-duration, 420ms) ease-out' }}
-          />
+          {C * progress >= MIN_ARC && (
+            <circle
+              cx={RING / 2}
+              cy={RING / 2}
+              r={R}
+              fill="none"
+              strokeWidth={STROKE}
+              strokeLinecap="round"
+              strokeDasharray={C}
+              strokeDashoffset={C * (1 - progress)}
+              className={placed ? 'stroke-accent' : 'stroke-warn'}
+              style={{ transition: 'stroke-dashoffset var(--tw-duration, 420ms) ease-out' }}
+            />
+          )}
         </svg>
-        <div className="absolute inset-0 flex items-center justify-center">
-          <TierBadge tier={tier} language={language} />
-        </div>
+        {/* The rank's COLOUR goes inside the ring; its NAME goes below.
+            The chip is text, and at eleven characters ("GRANDMASTER") it is
+            half again as wide as the 72px ring — centring it inside meant the
+            meter was drawn straight through the label, and the label itself
+            overflowed the card. Nothing inside the ring can be wider than it. */}
+        <div
+          className={`absolute inset-[13px] rounded-full border ${TIER_STYLE[tier]}`}
+          aria-hidden="true"
+        />
       </div>
+
+      <TierBadge tier={tier} language={language} />
 
       {!placed && (
         <span className="text-2xs tnum text-warn">
