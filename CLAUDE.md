@@ -73,6 +73,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ```
 ├── CLAUDE.md                  # This guide
 ├── README.md                  # Quickstart
+├── TESTING.md                 # The two test layers, the coverage floors, standing rules
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
 ├── DEPLOYMENT.md              # KVM/docker-compose runbook (+ Render alternative)
 ├── Dockerfile                 # Multi-stage build → slim runtime (express+ws only)
@@ -82,7 +83,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── scripts/load-test.mjs      # N-concurrent-matches relay load test
 ├── scripts/e2e-*.mjs          # E2E (profiles, gameplay, rating, rules,
 │                              #   achievements, elite, duel, eject, invite,
-│                              #   lobby, build-id)
+│                              #   lobby, split, build-id)
 ├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each
 ├── .github/workflows/ci.yml   # Typecheck+unit+build, and the E2E suites
 ├── index.html                 # HTML entry
@@ -96,11 +97,14 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 │   ├── build.ts               # Build id — retires every session on a new deployment
 │   ├── db.ts                  # SQLite store: profiles, ELO, XP, achievements, history, avatars
 │   ├── image.ts               # Dep-free 256×256 PNG avatar validation
+│   ├── room.ts                # The relay's room + its rules (pure, unit-tested)
 │   └── transform.ts           # Cross-net ball transform (unit-tested, shared with client)
-├── tests/                     # Vitest: transform, physics, db invariants, legacy import,
-│                              #   qr, device, and two that boot the real server:
+├── tests/                     # Vitest: transform, physics, room rules, db invariants,
+│                              #   protocol/P2P parity, the match queue, the session
+│                              #   heartbeat, themes, qr, device, i18n — plus two that
+│                              #   boot the real server via tests/helpers/relay.ts:
 │                              #   duelRecord (a duel end to end) and deviceSession
-│                              #   (the account-transfer eviction)
+│                              #   (the account-transfer eviction). See TESTING.md.
 └── src/
     ├── main.tsx               # React bootstrap
     ├── App.tsx                # Game controller, loop, WS client, all state
@@ -266,21 +270,30 @@ npm run build    # vite build (client) + esbuild bundle (server) → dist/
 npm start        # node dist/server.cjs (production)
 npm run lint     # tsc --noEmit
 npm test         # vitest run (tests/)
+npm run test:coverage # the same suites plus the per-module coverage floors CI enforces
 npm run test:e2e # browser E2E — needs `npm run build` first (see below)
 ```
 
 Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.example`.
 
 **CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every PR, as two
-parallel jobs. `verify` is the fast one — typecheck, `npm test`, build — and `e2e` drives
+parallel jobs. `verify` is the fast one — typecheck, `npm run test:coverage`, build — and `e2e` drives
 the browser suites, which cost minutes rather than seconds, hence its own job: a red one
 names the broken flow instead of a broken build. `npm run test:e2e` is the same entry
 point locally. Every suite gets its own free port, throwaway `DATA_DIR` and
 `node dist/server.cjs` (the production entry — a suite would otherwise inherit another's
 players and leaderboard), so `npm run build` is a precondition, and Chromium is resolved
-from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. **A suite that
+from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. `verify` runs
+`test:coverage` rather than a bare `npm test`: per-module floors on the shared pure logic,
+set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
+components are Playwright's job, and one number would either fail on that bet or be set low
+enough to measure nothing. **A suite that
 asserts old behaviour is a suite that will be deleted rather than read** — when a rule
 changes, change the suite in the same commit.
+
+**`TESTING.md` is the working guide to the suite**: what each layer owns, why a V8 coverage
+report reads 0% for `server.ts` and every `.tsx` (they run out-of-process), how the floors are
+set, and the standing invariants the tests exist to hold. Read it before adding a suite.
 
 ## 9. Conventions
 
