@@ -86,4 +86,73 @@ describe('a socket that takes a second seat', () => {
     await sleep(300);
     expect(await activeRooms()).toBe(0);
   }, 30000);
+
+  it('keeps the seat it has when the join is refused', async () => {
+    // Giving up the old seat is right when the new one is actually taken, and
+    // wrong the instant the join can fail: vacating first meant a mistyped
+    // code, an expired room or a full one cost the player the room they were
+    // already in — and, mid-duel, charged them an abandon for a match they
+    // had not left.
+    const a = await relay.newDevice('RoomLifeD');
+    const pa = await relay.openPhone(a);
+
+    pa.send({ type: 'create_room', playerId: a.id });
+    const mine = (await pa.await('room_created')).roomId;
+
+    // A code that resolves to nothing.
+    pa.clear();
+    pa.send({ type: 'join_room', roomId: 'ZZZZ', playerId: a.id });
+    expect((await pa.await('error')).message).toMatch(/not found/i);
+    await sleep(200);
+    expect(await roomStatus(mine)).toBe(200);
+
+    // And one that is real but full.
+    const b = await relay.newDevice('RoomLifeE');
+    const c = await relay.newDevice('RoomLifeF');
+    const pb = await relay.openPhone(b);
+    const pc = await relay.openPhone(c);
+    pb.send({ type: 'create_room', playerId: b.id });
+    const full = (await pb.await('room_created')).roomId;
+    pc.send({ type: 'join_room', roomId: full, playerId: c.id });
+    await pc.await('room_joined');
+
+    pa.clear();
+    pa.send({ type: 'join_room', roomId: full, playerId: a.id });
+    expect((await pa.await('error')).message).toMatch(/full/i);
+    await sleep(200);
+    expect(await roomStatus(mine)).toBe(200);
+
+    // The seat is still genuinely theirs, not just a room still in the map:
+    // closing the socket is what frees it.
+    pa.close();
+    await sleep(300);
+    expect(await roomStatus(mine)).toBe(404);
+
+    pb.close();
+    pc.close();
+    await sleep(300);
+    expect(await activeRooms()).toBe(0);
+  }, 30000);
+
+  it('refuses a join to the room it is already sitting in', async () => {
+    // Not a move: the vacate would empty this very room and delete it, and
+    // the seat would then be taken in an object no longer in the map — a room
+    // reachable only by the sockets already holding it.
+    const a = await relay.newDevice('RoomLifeG');
+    const pa = await relay.openPhone(a);
+
+    pa.send({ type: 'create_room', playerId: a.id });
+    const mine = (await pa.await('room_created')).roomId;
+
+    pa.clear();
+    pa.send({ type: 'join_room', roomId: mine, playerId: a.id });
+    expect((await pa.await('error')).message).toMatch(/already in this room/i);
+    await sleep(200);
+    expect(await roomStatus(mine)).toBe(200);
+    expect(await activeRooms()).toBe(1);
+
+    pa.close();
+    await sleep(300);
+    expect(await activeRooms()).toBe(0);
+  }, 30000);
 });

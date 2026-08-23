@@ -197,6 +197,14 @@ passes on the bug: `tests/streaks.test.ts` and `tests/room.test.ts` hold the cli
 counters apart, `tests/db.test.ts` holds that a carried run is not paid for twice, and
 `scripts/e2e-rules.mjs` closes the practice farm through a real server.
 
+**Copy that quotes a threshold is checked against the threshold.** A theme's unlock line is
+free text sitting beside the structured fields it describes, so the rally rescale moved the
+fields and left the copy asking for a 10-hit rally to open something that opens at 7.
+`tests/themes.test.ts` now allows a number in that copy only if the requirement actually
+holds it — via `minRally`/`minLevel`/`minWins`, the linked elite mission's target, or the
+linked achievement's own (rescaled) description — and requires a `minRally` to be stated at
+all. Rewording to dodge it is not a fix; the numbers are the point.
+
 **A rename is a rule about every table that keys off the name.** `moveAccount` renames
 `players.id`, so any table keyed on it must move in the same transaction or be orphaned —
 `tests/identity.test.ts` asserts the per-mode rows arrive and that nothing is left behind

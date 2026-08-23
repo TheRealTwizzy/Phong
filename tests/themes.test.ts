@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { CourtTheme, PlayerProfile } from '../src/types';
 import { THEMES, isThemeUnlocked } from '../src/game/themes';
 import { TIER_ORDER, type Tier } from '../src/rating';
+import { ALL_ACHIEVEMENTS } from '../src/achievements';
+import { ELITE_POOL } from '../src/game/missions';
 
 // isThemeUnlocked ORs five independent predicates — an achievement, an elite
 // mission's permanent unlock, a level, a rally, a win count and a tier — and
@@ -170,5 +172,62 @@ describe('the tier gate', () => {
   it('still opens for an unranked player who earned it another way', () => {
     // The tier arm being shut must not shut the theme: the rules are an OR.
     expect(isThemeUnlocked('quantum-gold', base({ tier: 'unranked', highestRally: 30 }))).toBe(true);
+  });
+});
+
+describe('the theme picker tells the truth about what a theme costs', () => {
+  // `unlockRequirement.description` is the line SettingsModal renders under a
+  // locked theme, and it is free text sitting next to the structured fields it
+  // describes. When the rally thresholds were rescaled the fields moved and the
+  // copy did not, so the picker asked for a 10-hit rally to unlock something
+  // that opens at 7, a 100-hit rally for one that opens at 72, and a 40-hit
+  // elite for one whose target is 28. Nothing rendered a number that was true.
+  //
+  // Every number in that copy has to come from somewhere real. Where the
+  // requirement carries the number structurally, that is the source; where it
+  // points at an achievement or an elite mission, theirs is.
+  const numbersIn = (text: string): number[] =>
+    (text.match(/\d+/g) || []).map(Number);
+
+  it('quotes only numbers its own requirement actually holds', () => {
+    for (const theme of Object.values(THEMES)) {
+      const req = theme.unlockRequirement;
+      if (!req) continue;
+      const allowed = new Set<number>();
+      if (req.minRally !== undefined) allowed.add(req.minRally);
+      if (req.minLevel !== undefined) allowed.add(req.minLevel);
+      if (req.minWins !== undefined) allowed.add(req.minWins);
+      if (req.eliteMissionId) {
+        const mission = ELITE_POOL.find((m) => m.id === req.eliteMissionId);
+        expect(mission, `${theme.id} points at an elite mission that does not exist`).toBeTruthy();
+        allowed.add(mission!.target);
+      }
+      if (req.achievementId) {
+        const ach = ALL_ACHIEVEMENTS.find((a) => a.id === req.achievementId);
+        expect(ach, `${theme.id} points at an achievement that does not exist`).toBeTruthy();
+        // The achievement's own copy is rescaled with the thresholds, so its
+        // numbers are the authority for a theme that defers to it.
+        for (const n of numbersIn(ach!.description)) allowed.add(n);
+      }
+      for (const n of numbersIn(req.description)) {
+        expect(
+          allowed.has(n),
+          `${theme.id}: "${req.description}" quotes ${n}, which is not a threshold it holds (${[...allowed].join(', ') || 'none'})`
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('states a number at all wherever it has one to state', () => {
+    // The other direction: a requirement carrying a threshold whose copy never
+    // mentions it is how "Reach 25+ Rally" survived the field moving to 18.
+    for (const theme of Object.values(THEMES)) {
+      const req = theme.unlockRequirement;
+      if (req?.minRally === undefined) continue;
+      expect(
+        numbersIn(req.description),
+        `${theme.id}: "${req.description}" never mentions its rally threshold of ${req.minRally}`
+      ).toContain(req.minRally);
+    }
   });
 });

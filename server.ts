@@ -991,14 +991,6 @@ async function startServer() {
             ws.send(JSON.stringify({ type: 'error', message: refusal }));
             return;
           }
-          // Taking a seat means giving up the one this socket already holds.
-          // Both handlers below just overwrite currentRoomId/playerIndex, so
-          // without this the old room keeps a PlayerSession whose socket has
-          // moved on: when that socket eventually closes, vacateSeat only
-          // reaches the newer room, and the older one is left with a seat no
-          // close event will ever clear. Walking out of a live duel to open
-          // another room is an abandon, and vacateSeat is what judges that.
-          vacateSeat();
         }
 
         if (msg.type === 'create_room') {
@@ -1006,6 +998,19 @@ async function startServer() {
           while (rooms.has(code)) {
             code = generateRoomCode();
           }
+          // Taking a seat means giving up the one this socket already holds.
+          // The handlers below just overwrite currentRoomId/playerIndex, so
+          // without this the old room keeps a PlayerSession whose socket has
+          // moved on: when that socket eventually closes, vacateSeat only
+          // reaches the newer room, and the older one is left with a seat no
+          // close event will ever clear. Walking out of a live duel to open
+          // another room is an abandon, and vacateSeat is what judges that.
+          //
+          // Here, and in join_room only once the destination has been
+          // checked: a room is always created, but a join can be refused, and
+          // a refused join must not cost the seat the player already had —
+          // still less charge them an abandon for a match they are still in.
+          vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
           // Display names come from the cookie-verified profile, never from
@@ -1067,10 +1072,23 @@ async function startServer() {
             return;
           }
 
+          if (currentRoomId === code) {
+            // Already sitting in it. Refused rather than treated as a move,
+            // because the vacate below would empty this very room and delete
+            // it, and the seat would then be taken in an object no longer in
+            // the map — a room only its two sockets could reach.
+            ws.send(JSON.stringify({ type: 'error', message: 'You are already in this room.' }));
+            return;
+          }
+
           if (room.players[1] !== null) {
             ws.send(JSON.stringify({ type: 'error', message: 'Room is already full (2 players).' }));
             return;
           }
+
+          // The destination is real and has room, so the old seat can go. See
+          // the note in create_room: nothing above this line may fail.
+          vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
           const guestName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 2';

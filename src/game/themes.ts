@@ -155,7 +155,7 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     accentColor: '#00ff66',
     scanlines: true,
     unlockRequirement: {
-      description: 'Unlock by completing 1st cross-net volley',
+      description: 'Unlock by completing your first cross-net volley',
       achievementId: 'first_serve',
     },
   },
@@ -179,7 +179,7 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     accentColor: '#ff6600',
     scanlines: false,
     unlockRequirement: {
-      description: 'Unlock with a 10+ hit rally in a single point',
+      description: 'Sustain a streak of 7 returns without missing one',
       achievementId: 'rally_10',
       minRally: 7,
     },
@@ -254,7 +254,7 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     accentColor: '#fbbf24',
     scanlines: false,
     unlockRequirement: {
-      description: 'Reach 25+ Rally or Master tier',
+      description: 'Sustain a streak of 18 returns, or reach Master tier',
       achievementId: 'rally_25',
       minRally: 18,
       minTier: 'master',
@@ -280,7 +280,7 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     accentColor: '#38bdf8',
     scanlines: false,
     unlockRequirement: {
-      description: 'Reach a 100-hit rally',
+      description: 'Sustain a streak of 72 returns',
       achievementId: 'rally_100',
     },
   },
@@ -400,7 +400,7 @@ export const THEMES: Record<CourtTheme, ThemeConfig> = {
     accentColor: '#fb7185',
     scanlines: false,
     unlockRequirement: {
-      description: 'Elite: sustain a 40-hit rally',
+      description: 'Elite: sustain a streak of 28 returns',
       eliteMissionId: 'elite_rally_40',
     },
   },
