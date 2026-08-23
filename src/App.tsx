@@ -2335,7 +2335,19 @@ export default function App() {
    * typechecked (no @types/react), so this is the guard.
    */
   const handleResetMatch = () => {
-    resetMatch(modeRef.current, statsRef.current.streak);
+    const run = statsRef.current.streak;
+    // Carrying the run into the restarted match is only half of it. The other
+    // half is saying so — a player who missed and then pressed Reset has a run
+    // of zero, and neither this page's record nor the server's had heard: a
+    // reload before the restarted match finished put the pre-miss run straight
+    // back, ready for the next return to extend a streak that had ended. Same
+    // pair as quitting, for the same reason. The tour says nothing, because
+    // the match it plays never happened.
+    if (!tourMatchRef.current) {
+      rememberCarry(carryRef.current, modeRef.current, run);
+      void reportStreak(modeRef.current, run);
+    }
+    resetMatch(modeRef.current, run);
   };
 
   resetMatchRef.current = resetMatch;

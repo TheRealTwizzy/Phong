@@ -146,6 +146,38 @@ console.log('A match banks its streak where it belongs, and carries it onward');
   if (afterReset.best !== '11') fail(`Reset reopened the match peak at ${afterReset.best}`);
   ok('and the HUD Reset restarts the match without ending the run');
 
+  // Carrying the run into the restarted match is only half of it — the server
+  // has to be told, or a reload before the restarted match finishes puts the
+  // pre-Reset run straight back. The case that bites is a miss, which a
+  // scripted paddle cannot be relied on to produce; but the REPORT itself is
+  // testable without one. Knock the stored run out of step through the real
+  // route, press Reset, and the page must have put it back.
+  const storedSolo = async (page) =>
+    page.evaluate(async () => {
+      const p = await (await fetch('/api/profile/me')).json();
+      return p.modeStats?.solo?.currentStreak ?? null;
+    });
+  await carrier.evaluate(() =>
+    fetch('/api/profile/me/streak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'solo', endStreak: 3 }),
+    }).then((r) => r.json())
+  );
+  if ((await storedSolo(carrier)) !== 3) fail('could not knock the stored run out of step');
+
+  await carrier.click('#btn-reset-match');
+  await carrier.waitForSelector('#court-stats-overlay', { state: 'detached', timeout: 5000 });
+  await sleep(600);
+  const reportedAfterReset = await storedSolo(carrier);
+  if (reportedAfterReset !== 11) {
+    fail(`Reset did not tell the server where the run stands (server says ${reportedAfterReset})`);
+  }
+  ok('and tells the server where the run stands, so a reload cannot undo it');
+
+  await carrier.click('#btn-show-stats-overlay');
+  await carrier.waitForSelector('#court-stats-overlay', { timeout: 5000 });
+
   // Quitting an UNFINISHED match ends the run wherever it stands — which for
   // an untouched ball is exactly where it came in. Only a finished match
   // reports itself, so the run has to be remembered on the way out; the case

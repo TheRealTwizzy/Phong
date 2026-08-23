@@ -210,6 +210,13 @@ all. Rewording to dodge it is not a fix; the numbers are the point.
 `tests/identity.test.ts` asserts the per-mode rows arrive and that nothing is left behind
 under the old id. Add a playerId-keyed table and that suite is where it has to be claimed.
 
+**When a browser cannot state a rule directly, look for the observable it CAN state.** The
+run-carry rules need a real miss to distinguish, which a scripted paddle cannot be relied on
+to produce — but "did the page tell the server" does not. `scripts/e2e-streak.mjs` knocks the
+stored run out of step through the real route, presses Reset, and asserts the page put it
+back; that fails outright when the report is removed, where an assertion about the streak
+readout alone passes on the bug. Reach for the side effect before loosening the assertion.
+
 **Where two sources can answer the same question, the precedence is a rule too.** The run a
 new match opens on has two: the profile (which survives a reload) and what this page last saw
 its own match end on (which is fresher, because Play Again fires long before the match POST
