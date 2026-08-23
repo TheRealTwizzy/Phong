@@ -48,6 +48,13 @@ interface FullCourtBall {
   vx: number;
   vy: number;
   radius: number;
+  /**
+   * Always true here, and present so this really is a BallState — which is
+   * what checkPaddleCollision takes, and this passes it one. On a half court
+   * `active` answers "is the ball on MY side"; a full court has no other side
+   * for it to be on.
+   */
+  active: boolean;
 }
 
 export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
@@ -79,6 +86,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     vx: 0,
     vy: 0,
     radius: BALL_BASE_RADIUS,
+    active: true,
   });
   // The physics loop reads/writes these refs synchronously (a state updater
   // runs too late — the loop could tick again and score the same ball twice);
@@ -111,6 +119,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       // Player 1 (bottom) serves upward; player 2 (top) serves downward.
       vy: from === 1 ? -SERVE_SPEED : SERVE_SPEED,
       radius: BALL_BASE_RADIUS,
+      active: true,
     };
   }, []);
 
@@ -125,6 +134,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       vx: 0,
       vy: 0,
       radius: BALL_BASE_RADIUS,
+      active: true,
     };
   };
 

@@ -675,7 +675,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
           const tipX = originX + Math.sin(radians) * reach;
           const tipY = originY - Math.cos(radians) * reach;
 
-          ctx.strokeStyle = theme.accent;
+          ctx.strokeStyle = theme.accentColor;
           ctx.lineWidth = 3;
           ctx.setLineDash([7, 5]);
           ctx.beginPath();
@@ -691,7 +691,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
           ctx.lineTo(tipX - Math.sin(radians - 0.45) * head, tipY + Math.cos(radians - 0.45) * head);
           ctx.lineTo(tipX - Math.sin(radians + 0.45) * head, tipY + Math.cos(radians + 0.45) * head);
           ctx.closePath();
-          ctx.fillStyle = theme.accent;
+          ctx.fillStyle = theme.accentColor;
           ctx.fill();
 
           // Power bar along the bottom
@@ -700,7 +700,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
           const barY = height * 0.955;
           ctx.fillStyle = 'rgba(255,255,255,0.18)';
           ctx.fillRect(barX, barY, barW, 5);
-          ctx.fillStyle = theme.accent;
+          ctx.fillStyle = theme.accentColor;
           ctx.fillRect(barX, barY, barW * liveAim.power, 5);
         } else {
           const pulse = (Math.sin(time / 200) + 1) / 2;

@@ -22,7 +22,7 @@ This document is the working guide to **Phong**, an arcade sports web app with a
 
 ## 2. Tech Stack
 
-- **Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 4 (CSS-first — configured in `src/index.css`, no `tailwind.config.js`), Motion (`motion/react`), Lucide React icons, Canvas Confetti.
+- **Frontend**: React 19 (**with `@types/react`** — without it `tsc` silently skips every `.tsx`, so component props go entirely unchecked; that is how a DOM event came to occupy a `GameMode` parameter and a canvas read `theme.accent` on a type whose field is `accentColor`), TypeScript, Vite 6, Tailwind CSS 4 (CSS-first — configured in `src/index.css`, no `tailwind.config.js`), Motion (`motion/react`), Lucide React icons, Canvas Confetti.
 - **Server**: Express 4 (`server.ts`) + **`ws`** for the WebSocket relay (no Socket.IO), Node 22. One process serves the client and the relay on one port, dev (Vite middleware) and prod (static `dist/`) alike. Runtime dependencies are only `express` + `ws`; everything else is dev tooling.
 - **P2P mode**: private matches connect the two phones directly over **WebRTC DataChannels** (`src/net/p2p.ts`), with the relay as automatic fallback — see §5.
 - **Audio**: procedural Web Audio API synthesis in `src/audio/soundEffects.ts` — zero audio assets.
