@@ -16,6 +16,18 @@ interface OnboardingModalProps {
   isOpen: boolean;
   theme: ThemeConfig;
   language: LanguageCode;
+  /**
+   * This player arrived on an invitation link. It matters because that link is
+   * the one way into Phong that gets tapped from another app, so it routinely
+   * opens in a browser that is not the one holding the player's account — a
+   * chat app's in-app browser, or wherever a QR scan hands off to. The server
+   * cannot tell that browser from a first-time visitor, so onboarding opens
+   * and reads as "I have been signed out", with the player's own username
+   * coming back as taken. Both are true and neither means what it looks like:
+   * the account is intact in the browser it was made in. Saying that, here, is
+   * what stops someone spending their way out of it.
+   */
+  invited?: boolean;
   onInitialized: (profile: PlayerProfile) => void;
 }
 
@@ -30,6 +42,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   isOpen,
   theme,
   language,
+  invited = false,
   onInitialized,
 }) => {
   const [name, setName] = useState('');
@@ -241,6 +254,18 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           />
         </div>
 
+        {/* Arrived on an invitation into a browser that holds no account. The
+            player is about to read "pick a username" as "you were signed out",
+            and their own name as "taken by someone else". */}
+        {invited && (
+          <p
+            id="onboarding-other-browser-note"
+            className="text-[11px] font-mono text-cyan-300/80 leading-relaxed bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3"
+          >
+            {t('onboarding_other_browser', language)}
+          </p>
+        )}
+
         {/* Username (required, unique, 365-day lock) */}
         <div className="flex flex-col gap-1.5">
           <label className="text-[11px] font-mono font-bold text-zinc-300">
@@ -293,6 +318,12 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           </div>
         </div>
 
+        {nameStatus.kind === 'taken' && (
+          <p id="username-taken-restore-hint" className="text-[11px] font-mono text-amber-300/90 text-center leading-relaxed">
+            {t('username_taken_restore', language)}
+          </p>
+        )}
+
         {submitError && (
           <p className="text-[11px] font-mono text-rose-400 text-center">
             {t(submitError, language)}
@@ -319,7 +350,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <KeyRound className="w-3.5 h-3.5" />
             {t('have_recovery_code', language)}
           </button>
-          {showRestore && (
+          {(showRestore || nameStatus.kind === 'taken') && (
             <div className="flex items-center gap-2">
               <input
                 id="input-onboarding-claim-code"

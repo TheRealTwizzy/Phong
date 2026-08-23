@@ -108,4 +108,45 @@ describe('one page load, one session', () => {
     await openSession({ force: true });
     expect(mints()).toBe(2);
   });
+
+  it('does not read the session while a mint is still in flight', async () => {
+    // Boot mints; the heartbeat's first tick reads. Both fire on mount, so on
+    // anything slower than localhost they are in flight TOGETHER — and back
+    // when the device cookie was established by whichever API call landed
+    // first, that meant two cookieless callers and two device identities for
+    // one page load. The server side is closed by establishing the cookie on
+    // the document navigation; this is the client's half.
+    //
+    // The assertion has to be about OVERLAP, not call order: openSession
+    // issues its POST synchronously, so a plain index comparison is true
+    // whether or not the read waits. What matters is whether the POST had
+    // come back by the time the GET went out.
+    let postsInFlight = 0;
+    let readOverlappedAMint = false;
+    vi.stubGlobal('fetch', async (input: string, init?: { method?: string }) => {
+      const url = String(input);
+      const method = init?.method || 'GET';
+      calls.push({ url, method });
+      if (url === '/api/session' && method === 'POST') {
+        postsInFlight += 1;
+        // A round trip, rather than a resolved promise: the whole failure
+        // mode only exists because the mint takes time.
+        await new Promise((r) => setTimeout(r, 25));
+        postsInFlight -= 1;
+        activeSessionId = 'session-1';
+        return { ok: true, json: async () => ({ status: 'active', sessionId: activeSessionId, profile: { id: 'p1' } }) };
+      }
+      if (url === '/api/session' && method === 'GET') {
+        if (postsInFlight > 0) readOverlappedAMint = true;
+        return { ok: true, json: async () => ({ status: 'active', sessionId: activeSessionId, build: 'b1' }) };
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    });
+
+    const { openSession, probeSession } = await import('../src/net/session');
+    await Promise.all([openSession(), probeSession()]);
+
+    expect(readOverlappedAMint).toBe(false);
+    expect(mints()).toBe(1);
+  });
 });

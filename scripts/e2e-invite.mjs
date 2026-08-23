@@ -138,5 +138,113 @@ ok('both phones reached the court');
 
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
 
-console.log('\nPASS: an invitation link lands a brand-new player in the match');
+// ---------------------------------------------------------------------------
+// The other half of the reported failure: the invitee is NOT a new player.
+//
+// An invitation link is the one way into Phong that gets tapped from another
+// app, so it routinely opens in a browser that is not the one holding the
+// player's account — a chat app's in-app browser, or wherever a QR scan hands
+// off to. The server cannot tell that browser from a first-time visitor, so
+// onboarding opens and their own username comes back taken, by themselves.
+// "They were not only unable to join the lobby, they got signed out and their
+// account still exists but they lost access somehow."
+//
+// Nothing can stop a foreign browser being a foreign browser. What had to stop
+// was every door out of it being one-way: restoring the account into the
+// throwaway browser RELEASED the real one, and the wall a released device gets
+// offered exactly one button — "start as a new player" — which mints a new
+// device identity and leaves the account reachable by nobody, forever.
+console.log('\nThe same link, followed by a player who already has an account');
+
+const homeCtx = await browser.newContext({ ...devices['iPhone 13'] });
+const home = await homeCtx.newPage();
+home.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
+await home.goto(BASE);
+await passGatekeeper(home);
+const homeName = await onboard(home, 'Home');
+await home.waitForSelector('#menu-mode-multiplayer', { timeout: 15000 });
+const homeCode = await home.evaluate(() => fetch('/api/profile/me').then((r) => r.json()).then((p) => p.recoveryCode));
+ok(`${homeName} has an account in the browser they play in`);
+
+// A fresh host: the one above is on a live court, where there is no room to
+// open. Its own page, its own account, its own room.
+const host2 = await newPage('host2');
+await host2.goto(BASE);
+await passGatekeeper(host2);
+const host2Name = await onboard(host2, 'Host2');
+await host2.waitForSelector('#menu-mode-multiplayer', { timeout: 15000 });
+await host2.click('#menu-mode-multiplayer');
+await host2.waitForSelector('#btn-create-room', { timeout: 8000 });
+await host2.click('#btn-create-room');
+await host2.waitForSelector('#btn-copy-link', { timeout: 8000 });
+const code2 = await host2.evaluate(() => document.querySelector('#lobby-room-code')?.textContent?.trim() || null);
+if (!code2) fail('the second host never got a room code');
+ok(`${host2Name} opened room ${code2}`);
+
+// The link opens somewhere with no cookie jar of its own.
+const foreign = await newPage('foreign');
+await foreign.goto(`${BASE}/?room=${code2}`);
+await passGatekeeper(foreign);
+await foreign.waitForSelector('#onboarding-modal-overlay', { timeout: 8000 });
+
+// It must SAY why, or being asked to pick a username reads as being signed out
+// of an account that is in fact perfectly safe where it was left.
+if (!(await foreign.$('#onboarding-other-browser-note'))) {
+  fail('an invitee in a foreign browser is not told why onboarding opened');
+}
+ok('the invitee is told their account stays with the browser it was made in');
+
+// Their own name comes back taken. That is the loudest possible signal that
+// this is their account, so it has to point at the door that gets it back.
+await foreign.fill('#input-onboarding-username', homeName);
+await foreign.waitForSelector('#username-status-taken', { timeout: 8000 });
+if (!(await foreign.$('#username-taken-restore-hint'))) fail('a taken name does not point at restoring');
+if (!(await foreign.$('#input-onboarding-claim-code'))) fail('a taken name does not open the restore door');
+ok('their own username reads as taken, and points at restoring rather than a dead end');
+
+// They restore here — which releases the browser they actually play in.
+await foreign.fill('#input-onboarding-claim-code', homeCode);
+await foreign.click('#btn-onboarding-claim');
+await sleep(3000);
+if (!(await foreign.$('#btn-leave-room'))) fail('restoring on the invite link did not land them in the match');
+ok('restoring takes them into the match they were invited to');
+
+// And now the part that used to cost people their accounts.
+await home.bringToFront();
+// The wall arrives on the session heartbeat, which fires on refocus and then
+// every 15s. Poll rather than guess: a fixed sleep here is either flaky or
+// slower than it needs to be.
+let wall = null;
+for (let i = 0; i < 45 && wall !== 'released'; i++) {
+  await sleep(700);
+  wall = await home.evaluate(
+    () => document.querySelector('#session-guard-overlay')?.getAttribute('data-session-status') || null
+  );
+}
+if (wall !== 'released') fail(`the browser that lost the account should be walled as released, got ${wall}`);
+if (!(await home.$('#input-session-claim-code'))) fail('the released wall offers no way to keep the account');
+if (await home.$('#btn-session-action')) fail('starting over is still one press away from irreversible');
+ok('the released wall leads with restoring, and starting over is not the only button');
+
+const rotated = await foreign.evaluate(() => fetch('/api/profile/me').then((r) => r.json()).then((p) => p.recoveryCode));
+await home.fill('#input-session-claim-code', rotated);
+await home.click('#btn-session-claim');
+// The restore reloads the page, so wait for the wall to actually go rather
+// than for a guess at how long a reload takes.
+let stillWalled = 'unknown';
+for (let i = 0; i < 30; i++) {
+  await sleep(700);
+  stillWalled = await home
+    .evaluate(() => document.querySelector('#session-guard-overlay')?.getAttribute('data-session-status') || null)
+    .catch(() => 'navigating');
+  if (stillWalled === null) break;
+}
+if (stillWalled !== null) fail(`restoring did not clear the wall (still ${stillWalled})`);
+const recovered = await home.evaluate(() => fetch('/api/profile/me').then((r) => r.json()).then((p) => p.username));
+if (recovered !== homeName) fail(`the account did not come home: expected ${homeName}, got ${recovered}`);
+ok(`${homeName} took their account back without spending it`);
+
+if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
+
+console.log('\nPASS: an invitation lands a new player in the match, and never costs a returning one their account');
 await browser.close();

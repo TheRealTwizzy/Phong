@@ -103,6 +103,10 @@ import { Trophy, RefreshCw, Home } from 'lucide-react';
 
 /** How many times a lost invitation socket is retried before giving up. */
 const MAX_INVITE_RETRIES = 2;
+// A relay that refuses the socket for want of a live session is a different
+// failure from a relay that cannot be reached, and it recovers on its own
+// within a round trip, so it gets its own (larger) allowance.
+const MAX_INVITE_SESSION_REJOINS = 5;
 
 const DEFAULT_SETTINGS: GameSettings = {
   soundEnabled: true,
@@ -283,6 +287,10 @@ export default function App() {
   // an abandon, so it should never happen off a single mis-tap.
   const [quitConfirmOpen, setQuitConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
+  // An invitation link that never got its holder a seat. Silence here reads as
+  // "the link is broken" — which it may well be (a dead room code), but the
+  // player deserves to be told rather than left on a menu that swallowed it.
+  const [toastInviteFailed, setToastInviteFailed] = useState<boolean>(false);
   // 'relay' = via server; 'connecting' = P2P handshake running; 'p2p' = direct
   const [linkStatus, setLinkStatus] = useState<'relay' | 'connecting' | 'p2p'>('relay');
   const [p2pEnabled, setP2pEnabled] = useState<boolean>(true);
@@ -851,6 +859,12 @@ export default function App() {
   // the ATTEMPT turned every such blip into "the link is broken". Bounded, so
   // a genuinely unreachable relay stops rather than spinning.
   const inviteRetriesRef = useRef<number>(0);
+  // Sockets the relay refused because this page held no live session. Bounded
+  // separately from the retries above: those are for a flaky relay, these are
+  // for a session that is one round trip from being fixed, and charging one to
+  // the other is what turned a recoverable blip into a dead invitation.
+  const sessionRefusedJoinRef = useRef<boolean>(false);
+  const sessionRejoinsRef = useRef<number>(0);
   const [inviteRetry, setInviteRetry] = useState<number>(0);
   useEffect(() => {
     const roomCode = new URLSearchParams(window.location.search).get('room');
@@ -1305,6 +1319,17 @@ export default function App() {
         // seconds, but the relay already knows, so act on it immediately —
         // this is the duel half of the same eviction the REST routes enforce.
         setSessionStatus(msg.status);
+        // `none` is the one refusal that says nothing about the account: this
+        // page simply had no live session at the moment it asked (a sibling
+        // tab handed it back, or it had not landed yet). It is recoverable in
+        // place, and the close that follows must NOT spend one of the
+        // invitation's two retries on it — three refusals arrive inside a few
+        // milliseconds, so a blink of session churn ate the whole budget and
+        // the link died in silence. Re-mint, then ask for the seat again.
+        if (msg.status === 'none') {
+          sessionRefusedJoinRef.current = true;
+          void adoptSessionRef.current();
+        }
         break;
 
       case 'opponent_left': {
@@ -1399,10 +1424,28 @@ export default function App() {
       }
       // The invitation is still outstanding: this socket never produced a
       // room_joined or an error, so ask again on a fresh one.
-      if (pendingRoomRef.current && inviteRetriesRef.current < MAX_INVITE_RETRIES) {
-        inviteRetriesRef.current += 1;
-        autoJoinedRef.current = false;
-        setInviteRetry((n) => n + 1);
+      if (pendingRoomRef.current) {
+        // Which budget this close comes out of depends on why the socket
+        // died. A session refusal is charged to its own allowance, because
+        // re-minting is already under way and the next attempt is very likely
+        // to be seated; anything else is the relay being unreachable.
+        const sessionRefusal = sessionRefusedJoinRef.current;
+        sessionRefusedJoinRef.current = false;
+        const budgetLeft = sessionRefusal
+          ? sessionRejoinsRef.current < MAX_INVITE_SESSION_REJOINS
+          : inviteRetriesRef.current < MAX_INVITE_RETRIES;
+        if (budgetLeft) {
+          if (sessionRefusal) sessionRejoinsRef.current += 1;
+          else inviteRetriesRef.current += 1;
+          autoJoinedRef.current = false;
+          setInviteRetry((n) => n + 1);
+        } else {
+          // Out of attempts. The link is what the player was handed, so it
+          // owes them an answer rather than a menu that quietly ate it.
+          pendingRoomRef.current = null;
+          setToastInviteFailed(true);
+          setTimeout(() => setToastInviteFailed(false), 8000);
+        }
       }
       const midMatch =
         modeRef.current === 'multiplayer' &&
@@ -2030,6 +2073,12 @@ export default function App() {
               content: t('match_not_saved', currentLanguage),
               onDismiss: () => setToastRecordFailed(false),
             },
+            toastInviteFailed && {
+              id: 'toast-invite-failed',
+              tone: 'warn' as const,
+              content: t('invite_join_failed', currentLanguage),
+              onDismiss: () => setToastInviteFailed(false),
+            },
           ].filter(Boolean) as ToastSpec[]}
         />
 
@@ -2076,6 +2125,14 @@ export default function App() {
           isOpen={Boolean(profile && !profile.initialized)}
           theme={currentTheme}
           language={currentLanguage}
+          /* An invitation is the one link into Phong that gets tapped from
+             ANOTHER app, so it is the one that routinely lands a player in a
+             browser that is not the one holding their account — a chat app's
+             in-app browser, or whatever a QR scan hands off to. There the app
+             cannot tell them from a first-time player, and onboarding reads as
+             having been signed out of an account that is in fact perfectly
+             safe where they left it. Saying so is the whole fix. */
+          invited={Boolean(pendingRoomRef.current)}
           onInitialized={(p) => {
             setProfile(p);
             setPlayerId(p.id);

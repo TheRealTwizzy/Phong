@@ -14,6 +14,7 @@ import {
   blockReleasedDevice,
   requireActiveSession,
   resetDeviceIdentity,
+  requireRestorableSession,
   resolveSession,
   sessionIdentity,
 } from './server/auth';
@@ -204,6 +205,40 @@ async function startServer() {
   // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies)
   app.set('trust proxy', true);
   app.use(express.json());
+
+  // The device cookie is established by the NAVIGATION, before a line of JS
+  // runs — not by whichever API call happens to land first.
+  //
+  // `deviceIdentity` was mounted on /api alone, so the HTML document set no
+  // cookie at all and the first /api calls from the booting client were the
+  // ones that minted it. Those calls are CONCURRENT (the session mint and the
+  // heartbeat's first tick both fire on mount), and on anything slower than
+  // localhost several are in flight before any of them has come back. Each
+  // arrives with no cookie, so each mints its OWN device identity and appends
+  // its own Set-Cookie; the browser keeps whichever response lands last.
+  // Measured on a phone-latency connection: THREE identities per page load.
+  //
+  // Usually the last one wins everything and it merely litters the players
+  // table. But the window stays open for as long as the slowest of those
+  // requests, and a player who onboards inside it — which the invitation flow
+  // pushes them to do, since the link drops them straight on the modal —
+  // locks their username to the identity the cookie is about to stop being.
+  // The next profile read comes back uninitialized, onboarding re-opens, and
+  // the name they just chose is taken. By themselves, seconds earlier. That is
+  // "they got signed out and their account still exists but they lost access":
+  // no transfer, no eviction, just a cookie race on a slow connection.
+  //
+  // A document GET always precedes the JS it delivers, so establishing the
+  // cookie here means every /api call carries one and nothing mints a second.
+  // index.html is served no-cache (see buildId), so this is reached on every
+  // load rather than only the first.
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api')) return next(); // its own mount, below
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    if (!String(req.headers.accept || '').includes('text/html')) return next();
+    return deviceIdentity(req, res, next);
+  });
+
   app.use('/api', deviceIdentity, sessionIdentity);
 
   // Health check
@@ -276,10 +311,13 @@ async function startServer() {
       }
       const previous = req.deviceId!;
       const deviceId = resetDeviceIdentity(req, res);
-      // The tombstone has done its job for this browser; the identity it
-      // pointed at is gone from the cookie jar and will never be presented
-      // again. Leaving it would strand the row forever.
-      db.clearDeviceRelease(previous);
+      // The tombstone is KEPT. It used to be deleted here on the grounds that
+      // the old identity is gone from the cookie jar and will never be
+      // presented again — true, and precisely why deleting it hurts: the row
+      // is the only record that this browser's account moved, and where it
+      // moved to. Once it is gone an account left behind by a reset is not
+      // merely unreachable, it is untraceable, and "my account still exists
+      // but I lost access" has no answer. One row per transfer is nothing.
       const sessionId = issueSession(req, res, deviceId);
       // The old identity's sockets belong to a device that no longer exists.
       closeDisplacedSockets(previous, sessionId);
@@ -293,6 +331,18 @@ async function startServer() {
   // next load displaces whatever still holds it anyway.
   app.post('/api/session/end', (req, res) => {
     const session = req.session!;
+    // A page hands back ITS OWN session, and the id it names is the only way
+    // the server can tell which page is talking. `phong_session` is an ORIGIN
+    // cookie: two tabs on one phone present the same value, so a closing tab
+    // arrives holding whatever the NEWEST load minted. Ending that, and
+    // clearing the shared cookie with it, signed the tab still sitting in a
+    // lobby out of its own account — its next request carried no session, the
+    // relay refused the socket at the upgrade, and the join died. Which tab
+    // the player closed decided whether the other one could still play.
+    const named = typeof req.body?.sessionId === 'string' ? req.body.sessionId : null;
+    if (named && named !== session.sessionId) {
+      return res.json({ status: 'not_mine' });
+    }
     if (session.status === 'active' && session.sessionId) {
       db.endSession(req.deviceId!, session.sessionId);
     }
@@ -475,15 +525,32 @@ async function startServer() {
 
   // Restore a profile on this device using its recovery code. The profile
   // moves: the previous device unlinks and the code rotates.
-  app.post('/api/profile/claim', requireActiveSession, (req, res) => {
+  app.post('/api/profile/claim', requireRestorableSession, (req, res) => {
     try {
       const code = String(req.body?.code || '');
       if (!code.trim()) {
         return res.status(400).json({ error: 'Recovery code required' });
       }
+      // A RELEASED device is allowed through this door, and deliberately so:
+      // it is the browser whose account was transferred away, and the session
+      // wall offers it exactly one button — "start as a new player" — which
+      // mints a new device identity and leaves the account behind reachable by
+      // nobody. Restoring is the non-destructive order of the same two moves,
+      // and it grants nothing extra: the credential is the account's own
+      // recovery code, and the same call was already reachable by pressing
+      // "start fresh" first. A released device holds no session to hand to the
+      // row, so it takes one on the way in.
+      const wasReleased = req.session!.status === 'released';
       const profile = db.claimProfileByCode(code, req.deviceId!, req.session!.sessionId);
       if (!profile) {
         return res.status(404).json({ error: 'No profile matches that code' });
+      }
+      if (wasReleased) {
+        // claimProfileByCode has already cleared this device's tombstone, so
+        // the account is here again and only a session is missing. Issuing it
+        // now is what makes the restore land in one move instead of leaving
+        // the player looking at the wall they just escaped.
+        issueSession(req, res, req.deviceId!);
       }
       // The device that just gave the account away may be sitting on an open
       // socket in a live duel. It stops being able to play the moment the

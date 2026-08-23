@@ -360,8 +360,16 @@ const guest = await newPage();
     fail(`released device still resolves a profile: ${JSON.stringify(releasedRead)}`);
   }
 
-  // Its only way forward is to start over as a NEW player — never to be
-  // handed back the account it gave away.
+  // Starting over is still there, and still never hands back the account it
+  // gave away — but it is no longer the ONLY thing offered, and no longer one
+  // press from irreversible. The restore box comes first (that is the way back
+  // that keeps the account; scripts/e2e-invite.mjs drives it), and starting
+  // fresh takes two presses with the cost said out loud in between.
+  if (!(await a.$('#input-session-claim-code'))) fail('the released wall offers no way to keep the account');
+  if (await a.$('#btn-session-action')) fail('starting over is still one press away from irreversible');
+  await a.click('#btn-session-fresh');
+  await a.waitForSelector('#btn-session-action', { timeout: 8000 })
+    .catch(() => fail('starting fresh did not ask for confirmation'));
   await a.click('#btn-session-action');
   await a.waitForSelector('#onboarding-modal-overlay', { timeout: 8000 })
     .catch(() => fail('starting fresh did not re-open onboarding'));
@@ -373,6 +381,7 @@ const guest = await newPage();
   if (profA3.matchesPlayed !== 0) fail('old device profile not fresh');
   if (profA3.initialized) fail('old device fresh profile should be uninitialized');
   console.log('scenario 5b OK — transfer moves the profile, walls off the old device, rotates the code');
+  console.log('scenario 5c OK — the wall keeps a restore door, and starting over is confirmed');
 
   await ctxA.close();
   await ctxB.close();
