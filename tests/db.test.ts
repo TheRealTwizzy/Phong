@@ -715,6 +715,64 @@ describe('per-mode stats', () => {
     expect(db.getModeStats(id).solo?.matchesPlayed).toBe(2);
   });
 
+  it('does not let a delayed result overwrite a newer run', () => {
+    // Idempotency tells two matches apart; it does not put them in sequence.
+    // currentStreak is the one column here that is ASSIGNED, so the last write
+    // wins — and the last write is not the last match. A result that failed to
+    // POST sits in the on-device queue while the player replays, and lands
+    // afterwards: match A's run of 10 comes back over replay B's 0, and the
+    // next reload starts on a run that was already broken.
+    const id = 'dev_modeorder0000001';
+    init(id, 'ModeOrder');
+    const early = 1_700_000_000_000;
+
+    // A ends at 10 but its POST is delayed.
+    // B is played and lost immediately after, and lands first.
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: false, playerScore: 2, bestStreak: 10, endStreak: 0, earnedStreak: 4, endedAt: early + 60_000, matchKey: 'ord-b' })
+    );
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+
+    // Now A's queued POST arrives, describing the EARLIER match.
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 10, endStreak: 10, earnedStreak: 10, endedAt: early, matchKey: 'ord-a' })
+    );
+    // The run stays broken...
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+    // ...but the match itself is still counted and its peak still stands: it
+    // happened, and it is owed everything except the ordering.
+    expect(db.getModeStats(id).solo?.matchesPlayed).toBe(2);
+    expect(db.getModeStats(id).solo?.bestStreak).toBe(10);
+  });
+
+  it('still takes a result that really is the newest', () => {
+    const id = 'dev_modeorder0000002';
+    init(id, 'ModeOrder2');
+    const t = 1_700_000_000_000;
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 6, endStreak: 6, earnedStreak: 6, endedAt: t, matchKey: 'ord2-a' })
+    );
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(6);
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 9, endStreak: 9, earnedStreak: 3, endedAt: t + 1000, matchKey: 'ord2-b' })
+    );
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(9);
+  });
+
+  it('treats a result with no stamp at all as happening now', () => {
+    // An older client, or the relay writing a duel as it finishes. Absent must
+    // not read as "the beginning of time" and be discarded.
+    const id = 'dev_modeorder0000003';
+    init(id, 'ModeOrder3');
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: true, playerScore: 5, bestStreak: 7, endStreak: 7, earnedStreak: 7, endedAt: Date.now(), matchKey: 'ord3-a' })
+    );
+    db.recordMatch(
+      match(id, { mode: 'solo', difficulty: 'rookie', isWinner: false, playerScore: 1, bestStreak: 7, endStreak: 0, earnedStreak: 0, matchKey: 'ord3-b' })
+    );
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+  });
+
   it('runs a win streak per mode, so a loss in one does not end the other', () => {
     const id = 'dev_modestreak000001';
     init(id, 'ModeStreak');

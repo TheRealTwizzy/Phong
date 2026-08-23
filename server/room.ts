@@ -193,6 +193,8 @@ export function applyMatchSync(
     bestStreaks: [number, number];
     streaks: [number, number];
     earnedBests: [number, number];
+    servingPlayer: 0 | 1;
+    crossingsThisPoint: number;
   }
 ): { decided: boolean } {
   // Nothing to sync before the host has started a match: the replica only
@@ -245,6 +247,17 @@ export function applyMatchSync(
     Math.max(room.earnedBests[0], Math.min(clampInt(sync.earnedBests?.[0], 0, 100000), room.bestStreaks[0])),
     Math.max(room.earnedBests[1], Math.min(clampInt(sync.earnedBests?.[1], 0, 100000), room.bestStreaks[1])),
   ];
+  // Where the POINT is, not just where the score is. A P2P match can hand
+  // gameplay back to the relay mid-rally — the DataChannel dies and sendGame
+  // starts returning false — and from that moment the relay judges crossings
+  // again with countReturn, which asks "was this the serve?" from exactly
+  // these two fields. Left at whatever the last relayed point set them to, the
+  // first crossing after the handover is read as a serve and dropped from the
+  // streak, or a real serve is counted as a return.
+  if (sync.servingPlayer === 0 || sync.servingPlayer === 1) {
+    room.servingPlayer = sync.servingPlayer;
+  }
+  room.crossingsThisPoint = clampInt(sync.crossingsThisPoint, 0, 100000);
   room.inPlay = true;
 
   if (room.scores[0] >= cap || room.scores[1] >= cap) {

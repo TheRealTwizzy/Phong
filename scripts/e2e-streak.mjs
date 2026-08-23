@@ -146,6 +146,30 @@ console.log('A match banks its streak where it belongs, and carries it onward');
   if (afterReset.best !== '11') fail(`Reset reopened the match peak at ${afterReset.best}`);
   ok('and the HUD Reset restarts the match without ending the run');
 
+  // Quitting an UNFINISHED match ends the run wherever it stands — which for
+  // an untouched ball is exactly where it came in. Only a finished match
+  // reports itself, so the run has to be remembered on the way out; the case
+  // that bites is a miss before quitting, which a scripted paddle cannot be
+  // relied on to produce (see TESTING.md). What IS deterministic is the other
+  // direction, and it is the likelier over-correction: quitting must not
+  // CONFISCATE a run either.
+  await carrier.click('#btn-quit-to-menu');
+  await carrier.waitForSelector('#main-menu-screen', { timeout: 8000 });
+  await carrier.click('#menu-mode-solo');
+  await carrier.waitForSelector('#menu-start-solo', { timeout: 8000 });
+  await carrier.click('#menu-start-solo');
+  await carrier.waitForSelector('#half-court-canvas', { timeout: 8000 });
+  await carrier.click('#btn-show-stats-overlay');
+  await carrier.waitForSelector('#court-stats-overlay', { timeout: 5000 });
+  await sleep(400);
+  const afterQuit = await carrier.evaluate(
+    () => document.querySelector('#telemetry-my-streak')?.textContent
+  );
+  if (afterQuit !== '11') {
+    fail(`quitting an unfinished match took the run from 11 to ${afterQuit}`);
+  }
+  ok('and quitting an unfinished match does not end the run either');
+
   // Modes keep their own runs: solo does not seed practice.
   await carrier.click('#btn-quit-to-menu');
   await carrier.waitForSelector('#main-menu-screen', { timeout: 8000 });

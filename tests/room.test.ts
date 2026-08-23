@@ -59,6 +59,8 @@ const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
   bestStreaks: [0, 0] as [number, number],
   streaks: [0, 0] as [number, number],
   earnedBests: [0, 0] as [number, number],
+  servingPlayer: 0 as 0 | 1,
+  crossingsThisPoint: 0,
   ...over,
 });
 
@@ -552,5 +554,27 @@ describe('what a match earned, on the relay', () => {
     applyMatchSync(r, sync({ p1Score: 1, bestStreaks: [5, 5], streaks: [900, 900], earnedBests: [900, 900] }));
     expect(r.streaks).toEqual([5, 5]);
     expect(r.earnedBests).toEqual([5, 5]);
+  });
+
+  it('takes the point phase too, so a handover back lands mid-rally', () => {
+    // A P2P link can die in the middle of a point: sendGame starts returning
+    // false and crossings go to the relay again, which judges them with
+    // countReturn — and countReturn asks "was this the serve?" from exactly
+    // these two fields. Left where the last relayed point put them, the first
+    // crossing after the handover is read as a serve and dropped.
+    const r = room({ servingPlayer: 0, crossingsThisPoint: 0 });
+    applyMatchSync(r, sync({ p1Score: 1, servingPlayer: 1, crossingsThisPoint: 3 }));
+    expect(r.servingPlayer).toBe(1);
+    expect(r.crossingsThisPoint).toBe(3);
+
+    // And the very next relayed crossing is a return, not a serve.
+    expect(countReturn(r, 1)).toBe(true);
+    expect(r.streaks[1]).toBe(1);
+  });
+
+  it('does not let a peer name a seat that does not exist as the server', () => {
+    const r = room({ servingPlayer: 1 });
+    applyMatchSync(r, sync({ p1Score: 1, servingPlayer: 7 as unknown as 0 | 1 }));
+    expect(r.servingPlayer).toBe(1);
   });
 });

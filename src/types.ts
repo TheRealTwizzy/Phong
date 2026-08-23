@@ -439,6 +439,17 @@ export interface MatchEndPayload {
    */
   earnedStreak: number;
   /**
+   * When this match ENDED, by the reporting device's clock.
+   *
+   * Everything else here is either additive (and so paid once, by matchKey) or
+   * a maximum. `endStreak` is neither: it is assigned, so the last write wins
+   * — and the last write is not the last match. A result can sit in the
+   * on-device queue through a whole replay and land afterwards, restoring a
+   * run the replay had already broken. This is what orders them; the server
+   * ignores a stamp older than the one it already has.
+   */
+  endedAt?: number;
+  /**
    * The streak this player finished the match ON. Zero if the last thing they
    * did was miss. A streak carries into the next match, so this is what the
    * next one starts from — and it is a different number from the peak above,
@@ -540,7 +551,7 @@ export type WSClientMessage =
   // rating it on the wrong thing. NOTE this member stays on ONE line —
   // tests/protocolParity.test.ts reads this union to the first line-ending
   // semicolon, and a multi-line member truncates the whole parse.
-  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number]; streaks: [number, number]; earnedBests: [number, number] }
+  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; bestStreaks: [number, number]; streaks: [number, number]; earnedBests: [number, number]; servingPlayer: 0 | 1; crossingsThisPoint: number }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
   | { type: 'rtc_signal'; payload: RTCSignalPayload }

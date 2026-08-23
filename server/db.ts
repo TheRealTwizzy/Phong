@@ -361,6 +361,13 @@ class GameDatabase {
         -- across a reload and a different browser too, which means it lives
         -- here rather than in the client.
         currentStreak INTEGER NOT NULL DEFAULT 0,
+        -- When the match that set currentStreak ended, by its own device's
+        -- clock. Every other column here is additive (paid once per matchKey)
+        -- or a maximum, so order cannot hurt them. currentStreak is assigned,
+        -- and the last WRITE is not the last MATCH: a result can sit in the
+        -- on-device queue through a whole replay and land after it, restoring
+        -- a run the replay had already broken.
+        streakAt INTEGER NOT NULL DEFAULT 0,
         winStreak INTEGER NOT NULL DEFAULT 0,
         bestWinStreak INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (playerId, mode)
@@ -567,6 +574,15 @@ class GameDatabase {
         this.sql.exec(`ALTER TABLE players ADD COLUMN ${ddl}`);
       }
     };
+    // The same, for player_mode_stats — the only other table this project has
+    // ever needed to widen after the fact.
+    const modeCols = this.sql
+      .prepare('PRAGMA table_info(player_mode_stats)')
+      .all() as unknown as Array<{ name: string }>;
+    if (modeCols.length && !modeCols.some((c) => c.name === 'streakAt')) {
+      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakAt INTEGER NOT NULL DEFAULT 0');
+    }
+
     addColumn('recoveryCode', 'recoveryCode TEXT');
     // TrueSkill-style ratings replaced the old fixed-delta ELO.
     addColumn('mmrMu', 'mmrMu REAL NOT NULL DEFAULT 25');
@@ -1040,12 +1056,20 @@ class GameDatabase {
        * a finished match wants.
        */
       endStreak?: number;
+      /**
+       * When the match this describes ENDED, by the reporting device's clock.
+       * Absent means "now", which is what a write happening as it happens
+       * wants — the relay's own record of a duel, or a practice session.
+       */
+      endedAt?: number;
     }
   ): void {
     const row = this.stmt(
-        `SELECT winStreak, currentStreak FROM player_mode_stats WHERE playerId = ? AND mode = ?`
+        `SELECT winStreak, currentStreak, streakAt FROM player_mode_stats WHERE playerId = ? AND mode = ?`
       )
-      .get(playerId, mode) as { winStreak: number; currentStreak: number } | undefined;
+      .get(playerId, mode) as
+      | { winStreak: number; currentStreak: number; streakAt: number }
+      | undefined;
     // A win streak IN THIS MODE: unlike the profile-wide one, a duel loss does
     // not end a solo streak and vice versa. Undefined `won` (a practice
     // session) leaves both alone rather than counting as a loss.
@@ -1054,15 +1078,27 @@ class GameDatabase {
     // The run that carries. Assigned, not accumulated and not maxed: it can
     // legitimately go DOWN to zero, because ending a match on a miss is
     // exactly what ends a streak.
+    //
+    // Which is exactly why it needs ordering, and the other columns do not.
+    // Idempotency tells two matches apart; it does not put them in sequence.
+    // A result that failed to POST sits in the on-device queue while the
+    // player replays, and lands afterwards — assigning blindly, match A's run
+    // of 10 comes back over replay B's 0 and the next reload starts on a run
+    // that was already broken. An older stamp is kept for its additive part
+    // (that is still one match, and still owed) and ignored for this one.
+    const stamp = Math.max(0, Math.round(Number(d.endedAt) || 0)) || Date.now();
+    const prevStamp = row?.streakAt ?? 0;
+    const isNewer = stamp >= prevStamp;
     const nextCurrent =
-      d.endStreak === undefined
+      d.endStreak === undefined || !isNewer
         ? (row?.currentStreak ?? 0)
         : Math.max(0, Math.round(d.endStreak));
+    const nextStamp = d.endStreak !== undefined && isNewer ? stamp : prevStamp;
     this.stmt(
         `INSERT INTO player_mode_stats
            (playerId, mode, matchesPlayed, matchesWon, matchesLost,
-            pointsScored, aces, bestStreak, currentStreak, winStreak, bestWinStreak)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pointsScored, aces, bestStreak, currentStreak, streakAt, winStreak, bestWinStreak)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(playerId, mode) DO UPDATE SET
            matchesPlayed = matchesPlayed + excluded.matchesPlayed,
            matchesWon    = matchesWon    + excluded.matchesWon,
@@ -1071,6 +1107,7 @@ class GameDatabase {
            aces          = aces          + excluded.aces,
            bestStreak    = MAX(bestStreak, excluded.bestStreak),
            currentStreak = excluded.currentStreak,
+           streakAt      = excluded.streakAt,
            winStreak     = excluded.winStreak,
            bestWinStreak = MAX(bestWinStreak, excluded.winStreak)`
       )
@@ -1084,6 +1121,7 @@ class GameDatabase {
         Math.max(0, Math.round(d.aces ?? 0)),
         Math.max(0, Math.round(d.bestStreak ?? 0)),
         nextCurrent,
+        nextStamp,
         nextWinStreak,
         nextWinStreak
       );
@@ -1944,6 +1982,10 @@ class GameDatabase {
       aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
       bestStreak: payload.bestStreak,
       endStreak,
+      // The device's own clock at the final whistle, so a result that queued
+      // through a replay does not land back on top of it. Absent — an older
+      // client, or a payload the relay built itself — means "now".
+      endedAt: Number(payload.endedAt) || undefined,
     };
     // Streaks, shutouts and per-difficulty wins are derived here and only
     // here, from the result the server just accepted — a client can report a

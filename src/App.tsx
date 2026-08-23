@@ -672,6 +672,10 @@ export default function App() {
           bestStreak: statsRef.current.bestStreak,
           endStreak: statsRef.current.streak,
           earnedStreak: statsRef.current.earnedBest,
+          // Stamped here, at the whistle — not when this eventually POSTs.
+          // The queue can hold this through a whole replay, and the run it
+          // reports must not land back on top of a newer one.
+          endedAt: Date.now(),
           aces: statsRef.current.aces,
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
@@ -2276,6 +2280,15 @@ export default function App() {
         statsRef.current.earnedBest,
         statsRef.current.streak
       );
+    } else if (!tourMatchRef.current) {
+      // Walking out of an UNFINISHED match still ends wherever the run ends.
+      // Only a finished match reports itself, so without this a player who
+      // carried a run in, missed, and quit was seeded from the stale carry on
+      // their next match — the miss simply undone, and every return after it
+      // extending a run that should have been over. Practice says the same
+      // thing through its own report above; the tour says nothing at all,
+      // because the match it plays never happened.
+      rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
     }
     setScreen('menu');
     resetMatch();

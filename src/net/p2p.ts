@@ -54,6 +54,8 @@ interface P2POptions {
     bestStreaks: [number, number];
     streaks: [number, number];
     earnedBests: [number, number];
+    servingPlayer: 0 | 1;
+    crossingsThisPoint: number;
   }) => void;
 }
 
@@ -211,6 +213,14 @@ export class P2PGameLink {
       // tells it what to carry into the next one.
       streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
       earnedBests: [this.streaks.earnedBests[0], this.streaks.earnedBests[1]],
+      // Where the POINT is, so a handover back to the relay lands mid-rally
+      // without it having to guess. If the DataChannel dies, sendGame starts
+      // returning false and crossings go to the relay again — which judges
+      // them with countReturn, asking "was this the serve?" from exactly these
+      // two fields. Stale, the first crossing after the handover is read as a
+      // serve and dropped, or a real serve is counted as a return.
+      servingPlayer: this.streaks.servingPlayer,
+      crossingsThisPoint: this.streaks.crossingsThisPoint,
     });
   }
 
