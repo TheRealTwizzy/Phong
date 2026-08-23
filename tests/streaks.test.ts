@@ -272,3 +272,32 @@ describe('which run the next match opens on', () => {
     expect(carriedStreak({}, 'solo', Number.NaN)).toBe(0);
   });
 });
+
+describe('the opponent’s run, where it is known', () => {
+  it('starts a duel on what the relay says BOTH seats walk in on', () => {
+    // game_start carries [p1, p2]. Passing only our own seat left the
+    // telemetry overlay showing the opponent on zero until they built a new
+    // run, while the relay and the P2P replica held the real number.
+    const s = startMatchStreaks(base(), 7, 4);
+    expect(s.streak).toBe(7);
+    expect(s.bestStreak).toBe(7);
+    expect(s.oppStreak).toBe(4);
+    expect(s.oppBestStreak).toBe(4);
+  });
+
+  it('still starts the opponent at zero when nobody knows', () => {
+    // A solo opponent is an AI that has just been constructed, so there is no
+    // carried run to show — the argument is optional for exactly that.
+    const s = startMatchStreaks(base(), 7);
+    expect(s.oppStreak).toBe(0);
+    expect(s.oppBestStreak).toBe(0);
+  });
+
+  it('pays and rates on nothing the opponent brought with them', () => {
+    // The opponent's side is display only. Their carry must not reach the
+    // earned figures, which are what this match is paid on.
+    const s = startMatchStreaks(base(), 7, 40);
+    expect(s.earnedStreak).toBe(0);
+    expect(s.earnedBest).toBe(0);
+  });
+});

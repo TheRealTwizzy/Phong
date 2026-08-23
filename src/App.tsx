@@ -336,6 +336,7 @@ export default function App() {
   // them. Leaving a room is now a decision, and taking it actually leaves.
   const [leaveLobbyConfirmOpen, setLeaveLobbyConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
+  const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
   // An invitation link that never got its holder a seat. Silence here reads as
   // "the link is broken" — which it may well be (a dead room code), but the
   // player deserves to be told rather than left on a menu that swallowed it.
@@ -436,6 +437,14 @@ export default function App() {
   const oppBallSeenRef = useRef<number>(0);
   const matchCountdownRef = useRef<number | null>(matchCountdown);
   const intentionalCloseRef = useRef<boolean>(false);
+  /**
+   * The room this page currently holds a seat in, for the socket handlers,
+   * which are built once and cannot see state. Cleared by handleLeaveRoom, so
+   * it answers "do we hold a seat right now" — which playerIndex does not: it
+   * keeps its last value after a leave, and is only ever overwritten by the
+   * next room_created/room_joined.
+   */
+  const roomIdRef = useRef<string | null>(null);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
 
   ballRef.current = ball;
@@ -450,6 +459,7 @@ export default function App() {
   settingsRef.current = settings;
   profileRef.current = profile;
   playerIndexRef.current = playerIndex;
+  roomIdRef.current = roomId;
   opponentIdRef.current = opponentId;
   oppPaddleXRef.current = oppPaddleX;
   matchCountdownRef.current = matchCountdown;
@@ -1249,7 +1259,11 @@ export default function App() {
             // The relay's number, not the profile's: it seeded the seat from
             // the store and it is what this match will be recorded on, so a
             // phone that disagrees is a phone showing something else.
-            msg.streaks?.[playerIndexRef.current] ?? carriedStreak('multiplayer')
+            msg.streaks?.[playerIndexRef.current] ?? carriedStreak('multiplayer'),
+            // The other seat's, for the telemetry overlay. Shown, never
+            // counted: what the opponent is paid and rated on is their own
+            // phone's business and the relay's.
+            msg.streaks?.[playerIndexRef.current === 0 ? 1 : 0] ?? 0
           )
         );
         setTotalTouches(0);
@@ -1534,13 +1548,21 @@ export default function App() {
           setTimeout(() => setToastInviteFailed(false), 8000);
         }
       }
-      const midMatch =
-        modeRef.current === 'multiplayer' &&
-        screenRef.current === 'game' &&
-        !!opponentIdRef.current;
-      if (midMatch) {
-        setToastEjected(true);
-        setTimeout(() => setToastEjected(false), 8000);
+      // Anything the relay was holding a seat for. This used to require an
+      // opponent AND a live court, which missed exactly the case the unpaired
+      // TTL exists for: a host waiting alone, whose room the reaper deletes
+      // and whose socket it closes. They were left sitting in a lobby showing
+      // a room code that no longer resolved, so a friend typing it got "room
+      // not found" while the host still believed they were hosting. A guest
+      // who has joined but not yet started is the same shape — a seat, and no
+      // court yet. A deliberate leave returned above; this is the rest.
+      if (roomIdRef.current) {
+        // Two different things to say. Mid-match the relay has recorded an
+        // abandon and told the opponent, so "removed from the match" is the
+        // truth. Alone in a lobby there was never a match to be removed from.
+        const notice = opponentIdRef.current ? setToastEjected : setToastRoomExpired;
+        notice(true);
+        setTimeout(() => notice(false), 8000);
         handleLeaveRoomRef.current();
       }
     };
@@ -1680,11 +1702,16 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
-    intentionalCloseRef.current = true;
     p2pRef.current?.close();
     p2pRef.current = null;
     setLinkStatus('relay');
     if (ws && ws.readyState === WebSocket.OPEN) {
+      // The flag labels a close WE cause, so it is set only when there is one
+      // to cause. Set unconditionally it outlived its socket — this is also
+      // reached FROM onclose, where the socket is already gone and no close
+      // event is coming to consume it, and the flag then swallowed the next
+      // socket's genuine ejection.
+      intentionalCloseRef.current = true;
       ws.send(JSON.stringify({ type: 'leave_room' }));
       ws.close();
     }
@@ -2355,6 +2382,12 @@ export default function App() {
               tone: 'loss' as const,
               content: t('connection_lost_notice', currentLanguage),
               onDismiss: () => setToastEjected(false),
+            },
+            toastRoomExpired && {
+              id: 'toast-room-expired',
+              tone: 'warn' as const,
+              content: t('room_expired_notice', currentLanguage),
+              onDismiss: () => setToastRoomExpired(false),
             },
             toastOpponentLeft && {
               id: 'toast-opponent-left',

@@ -81,6 +81,15 @@ const newPlayer = async (prefix) => {
 
 const host = await newPlayer('EjH');
 const guest = await newPlayer('EjG');
+// A third player who hosts and is never joined. Their socket dies with
+// everyone else's below, which is the same event the room reaper produces for
+// a room past its unpaired TTL — it deletes the room and closes the seat's
+// socket (that half is pinned in tests/room.test.ts). What is being asserted
+// here is the client's half, which used to require an OPPONENT before it
+// reacted at all: a host waiting alone was left in a lobby advertising a room
+// code the relay no longer knew, so a friend typing it got "room not found"
+// while the host still believed they were hosting.
+const loner = await newPlayer('EjL');
 
 await host.click('#menu-mode-multiplayer');
 await host.waitForSelector('#btn-create-room', { timeout: 5000 });
@@ -113,6 +122,12 @@ for (const p of [host, guest]) {
 }
 ok('duel is live on both phones');
 
+await loner.click('#menu-mode-multiplayer');
+await loner.waitForSelector('#btn-create-room', { timeout: 5000 });
+await loner.click('#btn-create-room');
+await loner.waitForSelector('#btn-leave-room', { timeout: 8000 });
+ok('and a third player is hosting a room nobody has joined');
+
 // The server dies under the match. Every socket closes (code 1001), so BOTH
 // players' own connections drop: each must be told and returned to the menu.
 srv.kill('SIGTERM');
@@ -125,6 +140,19 @@ for (const [page, who] of [[host, 'host'], [guest, 'guest']]) {
   if (!(await page.$('#toast-ejected'))) fail(`${who} was never told they were ejected`);
 }
 ok('both dropped players are told they were ejected and returned to the menu');
+
+// The lone host is the same close and a different sentence: there was no
+// match, so "you were removed from the match" would be describing one that
+// never existed.
+const lonerHome = await loner
+  .waitForSelector('#main-menu-screen', { timeout: 10000 })
+  .then(() => true)
+  .catch(() => false);
+if (!lonerHome) fail('the lone host was left in a lobby holding a room that no longer exists');
+if (!(await loner.$('#toast-room-expired'))) fail('the lone host was not told their room had gone');
+if (await loner.$('#toast-ejected')) fail('the lone host was told they were removed from a match they never had');
+if (await loner.$('#multiplayer-lobby-modal')) fail('the lobby stayed open over the menu');
+ok('and the lone host is told their room expired, not that they were ejected');
 
 await browser.close();
 fs.rmSync(dataDir, { recursive: true, force: true });

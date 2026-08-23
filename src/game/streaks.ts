@@ -64,8 +64,13 @@ export function opponentMiss(s: PlayerStats): PlayerStats {
  * The opponent's side does start from nothing: the opponent is a different
  * opponent, or an AI that has just been constructed.
  */
-export function startMatchStreaks(s: PlayerStats, carried: number): PlayerStats {
+export function startMatchStreaks(
+  s: PlayerStats,
+  carried: number,
+  oppCarried = 0
+): PlayerStats {
   const from = Math.max(0, Math.round(carried) || 0);
+  const oppFrom = Math.max(0, Math.round(oppCarried) || 0);
   return {
     ...s,
     streak: from,
@@ -74,8 +79,13 @@ export function startMatchStreaks(s: PlayerStats, carried: number): PlayerStats 
     // in was earned here.
     earnedStreak: 0,
     earnedBest: 0,
-    oppStreak: 0,
-    oppBestStreak: 0,
+    // The opponent's run carries too, and in a duel the relay tells both
+    // phones what each seat walks in on. Zero is the default because usually
+    // nobody knows: a solo opponent is an AI that has just been constructed,
+    // and the opponent's side is display only — the relay rates and pays each
+    // player on their own run, never on what the other phone thinks it is.
+    oppStreak: oppFrom,
+    oppBestStreak: oppFrom,
   };
 }
 
