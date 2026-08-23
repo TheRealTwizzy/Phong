@@ -96,7 +96,14 @@ if (await dis('#menu-pts-10')) fail('a first win should open first-to-10');
 ok('a first win opens longer matches');
 
 // Achievement tree renders with branches and hidden rungs.
-await page.click('#menu-nav-achievements').catch(async () => { await page.click('#menu-nav-trophies'); });
+// The difficulty and match-length pickers above live in solo's pre-match
+// sheet, which covers the tab bar the way the duel lobby always has. Close it
+// before navigating — the fallback that used to be here reached for a
+// #menu-nav-trophies that has never existed, so an intercepted click came
+// back as a 30s timeout naming the wrong element.
+await page.click('#btn-close-prematch');
+await page.waitForSelector('#prematch-modal', { state: 'detached', timeout: 4000 });
+await page.click('#menu-nav-achievements');
 await page.waitForSelector('#ach-branch-ladder', { timeout: 5000 });
 for (const b of ['foundation','rally','ladder','duel','craft','ascent','dominion','devotion']) {
   if (!(await page.$(`#ach-branch-${b}`))) fail(`missing branch tab ${b}`);
