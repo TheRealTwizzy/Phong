@@ -335,8 +335,48 @@ export function checkPaddleCollision(
  */
 export const MAX_AI_COMPETENCE = 0.66;
 
+// The ladder as it is actually PLAYED, in competence.
+//
+// The floor was the complaint: Rookie sat at c 0.21 and returned under 60% of
+// balls, which is less a warm-up than an empty half-court, and Pro at 0.45 was
+// not far enough above it to read as a step up. Raising the mu anchors instead
+// was not available — soloMuCap('rookie') is pinned to START_MU by the design
+// note in rating.ts and by a test, and widening AI_ADAPT_BAND to free it would
+// drag Pro's and Cyber's caps along with it. So what a rung PLAYS like moves
+// while what it is WORTH stays exactly where it was.
+//
+// Cyber's knot is the value the old straight line already produced, and at and
+// above its anchor that straight line is still what runs — so the top of the
+// ladder, and the MAX_AI_COMPETENCE clamp an adapted Cyber reaches, are
+// bit-for-bit unchanged. Only the stretch below it is lifted.
+//
+// The two middle knots are calibrated against the rally simulation in
+// tests/physics.test.ts rather than chosen: they are what put Rookie near 66%
+// of balls returned and Pro near 79%, i.e. an average player taking roughly
+// 75% of matches off Rookie and 42% off Pro, with Cyber left at 29%.
+const CEILING_MU = 29;
+const CEILING_C = (CEILING_MU - 12) / 29;
+
+const COMPETENCE_KNOTS: readonly (readonly [number, number])[] = [
+  [12, 0.05],
+  [18, 0.28],
+  [25, 0.49],
+  [CEILING_MU, CEILING_C],
+];
+
 export function competenceForMu(mu: number): number {
-  return clamp((mu - 12) / 29, 0.05, MAX_AI_COMPETENCE);
+  // Above Cyber's anchor the original line, untouched — this is the half of
+  // the curve that must not move.
+  if (mu >= CEILING_MU) return clamp((mu - 12) / 29, 0.05, MAX_AI_COMPETENCE);
+  for (let i = 1; i < COMPETENCE_KNOTS.length; i++) {
+    const [mLo, cLo] = COMPETENCE_KNOTS[i - 1];
+    const [mHi, cHi] = COMPETENCE_KNOTS[i];
+    if (mu <= mHi) {
+      const t = clamp((mu - mLo) / (mHi - mLo), 0, 1);
+      return clamp(cLo + (cHi - cLo) * t, 0.05, MAX_AI_COMPETENCE);
+    }
+  }
+  return clamp(CEILING_C, 0.05, MAX_AI_COMPETENCE);
 }
 
 interface AIStyle {
@@ -348,7 +388,7 @@ interface AIStyle {
 
 const AI_STYLES: Record<AIDifficulty, AIStyle> = {
   rookie: { volatility: 0.06, aggression: 0.15 },
-  pro: { volatility: 0.08, aggression: 0.45 },
+  pro: { volatility: 0.08, aggression: 0.58 },
   cyber: { volatility: 0.04, aggression: 0.9 },
 };
 
@@ -361,6 +401,20 @@ interface AIParams {
   lapseChance: number;
   jitter: number;
   spinRead: number;
+}
+
+// A lapse is the AI not moving for a WHOLE rally, and on the old line
+// (`lerp(0.14, 0, c)`) that was one rally in nine at Rookie — the single most
+// visible thing about the bottom rung, and the part that reads as broken
+// rather than easy.
+//
+// Cut at the bottom and PINNED at the top. At and above Cyber's competence
+// this is the original expression, unchanged, so no amount of tuning down here
+// can raise the ceiling by the back door.
+const LAPSE_AT_CEILING = lerp(0.14, 0, CEILING_C);
+function lapseForCompetence(c: number): number {
+  if (c >= CEILING_C) return lerp(0.14, 0, c);
+  return lerp(0.075, LAPSE_AT_CEILING, c / CEILING_C);
 }
 
 // Calibrated by simulating rallies through the real checkPaddleCollision above.
@@ -380,7 +434,7 @@ function paramsForCompetence(c: number): AIParams {
     readError: lerp(0.3, 0.05, c),
     // Chance it resolves a wall bounce instead of chasing the unreflected line.
     bounceSkill: clamp((c - 0.1) / 0.6, 0, 1),
-    lapseChance: lerp(0.14, 0, c),
+    lapseChance: lapseForCompetence(c),
     jitter: lerp(0.05, 0.008, c),
     // How much of the ball's curve it accounts for. A weak AI reads a spinning
     // ball as if it were travelling straight and arrives where the ball would

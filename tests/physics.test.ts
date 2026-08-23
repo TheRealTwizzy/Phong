@@ -13,6 +13,7 @@ import {
   AI_SERVE_DELAY_MIN,
   AI_SERVE_DELAY_MAX,
   MAX_AI_COMPETENCE,
+  competenceForMu,
 } from '../src/game/physics';
 import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
@@ -174,11 +175,58 @@ describe('OpponentAI is beatable at every difficulty', () => {
     // mean: what is being asserted is that the rungs are genuinely far apart,
     // and a ladder that had actually collapsed would score near zero here, so
     // the margin costs the test nothing it was buying.
-    expect(rates[rates.length - 1] - rates[0]).toBeGreaterThan(0.15);
+    //
+    // Lowered from 0.15 when the floor came up. Raising Rookie and Pro while
+    // the ceiling stays where it is NARROWS this by construction — that is
+    // what "raise the floor, not the ceiling" means arithmetically — and the
+    // spread now measures around 0.156, straddling the old bound. Return rate
+    // also saturates near the top, so the compression is worse in this
+    // measure than in the one players feel: Pro and Cyber are four points
+    // apart in balls returned and thirteen apart in matches won.
+    expect(rates[rates.length - 1] - rates[0]).toBeGreaterThan(0.11);
   });
 
   it('keeps Rookie a warm-up: an average player scores freely', () => {
-    expect(returnRate('rookie')).toBeLessThan(0.7);
+    // Raised from 0.7 alongside the floor lift. Rookie now measures ~0.674
+    // over 720 balls (SE ~0.017), so 0.7 sat about 1.5 sigma away and would
+    // have gone red on its own regularly — see the note on measuring a
+    // distribution before picking a bound in TESTING.md §5.
+    expect(returnRate('rookie')).toBeLessThan(0.74);
+  });
+
+  it('will not let Rookie sink back into an empty half-court', () => {
+    // The other half of the same rule, and the one that was missing. Rookie
+    // used to return under 60% of balls: an average player took roughly seven
+    // matches in eight off it, which is not a warm-up, it is an opponent who
+    // is not there. Nothing here may drift back below that.
+    expect(returnRate('rookie')).toBeGreaterThan(0.6);
+  });
+
+  it('makes Pro a real step up from Rookie', () => {
+    // Pro measures ~0.789 over 720 balls (SE ~0.015). Before the lift it was
+    // ~0.754 and an average player won a little over half their matches
+    // against it, which made the middle rung read as a coin toss rather than
+    // as the rung you climb to.
+    expect(returnRate('pro')).toBeGreaterThan(0.73);
+  });
+
+  it('leaves the top of the ladder EXACTLY where it was', () => {
+    // The floor was raised on the explicit condition that the ceiling did not
+    // move, and a sampled return rate is far too noisy to hold that: at the
+    // sample sizes above, a genuine two-point drift in Cyber is inside the
+    // noise. So it is pinned where it can be pinned exactly. competenceForMu
+    // is a straight line at and above Cyber's own anchor, every AI parameter
+    // is a pure function of the competence it returns, and Cyber's style is
+    // untouched — so Cyber, and the adapted Cyber that reaches
+    // MAX_AI_COMPETENCE, are bit-for-bit what they were.
+    const originalLine = (mu: number) => Math.min(Math.max((mu - 12) / 29, 0.05), MAX_AI_COMPETENCE);
+    for (const mu of [29, 30, 31, 31.14, 32, 36, 40, 100]) {
+      expect(competenceForMu(mu)).toBeCloseTo(originalLine(mu), 12);
+    }
+    // And the curve below it only ever lifts — it never makes a rung easier.
+    for (let mu = 12; mu < 29; mu += 0.5) {
+      expect(competenceForMu(mu)).toBeGreaterThanOrEqual(originalLine(mu) - 1e-12);
+    }
   });
 
   it('gets harder as the player gets better, without ever becoming a wall', () => {
