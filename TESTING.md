@@ -40,13 +40,13 @@ coverage number.
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
 | `physics` `spin` `transform` | Ball, collisions, spin, AI competence, the cross-net mirror |
-| `room` | The relay's room rules, including the adversarial `match_sync` guards |
+| `room` | The relay's room rules, the reaper, and the adversarial `match_sync` guards |
 | `matchRules` | Ranked bands, normalization, `duelMatchKey` |
 | `themes` | All 20 themes × every route that unlocks them |
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
-| `duelRecord` `deviceSession` `accountRecovery` | Three suites that boot the real server (see §4) |
+| `duelRecord` `deviceSession` `accountRecovery` `roomLifecycle` | Four suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` | The one-shot migrations |
 
 ### Browser layer

@@ -79,6 +79,18 @@ export interface Room {
    */
   matchSeq: number;
   lastActive: number;
+  /**
+   * When the room was opened. Distinct from lastActive, which any traffic
+   * refreshes — a lobby whose host is sitting on the court moving their paddle
+   * is "active" forever, so an idle clock alone can never expire one.
+   */
+  createdAt: number;
+  /**
+   * When a second player first took a seat, or null if none ever has. Never
+   * cleared: a room that HAS been a duel is a room a rematch can still happen
+   * in, and only the idle clock should judge that one.
+   */
+  pairedAt: number | null;
 }
 
 /** What a client is told when the room's match (re)starts. */
@@ -204,6 +216,76 @@ export function performanceWeight(myScore: number, oppScore: number, maxRally: n
   const rallyQuality = Math.min(1, maxRally / 20); // 0..1
   const weight = 1 + 0.3 * margin + 0.15 * (rallyQuality - 0.5);
   return Math.max(0.5, Math.min(1.5, weight));
+}
+
+// ---------------------------------------------------------------------------
+// Reaping
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a seat's socket can still be reached. Passed in rather than imported
+ * so this module keeps its promise of touching no socket: it asks a question
+ * about one, and server.ts answers it.
+ */
+export type SocketLiveness = (ws: WebSocket) => boolean;
+
+export interface ReapOptions {
+  isLive: SocketLiveness;
+  /** How long a room with a live socket may go quiet before it is abandoned. */
+  idleMs: number;
+  /** How long a room may wait for a second player, however busy the first is. */
+  unpairedTtlMs: number;
+}
+
+export type ReapReason = 'empty' | 'idle' | 'unpaired';
+
+export interface ReapedRoom {
+  id: string;
+  reason: ReapReason;
+  room: Room;
+}
+
+/** Whether every seat is either vacant or holds a socket that is already gone. */
+export function isRoomEmpty(room: Room, isLive: SocketLiveness): boolean {
+  return !room.players.some((seat) => seat && isLive(seat.ws));
+}
+
+/**
+ * Delete the rooms nobody can be in, and hand them back so the caller can
+ * close whatever is still attached and say what it did.
+ *
+ * Three ways a room dies. `empty` is the one that matters and the reason this
+ * exists: a seat holding a socket that has already gone is not a player, and
+ * nothing on the disconnect path can clear it — `vacateSeat` runs off a close
+ * event, and a socket that dies without one (a half-open TCP connection, or a
+ * socket whose seat was orphaned when it took a second one) leaves a room that
+ * no player can reach and no handler will ever remove.
+ *
+ * `idle` is the 30-minute clock this replaces, kept as-is. `unpaired` is new,
+ * and it is the only rule that can expire a room whose one player is busy:
+ * lastActive is refreshed by every paddle_move, so a host alone on a court
+ * streams their own room's clock forward forever.
+ *
+ * Pure, and returns rather than acts, for the same reason as everything else
+ * in this file: it can be tested without a socket, a timer or a process.
+ */
+export function reapRooms(
+  rooms: Map<string, Room>,
+  now: number,
+  opts: ReapOptions
+): ReapedRoom[] {
+  const dead: ReapedRoom[] = [];
+  for (const [id, room] of rooms) {
+    let reason: ReapReason | null = null;
+    if (isRoomEmpty(room, opts.isLive)) reason = 'empty';
+    else if (now - room.lastActive > opts.idleMs) reason = 'idle';
+    else if (room.pairedAt === null && now - room.createdAt > opts.unpairedTtlMs) {
+      reason = 'unpaired';
+    }
+    if (reason) dead.push({ id, reason, room });
+  }
+  for (const { id } of dead) rooms.delete(id);
+  return dead;
 }
 
 /**

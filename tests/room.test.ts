@@ -3,7 +3,9 @@ import {
   applyMatchSync,
   clampInt,
   generateRoomCode,
+  isRoomEmpty,
   performanceWeight,
+  reapRooms,
   Room,
   ROOM_CODE_ALPHABET,
   startMatch,
@@ -38,6 +40,8 @@ const room = (over: Partial<Room> = {}): Room => ({
   inPlay: false,
   matchSeq: 1,
   lastActive: 0,
+  createdAt: 0,
+  pairedAt: null,
   ...over,
 });
 
@@ -256,5 +260,114 @@ describe('clampInt', () => {
     expect(clampInt(NaN, 2, 10)).toBe(2);
     expect(clampInt(undefined, 2, 10)).toBe(2);
     expect(clampInt('7', 0, 10)).toBe(7);
+  });
+});
+
+
+// A socket is a `ws` WebSocket in production; here it only ever has to answer
+// the one question reapRooms asks of it.
+const seat = (open: boolean, idx: 0 | 1 = 0) =>
+  ({
+    ws: { readyState: open ? 1 : 3 } as never,
+    playerId: `p${idx}`,
+    playerName: `Player ${idx + 1}`,
+    playerIndex: idx,
+    deviceId: `d${idx}`,
+    sessionId: `s${idx}`,
+  }) as never;
+
+const live = (sock: { readyState: number }) => sock.readyState === 1;
+const OPTS = { isLive: live as never, idleMs: 1000, unpairedTtlMs: 5000 };
+const MINUTE = 60_000;
+
+describe('reapRooms', () => {
+  // The reason this exists. `vacateSeat` runs off a close event, so a socket
+  // that dies without one — a half-open connection, or a seat orphaned when
+  // its socket took another — leaves a room no player can reach and no
+  // handler will ever delete. The old sweep could not see one: it only asked
+  // whether the room had been quiet for half an hour.
+  it('deletes a room whose every seat is a socket that has already gone', () => {
+    const rooms = new Map<string, Room>([
+      ['DEAD', room({ players: [seat(false, 0), seat(false, 1)], lastActive: MINUTE })],
+    ]);
+    const dead = reapRooms(rooms, MINUTE, OPTS);
+    expect(dead.map((d) => [d.id, d.reason])).toEqual([['DEAD', 'empty']]);
+    expect(rooms.size).toBe(0);
+  });
+
+  it('deletes a room with no seats taken at all', () => {
+    const rooms = new Map<string, Room>([['NONE', room({ lastActive: MINUTE })]]);
+    expect(reapRooms(rooms, MINUTE, OPTS)[0].reason).toBe('empty');
+    expect(rooms.size).toBe(0);
+  });
+
+  // Half-empty is not empty: the host is waiting, and waiting is what a lobby
+  // is for. Only the unpaired clock may end that, and not for a while.
+  it('keeps a room while one socket is still live', () => {
+    const rooms = new Map<string, Room>([
+      ['HELD', room({ players: [seat(true, 0), seat(false, 1)], lastActive: MINUTE, createdAt: MINUTE })],
+    ]);
+    expect(reapRooms(rooms, MINUTE, OPTS)).toEqual([]);
+    expect(rooms.size).toBe(1);
+  });
+
+  it('deletes a live room that has gone quiet past the idle clock', () => {
+    const rooms = new Map<string, Room>([
+      ['IDLE', room({ players: [seat(true, 0), seat(true, 1)], lastActive: 0, pairedAt: 0, createdAt: 0 })],
+    ]);
+    expect(reapRooms(rooms, 5000, OPTS)[0].reason).toBe('idle');
+  });
+
+  it('keeps a live room that is still talking', () => {
+    const rooms = new Map<string, Room>([
+      ['BUSY', room({ players: [seat(true, 0), seat(true, 1)], lastActive: 4500, pairedAt: 0, createdAt: 0 })],
+    ]);
+    expect(reapRooms(rooms, 5000, OPTS)).toEqual([]);
+  });
+
+  // The one rule that can expire a busy room, and the reason it had to exist:
+  // lastActive is refreshed by every paddle_move, so a host sitting alone on a
+  // court streams their own room's idle clock forward for as long as they hold
+  // the phone. Nothing else in here can ever reach that room.
+  it('expires a room that never got a second player, however busy its first is', () => {
+    const rooms = new Map<string, Room>([
+      ['SOLO', room({ players: [seat(true, 0), null], createdAt: 0, lastActive: 9000, pairedAt: null })],
+    ]);
+    expect(reapRooms(rooms, 9000, OPTS)[0].reason).toBe('unpaired');
+  });
+
+  it('leaves an unpaired room alone until its TTL is up', () => {
+    const rooms = new Map<string, Room>([
+      ['WAIT', room({ players: [seat(true, 0), null], createdAt: 0, lastActive: 4000, pairedAt: null })],
+    ]);
+    expect(reapRooms(rooms, 4000, OPTS)).toEqual([]);
+  });
+
+  // pairedAt is never cleared, so a guest leaving does not hand the room back
+  // to the unpaired clock — a room that has been a duel is one a rematch can
+  // still happen in, and only the idle clock judges that.
+  it('never applies the unpaired TTL to a room that has been a duel', () => {
+    const rooms = new Map<string, Room>([
+      ['USED', room({ players: [seat(true, 0), null], createdAt: 0, lastActive: 9000, pairedAt: 10 })],
+    ]);
+    expect(reapRooms(rooms, 9000, OPTS)).toEqual([]);
+  });
+
+  it('hands back what it removed and leaves the rest of the map alone', () => {
+    const rooms = new Map<string, Room>([
+      ['GONE', room({ id: 'GONE', lastActive: MINUTE })],
+      ['KEPT', room({ id: 'KEPT', players: [seat(true, 0), null], createdAt: MINUTE, lastActive: MINUTE })],
+    ]);
+    const dead = reapRooms(rooms, MINUTE, OPTS);
+    expect(dead).toHaveLength(1);
+    expect(dead[0].room.id).toBe('GONE');
+    expect([...rooms.keys()]).toEqual(['KEPT']);
+  });
+});
+
+describe('isRoomEmpty', () => {
+  it('reads a seat holding a dead socket as vacant', () => {
+    expect(isRoomEmpty(room({ players: [seat(false, 0), null] }), live as never)).toBe(true);
+    expect(isRoomEmpty(room({ players: [seat(true, 0), null] }), live as never)).toBe(false);
   });
 });

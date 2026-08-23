@@ -32,6 +32,7 @@ import {
   PlayerSession,
   Room,
   startMatch as resetRoomForMatch,
+  reapRooms,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig } from './src/types';
@@ -858,15 +859,37 @@ async function startServer() {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
 
-  // Clean up inactive rooms older than 30 minutes
+  // Sweep the rooms nobody is in.
+  //
+  // Short, because the case it exists for is a room with no live socket at
+  // all, and one of those is pure garbage the moment it appears — there is
+  // nobody to notice a delay and nobody to inconvenience by being quick. The
+  // old sweep ran once a minute and only ever asked "has this been quiet for
+  // half an hour", which cannot see an empty room whose seat still holds a
+  // socket that is already gone, and cannot see a one-player room at all
+  // because its own paddle_move traffic keeps refreshing lastActive.
+  const ROOM_IDLE_MS = 30 * 60 * 1000;
+  const ROOM_UNPAIRED_TTL_MS = 30 * 60 * 1000;
+  const ROOM_SWEEP_MS = 15 * 1000;
   setInterval(() => {
-    const now = Date.now();
-    for (const [id, room] of rooms.entries()) {
-      if (now - room.lastActive > 30 * 60 * 1000) {
-        rooms.delete(id);
+    const dead = reapRooms(rooms, Date.now(), {
+      isLive: (sock) => sock.readyState === WebSocket.OPEN,
+      idleMs: ROOM_IDLE_MS,
+      unpairedTtlMs: ROOM_UNPAIRED_TTL_MS,
+    });
+    for (const { id, reason, room } of dead) {
+      // An empty room has nothing attached by definition; the other two can
+      // still have somebody sitting on a court that no longer exists. Closing
+      // their socket is what returns them to the menu — the client reads an
+      // unexpected close as an ejection, which is exactly what this is.
+      if (reason !== 'empty') {
+        for (const seat of room.players) {
+          if (seat && seat.ws.readyState === WebSocket.OPEN) seat.ws.close(1000, reason);
+        }
       }
+      console.log(`room ${id} reaped: ${reason}`);
     }
-  }, 60000);
+  }, ROOM_SWEEP_MS).unref?.();
 
   wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
     const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
@@ -927,6 +950,14 @@ async function startServer() {
             ws.send(JSON.stringify({ type: 'error', message: refusal }));
             return;
           }
+          // Taking a seat means giving up the one this socket already holds.
+          // Both handlers below just overwrite currentRoomId/playerIndex, so
+          // without this the old room keeps a PlayerSession whose socket has
+          // moved on: when that socket eventually closes, vacateSeat only
+          // reaches the newer room, and the older one is left with a seat no
+          // close event will ever clear. Walking out of a live duel to open
+          // another room is an abandon, and vacateSeat is what judges that.
+          vacateSeat();
         }
 
         if (msg.type === 'create_room') {
@@ -963,6 +994,8 @@ async function startServer() {
             ready: [false, false],
             matchSeq: 0,
             lastActive: Date.now(),
+            createdAt: Date.now(),
+            pairedAt: null,
           };
 
           rooms.set(code, room);
@@ -1003,6 +1036,9 @@ async function startServer() {
           };
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
+          // Never cleared once set: a room that has been a duel is a room a
+          // rematch can still happen in, so only the idle clock judges it.
+          if (room.pairedAt === null) room.pairedAt = Date.now();
           currentRoomId = code;
           playerIndex = 1;
 
