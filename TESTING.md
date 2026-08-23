@@ -133,6 +133,13 @@ device may restore with the account's own recovery code, and the release row sur
 so an abandoned account stays traceable. The matching browser assertions are in
 `scripts/e2e-invite.mjs`.
 
+**One account, one live holder — however many browsers belong to it.** Signing in links a
+browser to an account rather than transferring it away, so a player can reach their account from
+any browser on their phone. That must never become two of them playing at once:
+`seatStillHoldsAccount` and the WS upgrade both have to know about links, not just tombstones.
+`tests/deviceSession.test.ts` caught exactly that regression once already — the eviction silently
+stopped working because a linked device's row no longer exists under its own id.
+
 **One page load mints exactly one device identity.** The device cookie is established by the
 document navigation, not by whichever `/api` call lands first — concurrent cookieless calls
 each mint their own, which at phone latency was three per load, and a player who onboarded

@@ -109,89 +109,112 @@ function releasedRow(deviceId: string): { movedToPlayerId: string } | undefined 
   }
 }
 
-describe('a released device can take its own account back', () => {
-  it('restores with the recovery code instead of having to start over', async () => {
+describe('an account belongs to every browser that has signed in to it', () => {
+  it('signing in elsewhere no longer costs the browser you play in', async () => {
+    // A cookie jar does not cross browsers, and the web offers no device
+    // identifier to bridge them — so an invitation tapped in a chat app opens
+    // a webview the server cannot tell from a stranger. That part is not
+    // fixable. The consequence was: signing in used to TRANSFER, tombstoning
+    // the browser left behind as `released`, whose wall offered exactly one
+    // irreversible button.
     const home = await onboard('HomeBrowser1');
     const code = await recoveryCode(home);
 
-    // The invitation opens somewhere else — a chat app's in-app browser.
-    const inApp = await freshBrowser();
-    // Their own name is taken. By them.
-    const check = await call(inApp, `/api/username-check?u=HomeBrowser1`);
+    const webview = await freshBrowser();
+    // Their own name reads as taken. By them.
+    const check = await call(webview, `/api/username-check?u=HomeBrowser1`);
     expect(check.body).toMatchObject({ valid: true, available: false });
 
-    // So they restore, and the account follows them there.
-    expect((await call(inApp, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) })).status).toBe(200);
-    expect((await call(inApp, '/api/profile/me')).body.username).toBe('HomeBrowser1');
+    expect(
+      (await call(webview, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) })).status
+    ).toBe(200);
+    expect((await call(webview, '/api/profile/me')).body.username).toBe('HomeBrowser1');
 
-    // The browser they actually play in is now walled as `released`.
-    expect((await call(home, '/api/session')).body.status).toBe('released');
+    // The browser they actually play in is evicted — the concurrency rule is
+    // untouched — but it is a MEMBER of the account now, not a stranger.
+    expect((await call(home, '/api/session')).body.status).toBe('superseded');
 
-    // THE FIX: that wall is no longer a dead end. The account's own recovery
-    // code brings it home, without spending the device identity to do it.
-    const rotated = await recoveryCode(inApp);
-    const back = await call(home, '/api/profile/claim', {
-      method: 'POST',
-      body: JSON.stringify({ code: rotated }),
-    });
+    // And a member takes the account back with no code at all: the code is
+    // what gets a browser into the set, not what it presents every time after.
+    const back = await call(home, '/api/session', { method: 'POST' });
     expect(back.status).toBe(200);
-    expect(back.body.username).toBe('HomeBrowser1');
-
-    // And it lands in one move: the claim hands a released device a session
-    // too, so it is playable immediately rather than still behind the wall.
-    const after = await call(home, '/api/session');
-    expect(after.body.status).toBe('active');
+    expect(back.body.profile.username).toBe('HomeBrowser1');
     expect((await call(home, '/api/profile/me')).body.username).toBe('HomeBrowser1');
+
+    // Signing in does not spend the code — a player keeps it.
+    expect(await recoveryCode(home)).toBe(code);
+
+    // Still exactly one holder at a time; the webview now asks for its turn.
+    expect((await call(webview, '/api/session')).body.status).toBe('superseded');
   }, 30000);
 
-  it('still refuses a device whose session was merely superseded', async () => {
-    // `released` is admitted because the recovery code is the account's own
-    // credential and the alternative was destructive. `superseded` has a
-    // non-destructive way out already — "play here instead" — so it keeps the
-    // ordinary gate, and this widening must not have reached it.
-    const owner = await onboard('SupersededOne');
-    const code = await recoveryCode(owner);
-    const other = await onboard('SomebodyElse1');
+  it('will not sign in over an account this browser already holds', async () => {
+    // players.id IS a device id, so an incoming account has to take this
+    // browser's row. Silently deleting an initialized one would be losing an
+    // account — the exact thing this endpoint exists to prevent.
+    const mine = await onboard('AlreadyMine1');
+    const theirs = await onboard('SomebodyElse1');
+    const theirCode = await recoveryCode(theirs);
 
-    // A newer load on `owner`'s own device takes the account over.
-    const secondTab = new Jar();
-    secondTab.absorb(
-      await fetch(`${base}/api/session`, { method: 'POST', headers: { cookie: owner.header } })
-    );
-
-    const stale = await call(owner, '/api/profile/claim', {
+    const refused = await call(mine, '/api/profile/claim', {
       method: 'POST',
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code: theirCode }),
     });
-    expect(stale.status).toBe(409);
-    expect(stale.body.error).toBe('SESSION_SUPERSEDED');
-    // and the other player's account was never touched by any of it
-    expect((await call(other, '/api/profile/me')).body.username).toBe('SomebodyElse1');
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toBe('BROWSER_HAS_ACCOUNT');
+    expect((await call(mine, '/api/profile/me')).body.username).toBe('AlreadyMine1');
+    expect((await call(theirs, '/api/profile/me')).body.username).toBe('SomebodyElse1');
+  }, 30000);
+
+  it('no longer tombstones a browser for signing in somewhere else', async () => {
+    // `released` is legacy from here on: signing in links both browsers, so
+    // nothing writes a new release row. The path and its non-destructive exit
+    // are kept for databases that already carry them, and `session/reset` no
+    // longer deletes the record — it is the only trace that a browser held an
+    // account and where it went.
+    const home = await onboard('NoTombstone1');
+    const homeDevice = (await call(home, '/api/session')).body.deviceId as string;
+    const code = await recoveryCode(home);
+    const elsewhere = await freshBrowser();
+    await call(elsewhere, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) });
+
+    expect(releasedRow(homeDevice)).toBeUndefined();
+    expect((await call(home, '/api/session')).body.status).toBe('superseded');
   }, 30000);
 });
 
-describe('starting over stops erasing where the account went', () => {
-  it('keeps the release record, so an abandoned account is still traceable', async () => {
-    const home = await onboard('TracerHome01');
-    const homeDevice = (await call(home, '/api/session')).body.deviceId as string;
-    const code = await recoveryCode(home);
+describe('a reusable code is a credential, so guessing it is bounded', () => {
+  it('locks out repeated wrong codes', async () => {
+    // The code used to rotate the moment it was spent, so guessing it was a
+    // race against a moving target. It is a credential the player KEEPS now —
+    // that is what makes signing in on a second browser work at all — and the
+    // search runs against every account at once, so the attempts are counted.
+    const guesser = await freshBrowser();
+    let sawLimit = false;
+    for (let i = 0; i < 14; i++) {
+      const res = await call(guesser, '/api/profile/claim', {
+        method: 'POST',
+        body: JSON.stringify({ code: `ZZZ${String(i).padStart(2, '0')}-ZZZZ` }),
+      });
+      if (res.status === 429) {
+        expect(res.body.error).toBe('TOO_MANY_ATTEMPTS');
+        sawLimit = true;
+        break;
+      }
+      expect(res.status).toBe(404);
+    }
+    expect(sawLimit).toBe(true);
+  }, 30000);
 
-    const elsewhere = await freshBrowser();
-    expect((await call(elsewhere, '/api/profile/claim', { method: 'POST', body: JSON.stringify({ code }) })).status).toBe(200);
-    const elsewhereDevice = (await call(elsewhere, '/api/session')).body.deviceId as string;
-
-    expect(releasedRow(homeDevice)?.movedToPlayerId).toBe(elsewhereDevice);
-
-    // The player takes the destructive door anyway. It still works, and still
-    // hands them a clean new identity...
-    const reset = await call(home, '/api/session/reset', { method: 'POST' });
-    expect(reset.status).toBe(200);
-    expect((await call(home, '/api/session')).body.deviceId).not.toBe(homeDevice);
-
-    // ...but the trail is no longer deleted with it. This row is the only
-    // record that this browser held an account and where it went; without it
-    // "my account still exists but I lost access" has no answer at all.
-    expect(releasedRow(homeDevice)?.movedToPlayerId).toBe(elsewhereDevice);
+  it('rotating retires the old code and keeps the account', async () => {
+    const jar = await onboard('RotateMine1');
+    const before = await recoveryCode(jar);
+    const rotated = await call(jar, '/api/profile/me/recovery-code', { method: 'POST' });
+    expect(rotated.status).toBe(200);
+    expect(rotated.body.recoveryCode).not.toBe(before);
+    expect(await recoveryCode(jar)).toBe(rotated.body.recoveryCode);
+    // The account is untouched by its credential changing.
+    expect((await call(jar, '/api/profile/me')).body.username).toBe('RotateMine1');
   }, 30000);
 });
 

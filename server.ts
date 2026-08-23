@@ -14,8 +14,10 @@ import {
   blockReleasedDevice,
   requireActiveSession,
   resetDeviceIdentity,
+  mintSessionId,
   requireRestorableSession,
   resolveSession,
+  setSessionCookie,
   sessionIdentity,
 } from './server/auth';
 import { buildId } from './server/build';
@@ -78,6 +80,15 @@ const liveSockets = new Set<LiveSocket>();
 function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: string | null }): boolean {
   if (!seat.deviceId) return false;
   if (db.releasedDevice(seat.deviceId)) return false;
+  // A browser signed in to an account that has since moved to another browser
+  // is not holding it, and must lose its seat exactly as a tombstoned one
+  // does. This is NOT covered by the owner check below: the account's row was
+  // renamed away from this device id, so `activeSessionId` finds no row at
+  // all — and "no recorded owner" reads as "nothing has displaced this seat".
+  // Without this line the whole eviction silently stopped working the moment
+  // transfers began linking instead of releasing.
+  const link = db.linkedAccount(seat.deviceId);
+  if (link && !link.holdsIt) return false;
   const owner = db.activeSessionId(seat.deviceId);
   // No recorded owner means nothing has displaced this seat.
   return !owner || owner === seat.sessionId;
@@ -278,6 +289,24 @@ async function startServer() {
     try {
       if (req.session!.status === 'released') {
         return res.status(409).json({ error: 'DEVICE_RELEASED', sessionStatus: 'released', build: buildId() });
+      }
+      // A browser already signed in to an account that is currently living on
+      // another browser takes it back here, with no code asked for. The device
+      // cookie of a member IS the credential — the code is what gets a browser
+      // into the set, not what it presents every time afterwards. Without this
+      // `issueSession` would call getProfile and mint the member a fresh empty
+      // profile, which is the whole failure being fixed.
+      const link = db.linkedAccount(req.deviceId!);
+      if (link && !link.holdsIt) {
+        const sessionId = mintSessionId();
+        const restored = db.reclaimLinkedAccount(req.deviceId!, sessionId);
+        if (restored) {
+          setSessionCookie(req, res, sessionId, req.deviceId!);
+          // Whatever the account was doing on the browser it just left stops
+          // now, not at that client's next heartbeat.
+          evictStaleSockets();
+          return res.json({ status: 'active', sessionId, build: buildId(), profile: restored });
+        }
       }
       const sessionId = issueSession(req, res, req.deviceId!);
       // Whatever this device was holding open under an older session is over
@@ -523,13 +552,55 @@ async function startServer() {
     }
   });
 
-  // Restore a profile on this device using its recovery code. The profile
-  // moves: the previous device unlinks and the code rotates.
+  /**
+   * Failed sign-in attempts, per device and per IP.
+   *
+   * The code used to be single-use — it rotated the moment it was spent, so
+   * guessing it was a race against a moving target. It is a credential the
+   * player KEEPS now, which is what makes signing in on a second browser
+   * possible at all, and that makes it worth guessing: eight characters of a
+   * 31-letter alphabet is a large space, but the search is against every
+   * account at once and nothing was counting the attempts.
+   *
+   * Deliberately in memory. The relay is single-instance by design (rooms live
+   * in process memory), a restart clearing the counters costs an attacker more
+   * than it gains them, and this does not need to survive a deploy.
+   */
+  const signInAttempts = new Map<string, { n: number; until: number }>();
+  const SIGN_IN_WINDOW_MS = 10 * 60 * 1000;
+  const SIGN_IN_MAX = 10;
+  const tooManySignIns = (key: string): boolean => {
+    const now = Date.now();
+    const hit = signInAttempts.get(key);
+    if (!hit || hit.until < now) return false;
+    return hit.n >= SIGN_IN_MAX;
+  };
+  const noteFailedSignIn = (key: string): void => {
+    const now = Date.now();
+    const hit = signInAttempts.get(key);
+    if (!hit || hit.until < now) {
+      signInAttempts.set(key, { n: 1, until: now + SIGN_IN_WINDOW_MS });
+      return;
+    }
+    hit.n += 1;
+  };
+  // Bounded: without this the map is a slow leak keyed by attacker-chosen ids.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, hit] of signInAttempts) if (hit.until < now) signInAttempts.delete(key);
+  }, SIGN_IN_WINDOW_MS).unref?.();
+
+  // Sign in to an account on this browser with its code. The account moves
+  // here, and BOTH browsers stay members of it — see db.signInWithCode.
   app.post('/api/profile/claim', requireRestorableSession, (req, res) => {
     try {
       const code = String(req.body?.code || '');
       if (!code.trim()) {
         return res.status(400).json({ error: 'Recovery code required' });
+      }
+      const limitKeys = [`d:${req.deviceId}`, `i:${req.ip}`];
+      if (limitKeys.some(tooManySignIns)) {
+        return res.status(429).json({ error: 'TOO_MANY_ATTEMPTS' });
       }
       // A RELEASED device is allowed through this door, and deliberately so:
       // it is the browser whose account was transferred away, and the session
@@ -540,9 +611,22 @@ async function startServer() {
       // recovery code, and the same call was already reachable by pressing
       // "start fresh" first. A released device holds no session to hand to the
       // row, so it takes one on the way in.
+      // Signing in to one account from a browser that already holds another,
+      // initialized one would delete the second: players.id IS a device id, so
+      // the incoming row has to take this device's place. Refused rather than
+      // done silently — losing an account is precisely what this endpoint is
+      // for avoiding. A placeholder profile carries nothing and is replaced.
+      const here = db.getProfile(req.deviceId!);
+      if (here.initialized && db.linkedAccount(req.deviceId!)?.holdsIt !== false) {
+        const target = db.profileByRecoveryCode(code);
+        if (target && target.id !== req.deviceId) {
+          return res.status(409).json({ error: 'BROWSER_HAS_ACCOUNT', username: here.username });
+        }
+      }
       const wasReleased = req.session!.status === 'released';
-      const profile = db.claimProfileByCode(code, req.deviceId!, req.session!.sessionId);
+      const profile = db.signInWithCode(code, req.deviceId!, req.session!.sessionId);
       if (!profile) {
+        for (const key of limitKeys) noteFailedSignIn(key);
         return res.status(404).json({ error: 'No profile matches that code' });
       }
       if (wasReleased) {
@@ -557,6 +641,19 @@ async function startServer() {
       // transfer lands, not whenever it next asks.
       evictStaleSockets();
       res.json(profile);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Retire this account's sign-in code and mint a new one. The counterpart to
+  // the code being reusable: a player who has shared or lost one needs a way
+  // to make it worthless without losing the account.
+  app.post('/api/profile/me/recovery-code', requireActiveSession, (req, res) => {
+    try {
+      const code = db.rotateRecoveryCode(req.deviceId!);
+      if (!code) return res.status(404).json({ error: 'PROFILE_NOT_FOUND' });
+      res.json({ recoveryCode: code });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

@@ -196,6 +196,23 @@ declare module 'http' {
  * worth looking up.
  */
 export function resolveSession(deviceId: string, cookieHeader: string | undefined): RequestSession {
+  // A browser SIGNED IN to an account is a member of it, whether or not it is
+  // the one holding it right now. Checked before the tombstone, because the
+  // two states are answers to different questions and only one of them is a
+  // dead end: `released` means "this browser gave an account away and has no
+  // claim on it", while a linked browser simply is not the one currently
+  // holding an account that is still its own. Reporting the second as the
+  // first is what put players in front of a wall whose only button destroyed
+  // the account — and cookie jars do not cross browsers, so a player opening
+  // an invitation in Messenger's webview lands here as a matter of course.
+  const link = db.linkedAccount(deviceId);
+  if (link && !link.holdsIt) {
+    // `superseded`, deliberately: it is the state that already means "your
+    // account is live somewhere else" and already has a non-destructive way
+    // back. POST /api/session brings the account here for a linked browser.
+    return { status: 'superseded', sessionId: null, movedToPlayerId: link.playerId };
+  }
+
   const release = db.releasedDevice(deviceId);
   if (release) {
     return { status: 'released', sessionId: null, movedToPlayerId: release.movedToPlayerId };
@@ -229,11 +246,27 @@ export function issueSession(req: Request, res: Response, deviceId: string): str
   const sessionId = mintSessionId();
   db.getProfile(deviceId); // the row has to exist before it can name an owner
   db.adoptSession(deviceId, sessionId);
+  setSessionCookie(req, res, sessionId, deviceId);
+  return sessionId;
+}
+
+/**
+ * Hand this browser a session cookie for an id the caller already owns.
+ *
+ * For the one path that mints the id before the account is in place: a linked
+ * browser taking its account back needs the session recorded on the row as it
+ * moves, so `issueSession` (which resolves the profile first) cannot be used.
+ */
+export function setSessionCookie(
+  req: Request,
+  res: Response,
+  sessionId: string,
+  deviceId: string
+): void {
   res.append(
     'Set-Cookie',
     `${SESSION_COOKIE}=${mintSessionToken(sessionId, deviceId, buildId())}; ${cookieAttributes(req, SESSION_MAX_AGE_S)}`
   );
-  return sessionId;
 }
 
 /** Drop the session cookie, leaving the device cookie (and the account) alone. */
@@ -290,6 +323,18 @@ export function requireActiveSession(req: Request, res: Response, next: NextFunc
  * it is the player's account, they are simply not acting from it.
  */
 export function blockReleasedDevice(req: Request, res: Response, next: NextFunction): void {
+  // A linked browser that is not holding its account must not reach getProfile
+  // either: the lazy mint would hand it a fresh empty profile, which is the
+  // failure this whole area exists to stop. It is told where the account is
+  // instead, and POST /api/session brings it back.
+  if (req.session?.status === 'superseded' && req.session.movedToPlayerId) {
+    res.status(409).json({
+      error: 'ACCOUNT_ELSEWHERE',
+      sessionStatus: 'superseded',
+      build: buildId(),
+    });
+    return;
+  }
   if (req.session?.status === 'released') {
     res.status(409).json({ error: 'DEVICE_RELEASED', sessionStatus: 'released', build: buildId() });
     return;

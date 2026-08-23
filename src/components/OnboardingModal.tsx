@@ -4,6 +4,7 @@ import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { Sheet } from './ui';
 import { validateUsername, USERNAME_MAX } from '../profileRules';
+import { detectInAppBrowser } from '../device';
 import { processAvatarFile, uploadAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
 import { Check, ImagePlus, KeyRound, Loader2, Play, ShieldCheck, X } from 'lucide-react';
@@ -180,6 +181,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   };
 
   const canSubmit = nameStatus.kind === 'available' && !submitting;
+  // Naming the app is what turns "I got signed out" into "I am in the wrong
+  // browser" — a problem the player can actually act on.
+  const inApp = detectInAppBrowser(typeof navigator === 'undefined' ? '' : navigator.userAgent);
 
   return (
     <Sheet
@@ -262,7 +266,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             id="onboarding-other-browser-note"
             className="text-[11px] font-mono text-cyan-300/80 leading-relaxed bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3"
           >
-            {t('onboarding_other_browser', language)}
+            {inApp
+              ? t('onboarding_in_app_browser', language, { app: inApp })
+              : t('onboarding_other_browser', language)}
           </p>
         )}
 
