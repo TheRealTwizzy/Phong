@@ -219,7 +219,19 @@ export function applyMatchToProgress(
   if (def.type === 'rally') {
     if (def.difficulty && (match.difficulty !== def.difficulty || match.mode !== 'solo')) return current;
     if (def.mode && match.mode !== def.mode) return current;
-    return Math.min(def.target, Math.max(current, Math.max(0, Math.round(match.bestStreak || 0))));
+    // The run EARNED here, not the peak it reached. A streak carries between
+    // matches, so bestStreak opens on whatever was carried in — and a rally
+    // task dealt or rerolled onto a player already on a long run completed
+    // itself on the next recorded match without them returning another ball.
+    // At its worst that paid an elite task's 600 XP and its permanent theme
+    // for nothing. It also broke the rule the deal is built on: a dealt task
+    // starts from zero and must never arrive already finished.
+    //
+    // The honest limit of using this number: a run that spans the deal
+    // boundary counts only the part built after it, so a carried 3 plus 5 more
+    // is 5 against the target and not 8. That is the safe side of the trade —
+    // the alternative pays for work done before the task existed.
+    return Math.min(def.target, Math.max(current, Math.max(0, Math.round(match.earnedStreak || 0))));
   }
   return Math.min(def.target, current + missionProgressDelta(def, match));
 }

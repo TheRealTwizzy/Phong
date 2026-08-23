@@ -197,6 +197,11 @@ passes on the bug: `tests/streaks.test.ts` and `tests/room.test.ts` hold the cli
 counters apart, `tests/db.test.ts` holds that a carried run is not paid for twice, and
 `scripts/e2e-rules.mjs` closes the practice farm through a real server.
 
+**A rename is a rule about every table that keys off the name.** `moveAccount` renames
+`players.id`, so any table keyed on it must move in the same transaction or be orphaned —
+`tests/identity.test.ts` asserts the per-mode rows arrive and that nothing is left behind
+under the old id. Add a playerId-keyed table and that suite is where it has to be claimed.
+
 **Where two sources can answer the same question, the precedence is a rule too.** The run a
 new match opens on has two: the profile (which survives a reload) and what this page last saw
 its own match end on (which is fresher, because Play Again fires long before the match POST

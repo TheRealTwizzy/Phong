@@ -184,6 +184,63 @@ describe('sign-in codes and the browsers an account belongs to', () => {
     expect(db.getAvatar(source)).toBeNull();
   });
 
+  it('the per-mode history, and the run each mode is on, follow it too', () => {
+    // players.id IS the device id, so a sign-in RENAMES the row — and every
+    // table keyed on that id has to be renamed with it or it is orphaned.
+    // player_mode_stats was not, so an account arrived on the new browser
+    // having played nothing, with every carried streak back at zero; the next
+    // match recorded there then wrote that zero over the run the player had.
+    const source = 'dev_aaaaaaaaaaaaaaaa11';
+    const device = 'dev_aaaaaaaaaaaaaaaa12';
+    init(source, 'ModeMover');
+    db.recordMatch({
+      playerId: source, username: 'ModeMover', playerScore: 5, opponentScore: 1,
+      bestStreak: 12, endStreak: 12, earnedStreak: 12, mode: 'solo',
+      difficulty: 'rookie', isWinner: true,
+    } as never);
+    db.recordPractice(source, { bestStreak: 6, earnedStreak: 6, endStreak: 6 });
+    const before = db.getProfile(source);
+    expect(before.modeStats?.solo?.currentStreak).toBe(12);
+
+    const claimed = db.signInWithCode(before.recoveryCode!, device);
+    expect(claimed!.modeStats?.solo?.currentStreak).toBe(12);
+    expect(claimed!.modeStats?.solo?.matchesWon).toBe(1);
+    expect(claimed!.modeStats?.practice?.currentStreak).toBe(6);
+    // And nothing is left behind under the old id to diverge from it.
+    expect(db.getProfile(source).modeStats?.solo).toBeUndefined();
+  });
+
+  it('does not collide with per-mode rows already on the claiming browser', () => {
+    // The primary key is (playerId, mode), so rows moving onto a device that
+    // already has its own would violate it. They are cleared first, exactly
+    // as that device's avatar is — and this is reachable rather than
+    // belt-and-braces: any account moved by a build before the line above
+    // existed left its per-mode rows orphaned under the old device id, and
+    // signing back into that browser walks straight into them.
+    const source = 'dev_aaaaaaaaaaaaaaaa13';
+    const device = 'dev_aaaaaaaaaaaaaaaa14';
+    init(source, 'CollideOwner');
+    db.recordMatch({
+      playerId: source, username: 'CollideOwner', playerScore: 5, opponentScore: 0,
+      bestStreak: 20, endStreak: 20, earnedStreak: 20, mode: 'solo',
+      difficulty: 'rookie', isWinner: true,
+    } as never);
+    // The claiming browser has a solo row of its own to be displaced.
+    init(device, 'CollideSquatter');
+    db.recordMatch({
+      playerId: device, username: 'CollideSquatter', playerScore: 5, opponentScore: 3,
+      bestStreak: 3, endStreak: 3, earnedStreak: 3, mode: 'solo',
+      difficulty: 'rookie', isWinner: true,
+    } as never);
+    expect(db.getProfile(device).modeStats?.solo?.currentStreak).toBe(3);
+
+    const code = db.getProfile(source).recoveryCode!;
+    const claimed = db.signInWithCode(code, device);
+    expect(claimed!.username).toBe('CollideOwner');
+    // The arriving account's run, not the displaced one's and not a merge.
+    expect(claimed!.modeStats?.solo?.currentStreak).toBe(20);
+  });
+
   it('never leaks recovery codes through the leaderboard', () => {
     const rows = db.getLeaderboard('elo', 100) as unknown as Array<Record<string, unknown>>;
     expect(rows.every((r) => !('recoveryCode' in r))).toBe(true);

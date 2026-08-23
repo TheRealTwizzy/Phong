@@ -69,18 +69,24 @@ describe('mission definitions', () => {
   });
 
   it('holds rally progress at the best of the day and never sums it', () => {
+    // Driven by the run EARNED in each match, not the peak it reached: a
+    // streak carries in, and a task must not be finished by one that was.
     const rally = MISSION_POOL.find((m) => m.type === 'rally')!;
-    let p = applyMatchToProgress(rally, 0, match('x', { bestStreak: 5 }));
+    let p = applyMatchToProgress(rally, 0, match('x', { earnedStreak: 5 }));
     expect(p).toBe(5);
-    p = applyMatchToProgress(rally, p, match('x', { bestStreak: 3 }));
+    p = applyMatchToProgress(rally, p, match('x', { earnedStreak: 3 }));
     expect(p).toBe(5); // a worse rally does not regress or accumulate
-    p = applyMatchToProgress(rally, p, match('x', { bestStreak: 40 }));
+    p = applyMatchToProgress(rally, p, match('x', { earnedStreak: 40 }));
     expect(p).toBe(rally.target); // and never banks surplus past the target
   });
 
   it('caps every mission at its target', () => {
     for (const def of ALL_MISSIONS) {
-      const p = applyMatchToProgress(def, def.target, match('x', { playerScore: 99, bestStreak: 99 }));
+      const p = applyMatchToProgress(
+        def,
+        def.target,
+        match('x', { playerScore: 99, bestStreak: 99, earnedStreak: 99 })
+      );
       expect(p).toBeLessThanOrEqual(def.target);
     }
   });
@@ -123,6 +129,37 @@ describe('server-owned mission state', () => {
     expect(
       applyMatchToProgress(forType('multiplayer'), 0, { ...soloWin, mode: 'multiplayer' })
     ).toBe(1);
+  });
+
+  it('never completes a rally task on the run carried into the match', () => {
+    // A dealt task starts from zero — that is the rule the whole deal is
+    // built on. But a streak carries between matches, so bestStreak opens on
+    // whatever was carried in, and a rally task dealt or rerolled onto a
+    // player already on a long run finished itself on the very next recorded
+    // match without them returning another ball. At its worst that paid an
+    // elite task's XP and its permanent theme unlock for no play at all.
+    const rally = MISSION_POOL.find((m) => m.type === 'rally' && !m.difficulty && !m.mode)!;
+    const carriedOnly = {
+      playerId: 'x', username: 'x', playerScore: 5, opponentScore: 0,
+      // A huge run, none of it built here.
+      bestStreak: 400, endStreak: 400, earnedStreak: 0,
+      mode: 'solo' as const, difficulty: 'rookie' as const, isWinner: true,
+    };
+    expect(applyMatchToProgress(rally, 0, carriedOnly)).toBe(0);
+    // And the part that WAS built here counts, up to the target.
+    expect(applyMatchToProgress(rally, 0, { ...carriedOnly, earnedStreak: 2 })).toBe(2);
+    expect(applyMatchToProgress(rally, 0, { ...carriedOnly, earnedStreak: 999 })).toBe(rally.target);
+  });
+
+  it('closes the same hole end to end, through a recorded match', () => {
+    init('m_carry', 'MissionCarry');
+    // Whatever hand this player holds, no rally task in it may move.
+    const rallyProgress = () =>
+      db.getMissions('m_carry').filter((m) => m.type === 'rally').map((m) => m.current);
+    db.recordMatch(
+      match('m_carry', { playerScore: 5, bestStreak: 400, endStreak: 400, earnedStreak: 0 })
+    );
+    expect(rallyProgress().every((n) => n === 0)).toBe(true);
   });
 
   it('honours a difficulty restriction', () => {
@@ -411,7 +448,9 @@ describe('a completed mission deals a free replacement', () => {
           difficulty: def.difficulty || 'pro',
           playerScore: 5,
           opponentScore: def.type === 'shutouts' ? 0 : 2,
+          // Built HERE, which is the only thing a rally task counts.
           bestStreak: Math.max(def.type === 'rally' ? def.target : 9, 9),
+          earnedStreak: Math.max(def.type === 'rally' ? def.target : 9, 9),
           aces: 8,
           isWinner: true,
         }),

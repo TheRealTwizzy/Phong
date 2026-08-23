@@ -2340,6 +2340,16 @@ class GameDatabase {
       this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, fromId);
       this.stmt('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
       this.stmt('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
+      // Per-mode history and, with it, the run each mode is still on. Left
+      // behind, the account arrived on the new browser having played nothing
+      // and every carried streak reset to zero — and the next match recorded
+      // there wrote that zero back over the run the player actually had.
+      // The DELETE is load-bearing, not tidiness: the primary key is
+      // (playerId, mode), so a placeholder profile that had played on this
+      // browser would collide with the rows moving in.
+      this.stmt('DELETE FROM player_mode_stats WHERE playerId = ?').run(newDeviceId);
+      this.stmt('UPDATE player_mode_stats SET playerId = ? WHERE playerId = ?')
+        .run(newDeviceId, fromId);
       // Everything already pointed at the account follows it, and both ends of
       // the move are members from here on.
       this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
