@@ -100,9 +100,18 @@ is what reunites them. A read-only CLI ships in the image:
 
 ```bash
 # in the container's terminal (Dokploy → the app → Terminal)
-node dist/admin.cjs whois WeinerSmasher420   # recovery code, history, verdict
-node dist/admin.cjs orphans                  # accounts that look unreachable
+node /app/dist/admin.cjs whois WeinerSmasher420   # recovery code, history, verdict
+node /app/dist/admin.cjs orphans                  # accounts that look unreachable
 ```
+
+Two things about that shell, both of which look like the tool is broken and
+are not. Pick **`/bin/sh`**, not Bash: the runtime stage is `node:22-alpine`
+and there is no bash in it (`exec: "bash": executable file not found`). And
+use the **absolute path**: the Dockerfile's `WORKDIR /app` applies to the
+container's own process, not to an exec'd shell, which starts at `/` — so a
+relative `node dist/admin.cjs` looks for `/dist/admin.cjs` and reports
+`MODULE_NOT_FOUND`. If `ls /app/dist` shows no `admin.cjs` at all, the
+running image predates the CLI and needs a redeploy.
 
 The player enters the code under *"Have a recovery code from another device?"*
 in onboarding, and the account moves onto the browser they are using now.

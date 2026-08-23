@@ -165,6 +165,13 @@ carries the session id the page was actually given and ends nothing else.
 **A user-facing string ships in all seven locales.** `tests/i18n.test.ts` pins parity, no dead
 keys, and no missing keys — note the second rule makes a test a poor place to name a key.
 
+**An assertion on a DIFFERENCE needs a bigger sample than one on a value.** The AI rolls its
+reads per rally, so a measured return rate is a sample and subtracting two of them adds both
+their noise. The ladder-spread check flaked at roughly 3 runs in 400 until its sample was
+tripled and its threshold moved below the tail rather than beside the mean — it surfaced as
+`expected 0.19999999999999996 to be greater than 0.2` on a docs-only PR. Measure the
+distribution before picking a bound; do not tune it until the red goes away.
+
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit.
 
