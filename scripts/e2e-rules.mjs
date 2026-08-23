@@ -73,6 +73,40 @@ for (const key of ['opponentSonar','trackTelemetry']) {
 }
 ok('all six physics sliders and the presentation toggles render');
 
+// The pre-match sheet must survive its own content. Opening the rules used to
+// take the whole menu down with it: match settings lived in an accordion
+// inside the menu's flex-column scroll region, and the card's `overflow-hidden`
+// let the column squash every row to a sliver instead of overflowing. Nothing
+// overflowed, so nothing scrolled, and the Start button — last in a clipped
+// card — sat ~160px below the viewport with no gesture able to reach it. That
+// is why "editing a match setting" read as "this mode cannot be started".
+{
+  const layout = await page.evaluate(() => {
+    const start = document.querySelector('#menu-start-solo');
+    const b = start.getBoundingClientRect();
+    const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+    const body = document.querySelector('#prematch-modal-container .scroll-y');
+    return {
+      startTop: b.top,
+      startBottom: b.bottom,
+      viewportH: window.innerHeight,
+      startReachable: !!(hit && hit.closest('#menu-start-solo')),
+      bodyScrolls: body.scrollHeight > body.clientHeight,
+      // Every mode row behind the sheet keeps its full content height.
+      crushed: [...document.querySelectorAll('[id^="menu-mode-"]')]
+        .filter((el) => el.clientHeight + 1 < el.scrollHeight)
+        .map((el) => `${el.id} ${el.clientHeight}/${el.scrollHeight}`),
+    };
+  });
+  if (layout.startBottom > layout.viewportH || layout.startTop < 0) {
+    fail(`Start sits outside the viewport (${layout.startTop}–${layout.startBottom} of ${layout.viewportH})`);
+  }
+  if (!layout.startReachable) fail('Start is in the layout but nothing can tap it');
+  if (!layout.bodyScrolls) fail('the sheet body does not scroll its own overflow');
+  if (layout.crushed.length) fail(`menu rows crushed below their content: ${layout.crushed.join(', ')}`);
+  ok('with every rule expanded: the sheet body scrolls, Start stays pinned and tappable, the menu behind is intact');
+}
+
 const setSlider = async (key, value) => {
   await page.$eval(
     `#menu-rule-slider-${key}`,

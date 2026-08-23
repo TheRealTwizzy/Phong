@@ -46,7 +46,6 @@ import {
   Play,
   Shield,
   Flame,
-  ChevronDown,
   ChevronRight,
 } from 'lucide-react';
 
@@ -58,12 +57,28 @@ import {
 // because dvh changes as mobile browser chrome collapses and a fixed bar
 // would jump mid-scroll.
 //
-// Match settings are still chosen HERE, before a match starts, and still by
-// expanding a mode in place. Moving them into a bottom sheet was considered
-// and rejected: the suites open a mode, pick a score and close it again by
-// tapping the same control twice, which a sheet backdrop would swallow — and
-// an accordion already withholds every mode's options until asked, which is
-// the property that matters.
+// EVERY mode opens the same pre-match surface. A duel has always had one —
+// the lobby — and the other three used to expand INTO THE LIST instead, as an
+// accordion. That was not merely a second flow, it was a broken one:
+//
+//   - The scroll region is a flex column, and the accordion card carried
+//     `overflow-hidden`. A flex item whose overflow is not `visible` has an
+//     automatic minimum size of ZERO, so the column had permission to squash
+//     its children instead of overflowing. It took it. Nothing ever exceeded
+//     the container, so `overflow-y: auto` had nothing to scroll and the menu
+//     simply could not be scrolled.
+//   - Everything in the list was crushed to fit whatever the open card
+//     wanted: the other three mode rows collapsed to ~12px slivers, and the
+//     open card was itself clipped to a fraction of its content — measured at
+//     126px of a needed 772px with the rules panel open.
+//   - The Start button, last in the clipped card, landed 160px BELOW the
+//     viewport with no way to reach it. That is the "cannot start anything
+//     but a duel" report: the button existed, and no gesture could get to it.
+//
+// So the fix is the same shape as the cure: pre-match setup is a Sheet, which
+// caps itself against the visible viewport, scrolls its own body, and pins
+// the Start CTA in a footer that cannot be scrolled away. Every child of the
+// scroll region below is `shrink-0` so this class of collapse cannot return.
 interface MainMenuProps {
   theme: ThemeConfig;
   settings: GameSettings;
@@ -86,7 +101,7 @@ interface MainMenuProps {
 }
 
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <span className="text-kicker px-0.5 text-ink-dim uppercase">{children}</span>
+  <span className="text-kicker shrink-0 px-0.5 text-ink-dim uppercase">{children}</span>
 );
 
 export const MainMenu: React.FC<MainMenuProps> = ({
@@ -110,7 +125,9 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onOpenTutorial,
 }) => {
   const lang = settings.language || 'en';
-  const [expandedMode, setExpandedMode] = useState<GameMode | null>(null);
+  // Which mode's pre-match sheet is open. A duel's lives in App (the lobby
+  // owns a room, not just a form), so this only ever holds the other three.
+  const [prematchMode, setPrematchMode] = useState<GameMode | null>(null);
   // Which gate the player tapped, so the reason a rung is shut is something
   // they can read rather than a tooltip no touch device will ever show.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
@@ -134,18 +151,24 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 
   const handleModeTap = (id: GameMode) => {
     if (id === 'multiplayer') {
-      // The lobby IS the pre-match setup for 2-phone duels.
+      // The lobby IS this mode's pre-match sheet — same surface, plus a room.
       onOpenMultiplayer();
       return;
     }
-    setExpandedMode((cur) => (cur === id ? null : id));
+    setPrematchMode(id);
   };
 
-  const startExpanded = () => {
-    if (expandedMode === 'solo') onStartSolo();
-    else if (expandedMode === 'practice') onStartPractice();
-    else if (expandedMode === 'split') onStartSplit();
+  // The sheet closes on the way to the court, exactly as `game_start` closes
+  // both lobbies: nobody is left holding a setup form over a live match.
+  const startPrematch = () => {
+    const id = prematchMode;
+    setPrematchMode(null);
+    if (id === 'solo') onStartSolo();
+    else if (id === 'practice') onStartPractice();
+    else if (id === 'split') onStartSplit();
   };
+
+  const prematch = modes.find((m) => m.id === prematchMode) ?? null;
 
   // Hidden MMR drives every prediction on this screen (solo play moves it,
   // even though it can never move the visible tier).
@@ -249,9 +272,14 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         </button>
       </header>
 
+      {/* The one scrolling region. Every direct child is `shrink-0`: this is a
+          flex column, and a flex item is free to be squashed below its content
+          the moment its own overflow is not `visible` (a card that clips, a
+          rail that scrolls sideways). Squashed children never overflow, and a
+          region with nothing to overflow does not scroll. */}
       <main className="scroll-y relative z-10 flex min-h-0 flex-1 flex-col gap-3 px-safe pb-3">
         {/* Rank is the hero: the ladder always shows its next rung. */}
-        <Panel id="menu-rank-card" variant="raised" className="flex items-center gap-4">
+        <Panel id="menu-rank-card" variant="raised" className="flex shrink-0 items-center gap-4">
           <RankBadge
             size="hero"
             tier={profile?.tier || 'unranked'}
@@ -289,7 +317,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           data-stub="true"
           aria-disabled={!quickMatch.available}
           onClick={() => setQueueInfoOpen(true)}
-          className="flex items-center gap-3 rounded-card border border-dashed border-line-strong bg-surface-2/60 p-3 text-left opacity-60 transition-colors"
+          className="flex shrink-0 items-center gap-3 rounded-card border border-dashed border-line-strong bg-surface-2/60 p-3 text-left opacity-60 transition-colors"
         >
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border border-line-strong text-ink-muted">
             <Swords className="h-5 w-5" />
@@ -305,156 +333,51 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           </span>
         </button>
 
+        {/* Four rows, one affordance. A chevron pointing INTO a surface is the
+            promise every mode now keeps: the duel opens its lobby, the other
+            three open the pre-match sheet below. Nothing expands in place. */}
         {modes.map((m) => {
-          const isExpanded = expandedMode === m.id;
           const isPrimary = m.id === 'multiplayer';
           return (
-            <div
+            <button
               key={m.id}
-              className={`overflow-hidden rounded-card border transition-colors ${
-                isExpanded || isPrimary
-                  ? 'border-accent/40 bg-surface-2'
-                  : 'border-line bg-surface-2/70'
+              id={`menu-mode-${m.id}`}
+              onClick={() => handleModeTap(m.id)}
+              className={`flex shrink-0 items-center gap-3 rounded-card border p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
+                isPrimary ? 'border-accent/40 bg-surface-2' : 'border-line bg-surface-2/70'
               }`}
             >
-              <button
-                id={`menu-mode-${m.id}`}
-                onClick={() => handleModeTap(m.id)}
-                className="flex w-full items-center gap-3 p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100"
+              <div
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border ${
+                  isPrimary
+                    ? 'border-accent/50 bg-accent/15 text-accent'
+                    : 'border-line-strong bg-surface-3 text-ink-muted'
+                }`}
               >
-                <div
-                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border ${
-                    isPrimary
-                      ? 'border-accent/50 bg-accent/15 text-accent'
-                      : 'border-line-strong bg-surface-3 text-ink-muted'
-                  }`}
-                >
-                  {m.icon}
-                </div>
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="flex items-center gap-1.5">
-                    <span className="truncate text-2xs text-ink">{t(m.labelKey, lang)}</span>
-                    <span className="shrink-0 text-2xs font-normal tracking-normal text-ink-dim">
-                      {m.kicker}
-                    </span>
+                {m.icon}
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="flex items-center gap-1.5">
+                  <span className="truncate text-2xs text-ink">{t(m.labelKey, lang)}</span>
+                  <span className="shrink-0 text-2xs font-normal tracking-normal text-ink-dim">
+                    {m.kicker}
                   </span>
-                  <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
-                    {t(m.descKey, lang)}
-                  </span>
-                </div>
-                {isPrimary ? (
-                  <ChevronRight className="h-4 w-4 shrink-0 text-accent" />
-                ) : (
-                  <ChevronDown
-                    className={`h-4 w-4 shrink-0 text-ink-dim transition-transform ${
-                      isExpanded ? 'rotate-180' : ''
-                    }`}
-                  />
-                )}
-              </button>
-
-              {/* Pre-match setup — the ONLY place match settings change */}
-              {isExpanded && (
-                <div className="flex flex-col gap-3 border-t border-line px-3 pt-3 pb-3">
-                  {m.id !== 'practice' && (
-                    <SectionLabel>{t('match_settings', lang)}</SectionLabel>
-                  )}
-
-                  {m.id === 'solo' && (
-                    <div className="flex flex-col gap-1.5">
-                      <label className="flex items-center gap-1 text-2xs font-normal tracking-normal text-ink-muted">
-                        <Shield className="h-3 w-3" />
-                        {t('ai_difficulty', lang)}
-                        <span className="ml-auto text-2xs text-ink-dim">
-                          {t('win_chance', lang)}
-                        </span>
-                      </label>
-                      <SegmentedControl
-                        columns={3}
-                        ariaLabel={t('ai_difficulty', lang)}
-                        value={settings.difficulty}
-                        onChange={(diff) => onUpdateSettings({ difficulty: diff })}
-                        onLockTap={setGateHint}
-                        options={AI_DIFFICULTIES.map((diff) => {
-                          // Pre-match prediction from hidden MMR vs this AI
-                          // anchor — the same number that scales match XP.
-                          const chance = Math.round(
-                            winProbability(myRating, aiRating(diff, myRating.mu)) * 100
-                          );
-                          return {
-                            value: diff,
-                            id: `menu-diff-${diff}`,
-                            label: <span className="capitalize">{diff}</span>,
-                            sublabel: `${chance}%`,
-                            sublabelId: `menu-diff-${diff}-odds`,
-                            sublabelTone:
-                              chance >= 60 ? 'win' : chance >= 40 ? 'warn' : 'loss',
-                            badge:
-                              diff === bestDifficulty
-                                ? { id: 'menu-diff-balanced', text: t('balanced', lang) }
-                                : undefined,
-                            lock: opened('difficulty', diff)
-                              ? null
-                              : unlockedBy('difficulty', diff) ?? null,
-                            lockId: `menu-diff-${diff}-lock`,
-                          };
-                        })}
-                      />
-                    </div>
-                  )}
-
-                  {(m.id === 'solo' || m.id === 'split') && (
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-2xs font-normal tracking-normal text-ink-muted">
-                        {t('winning_score', lang)}
-                      </label>
-                      <SegmentedControl
-                        columns={4}
-                        ariaLabel={t('winning_score', lang)}
-                        value={settings.winningScore}
-                        onChange={(pts) => onUpdateSettings({ winningScore: pts })}
-                        onLockTap={setGateHint}
-                        options={[3, 5, 10, 15].map((pts) => ({
-                          value: pts,
-                          id: `menu-pts-${pts}`,
-                          label: `${pts} pts`,
-                          lock: opened('winningScore', pts)
-                            ? null
-                            : unlockedBy('winningScore', pts) ?? null,
-                        }))}
-                      />
-                    </div>
-                  )}
-
-                  <MatchRulesPanel
-                    rules={settings.rules}
-                    onUpdateRules={(patch) =>
-                      onUpdateSettings({ rules: normalizeRules({ ...settings.rules, ...patch }) })
-                    }
-                    lang={lang}
-                    mode={m.id}
-                  />
-
-                  <Button
-                    id={`menu-start-${m.id}`}
-                    variant="primary"
-                    size="lg"
-                    block
-                    icon={<Play className="h-4 w-4" />}
-                    onClick={startExpanded}
-                  >
-                    {m.id === 'practice' ? t('start_training', lang) : t('start_match', lang)}
-                  </Button>
-                </div>
-              )}
-            </div>
+                </span>
+                <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
+                  {t(m.descKey, lang)}
+                </span>
+              </div>
+              <ChevronRight
+                className={`h-4 w-4 shrink-0 ${isPrimary ? 'text-accent' : 'text-ink-dim'}`}
+              />
+            </button>
           );
         })}
 
         {railMissions.length > 0 && (
           <>
             <SectionLabel>{t('menu_section_today', lang)}</SectionLabel>
-            <div id="menu-daily-rail" className="scroll-x flex gap-2 pb-1">
+            <div id="menu-daily-rail" className="scroll-x flex shrink-0 gap-2 pb-1">
               {railMissions.map((mi) => (
                 <button
                   key={mi.id}
@@ -480,7 +403,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         <button
           id="menu-nav-tutorial"
           onClick={onOpenTutorial}
-          className="flex items-center gap-2 rounded-card border border-line bg-surface-2/60 px-3 py-2.5 text-left text-ink-muted transition-colors active:scale-[0.99] motion-reduce:active:scale-100"
+          className="flex shrink-0 items-center gap-2 rounded-card border border-line bg-surface-2/60 px-3 py-2.5 text-left text-ink-muted transition-colors active:scale-[0.99] motion-reduce:active:scale-100"
         >
           <BookOpen className="h-4 w-4 shrink-0" />
           <span className="flex-1 text-2xs font-normal tracking-normal">
@@ -516,6 +439,146 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           );
         })}
       </nav>
+
+      {/* Pre-match setup — the ONLY place match settings change, and now the
+          same surface for all three of them that a duel has always had. Body
+          scrolls, footer does not: the Start CTA is reachable at any content
+          height, on any phone, with every rule expanded. */}
+      <Sheet
+        id="prematch-modal"
+        cardId="prematch-modal-container"
+        isOpen={prematch !== null}
+        onClose={() => setPrematchMode(null)}
+        size="md"
+        accent="accent"
+        closeId="btn-close-prematch"
+        closeLabel={t('close', lang)}
+        icon={prematch?.icon}
+        title={prematch ? t(prematch.labelKey, lang) : ''}
+        subtitle={prematch ? t(prematch.descKey, lang) : ''}
+        bodyClassName="scroll-y p-4 flex flex-col gap-3"
+        footer={
+          prematch ? (
+            <>
+              <Button id="btn-prematch-back" variant="ghost" onClick={() => setPrematchMode(null)}>
+                {t('close', lang)}
+              </Button>
+              <Button
+                id={`menu-start-${prematch.id}`}
+                variant="primary"
+                block
+                icon={<Play className="h-3.5 w-3.5 fill-current" />}
+                onClick={startPrematch}
+              >
+                {prematch.id === 'practice' ? t('start_training', lang) : t('start_match', lang)}
+              </Button>
+            </>
+          ) : undefined
+        }
+      >
+        {prematch && (
+          <>
+            {/* Locked identity, exactly as the lobby states it — a match is
+                always played under the profile username. */}
+            <div
+              id="prematch-playing-as"
+              className="flex items-center gap-2 rounded-card border border-line bg-surface-1 px-3 py-2"
+            >
+              <User className="h-4 w-4 shrink-0 text-accent" />
+              <span className="text-2xs font-normal tracking-normal text-ink-muted">
+                {t('playing_as', lang)}
+              </span>
+              <span className="truncate text-2xs text-ink">{profile?.username || 'Player'}</span>
+            </div>
+
+            <div id="prematch-match-settings" className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-kicker text-ink-dim uppercase">
+                  {t('match_settings', lang)}
+                </span>
+                <span
+                  id="prematch-mode-kicker"
+                  className="rounded-chip border border-accent/40 bg-accent/12 px-1.5 py-0.5 text-2xs text-accent"
+                >
+                  {prematch.kicker}
+                </span>
+              </div>
+
+              {prematch.id === 'solo' && (
+                <div className="flex flex-col gap-1.5">
+                  <label className="flex items-center gap-1 text-2xs font-normal tracking-normal text-ink-muted">
+                    <Shield className="h-3 w-3" />
+                    {t('ai_difficulty', lang)}
+                    <span className="ml-auto text-2xs text-ink-dim">{t('win_chance', lang)}</span>
+                  </label>
+                  <SegmentedControl
+                    columns={3}
+                    ariaLabel={t('ai_difficulty', lang)}
+                    value={settings.difficulty}
+                    onChange={(diff) => onUpdateSettings({ difficulty: diff })}
+                    onLockTap={setGateHint}
+                    options={AI_DIFFICULTIES.map((diff) => {
+                      // Pre-match prediction from hidden MMR vs this AI
+                      // anchor — the same number that scales match XP.
+                      const chance = Math.round(
+                        winProbability(myRating, aiRating(diff, myRating.mu)) * 100
+                      );
+                      return {
+                        value: diff,
+                        id: `menu-diff-${diff}`,
+                        label: <span className="capitalize">{diff}</span>,
+                        sublabel: `${chance}%`,
+                        sublabelId: `menu-diff-${diff}-odds`,
+                        sublabelTone: chance >= 60 ? 'win' : chance >= 40 ? 'warn' : 'loss',
+                        badge:
+                          diff === bestDifficulty
+                            ? { id: 'menu-diff-balanced', text: t('balanced', lang) }
+                            : undefined,
+                        lock: opened('difficulty', diff)
+                          ? null
+                          : unlockedBy('difficulty', diff) ?? null,
+                        lockId: `menu-diff-${diff}-lock`,
+                      };
+                    })}
+                  />
+                </div>
+              )}
+
+              {(prematch.id === 'solo' || prematch.id === 'split') && (
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-2xs font-normal tracking-normal text-ink-muted">
+                    {t('winning_score', lang)}
+                  </label>
+                  <SegmentedControl
+                    columns={4}
+                    ariaLabel={t('winning_score', lang)}
+                    value={settings.winningScore}
+                    onChange={(pts) => onUpdateSettings({ winningScore: pts })}
+                    onLockTap={setGateHint}
+                    options={[3, 5, 10, 15].map((pts) => ({
+                      value: pts,
+                      id: `menu-pts-${pts}`,
+                      label: `${pts} pts`,
+                      lock: opened('winningScore', pts)
+                        ? null
+                        : unlockedBy('winningScore', pts) ?? null,
+                    }))}
+                  />
+                </div>
+              )}
+
+              <MatchRulesPanel
+                rules={settings.rules}
+                onUpdateRules={(patch) =>
+                  onUpdateSettings({ rules: normalizeRules({ ...settings.rules, ...patch }) })
+                }
+                lang={lang}
+                mode={prematch.id}
+              />
+            </div>
+          </>
+        )}
+      </Sheet>
 
       <UnlockHintSheet
         achievement={gateHint}

@@ -55,9 +55,14 @@ async function passGatekeeper(page) {
 }
 
 /**
- * Pick a winning score. The picker lives in the SOLO panel — multiplayer has
- * never shown one — so this is exactly how a player's PvP target gets set:
- * invisibly, from whatever they last chose for a solo match.
+ * Pick a winning score. The picker lives in SOLO's pre-match sheet —
+ * multiplayer takes its target from the room instead — so this is exactly how
+ * a player's local default gets set: from whatever they last chose for a solo
+ * match.
+ *
+ * Every mode opens a Sheet now, the duel included, so the sheet is dismissed
+ * through its own close control. Tapping #menu-mode-solo a second time used
+ * to collapse an accordion; it now lands on the sheet's backdrop.
  */
 async function pickShortMatch(page, points = 3) {
   const lobby = await page.$('#multiplayer-lobby-modal');
@@ -66,7 +71,8 @@ async function pickShortMatch(page, points = 3) {
   const btn = await page.waitForSelector(`#menu-pts-${points}:not([disabled])`, { timeout: 4000 }).catch(() => null);
   if (!btn) fail(`winning-score button #menu-pts-${points} not available`);
   await btn.click();
-  await page.click('#menu-mode-solo'); // collapse again
+  await page.click('#btn-close-prematch');
+  await page.waitForSelector('#prematch-modal', { state: 'detached', timeout: 4000 });
 }
 
 async function hostCreateRoom(page, { p2p, points = 3 }) {
