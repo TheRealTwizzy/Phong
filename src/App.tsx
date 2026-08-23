@@ -286,6 +286,11 @@ export default function App() {
   // "Are you sure?" gate for quitting a live duel — walking out mid-match is
   // an abandon, so it should never happen off a single mis-tap.
   const [quitConfirmOpen, setQuitConfirmOpen] = useState<boolean>(false);
+  // The same gate for walking out of a LOBBY. Dismissing that sheet used to
+  // only hide it, which left the player alone on the live court underneath —
+  // paddle working, serve refused, and the relay's room still open behind
+  // them. Leaving a room is now a decision, and taking it actually leaves.
+  const [leaveLobbyConfirmOpen, setLeaveLobbyConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
   // An invitation link that never got its holder a seat. Silence here reads as
   // "the link is broken" — which it may well be (a dead room code), but the
@@ -1593,9 +1598,29 @@ export default function App() {
     setCountdownArmed(false);
     setLobbyReady([false, false]);
     setQuitConfirmOpen(false);
+    setLeaveLobbyConfirmOpen(false);
+    // The lobby is a sheet over the court, not a screen. Leaving without
+    // closing it dropped the player back on the menu with it still floating.
+    setIsMultiplayerOpen(false);
     setMode('solo');
     setScreen('menu');
     resetMatch();
+  };
+
+  /**
+   * The lobby's X and its Leave button are the same intent, and both are a
+   * request rather than an action: a seat in a room is something the relay is
+   * holding, so walking away from it has to actually tell the relay. Before a
+   * room exists there is nothing to leave, and dismissing is just dismissing —
+   * which is also the window a join can still be in flight in, where
+   * `room_joined` reopens the sheet rather than seating anyone behind it.
+   */
+  const requestLeaveLobby = () => {
+    if (roomId) {
+      setLeaveLobbyConfirmOpen(true);
+      return;
+    }
+    setIsMultiplayerOpen(false);
   };
 
   // Main 60/120 FPS Physics Engine Loop
@@ -2119,6 +2144,48 @@ export default function App() {
           </p>
         </Sheet>
 
+        <Sheet
+          id="leave-lobby-confirm-modal"
+          isOpen={leaveLobbyConfirmOpen}
+          onClose={() => setLeaveLobbyConfirmOpen(false)}
+          size="xs"
+          layer="over"
+          accent="warn"
+          title={t('lobby_leave_confirm_title', currentLanguage)}
+          footer={
+            <>
+              <Button
+                id="btn-leave-lobby-cancel"
+                variant="secondary"
+                block
+                onClick={() => setLeaveLobbyConfirmOpen(false)}
+              >
+                {t('lobby_leave_confirm_no', currentLanguage)}
+              </Button>
+              <Button
+                id="btn-leave-lobby-confirm"
+                variant="danger"
+                block
+                onClick={() => {
+                  setLeaveLobbyConfirmOpen(false);
+                  handleLeaveRoom();
+                }}
+              >
+                {t('lobby_leave_confirm_yes', currentLanguage)}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
+            {t(
+              playerIndex === 0
+                ? 'lobby_leave_confirm_body_host'
+                : 'lobby_leave_confirm_body_guest',
+              currentLanguage
+            )}
+          </p>
+        </Sheet>
+
         {/* Mandatory first-arrival onboarding: gates EVERYTHING until the
             player locks in their unique username (or restores a profile) */}
         <OnboardingModal
@@ -2532,7 +2599,7 @@ export default function App() {
         {/* 2-Phone Multiplayer Lobby */}
         <MultiplayerLobby
           isOpen={isMultiplayerOpen}
-          onClose={() => setIsMultiplayerOpen(false)}
+          onClose={requestLeaveLobby}
           theme={currentTheme}
           roomId={roomId}
           playerIndex={playerIndex}
@@ -2541,7 +2608,7 @@ export default function App() {
           currentUsername={profile?.username}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
-          onLeaveRoom={handleLeaveRoom}
+          onLeaveRoom={requestLeaveLobby}
           opponentId={opponentId}
           onViewProfile={openPublicProfile}
           winProbability={matchPrediction}
@@ -2552,7 +2619,6 @@ export default function App() {
           onStartMatch={handleStartMatch}
           earnedAchievements={profile?.achievements || []}
           language={currentLanguage}
-          onOpenTutorial={() => setIsTutorialOpen(true)}
           p2pEnabled={p2pEnabled}
           onToggleP2P={setP2pEnabled}
         />

@@ -1,4 +1,13 @@
-// Browser E2E for a join that is still in flight when the lobby is dismissed.
+// Browser E2E for the two ways a lobby gets dismissed.
+//
+// PART 1 — a HOST walking out of their own room. Dismissing the lobby used to
+// only hide the sheet. `room_created` has already flipped the screen to
+// 'game', so the host landed alone on a live court: paddle working, serve
+// refused (there is no opponent to serve to), and the relay still holding an
+// open room whose code they had probably already sent someone. Leaving is now
+// a decision, and taking it actually leaves.
+//
+// PART 2 — a join that is still in flight when the lobby is dismissed.
 //
 // Asking for a seat and being given one are two different moments, and the
 // player can close the lobby in between — a stray tap on the X, or simply
@@ -51,7 +60,49 @@ async function newPlayer(prefix) {
   return page;
 }
 
-console.log('A join in flight survives the lobby being dismissed');
+console.log('Leaving a lobby is a decision, and it closes the room');
+
+// A host with nobody else in the room. `roomId` is set, so both the X and the
+// Leave button are requests rather than actions.
+const solo = await newPlayer('LbX');
+await solo.click('#menu-mode-multiplayer');
+await solo.waitForSelector('#btn-create-room', { timeout: 8000 });
+await solo.click('#btn-create-room');
+await solo.waitForSelector('#btn-copy-link', { timeout: 8000 });
+const doomed = (await solo.textContent('#lobby-room-code'))?.trim();
+if (!/^[A-Z0-9]{4}$/.test(doomed || '')) fail('host never got a room code');
+if ((await fetch(`${BASE}/api/room/${doomed}`)).status !== 200) fail(`room ${doomed} was never open`);
+
+await solo.click('#btn-close-lobby');
+const confirmed = await solo.waitForSelector('#leave-lobby-confirm-modal', { timeout: 5000 }).catch(() => null);
+if (!confirmed) fail('dismissing a lobby with a live room asked nothing — the host is on the court again');
+ok('dismissing a lobby with a room open asks first');
+
+// Cancelling has to put them back in the LOBBY, not behind it. This is the
+// exact failure being fixed: a court with a paddle and no way to serve.
+await solo.click('#btn-leave-lobby-cancel');
+await sleep(600);
+if (!(await solo.$('#multiplayer-lobby-modal'))) fail('cancelling the prompt still dumped the host on the court');
+ok('cancelling keeps them in the lobby');
+
+await solo.click('#btn-close-lobby');
+await solo.waitForSelector('#btn-leave-lobby-confirm', { timeout: 5000 });
+await solo.click('#btn-leave-lobby-confirm');
+await solo.waitForSelector('#main-menu-screen', { timeout: 8000 });
+await sleep(800);
+const left = await solo.evaluate(() => ({
+  lobby: !!document.querySelector('#multiplayer-lobby-modal'),
+  court: !!document.querySelector('#half-court-canvas'),
+}));
+if (left.lobby) fail('confirming left the lobby sheet floating over the menu');
+if (left.court) fail('confirming left the court alive behind the menu');
+// The room is the point: a code that outlives the player holding it is a code
+// somebody else can still be sent.
+const after = (await fetch(`${BASE}/api/room/${doomed}`)).status;
+if (after !== 404) fail(`room ${doomed} survived its only player leaving (status ${after})`);
+ok('confirming returns to the menu and closes the room');
+
+console.log('\nA join in flight survives the lobby being dismissed');
 
 const host = await newPlayer('LbH');
 await host.click('#menu-mode-multiplayer');
