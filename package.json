@@ -8,14 +8,15 @@
   },
   "scripts": {
     "dev": "tsx watch server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild server/admin.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/admin.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "node scripts/e2e-run.mjs",
-    "db:reset": "node scripts/db-reset.mjs"
+    "db:reset": "node scripts/db-reset.mjs",
+    "admin": "node dist/admin.cjs"
   },
   "dependencies": {
     "express": "^4.21.2",

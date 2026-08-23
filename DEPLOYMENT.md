@@ -90,6 +90,38 @@ The app then mints time-limited TURN credentials per client via `/api/rtc-config
 
 ### Backups
 
+## Support: an account somebody can't get back into
+
+Identity is bound to the browser's device cookie, so "I lost my account" is a
+standing category of support request rather than a bug that gets fixed once — a
+cleared cookie jar, a new phone, an invitation link opened in a chat app's
+webview. The account is intact and merely unreachable, and its **recovery code**
+is what reunites them. A read-only CLI ships in the image:
+
+```bash
+# in the container's terminal (Dokploy → the app → Terminal)
+node dist/admin.cjs whois WeinerSmasher420   # recovery code, history, verdict
+node dist/admin.cjs orphans                  # accounts that look unreachable
+```
+
+The player enters the code under *"Have a recovery code from another device?"*
+in onboarding, and the account moves onto the browser they are using now.
+
+Three things to know before handing one over:
+
+- **A recovery code transfers the account to whoever types it.** Treat it like a
+  password: confirm who you are talking to, and send it over a channel you trust.
+- **Claiming deletes the claiming device's current profile row.** A player who
+  has since built up a replacement account loses it, so sequence deliberately.
+- **`orphans` is circumstantial.** A player who onboarded and never came back
+  looks identical to one whose browser lost the cookie; the server cannot see
+  which cookie a browser holds. Confirm with the player.
+
+The tool opens the database `readOnly` and has no write path — safe against a
+live server, since WAL readers never block the writer. It deliberately does not
+import `server/db.ts`, whose constructor would run migrations and seed the bot
+roster as a side effect of answering a question.
+
 All player data is one SQLite file on the `phong-data` volume. Online backup without stopping anything:
 
 ```bash
