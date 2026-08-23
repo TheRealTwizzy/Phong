@@ -1,5 +1,11 @@
 /**
- * Read-only support CLI. `node dist/admin.cjs <command>` inside the container.
+ * Read-only support CLI. `node /app/dist/admin.cjs <command>` inside the container.
+ *
+ * Absolute path throughout, and deliberately: the Dockerfile's WORKDIR
+ * applies to the container's own process, not to a shell exec'd into it,
+ * which starts at `/`. A relative `node dist/admin.cjs` therefore looks for
+ * `/dist/admin.cjs` and reports MODULE_NOT_FOUND, which reads as the tool
+ * being missing rather than the path being wrong.
  *
  * Device-bound identity means "I lost my account" is a permanent category of
  * support request, not a bug that gets fixed once. A browser clears its
@@ -137,7 +143,7 @@ const [command, argument] = process.argv.slice(2);
 switch (command) {
   case 'whois':
     if (!argument) {
-      console.error('usage: node dist/admin.cjs whois <username|deviceId>');
+      console.error('usage: node /app/dist/admin.cjs whois <username|deviceId>');
       process.exit(2);
     }
     whois(argument);
@@ -148,8 +154,8 @@ switch (command) {
   default:
     console.log(`Phong support CLI — read-only, safe to run against a live server.
 
-  node dist/admin.cjs whois <username|deviceId>   one account: recovery code, history, verdict
-  node dist/admin.cjs orphans                     accounts that look unreachable
+  node /app/dist/admin.cjs whois <username|deviceId>   one account: recovery code, history, verdict
+  node /app/dist/admin.cjs orphans                     accounts that look unreachable
 
 Reading from ${DB_FILE} (override with DATA_DIR or DB_FILE).
 
