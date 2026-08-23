@@ -338,50 +338,47 @@ const guest = await newPage();
   const profB2 = await me(b);
   if (profB2.username !== keeperName) fail(`claim did not move profile: got ${profB2.username}`);
   if (profB2.id !== profB1.id) fail('device id changed on claim');
-  if (profB2.recoveryCode === profA1.recoveryCode) fail('recovery code did not rotate on use');
+  if (profB2.recoveryCode !== profA1.recoveryCode) fail('sign-in code should survive being used');
   if (!profB2.initialized) fail('claimed profile lost its initialized state');
 
-  // The device left behind is TOLD, and is walled off until it acknowledges.
-  // It used to be handed a brand-new profile silently, which is what let a
-  // transferred-away phone play a whole match before finding out at the final
-  // whistle that it had been a guest the entire time.
-  await a.reload({ waitUntil: 'networkidle' });
-  const guard = await a.waitForSelector('#session-guard-overlay', { timeout: 8000 })
-    .catch(() => fail('released device was not walled off after the transfer'));
-  if ((await guard.getAttribute('data-session-status')) !== 'released') {
-    fail(`released device shows "${await guard.getAttribute('data-session-status')}"`);
-  }
-  if (await a.$('#main-menu-screen')) fail('released device could still reach the menu');
-  const releasedRead = await a.evaluate(async () => {
+  // The browser left behind is evicted — the concurrency rule is unchanged.
+  // It used to be handed a brand-new empty profile silently, which is what let
+  // a transferred-away phone play a whole match before finding out at the
+  // final whistle that it had been a guest the entire time.
+  const evictedRead = await a.evaluate(async () => {
     const r = await fetch('/api/profile/me');
     return { status: r.status, body: await r.json() };
   });
-  if (releasedRead.status !== 409 || releasedRead.body.error !== 'DEVICE_RELEASED') {
-    fail(`released device still resolves a profile: ${JSON.stringify(releasedRead)}`);
+  if (evictedRead.status !== 409 || evictedRead.body.error !== 'ACCOUNT_ELSEWHERE') {
+    fail(`evicted browser still resolves a profile: ${JSON.stringify(evictedRead)}`);
   }
+  const evictedState = await a.evaluate(() =>
+    fetch('/api/session').then((r) => r.json()).then((d) => d.status)
+  );
+  // `superseded`, not `released`: signing in links both browsers rather than
+  // tombstoning the one left behind, and `superseded` has always had a way
+  // back where `released` had only a way out.
+  if (evictedState !== 'superseded') fail(`evicted browser reports "${evictedState}"`);
 
-  // Starting over is still there, and still never hands back the account it
-  // gave away — but it is no longer the ONLY thing offered, and no longer one
-  // press from irreversible. The restore box comes first (that is the way back
-  // that keeps the account; scripts/e2e-invite.mjs drives it), and starting
-  // fresh takes two presses with the cost said out loud in between.
-  if (!(await a.$('#input-session-claim-code'))) fail('the released wall offers no way to keep the account');
-  if (await a.$('#btn-session-action')) fail('starting over is still one press away from irreversible');
-  await a.click('#btn-session-fresh');
-  await a.waitForSelector('#btn-session-action', { timeout: 8000 })
-    .catch(() => fail('starting fresh did not ask for confirmation'));
-  await a.click('#btn-session-action');
-  await a.waitForSelector('#onboarding-modal-overlay', { timeout: 8000 })
-    .catch(() => fail('starting fresh did not re-open onboarding'));
+  // ...and the way back needs no code and no wall. Opening Phong in a browser
+  // that has signed in before simply brings the account to it — a member's
+  // device cookie IS the credential. This is the whole point: the account is
+  // reachable from any browser on the phone that has signed in to it once.
+  await a.reload({ waitUntil: 'networkidle' });
+  await a.waitForSelector('#main-menu-screen', { timeout: 15000 })
+    .catch(() => fail('a browser that signed in before could not get back to the menu'));
+  if (await a.$('#session-guard-overlay')) fail('a member was walled off from its own account');
   const profA3 = await me(a);
-  if (profA3.id === profA1.id) fail('fresh start kept the released device id');
-  if (profA3.createdAt === profA1.createdAt) fail('old device still holds the moved profile');
-  if (profA3.recoveryCode === profA1.recoveryCode || profA3.recoveryCode === profB2.recoveryCode)
-    fail('fresh profile did not get its own recovery code');
-  if (profA3.matchesPlayed !== 0) fail('old device profile not fresh');
-  if (profA3.initialized) fail('old device fresh profile should be uninitialized');
-  console.log('scenario 5b OK — transfer moves the profile, walls off the old device, rotates the code');
-  console.log('scenario 5c OK — the wall keeps a restore door, and starting over is confirmed');
+  if (profA3.username !== profA1.username) fail(`account did not come back: ${profA3.username}`);
+  if (profA3.matchesPlayed !== profA1.matchesPlayed) fail('history did not come back with it');
+  if (!profA3.initialized) fail('the account came back uninitialized');
+
+  // Exactly one browser holds it at a time — B has to ask for its turn now.
+  const bNow = await b.evaluate(() => fetch('/api/session').then((r) => r.json()).then((d) => d.status));
+  if (bNow !== 'superseded') fail(`both browsers hold the account at once (B is "${bNow}")`);
+
+  console.log('scenario 5b OK — signing in moves the account and evicts the old browser');
+  console.log('scenario 5c OK — a browser that signed in takes the account back with one tap, no code');
 
   await ctxA.close();
   await ctxB.close();
