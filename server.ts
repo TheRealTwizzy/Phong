@@ -205,6 +205,40 @@ async function startServer() {
   // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies)
   app.set('trust proxy', true);
   app.use(express.json());
+
+  // The device cookie is established by the NAVIGATION, before a line of JS
+  // runs — not by whichever API call happens to land first.
+  //
+  // `deviceIdentity` was mounted on /api alone, so the HTML document set no
+  // cookie at all and the first /api calls from the booting client were the
+  // ones that minted it. Those calls are CONCURRENT (the session mint and the
+  // heartbeat's first tick both fire on mount), and on anything slower than
+  // localhost several are in flight before any of them has come back. Each
+  // arrives with no cookie, so each mints its OWN device identity and appends
+  // its own Set-Cookie; the browser keeps whichever response lands last.
+  // Measured on a phone-latency connection: THREE identities per page load.
+  //
+  // Usually the last one wins everything and it merely litters the players
+  // table. But the window stays open for as long as the slowest of those
+  // requests, and a player who onboards inside it — which the invitation flow
+  // pushes them to do, since the link drops them straight on the modal —
+  // locks their username to the identity the cookie is about to stop being.
+  // The next profile read comes back uninitialized, onboarding re-opens, and
+  // the name they just chose is taken. By themselves, seconds earlier. That is
+  // "they got signed out and their account still exists but they lost access":
+  // no transfer, no eviction, just a cookie race on a slow connection.
+  //
+  // A document GET always precedes the JS it delivers, so establishing the
+  // cookie here means every /api call carries one and nothing mints a second.
+  // index.html is served no-cache (see buildId), so this is reached on every
+  // load rather than only the first.
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api')) return next(); // its own mount, below
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    if (!String(req.headers.accept || '').includes('text/html')) return next();
+    return deviceIdentity(req, res, next);
+  });
+
   app.use('/api', deviceIdentity, sessionIdentity);
 
   // Health check

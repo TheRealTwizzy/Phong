@@ -188,6 +188,20 @@ export function endSession(): void {
 
 
 async function readSession(): Promise<SessionSnapshot> {
+  // A mint in flight is establishing the very identity this read would
+  // otherwise ask about while holding no cookie at all. Both fire on mount —
+  // the boot mint and this heartbeat's first tick — and on a phone-latency
+  // connection they are in flight together, so the server saw two cookieless
+  // callers and minted a device for each. The server side of that is closed by
+  // setting the cookie on the document navigation; this closes the client's
+  // half, and costs nothing when no mint is running.
+  if (opening) {
+    try {
+      await opening;
+    } catch {
+      /* the read below is the answer either way */
+    }
+  }
   try {
     const res = await fetch('/api/session');
     const data = (await res.json()) as SessionState;

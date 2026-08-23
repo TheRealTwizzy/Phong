@@ -133,6 +133,13 @@ device may restore with the account's own recovery code, and the release row sur
 so an abandoned account stays traceable. The matching browser assertions are in
 `scripts/e2e-invite.mjs`.
 
+**One page load mints exactly one device identity.** The device cookie is established by the
+document navigation, not by whichever `/api` call lands first — concurrent cookieless calls
+each mint their own, which at phone latency was three per load, and a player who onboarded
+inside that window had their username locked to an identity the cookie was about to stop
+being. `tests/accountRecovery.test.ts` pins the navigation; `tests/sessionMint.test.ts` pins
+that a session read never overlaps a mint.
+
 **One tab closing may not sign another out.** `phong_session` is an ORIGIN cookie, so two tabs
 present the same value and the server cannot tell them apart; `POST /api/session/end` therefore
 carries the session id the page was actually given and ends nothing else.

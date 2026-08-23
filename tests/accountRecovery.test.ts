@@ -195,6 +195,58 @@ describe('starting over stops erasing where the account went', () => {
   }, 30000);
 });
 
+describe('one page load mints one device identity', () => {
+  it('establishes the device cookie on the navigation, before any API call', async () => {
+    // `deviceIdentity` used to be mounted on /api alone, so the HTML document
+    // set no cookie and the booting client's first API calls minted it. Those
+    // calls are concurrent — the session mint and the heartbeat's first tick
+    // both fire on mount — and on anything slower than localhost several are
+    // in flight before any has come back, so each arrives with no cookie and
+    // mints its OWN identity. Measured in a browser at 250ms latency: three
+    // device identities per page load, the browser keeping whichever Set-Cookie
+    // landed last. A player who onboards inside that window locks their
+    // username to the identity the cookie is about to stop being: the next
+    // profile read is uninitialized, onboarding re-opens, and the name they
+    // just chose is taken — by themselves, seconds earlier.
+    const doc = await fetch(`${base}/?room=ZZZZ`, { headers: { accept: 'text/html' } });
+    const ids = (doc.headers.getSetCookie?.() ?? [])
+      .map((c) => /phong_device=v1\.(dev_[0-9a-f]+)/.exec(c)?.[1])
+      .filter(Boolean);
+    expect(ids).toHaveLength(1);
+
+    // And with that cookie in hand, a whole boot burst mints nothing further —
+    // which is the point: the navigation always precedes the JS it delivers.
+    const jar = new Jar();
+    jar.absorb(doc);
+    const burst = await Promise.all(
+      ['/api/session', '/api/profile/me', '/api/leaderboard', '/api/achievements', '/api/missions'].map(
+        (route) => fetch(`${base}${route}`, { headers: { cookie: jar.header } })
+      )
+    );
+    const reminted = burst.flatMap((r) => (r.headers.getSetCookie?.() ?? []).filter((c) => c.startsWith('phong_device=')));
+    expect(reminted).toEqual([]);
+  }, 30000);
+
+  it('shows why: cookieless API calls each mint an identity of their own', async () => {
+    // Not a bug being asserted — the hazard the test above exists to keep the
+    // client away from. A request with no device cookie must mint one; there
+    // is nothing else it could do. What had to change is that a browser never
+    // makes several of them at once.
+    const cookieless = await Promise.all(
+      ['/api/session', '/api/profile/me', '/api/leaderboard'].map((route) =>
+        fetch(`${base}${route}`, { method: route === '/api/session' ? 'POST' : 'GET' })
+      )
+    );
+    const minted = new Set(
+      cookieless
+        .flatMap((r) => r.headers.getSetCookie?.() ?? [])
+        .map((c) => /phong_device=v1\.(dev_[0-9a-f]+)/.exec(c)?.[1])
+        .filter(Boolean)
+    );
+    expect(minted.size).toBeGreaterThan(1);
+  }, 30000);
+});
+
 describe('one tab closing cannot sign another one out', () => {
   it('ignores a handback that names a session the caller no longer holds', async () => {
     // `phong_session` is an ORIGIN cookie, so two tabs on one phone present
