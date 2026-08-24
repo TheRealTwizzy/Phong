@@ -844,7 +844,15 @@ async function startServer() {
       if (!me.initialized) {
         return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
       }
-      const payload: MatchEndPayload = { ...req.body, playerId: req.deviceId!, username: me.username };
+      const payload: MatchEndPayload = {
+        ...req.body,
+        playerId: req.deviceId!,
+        username: me.username,
+        // From the verified cookie, never the body. `runSeq` says where in a
+        // chain this write sits; the session says whose chain, and a client
+        // that could name that could reorder somebody else's writes.
+        sessionId: req.session?.sessionId ?? null,
+      };
 
       // The achievement tree gates the ladder, so the gate is enforced here
       // too — the menu hides a locked difficulty, but the menu is the client.
@@ -944,7 +952,10 @@ async function startServer() {
       // sent as it happens, but "as it happens" is when it LEAVES the device,
       // not when it arrives: stamped on arrival, a report that stalled for a
       // second would outrank the match result that overtook it in flight.
-      const out = db.reportStreak(req.deviceId!, mode, endStreak, clientAgeMs(req.body));
+      const out = db.reportStreak(req.deviceId!, mode, endStreak, clientAgeMs(req.body), {
+        sessionId: req.session?.sessionId ?? null,
+        runSeq: Number(req.body?.runSeq),
+      });
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
       res.json({ modeStats: out.modeStats });
     } catch (e: any) {
@@ -970,6 +981,8 @@ async function startServer() {
           earnedStreak: Number(req.body?.earnedStreak),
           endStreak: Number(req.body?.endStreak),
           ageMs: clientAgeMs(req.body),
+          sessionId: req.session?.sessionId ?? null,
+          runSeq: Number(req.body?.runSeq),
         })
       );
     } catch (e: any) {

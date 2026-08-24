@@ -461,6 +461,26 @@ export interface MatchEndPayload {
    */
   clientNow?: number;
   /**
+   * Where this write sits in the client's serialized run-write chain.
+   *
+   * The age cannot order two writes from one page: it stops when a request is
+   * SENT, so it never includes that request's own time on the wire — while the
+   * next write in the chain waits for the first one's response and therefore
+   * carries that whole round trip in its own age. A stall inverts them. The
+   * chain already knows the order, so it says so; the session cookie says
+   * which chain, and the server compares the pair (see bumpModeStats).
+   *
+   * Absent for anything not chained: a replay off the on-device queue, which
+   * flushes outside the chain deliberately, and the relay's own writes.
+   */
+  runSeq?: number;
+  /**
+   * Which client chain that seq belongs to. Set SERVER-side from the verified
+   * session cookie, never from the body — a client that could name its own
+   * chain could name somebody else's.
+   */
+  sessionId?: string | null;
+  /**
    * The streak this player finished the match ON. Zero if the last thing they
    * did was miss. A streak carries into the next match, so this is what the
    * next one starts from — and it is a different number from the peak above,

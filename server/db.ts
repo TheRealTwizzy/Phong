@@ -403,6 +403,8 @@ class GameDatabase {
         -- on-device queue through a whole replay and land after it, restoring
         -- a run the replay had already broken.
         streakAt INTEGER NOT NULL DEFAULT 0,
+        streakSession TEXT,
+        streakSeq INTEGER NOT NULL DEFAULT 0,
         winStreak INTEGER NOT NULL DEFAULT 0,
         bestWinStreak INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (playerId, mode)
@@ -616,6 +618,10 @@ class GameDatabase {
       .all() as unknown as Array<{ name: string }>;
     if (modeCols.length && !modeCols.some((c) => c.name === 'streakAt')) {
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakAt INTEGER NOT NULL DEFAULT 0');
+    }
+    if (modeCols.length && !modeCols.some((c) => c.name === 'streakSession')) {
+      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakSession TEXT');
+      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakSeq INTEGER NOT NULL DEFAULT 0');
     }
 
     addColumn('recoveryCode', 'recoveryCode TEXT');
@@ -1098,13 +1104,29 @@ class GameDatabase {
        * practice session, or a first attempt that landed.
        */
       ageMs?: number;
+      /**
+       * Which client-side chain this write came from, and where in it. The
+       * client serializes every write that assigns the run, so within one page
+       * the order is known and does not have to be inferred from a stamp the
+       * network can reorder. Absent for anything not chained — the relay's own
+       * writes, and a replay off the on-device queue.
+       */
+      sessionId?: string | null;
+      runSeq?: number;
     }
   ): void {
     const row = this.stmt(
-        `SELECT winStreak, currentStreak, streakAt FROM player_mode_stats WHERE playerId = ? AND mode = ?`
+        `SELECT winStreak, currentStreak, streakAt, streakSession, streakSeq
+           FROM player_mode_stats WHERE playerId = ? AND mode = ?`
       )
       .get(playerId, mode) as
-      | { winStreak: number; currentStreak: number; streakAt: number }
+      | {
+          winStreak: number;
+          currentStreak: number;
+          streakAt: number;
+          streakSession: string | null;
+          streakSeq: number;
+        }
       | undefined;
     // Two of these columns describe THE RUN AS IT STANDS rather than a total,
     // and a run is a statement about a sequence — so they are the two that
@@ -1131,7 +1153,25 @@ class GameDatabase {
     const age = Math.min(MAX_RESULT_AGE_MS, Math.max(0, Math.round(Number(d.ageMs) || 0)));
     const stamp = now - age;
     const prevStamp = row?.streakAt ?? 0;
-    const isNewer = stamp >= prevStamp;
+    // A stamp is `event + time on the wire`, and the wire is not constant, so
+    // two writes from ONE page can invert. The client serializes every write
+    // that assigns the run, which means the later one waits for the earlier
+    // one's RESPONSE — so its age includes that whole round trip, while the
+    // earlier one's age stopped when it was sent and never counted its own.
+    // Stamped `now - age`, the stalled first write lands late and the second
+    // lands early, and the newer run is refused as stale.
+    //
+    // Inside one chain the order is already known, so it is sent rather than
+    // inferred: `runSeq` rises with each queued write and the session says
+    // which chain it belongs to. Same session, higher seq — later, whatever
+    // the wire did. A different session is a different page (or device), and
+    // there the age is the only thing that can order them; so is a write with
+    // no seq at all, which is what a replay off the on-device queue is, since
+    // that flush is deliberately not chained.
+    const seq = Number.isFinite(Number(d.runSeq)) ? Math.floor(Number(d.runSeq)) : null;
+    const sameChain =
+      seq !== null && !!d.sessionId && !!row?.streakSession && d.sessionId === row.streakSession;
+    const isNewer = sameChain ? seq > (row?.streakSeq ?? 0) : stamp >= prevStamp;
     const describesRun = d.endStreak !== undefined || d.won !== undefined;
 
     // A win streak IN THIS MODE: unlike the profile-wide one, a duel loss does
@@ -1162,11 +1202,16 @@ class GameDatabase {
         ? (row?.currentStreak ?? 0)
         : Math.max(0, Math.round(d.endStreak));
     const nextStamp = describesRun && isNewer ? stamp : prevStamp;
+    // The chain this run was last assigned by, so the next write from the same
+    // page can be ordered against it without the wire getting a vote.
+    const nextSession = describesRun && isNewer ? (d.sessionId ?? null) : (row?.streakSession ?? null);
+    const nextSeq = describesRun && isNewer ? (seq ?? 0) : (row?.streakSeq ?? 0);
     this.stmt(
         `INSERT INTO player_mode_stats
            (playerId, mode, matchesPlayed, matchesWon, matchesLost,
-            pointsScored, aces, bestStreak, currentStreak, streakAt, winStreak, bestWinStreak)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pointsScored, aces, bestStreak, currentStreak, streakAt, streakSession,
+            streakSeq, winStreak, bestWinStreak)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(playerId, mode) DO UPDATE SET
            matchesPlayed = matchesPlayed + excluded.matchesPlayed,
            matchesWon    = matchesWon    + excluded.matchesWon,
@@ -1176,6 +1221,8 @@ class GameDatabase {
            bestStreak    = MAX(bestStreak, excluded.bestStreak),
            currentStreak = excluded.currentStreak,
            streakAt      = excluded.streakAt,
+           streakSession = excluded.streakSession,
+           streakSeq     = excluded.streakSeq,
            winStreak     = excluded.winStreak,
            bestWinStreak = MAX(bestWinStreak, excluded.winStreak)`
       )
@@ -1190,6 +1237,8 @@ class GameDatabase {
         Math.max(0, Math.round(d.bestStreak ?? 0)),
         nextCurrent,
         nextStamp,
+        nextSession,
+        nextSeq,
         nextWinStreak,
         nextWinStreak
       );
@@ -1220,7 +1269,9 @@ class GameDatabase {
      * spirit: a report that stalls on a slow connection is stamped by ARRIVAL
      * without it, which makes it newer than the match result that overtook it.
      */
-    ageMs?: number
+    ageMs?: number,
+    /** The client chain this report belongs to; see bumpModeStats. */
+    chain?: { sessionId?: string | null; runSeq?: number }
   ): { ok: boolean; modeStats: Record<string, ModeStats> } {
     if (mode !== 'solo' && mode !== 'practice') return { ok: false, modeStats: {} };
     const profile = this.getProfile(playerId);
@@ -1231,6 +1282,8 @@ class GameDatabase {
     this.bumpModeStats(playerId, mode, {
       endStreak: Math.min(100000, n),
       ageMs: Number(ageMs) || undefined,
+      sessionId: chain?.sessionId,
+      runSeq: chain?.runSeq,
     });
     return { ok: true, modeStats: this.getModeStats(playerId) };
   }
@@ -1300,7 +1353,14 @@ class GameDatabase {
    */
   public recordPractice(
     playerId: string,
-    session: { bestStreak: number; earnedStreak?: number; endStreak?: number; ageMs?: number },
+    session: {
+      bestStreak: number;
+      earnedStreak?: number;
+      endStreak?: number;
+      ageMs?: number;
+      sessionId?: string | null;
+      runSeq?: number;
+    },
     now: Date = new Date()
   ): {
     earnedXp: number;
@@ -1332,6 +1392,8 @@ class GameDatabase {
       // one ending at 8 landing after a newer one that broke to 0 would put
       // the broken run back for anyone who reloads.
       ageMs: session.ageMs,
+      sessionId: session.sessionId,
+      runSeq: session.runSeq,
     });
 
     const dayKey = missionDayKey(now);
@@ -2122,6 +2184,10 @@ class GameDatabase {
       // land back on top of a newer one. Absent (an older client, or a payload
       // the relay built itself) means "just now".
       ageMs: resultAgeMs(payload),
+      // Where this sits in the client's chain, for the writes the age cannot
+      // order — see the note beside `stamp` in bumpModeStats.
+      sessionId: payload.sessionId,
+      runSeq: payload.runSeq,
     };
     // Streaks, shutouts and per-difficulty wins are derived here and only
     // here, from the result the server just accepted — a client can report a

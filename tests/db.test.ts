@@ -804,6 +804,40 @@ describe('per-mode stats', () => {
     expect(db.getModeStats(id).solo?.matchesWon).toBe(2);
   });
 
+  it('keeps the order the client queued writes in, even when one stalls', () => {
+    // The age is measured when a request is SENT, so it does not include that
+    // request's own time on the wire — and the client chain makes B wait for
+    // A's response, so B's age DOES include A's round trip. Stamped
+    // `now - age`, A lands at its late arrival and B lands near its earlier
+    // event, which inverts them: the later run is refused as stale.
+    //
+    // A stalls two seconds; B happens half a second in and goes out when A
+    // lands. Both are live writes from one page, in the order the player did
+    // them.
+    const id = 'dev_modequeueord0001';
+    init(id, 'ModeQueueOrder');
+
+    const write = (endStreak: number, ageMs: number, key: string, seq: number) =>
+      db.recordMatch(
+        match(id, {
+          mode: 'solo', difficulty: 'rookie', isWinner: true,
+          playerScore: 5, opponentScore: 1,
+          bestStreak: 12, endStreak, earnedStreak: 4,
+          endedAt: 1_000_000, clientNow: 1_000_000 + ageMs, matchKey: key,
+          // The route sets this from the verified cookie; here it stands for
+          // "both of these came from one page's chain".
+          sessionId: 'ses_queueorder', runSeq: seq,
+        })
+      );
+
+    write(7, 0, 'queue-a', 1); // sent at once, two seconds on the wire
+    write(0, 2_000, 'queue-b', 2); // queued behind it; a miss ended the run
+
+    // B is the later event and the run is broken. Reading 7 here means the
+    // stall reordered them.
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+  });
+
   it('will not read a backwards clock jump as "just now"', () => {
     // The age is a difference between two readings of ONE clock, which is what
     // makes it free of that clock's offset — but not of a clock CHANGE between

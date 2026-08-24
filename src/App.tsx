@@ -659,8 +659,23 @@ export default function App() {
    * write that never lands leaves the server where it already was.
    */
   const runWriteChainRef = useRef<Promise<unknown>>(Promise.resolve());
-  const queueRunWrite = useCallback(<T,>(work: () => Promise<T>): Promise<T> => {
-    const next = runWriteChainRef.current.then(work, work);
+  /**
+   * Where each queued write sits in the chain, counting from 1.
+   *
+   * The chain gets the order right and the AGE cannot see it: an age stops
+   * when a request is sent, so it never includes that request's own time on
+   * the wire — while the next write waits for the first one's RESPONSE and
+   * carries that whole round trip in its own age. Stamped `now - age` on the
+   * server, a stalled first write lands late and the second lands early, and
+   * the newer run is refused as stale. So the order is sent rather than
+   * inferred. Per page, because a reload starts a new session and the age is
+   * what orders across those.
+   */
+  const runWriteSeqRef = useRef<number>(0);
+  const queueRunWrite = useCallback(<T,>(work: (runSeq: number) => Promise<T>): Promise<T> => {
+    const seq = (runWriteSeqRef.current += 1);
+    const run = () => work(seq);
+    const next = runWriteChainRef.current.then(run, run);
     runWriteChainRef.current = next.catch(() => undefined);
     return next;
   }, []);
@@ -745,7 +760,7 @@ export default function App() {
           matchKey,
         };
 
-        const outcome = await queueRunWrite(() => postMatchRecord(payload));
+        const outcome = await queueRunWrite((runSeq) => postMatchRecord({ ...payload, runSeq }));
         if (!outcome.ok) {
           if (outcome.reason === 'stale_build') {
             // A newer deployment is live and the page is already reloading.
@@ -2420,11 +2435,13 @@ export default function App() {
       // On the same chain as every other write that assigns the run: two
       // sessions can be left seconds apart, and an older one ending at 8 must
       // not land after a newer one that broke to 0.
-      const res = await queueRunWrite(() =>
+      const res = await queueRunWrite((runSeq) =>
         fetch('/api/practice/record', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now() }),
+          body: JSON.stringify({
+            bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now(), runSeq,
+          }),
         })
       );
       if (!res.ok) return;
@@ -2468,7 +2485,7 @@ export default function App() {
     (m: GameMode, endStreak: number): Promise<void> => {
       if (m !== 'solo' && m !== 'practice') return Promise.resolve();
       const endedAt = Date.now();
-      return queueRunWrite(async () => {
+      return queueRunWrite(async (runSeq) => {
         try {
           await fetch('/api/profile/me/streak', {
             method: 'POST',
@@ -2479,7 +2496,7 @@ export default function App() {
             // the chain is. It is here so the server has one rule for every
             // writer, and so a report delayed behind a slow write ahead of it
             // still says how long it waited.
-            body: JSON.stringify({ mode: m, endStreak, endedAt, clientNow: Date.now() }),
+            body: JSON.stringify({ mode: m, endStreak, endedAt, clientNow: Date.now(), runSeq }),
           });
         } catch {
           // A correction, not a result: the server keeps what it had.
