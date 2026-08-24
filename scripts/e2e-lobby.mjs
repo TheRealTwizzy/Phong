@@ -178,6 +178,51 @@ const onCourt = await Promise.all([
 if (!onCourt[0] || !onCourt[1]) fail(`both phones did not reach the court (host=${onCourt[0]} guest=${onCourt[1]})`);
 ok('the duel starts normally afterwards');
 
+// ---------------------------------------------------------------------------
+// A guest whose HOST walks out is not left waiting on a room that cannot start.
+// Seat 0 is only ever filled by create_room, so a hostless room can never have
+// one again: join_room fills seat 1, and start_match is refused to anyone but
+// seat 0. The lobby deliberately does not bounce on opponent_left — but that
+// is about a host going back to waiting for the next guest, which is the
+// opposite situation.
+// ---------------------------------------------------------------------------
+const host2 = await newPlayer('LbH2');
+const guest2 = await newPlayer('LbG2');
+
+await host2.click('#menu-mode-multiplayer');
+await host2.waitForSelector('#btn-create-room', { timeout: 8000 });
+await host2.click('#btn-create-room');
+const code2 = await host2
+  .waitForFunction(() => {
+    const t = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(t) ? t : null;
+  }, { timeout: 8000 })
+  .then((h) => h.jsonValue());
+
+await guest2.goto(`${BASE}/?room=${code2}`, { waitUntil: 'networkidle' });
+const sim3 = await guest2.$('#simulate-smartphone-btn');
+if (sim3) await sim3.click();
+await guest2.waitForSelector('#btn-ready-play', { timeout: 10000 });
+
+// The host leaves, through the confirmation this suite already exercises.
+await host2.click('#btn-close-lobby');
+await host2.waitForSelector('#btn-leave-lobby-confirm', { timeout: 5000 });
+await host2.click('#btn-leave-lobby-confirm');
+
+const guestHome = await guest2
+  .waitForSelector('#main-menu-screen', { timeout: 10000 })
+  .then(() => true)
+  .catch(() => false);
+if (!guestHome) fail('the guest was left in a lobby whose room can never start');
+if (await guest2.$('#multiplayer-lobby-modal')) fail('the lobby stayed open over the menu');
+// And the room goes with them, rather than holding its code until the reaper.
+const gone = await guest2.evaluate(
+  (c) => fetch(`/api/room/${c}`).then((r) => r.status),
+  code2
+);
+if (gone !== 404) fail(`the hostless room is still open (GET /api/room returned ${gone})`);
+ok('a guest whose host walks out is returned to the menu, and the room closes');
+
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
 
 console.log('\nLOBBY DISMISSAL CHECKS PASSED');

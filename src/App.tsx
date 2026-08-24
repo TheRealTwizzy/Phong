@@ -1452,8 +1452,17 @@ export default function App() {
         // match finished; let them read it — the rematch button disables
         // itself), and the lobby is still open (a host goes back to waiting
         // for the next opponent, which is what the lobby is for).
+        //
+        // That second case is about a HOST. For a guest it is the opposite:
+        // seat 0 is only ever filled by create_room, so a room whose host has
+        // gone can never have one again — join_room fills seat 1 and
+        // start_match is refused to anyone but seat 0. Left in the lobby, the
+        // guest waits on a room that cannot start, with nothing on screen to
+        // say so. They are sent back with the same notice a mid-match
+        // departure gets, which also empties the room behind them.
+        const strandedGuest = isMultiplayerOpen && playerIndexRef.current === 1;
         const midMatch = !winner && !isMultiplayerOpen && screenRef.current === 'game';
-        if (midMatch) {
+        if (midMatch || strandedGuest) {
           setToastOpponentLeft(true);
           setTimeout(() => setToastOpponentLeft(false), 6000);
           handleLeaveRoom();
