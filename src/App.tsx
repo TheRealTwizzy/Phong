@@ -69,7 +69,7 @@ import { SplitScreenMatch } from './components/SplitScreenMatch';
 import { ProfileModal } from './components/ProfileModal';
 import { LeaderboardModal } from './components/LeaderboardModal';
 import { AchievementsModal } from './components/AchievementsModal';
-import { AchievementToast } from './components/AchievementToast';
+import { AchievementCard, LevelUpCard } from './components/AchievementCard';
 import { MatchHistoryModal } from './components/MatchHistoryModal';
 import { StatsOverlay } from './components/StatsOverlay';
 import { MissionsModal } from './components/MissionsModal';
@@ -96,6 +96,7 @@ import {
   ProgressBar,
   StatTile,
   ToastHost,
+  TOAST_TTL,
   useMotion,
   type ToastSpec,
 } from './components/ui';
@@ -250,8 +251,10 @@ export default function App() {
   const [totalTouches, setTotalTouches] = useState<number>(0);
   const [matchStartTime, setMatchStartTime] = useState<number | null>(() => Date.now());
 
-  // Toast notifications
-  const [toastAchievement, setToastAchievement] = useState<Achievement | null>(null);
+  // Toast notifications. A match can unlock several achievements at once —
+  // a first-ever match grants first_serve, ai_rookie and first_win together —
+  // so they stack rather than one of them standing for all of them.
+  const [toastAchievements, setToastAchievements] = useState<Achievement[]>([]);
   const [toastLevelUp, setToastLevelUp] = useState<number | null>(null);
   // A match that failed to reach the server is parked on the device; the
   // player is told rather than left looking at an untracked result.
@@ -653,13 +656,15 @@ export default function App() {
     // The server advanced today's missions as part of recording the match.
     if (result.missions) setMissions(result.missions);
 
-    if (result.leveledUp) {
-      setToastLevelUp(result.profile.level);
-      confetti({ particleCount: 150, spread: 90, origin: { y: 0.5 } });
-    } else if (result.newAchievements && result.newAchievements.length > 0) {
-      setToastAchievement(result.newAchievements[0]);
-      confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-    }
+    // Both, not one or the other: levelling up and unlocking something are
+    // separate things to be told, and the `else if` this replaced meant a
+    // match that did both announced only the level.
+    const unlocked = result.newAchievements ?? [];
+    if (result.leveledUp) setToastLevelUp(result.profile.level);
+    if (unlocked.length > 0) setToastAchievements(unlocked);
+    // One burst for the moment, sized by the bigger of the two things in it.
+    if (result.leveledUp) confetti({ particleCount: 150, spread: 90, origin: { y: 0.5 } });
+    else if (unlocked.length > 0) confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
   }, []);
 
   /**
@@ -1586,7 +1591,6 @@ export default function App() {
         const midMatch = !winner && !isMultiplayerOpen && screenRef.current === 'game';
         if (midMatch || strandedGuest) {
           setToastOpponentLeft(true);
-          setTimeout(() => setToastOpponentLeft(false), 6000);
           handleLeaveRoom();
         }
         break;
@@ -1682,7 +1686,6 @@ export default function App() {
           // owes them an answer rather than a menu that quietly ate it.
           pendingRoomRef.current = null;
           setToastInviteFailed(true);
-          setTimeout(() => setToastInviteFailed(false), 8000);
         }
       }
       // Anything the relay was holding a seat for. This used to require an
@@ -1699,7 +1702,6 @@ export default function App() {
         // truth. Alone in a lobby there was never a match to be removed from.
         const notice = opponentIdRef.current ? setToastEjected : setToastRoomExpired;
         notice(true);
-        setTimeout(() => notice(false), 8000);
         handleLeaveRoomRef.current();
       }
     };
@@ -2466,6 +2468,10 @@ export default function App() {
       const data = await res.json();
       if (data.profile) setProfile(data.profile);
       if (data.earnedXp > 0) setToastPracticeXp(data.earnedXp);
+      // The wall grants achievements of its own (wall_30/90/200) and the
+      // response has always carried them; nothing read them, so they were
+      // banked in silence.
+      if (data.newAchievements?.length) setToastAchievements(data.newAchievements);
     } catch (e) {
       console.error('Failed to bank practice session:', e);
     }
@@ -2669,22 +2675,35 @@ export default function App() {
           } as React.CSSProperties
         }
       >
-        {/* Pop-up achievement and level up notifications */}
-        <AchievementToast
-          achievement={toastAchievement}
-          levelUp={toastLevelUp}
-          language={currentLanguage}
-          onClose={() => {
-            setToastAchievement(null);
-            setToastLevelUp(null);
-          }}
-        />
-
+        {/* Every temporary notice, celebrations included, lives in one stack:
+            the host owns the timer and the tap target so neither can be
+            forgotten here. */}
         <ToastHost
           toasts={[
+            toastLevelUp !== null && {
+              id: 'toast-level-up',
+              chrome: 'card' as const,
+              kind: 'level-up',
+              ttlMs: TOAST_TTL.celebration,
+              content: <LevelUpCard level={toastLevelUp} language={currentLanguage} />,
+              onDismiss: () => setToastLevelUp(null),
+            },
+            // Each unlock is its own card with its own timer, and dismissing
+            // one must not take its siblings with it — hence the functional
+            // update rather than a straight set.
+            ...toastAchievements.map((a) => ({
+              id: `toast-achievement-${a.id}`,
+              chrome: 'card' as const,
+              kind: 'achievement',
+              ttlMs: TOAST_TTL.celebration,
+              content: <AchievementCard achievement={a} language={currentLanguage} />,
+              onDismiss: () =>
+                setToastAchievements((prev) => prev.filter((x) => x.id !== a.id)),
+            })),
             toastUnlock && {
               id: 'toast-unlock',
               tone: 'xp' as const,
+              ttlMs: TOAST_TTL.reward,
               content: t('mission_unlock_earned', currentLanguage, {
                 name: THEMES[toastUnlock as CourtTheme]?.name || toastUnlock,
               }),
@@ -2693,27 +2712,34 @@ export default function App() {
             toastPracticeXp !== null && {
               id: 'toast-practice-xp',
               tone: 'info' as const,
+              ttlMs: TOAST_TTL.reward,
               content: t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp }),
               onDismiss: () => setToastPracticeXp(null),
             },
             toastEjected && {
               id: 'toast-ejected',
               tone: 'loss' as const,
+              ttlMs: TOAST_TTL.notice,
               content: t('connection_lost_notice', currentLanguage),
               onDismiss: () => setToastEjected(false),
             },
             toastRoomExpired && {
               id: 'toast-room-expired',
               tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
               content: t('room_expired_notice', currentLanguage),
               onDismiss: () => setToastRoomExpired(false),
             },
             toastOpponentLeft && {
               id: 'toast-opponent-left',
               tone: 'loss' as const,
+              ttlMs: TOAST_TTL.reward,
               content: t('opponent_left_notice', currentLanguage),
               onDismiss: () => setToastOpponentLeft(false),
             },
+            // Deliberately no ttlMs: this one reports a state that is still
+            // unresolved, and it is cleared by applyMatchResult the moment the
+            // retry lands. A timer would hide an unsaved match.
             toastRecordFailed && {
               id: 'toast-record-failed',
               tone: 'warn' as const,
@@ -2723,6 +2749,7 @@ export default function App() {
             toastInviteFailed && {
               id: 'toast-invite-failed',
               tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
               content: t('invite_join_failed', currentLanguage),
               onDismiss: () => setToastInviteFailed(false),
             },

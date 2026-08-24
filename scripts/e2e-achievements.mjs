@@ -3,6 +3,9 @@
 //   2. The server rejects a locked difficulty, not just the menu.
 //   3. Beating Rookie opens Pro — and only Pro.
 //   4. The tree renders per branch, with deep rungs concealed.
+//   5. The toast that announces an unlock expires on its own even with a
+//      match running under it, goes when tapped, and does not eat the HUD's
+//      taps while it is up.
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
 // nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
@@ -154,6 +157,131 @@ if (!(await page.$('#ach-row-cyber_slayer'))) fail('ladder branch did not render
 const body = await page.textContent('#achievements-modal-container');
 if (!/\?\?\?/.test(body)) fail('no hidden achievements concealed');
 ok('tree renders per branch, with deep rungs concealed');
+
+// ---------------------------------------------------------------------------
+// The toast that announces an unlock has to leave on its own, and go the
+// moment it is tapped.
+//
+// It used to do neither. Its timer was armed by an effect that listed the
+// dismiss callback among its dependencies; App rebuilds that callback on
+// every render and re-renders once per animation frame while a ball is in
+// play, so the timer was torn down and re-armed sixty times a second and
+// never fired. It outlived the match that raised it and the menu after that,
+// and there was no tap handler to cut it short.
+//
+// Each check gets its own fresh player: the profile above has long since
+// earned first_serve, and an unlock only happens once.
+// ---------------------------------------------------------------------------
+
+// Park the paddle at the wall and keep asking to serve (Space is a no-op when
+// it is not this player's serve). Who wins does not matter — only that the
+// match finishes and is recorded, since `first_serve` is granted
+// unconditionally on any recorded match (server/db.ts).
+async function playSoloToEnd(p, ms = 90000) {
+  await p.keyboard.down('KeyA');
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await p.$('#btn-play-again')) break;
+    await p.keyboard.press('Space');
+    await p.waitForTimeout(350);
+  }
+  await p.keyboard.up('KeyA');
+  if (!(await p.$('#btn-play-again'))) fail('a first-to-3 solo match never finished');
+}
+
+async function freshPlayerInAMatch(label) {
+  const c = await browser.newContext({ ...devices['iPhone 13'] });
+  const p = await c.newPage();
+  p.on('pageerror', (e) => errs.push(`${label}: ${e.message}`));
+  await p.goto(BASE, { waitUntil: 'networkidle' });
+  await p.waitForSelector('#onboarding-modal-overlay', { timeout: 10000 });
+  await p.fill('#input-onboarding-username', `${label}${Date.now().toString(36).slice(-5)}`);
+  await p.waitForSelector('#username-status-available', { timeout: 6000 });
+  await p.click('#btn-onboarding-submit');
+  await p.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
+    .then((b) => b.click())
+    .catch(() => {});
+  await skipTour(p);
+  await p.waitForSelector('#main-menu-screen', { timeout: 10000 });
+  await p.click('#menu-mode-solo');
+  await p.waitForSelector('#menu-pts-3', { timeout: 8000 });
+  await p.click('#menu-pts-3');
+  await p.click('#menu-start-solo');
+  await p.waitForSelector('#half-court-canvas', { timeout: 8000 });
+  return { ctx: c, page: p };
+}
+
+// --- 1. It expires while a match is running underneath it -------------------
+{
+  const { ctx, page: p } = await freshPlayerInAMatch('Expiry');
+  await playSoloToEnd(p);
+  if (!(await p.waitForSelector('[data-toast="achievement"]', { timeout: 20000 }).catch(() => null))) {
+    fail('a first-ever match announced no unlock at all');
+  }
+  ok('a first match announces its unlock');
+
+  // Play Again puts a live court back under the toast, and serving gets the
+  // ball moving — which is exactly the condition that used to make the toast
+  // immortal. Space is pressed round the loop so a rally is always in flight.
+  await p.click('#btn-play-again');
+  await p.waitForSelector('#half-court-canvas', { timeout: 8000 });
+  await p.keyboard.down('KeyA');
+  let stillUp = true;
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    await p.keyboard.press('Space');
+    await p.waitForTimeout(300);
+    if (!(await p.$('[data-toast="achievement"]'))) { stillUp = false; break; }
+  }
+  await p.keyboard.up('KeyA');
+  if (stillUp) fail('the toast outlived a match running under it — its timer is being re-armed by App re-renders');
+  ok('the toast expires on schedule with a ball in play');
+  await ctx.close();
+}
+
+// --- 2. Tapping it dismisses it, and it does not eat the HUD's taps ---------
+{
+  const { ctx, page: p } = await freshPlayerInAMatch('Tap');
+  await playSoloToEnd(p);
+  const toast = await p.waitForSelector('[data-toast="achievement"]', { timeout: 20000 }).catch(() => null);
+  if (!toast) fail('no achievement toast to tap');
+
+  // Back to a live court so the HUD is on screen under the toast. Everything
+  // from here runs inside the toast's own dwell, so it is still up.
+  await p.click('#btn-play-again');
+  await p.waitForSelector('#half-court-canvas', { timeout: 8000 });
+
+  const hit = await p.evaluate(() => {
+    const t = document.querySelector('[data-toast="achievement"]');
+    if (!t) return { gone: true };
+    const btn = document.querySelector('#btn-sound-toggle');
+    if (!btn) return { noButton: true };
+    const b = btn.getBoundingClientRect();
+    const el = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+    return { intercepted: !!(el && t.contains(el)) };
+  });
+  if (hit.gone) fail('the toast vanished inside its own dwell — cannot test what it blocks');
+  if (hit.noButton) fail('no HUD sound button to test against');
+  if (hit.intercepted) fail('the toast is swallowing taps meant for the HUD underneath it');
+  ok('the HUD stays reachable while a toast is up');
+
+  // A first-ever match unlocks several at once, so each card is tapped on its
+  // own id: dismissing one must take that one and leave its siblings, which is
+  // the whole reason the dismiss is a functional update.
+  const ids = await p.$$eval('[data-toast="achievement"]', (els) => els.map((e) => e.id));
+  if (!ids.length) fail('the toast vanished before it could be tapped');
+  await p.click(`#${ids[0]}`);
+  const went = await p
+    .waitForSelector(`#${ids[0]}`, { state: 'detached', timeout: 1500 })
+    .then(() => true)
+    .catch(() => false);
+  if (!went) fail('tapping the achievement toast did not dismiss it');
+  const left = await p.$$eval('[data-toast="achievement"]', (els) => els.length);
+  if (left !== ids.length - 1) fail(`tapping one card took ${ids.length - left} of ${ids.length} cards with it`);
+  ok(`tapping a card dismisses that card alone (${ids.length} unlocked, ${left} left)`);
+  await ctx.close();
+}
+
 if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
 console.log('\nTREE + GATING CHECKS PASSED');
 await browser.close();

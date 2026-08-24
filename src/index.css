@@ -190,6 +190,14 @@
 @utility pt-safe {
   padding-top: max(var(--sa-t), calc(var(--spacing) * 3));
 }
+/* The toast stack clears the screen's own top bar — the in-match scoreboard,
+   the menu header — instead of sitting on top of it. Both bars are pt-safe
+   plus a ~34px pill, so one offset covers both. A notice that covers the
+   controls for the seconds it is up is in the way, and the achievement card
+   is tall enough to bury the whole row: sound, reset, settings and Home. */
+@utility pt-safe-bar {
+  padding-top: calc(max(var(--sa-t), calc(var(--spacing) * 3)) + calc(var(--spacing) * 12));
+}
 @utility pb-safe {
   padding-bottom: max(var(--sa-b), calc(var(--spacing) * 3));
 }
