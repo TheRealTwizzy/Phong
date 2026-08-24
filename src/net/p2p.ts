@@ -404,6 +404,13 @@ export class P2PGameLink {
       // No `carried` argument: a locally agreed rematch continues the runs the
       // replica is already holding, which is exactly what carrying means.
       this.resetMatchState(nextServer);
+      this.opts.onMessage({
+        type: 'game_start',
+        servingPlayer: nextServer,
+        config: this.config,
+        matchSeq: this.matchSeq,
+        streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
+      });
       // Tell the relay NOW, not at the new match's first crossing or point.
       // The two peers agree a rematch entirely between themselves — the relay
       // learns its matchSeq changed only from a later syncToRelay() call, and
@@ -417,14 +424,16 @@ export class P2PGameLink {
       // told the rematch had happened. A zero-score sync sent the moment both
       // votes land closes the gap to one network round trip instead of
       // however long the next rally takes to produce a crossing.
+      //
+      // AFTER the game_start above, not before it. That message is dispatched
+      // synchronously into App.tsx, whose own handler calls
+      // resetMatchState(...) on this very replica — which zeroes syncRev
+      // again. Announcing first meant the announcement claimed rev 1, App
+      // then reset the counter, and the first real crossing claimed rev 1 a
+      // second time; the relay reads that as already applied and drops it, so
+      // a fallback landing before the next snapshot resumes a crossing short
+      // and reads the next return as a serve.
       this.syncToRelay();
-      this.opts.onMessage({
-        type: 'game_start',
-        servingPlayer: nextServer,
-        config: this.config,
-        matchSeq: this.matchSeq,
-        streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
-      });
     } else {
       this.opts.onMessage({ type: 'rematch_state', votes: [...this.rematchVotes] });
     }

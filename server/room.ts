@@ -292,6 +292,14 @@ export function applyMatchSync(
     room.matchOver = false;
     room.rematchVotes = [false, false];
     room.ready = [false, false];
+    // A new match has had no ball in it yet. Left carrying the PREVIOUS
+    // match's true, a player leaving during the countdown or before the
+    // first serve is charged an abandon — and, past the daily forgiveness, a
+    // ranked rating penalty — for a match nobody played. It was unreachable
+    // while the relay only learned of a rematch at its first crossing (by
+    // which point this is true anyway); announcing the rematch up front is
+    // what exposed it.
+    room.inPlay = false;
     // A new match's revisions start over, so the old high-water mark would
     // reject every snapshot of it. The peers agreed this rematch between
     // themselves, so their link is up and they are authoritative again.
@@ -381,7 +389,17 @@ export function applyMatchSync(
     }
     room.crossingsThisPoint = clampInt(sync.crossingsThisPoint, 0, 100000);
   }
-  room.inPlay = true;
+  // Only on evidence that a ball has actually been in play. Not every
+  // snapshot describes gameplay: the one a peer sends the instant a rematch
+  // is agreed exists purely to tell the relay the match NUMBER changed, and
+  // taking it as "play has started" makes a walk-out during the countdown an
+  // abandon. A point scored or a crossing in the current point is that
+  // evidence; a 0-0 snapshot with no crossings is a match that has not begun.
+  // (Scores are already the running maximum here, so this cannot be argued
+  // backwards by a late snapshot.)
+  if (room.scores[0] > 0 || room.scores[1] > 0 || clampInt(sync.crossingsThisPoint, 0, 100000) > 0) {
+    room.inPlay = true;
+  }
 
   if (room.scores[0] >= cap || room.scores[1] >= cap) {
     room.matchOver = true;

@@ -96,21 +96,37 @@ interface Side {
   syncs: Parameters<NonNullable<ConstructorParameters<typeof P2PGameLink>[0]['onMatchSync']>>[0][];
 }
 
-/** Two linked peers, channels open, seeded on match 1 exactly as game_start does. */
-async function pairedPeers(): Promise<[Side, Side]> {
+/**
+ * Two linked peers, channels open, seeded on match 1 exactly as game_start does.
+ *
+ * `echoGameStart` mirrors what App.tsx actually does with a game_start: its
+ * handler calls `p2pRef.current.resetMatchState(...)` on this very replica,
+ * synchronously, inside the dispatch. That re-entrant call is invisible to a
+ * test whose onMessage merely records, and it resets state the replica had
+ * just set — so anything asserting about ordering AROUND a game_start has to
+ * model it or it is testing a shape the app never runs.
+ */
+async function pairedPeers(opts: { echoGameStart?: boolean } = {}): Promise<[Side, Side]> {
   const sides: Side[] = [];
   for (const myIndex of [0, 1] as const) {
     const got: WSServerMessage[] = [];
     const syncs: Side['syncs'] = [];
+    let self: InstanceType<typeof P2PGameLink> | null = null;
     const link = new P2PGameLink({
       myIndex,
       playerNames: NAMES,
       config: CONFIG,
       sendSignal: () => {},
-      onMessage: (m) => got.push(m),
+      onMessage: (m) => {
+        got.push(m);
+        if (opts.echoGameStart && m.type === 'game_start') {
+          self?.resetMatchState(m.servingPlayer, m.matchSeq, m.streaks);
+        }
+      },
       onStatus: () => {},
       onMatchSync: (s) => syncs.push(s),
     });
+    self = link;
     sides.push({ link, got, syncs });
   }
   const [a, b] = sides;
@@ -412,8 +428,38 @@ describe('the replica applies the relay rules it owns alone', () => {
     expect(a.syncs.at(-1)!.matchSeq).toBe(2);
     expect(a.syncs.at(-1)!.p1Score).toBe(0);
     expect(a.syncs.at(-1)!.p2Score).toBe(0);
+    expect(a.syncs.at(-1)!.matchSeq).toBe(2);
+    expect(a.syncs.at(-1)!.p1Score).toBe(0);
+    expect(a.syncs.at(-1)!.p2Score).toBe(0);
     expect(b.syncs.at(-1)!.matchSeq).toBe(2);
     expect(b.syncs.at(-1)!.p1Score).toBe(0);
     expect(b.syncs.at(-1)!.p2Score).toBe(0);
+  });
+
+  it('keeps the announcement’s revision ahead of the first crossing’s', async () => {
+    // App.tsx's game_start handler calls resetMatchState on this same replica,
+    // synchronously — which zeroes syncRev. Announcing the rematch BEFORE
+    // emitting game_start therefore had the announcement claim rev 1, App
+    // reset the counter, and the first real crossing claim rev 1 again. The
+    // relay reads a revision at-or-below its mark as already applied and
+    // drops it, so that crossing never reaches room.streaks: a fallback
+    // landing before the next snapshot resumes one return short and reads the
+    // next one as a serve. The announcement goes out after the dispatch.
+    const [a, b] = await pairedPeers({ echoGameStart: true });
+    for (let i = 0; i < 3; i++) a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
+    a.syncs.length = 0;
+    a.link.sendGame({ type: 'rematch_request' });
+    b.link.sendGame({ type: 'rematch_request' });
+
+    const announcement = a.syncs.at(-1)!;
+    expect(announcement.matchSeq).toBe(2);
+    expect(announcement.rev).toBe(1);
+
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    const crossing = a.syncs.at(-1)!;
+    expect(crossing.matchSeq).toBe(2);
+    expect(crossing.crossingsThisPoint).toBe(1);
+    // Strictly ahead, or the relay drops the crossing as already applied.
+    expect(crossing.rev).toBeGreaterThan(announcement.rev);
   });
 });

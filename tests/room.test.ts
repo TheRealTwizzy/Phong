@@ -177,6 +177,45 @@ describe('applyMatchSync — a score reported by a peer', () => {
     applyMatchSync(r, sync({ p1Score: 5 }));
     expect(r.rematchVotes).toEqual([false, false]);
   });
+
+  it('does not start play on a snapshot that only announces a rematch', () => {
+    // A peer sends an all-zero snapshot the instant both rematch votes land,
+    // purely so the relay learns the match NUMBER changed (it is what the
+    // pre-match rating snapshot keys on). It describes no gameplay — so
+    // taking it as "a ball is in play" makes a player who leaves during the
+    // countdown, or before the first serve, an abandon: a ranked rating
+    // penalty for a match nobody played.
+    const r = room({ matchOver: true, inPlay: true, scores: [5, 3] });
+    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 0, p2Score: 0, crossingsThisPoint: 0 }));
+
+    expect(r.matchSeq).toBe(2); // the announcement did its actual job
+    expect(r.scores).toEqual([0, 0]);
+    expect(r.matchOver).toBe(false);
+    // ...and the new match has had no ball in it. Both halves matter: the
+    // rematch branch has to clear the PREVIOUS match's true, and the write at
+    // the end must not immediately set it again.
+    expect(r.inPlay).toBe(false);
+  });
+
+  it('starts play on the first crossing after that announcement', () => {
+    // The other side of the same rule — this must not become "a P2P duel is
+    // never in play", which would take abandon detection away entirely.
+    const r = room({ matchOver: true, inPlay: true, scores: [5, 3] });
+    applyMatchSync(r, sync({ matchSeq: 2, crossingsThisPoint: 0 }));
+    expect(r.inPlay).toBe(false);
+
+    applyMatchSync(r, sync({ matchSeq: 2, crossingsThisPoint: 1 }));
+    expect(r.inPlay).toBe(true);
+  });
+
+  it('starts play on a point scored, even with the point phase reset', () => {
+    // crossingsThisPoint goes back to zero the moment a point lands, so a
+    // snapshot reporting a score carries no crossings — the score itself is
+    // the evidence.
+    const r = room();
+    applyMatchSync(r, sync({ p1Score: 1, crossingsThisPoint: 0 }));
+    expect(r.inPlay).toBe(true);
+  });
 });
 
 describe('startMatch', () => {
