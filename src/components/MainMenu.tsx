@@ -150,6 +150,17 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // they can read rather than a tooltip no touch device will ever show.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
   const [queueInfoOpen, setQueueInfoOpen] = useState(false);
+  // Same bug as openPrematch, on two more sheets the tour never asks for: the
+  // scrim leaves the locked-difficulty hint and the Quick Match stub tappable
+  // on every menu and pre-match step, and neither state lives in App, so the
+  // per-step cleanup there can't reach in and close them. Left open past the
+  // step that opened them, a layer-60 sheet sits above the layer-50 modal a
+  // later stage opens and hides its spotlight target for the rest of the
+  // tour. No step ever wants either one, so — unlike openPrematch — there is
+  // no tour-owned value to fall back to: both are simply forced shut for as
+  // long as the tour is running.
+  const openGateHint = tourActive ? null : gateHint;
+  const openQueueInfo = tourActive ? false : queueInfoOpen;
   const quickMatch = useQuickMatch();
 
   const modes: {
@@ -588,14 +599,14 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       </Sheet>
 
       <UnlockHintSheet
-        achievement={gateHint}
+        achievement={openGateHint}
         onClose={() => setGateHint(null)}
         closeLabel={t('close', lang)}
       />
 
       <Sheet
         id="quickmatch-info-sheet"
-        isOpen={queueInfoOpen}
+        isOpen={openQueueInfo}
         onClose={() => setQueueInfoOpen(false)}
         size="xs"
         layer="over"

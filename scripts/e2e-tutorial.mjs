@@ -221,6 +221,7 @@ const look = () =>
     tasks: !!document.querySelector('#missions-modal-container'),
     leaderboard: !!document.querySelector('#leaderboard-modal-container'),
     profile: !!document.querySelector('#profile-modal-container'),
+    quickmatch: !!document.querySelector('#quickmatch-info-sheet'),
   }));
 // evaluate() rather than click(): the scrim fails Playwright's actionability
 // check, and whether IT thinks the control is clickable is not what is being
@@ -265,6 +266,21 @@ if ((await look()).lobby) {
   fail('the Duel lobby the player opened survived the stage change and covers the next step’s anchor');
 }
 
+// Achievements and the Duel lobby are App-level state, closed by the same
+// per-step effect that drives the tour's own modals — open normally, force
+// shut on the next step. The Quick Match stub is different: queueInfoOpen
+// lives inside MainMenu, which that effect cannot reach at all, so rather
+// than open-then-sweep (nothing there to do the sweeping) the sheet is
+// forced shut for as long as the tour runs — no step ever asks for it, so
+// there is no "later" to sweep it before. Left unforced, its layer-60 sheet
+// would sit above whatever layer-50 modal a later stage opens (Settings,
+// Profile, Leaderboard, Tasks) and hide its anchor for the rest of the tour.
+if (!(await poke('#menu-mode-quickmatch'))) fail('no Quick Match stub to meddle with');
+await sleep(300);
+if ((await look()).quickmatch) {
+  fail('the Quick Match stub opened its info sheet under the tour scrim, covering a later step’s anchor');
+}
+
 // Probe 2: the pre-match sheet. Tapping a mode row still sets the menu's own
 // prematchMode — that is local state and nothing stops it — but while the tour
 // is running the tour's choice is the ONLY one, so no sheet appears here and
@@ -287,6 +303,43 @@ for (let i = 0; i < 40; i++) {
 if (sheetOverModal) fail('the pre-match sheet the player opened covered a later step’s modal');
 ok('and a surface the player opened under the scrim never covers a later step');
 await meddler.context().close();
+
+// ---------------------------------------------------------------------------
+// 4f. The locked-difficulty hint is the same MainMenu-local-state bug as the
+//     Quick Match sheet, one level deeper: gateHint only has something to
+//     tap while the tour's OWN prematch step has the real Solo sheet open
+//     (tourPrematch === 'solo'), so this walks the tour forward for real
+//     rather than assuming a step index. A fresh account has Pro locked,
+//     exactly like a real first-time player — walking the real product is
+//     the point. No step ever wants the hint shown, so — like the Quick
+//     Match sheet — it is forced shut for the whole tour rather than opened
+//     and swept: tapping the lock must do nothing at all while the tour owns
+//     the screen.
+// ---------------------------------------------------------------------------
+const locker = await onboard('Lck');
+await locker.waitForSelector('#onboarding-tour-card', { timeout: 10000 });
+
+let lockPoked = false;
+for (let i = 0; i < 60; i++) {
+  const here = await locker.evaluate(() => ({
+    open: !!document.querySelector('#onboarding-tour-card'),
+    lock: !!document.querySelector('#menu-diff-pro-lock'),
+  }));
+  if (!here.open) break;
+  if (here.lock && !lockPoked) {
+    lockPoked = true;
+    await locker.evaluate(() => document.querySelector('#menu-diff-pro-lock')?.click());
+    await sleep(300);
+    if (await locker.$('#unlock-hint-sheet')) {
+      fail('a locked difficulty opened its unlock hint under the tour scrim, covering a later step’s anchor');
+    }
+  }
+  await locker.click('#btn-tour-next');
+  await sleep(420);
+}
+if (!lockPoked) fail('the tour never showed a locked difficulty to meddle with');
+ok('and a locked difficulty never opens its unlock hint while the tour is running');
+await locker.context().close();
 
 // ---------------------------------------------------------------------------
 // 4c. The tour runs on teaching terms, not the player's. A replay after they
