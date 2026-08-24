@@ -183,6 +183,43 @@ if (await skipper.$('#btn-settings-start-tour')) {
 }
 ok('and cannot be started from inside a live match');
 
+// ---------------------------------------------------------------------------
+// 8. And no room can be opened from under it. The scrim is deliberately
+//    pointer-events-none — the app underneath is the real app and stays
+//    usable, which is the point — but a room opened during the tour is one the
+//    tour then walks away from: reaching the match stage switches straight to
+//    Solo, leaving the relay holding a seat whose code somebody may already
+//    have been sent.
+// ---------------------------------------------------------------------------
+// Section 7 left Settings open over the court.
+await skipper.click('#btn-close-settings');
+await skipper.waitForSelector('#btn-close-settings', { state: 'detached', timeout: 8000 });
+await skipper.click('#btn-quit-to-menu');
+await skipper.waitForSelector('#main-menu-screen', { timeout: 8000 });
+await skipper.click('#menu-nav-settings');
+await skipper.waitForSelector('#btn-settings-start-tour', { timeout: 8000 });
+await skipper.click('#btn-settings-start-tour');
+await skipper.waitForSelector('#onboarding-tour-card', { timeout: 8000 });
+
+const roomsBefore = await skipper.evaluate(() =>
+  fetch('/api/health').then((r) => r.json()).then((h) => h.activeRooms)
+);
+await skipper.click('#menu-mode-multiplayer');
+const createBtn = await skipper
+  .waitForSelector('#btn-create-room', { timeout: 4000 })
+  .catch(() => null);
+if (createBtn) {
+  await createBtn.click();
+  await sleep(1200);
+}
+const roomsAfter = await skipper.evaluate(() =>
+  fetch('/api/health').then((r) => r.json()).then((h) => h.activeRooms)
+);
+if (roomsAfter !== roomsBefore) {
+  fail(`a room was opened from under the tour (${roomsBefore} → ${roomsAfter})`);
+}
+ok('and no room can be opened from under it');
+
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
 
 console.log('\nONBOARDING TOUR CHECKS PASSED');

@@ -622,6 +622,33 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * Every client write that ASSIGNS the carried run, in the order it was made.
+   *
+   * The age each write carries orders it against writes from OTHER moments —
+   * a match replayed off the on-device queue days later says so and loses to
+   * what overtook it. It cannot order two writes made at nearly the same
+   * moment, because their ages are both ~0 and what separates them is time
+   * spent IN FLIGHT, which no stamp taken before sending can see. Reset
+   * reporting a run of 8, then a miss and a walk-out reporting 0, then the
+   * first request arriving last: both say "just now", and the server takes the
+   * later arrival.
+   *
+   * So the two mechanisms answer different questions and the writes need both.
+   * I removed this chain once on the grounds that the age superseded it; it
+   * does not, and that was the wrong call.
+   *
+   * The price is that a stuck write delays the ones behind it. They are
+   * corrections and results whose order matters more than their latency, and a
+   * write that never lands leaves the server where it already was.
+   */
+  const runWriteChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const queueRunWrite = useCallback(<T,>(work: () => Promise<T>): Promise<T> => {
+    const next = runWriteChainRef.current.then(work, work);
+    runWriteChainRef.current = next.catch(() => undefined);
+    return next;
+  }, []);
+
   // Record Match Result to Server Database and Track Daily Missions
   const recordMatchCompletion = useCallback(
     async (isWinner: boolean) => {
@@ -702,7 +729,7 @@ export default function App() {
           matchKey,
         };
 
-        const outcome = await postMatchRecord(payload);
+        const outcome = await queueRunWrite(() => postMatchRecord(payload));
         if (!outcome.ok) {
           if (outcome.reason === 'stale_build') {
             // A newer deployment is live and the page is already reloading.
@@ -739,7 +766,7 @@ export default function App() {
         if (shownMatchKeyRef.current !== matchKey) setToastRecordFailed(true);
       }
     },
-    [playerId, opponentId, opponentName, roomId, applyMatchResult]
+    [playerId, opponentId, opponentName, roomId, applyMatchResult, queueRunWrite]
   );
 
   // Trigger match completion on winner change. Guarded by a ref because the
@@ -1610,6 +1637,14 @@ export default function App() {
   };
 
   const handleCreateRoom = () => {
+    // Not from under the tour. Its scrim is deliberately pointer-events-none —
+    // the app underneath is the real app and stays usable, which is the whole
+    // idea — but a room opened during it is one the tour then walks away from:
+    // reaching the match stage switches straight to Solo, and the relay is
+    // left holding the seat with a code somebody may already have been sent.
+    // The tour cannot START over a room (it only opens from the menu, and a
+    // room puts you on the court), so refusing here is the whole of it.
+    if (tourActive) return;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
@@ -1627,6 +1662,7 @@ export default function App() {
   };
 
   const handleJoinRoom = (code: string) => {
+    if (tourActive) return; // see handleCreateRoom
     if (joinInFlightRef.current) return;
     joinInFlightRef.current = true;
     let socket = ws;
@@ -2266,14 +2302,16 @@ export default function App() {
       if (earnedStreak < 3 && endStreak <= 0 && carriedIn <= 0) return;
     try {
       const endedAt = Date.now();
-      const res = await fetch('/api/practice/record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // The same age every other write to the run carries: two sessions can
-        // be left seconds apart and land in either order, and an older one
-        // ending at 8 must not overwrite a newer one that broke to 0.
-        body: JSON.stringify({ bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now() }),
-      });
+      // On the same chain as every other write that assigns the run: two
+      // sessions can be left seconds apart, and an older one ending at 8 must
+      // not land after a newer one that broke to 0.
+      const res = await queueRunWrite(() =>
+        fetch('/api/practice/record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now() }),
+        })
+      );
       if (!res.ok) return;
       const data = await res.json();
       if (data.profile) setProfile(data.profile);
@@ -2281,7 +2319,7 @@ export default function App() {
     } catch (e) {
       console.error('Failed to bank practice session:', e);
     }
-  }, []);
+  }, [queueRunWrite]);
 
   /**
    * Tell the server where a run stands when no match is ending to say so.
@@ -2311,19 +2349,30 @@ export default function App() {
    * back to the menu on a request would make a stall look like a frozen
    * button.
    */
-  const reportStreak = useCallback(async (m: GameMode, endStreak: number): Promise<void> => {
-    if (m !== 'solo' && m !== 'practice') return;
-    const endedAt = Date.now();
-    try {
-      await fetch('/api/profile/me/streak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: m, endStreak, endedAt, clientNow: Date.now() }),
+  const reportStreak = useCallback(
+    (m: GameMode, endStreak: number): Promise<void> => {
+      if (m !== 'solo' && m !== 'practice') return Promise.resolve();
+      const endedAt = Date.now();
+      return queueRunWrite(async () => {
+        try {
+          await fetch('/api/profile/me/streak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            // Stamped when the call was MADE, sent with the clock as it goes
+            // out. For a report those are close together and the age is
+            // small — the age is not what orders these against each other,
+            // the chain is. It is here so the server has one rule for every
+            // writer, and so a report delayed behind a slow write ahead of it
+            // still says how long it waited.
+            body: JSON.stringify({ mode: m, endStreak, endedAt, clientNow: Date.now() }),
+          });
+        } catch {
+          // A correction, not a result: the server keeps what it had.
+        }
       });
-    } catch {
-      // See above: the server simply keeps what it had.
-    }
-  }, []);
+    },
+    [queueRunWrite]
+  );
 
   const quitToMenu = () => {
     if (mode === 'multiplayer') {
