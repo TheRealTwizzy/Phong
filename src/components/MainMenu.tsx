@@ -102,6 +102,8 @@ interface MainMenuProps {
    * tour, which does live in App, has to be able to reach in and open it.
    */
   tourPrematch?: GameMode | null;
+  /** Whether the tour is running at all — see openPrematch. */
+  tourActive?: boolean;
 }
 
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -127,14 +129,23 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onOpenMissions,
   onOpenSettings,
   tourPrematch = null,
+  tourActive = false,
 }) => {
   const lang = settings.language || 'en';
   // Which mode's pre-match sheet is open. A duel's lives in App (the lobby
   // owns a room, not just a form), so this only ever holds the other three.
   const [prematchMode, setPrematchMode] = useState<GameMode | null>(null);
-  // The tour's choice wins while it is running, so a step that is ABOUT the
-  // pre-match sheet always has one on screen to point at.
-  const openPrematch = tourPrematch ?? prematchMode;
+  // The tour's choice is the ONLY one while it is running, so a step that is
+  // ABOUT the pre-match sheet always has one on screen to point at — and every
+  // other step has none.
+  //
+  // A nullish fallback was wrong in the second half: the scrim is
+  // pointer-events-none, so a player can tap the highlighted Solo row during
+  // the modes step and set prematchMode themselves. Once the tour's own
+  // pre-match step passed and tourPrematch went back to null, that private
+  // value came back and left the sheet covering the tab bar and every modal
+  // stage after it.
+  const openPrematch = tourActive ? tourPrematch : prematchMode;
   // Which gate the player tapped, so the reason a rung is shut is something
   // they can read rather than a tooltip no touch device will ever show.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);

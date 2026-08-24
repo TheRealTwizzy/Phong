@@ -123,6 +123,15 @@ const resultAgeMs = (payload: { endedAt?: number; clientNow?: number }): number 
   const sent = Number(payload.clientNow);
   if (!Number.isFinite(ended) || !Number.isFinite(sent)) return undefined;
   const age = sent - ended;
+  // A NEGATIVE difference means the clock moved backwards between the two
+  // readings — an NTP correction, or a hand-set clock — so the elapsed time
+  // is not knowable from them. "Just now" is the reading that lets this
+  // result overwrite whatever is stored, which makes it the wrong guess: a
+  // match queued while the clock ran fast, replayed after the correction,
+  // would land on top of a newer one. Read as old as we allow instead. It
+  // costs at most the carry from a live report whose ordering the client's
+  // own write chain already handles, and that is the side to be wrong on.
+  if (age < 0) return MAX_RESULT_AGE_MS;
   return age > 0 ? age : undefined;
 };
 // Every key, oldest first. applyWipe re-stamps ALL of them after running:

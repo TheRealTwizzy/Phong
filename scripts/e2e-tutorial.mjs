@@ -200,6 +200,84 @@ ok('and it puts the court back if the player wanders off it');
 await wanderer.context().close();
 
 // ---------------------------------------------------------------------------
+// 4d. The scrim is pointer-events-none, so a player can open surfaces the tour
+//     did not ask for — Achievements from the tab bar, or a mode's pre-match
+//     sheet. Each one, left open, covers the anchor of a later step.
+//
+//     Two separate probes rather than one heuristic walk: opening the sheet
+//     hides the tab bar, so doing both at once quietly tested only the first.
+// ---------------------------------------------------------------------------
+const meddler = await onboard('Mdl');
+await meddler.waitForSelector('#onboarding-tour-card', { timeout: 10000 });
+
+const look = () =>
+  meddler.evaluate(() => ({
+    open: !!document.querySelector('#onboarding-tour-card'),
+    menu: !!document.querySelector('#main-menu-screen'),
+    court: !!document.querySelector('#half-court-canvas'),
+    sheet: !!document.querySelector('#prematch-modal'),
+    achievements: !!document.querySelector('#achievements-modal-container'),
+    tasks: !!document.querySelector('#missions-modal-container'),
+    leaderboard: !!document.querySelector('#leaderboard-modal-container'),
+    profile: !!document.querySelector('#profile-modal-container'),
+  }));
+// evaluate() rather than click(): the scrim fails Playwright's actionability
+// check, and whether IT thinks the control is clickable is not what is being
+// tested — a real finger goes through a pointer-events-none overlay anyway.
+const poke = (id) =>
+  meddler.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    el.click();
+    return true;
+  }, id);
+const nextStep = async () => { await meddler.click('#btn-tour-next'); await sleep(420); };
+
+// Into the MENU half: the match half has no menu to meddle with.
+let sawCourt = false;
+for (let i = 0; i < 40; i++) {
+  const here = await look();
+  if (!here.open) fail('the tour ended before it reached the menu half');
+  if (here.court) sawCourt = true;
+  if (sawCourt && here.menu) break;
+  await nextStep();
+}
+
+// Probe 1: a modal the tour did not open must not survive the stage change.
+// The stages after this open Tasks, the Leaderboard and Profile, any of which
+// would otherwise mount underneath it.
+if (!(await poke('#menu-nav-achievements'))) fail('no Achievements tab to meddle with');
+await sleep(300);
+if (!(await look()).achievements) fail('could not open Achievements under the tour scrim');
+await nextStep();
+if ((await look()).achievements) {
+  fail('a modal the player opened survived the stage change and covers the next step’s anchor');
+}
+
+// Probe 2: the pre-match sheet. Tapping a mode row still sets the menu's own
+// prematchMode — that is local state and nothing stops it — but while the tour
+// is running the tour's choice is the ONLY one, so no sheet appears here and
+// none appears later either. A nullish fallback instead of that rule showed it
+// immediately, and kept showing it once the tour's own pre-match step had
+// passed, over the tab bar and every modal stage after it.
+if (!(await poke('#menu-mode-solo'))) fail('no Solo row to meddle with');
+await sleep(300);
+if ((await look()).sheet) {
+  fail('a mode row tapped under the scrim opened a sheet the tour had not asked for');
+}
+
+let sheetOverModal = false;
+for (let i = 0; i < 40; i++) {
+  const here = await look();
+  if (!here.open) break; // once the tour ends, the player's own sheet is their own tap
+  if (here.sheet && (here.tasks || here.leaderboard || here.profile)) sheetOverModal = true;
+  await nextStep();
+}
+if (sheetOverModal) fail('the pre-match sheet the player opened covered a later step’s modal');
+ok('and a surface the player opened under the scrim never covers a later step');
+await meddler.context().close();
+
+// ---------------------------------------------------------------------------
 // 4c. The tour runs on teaching terms, not the player's. A replay after they
 //     have tuned their own rules would demonstrate a serve at their serve
 //     power and a paddle at their paddle size — and, if they had turned the

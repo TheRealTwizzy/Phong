@@ -804,6 +804,46 @@ describe('per-mode stats', () => {
     expect(db.getModeStats(id).solo?.matchesWon).toBe(2);
   });
 
+  it('will not read a backwards clock jump as "just now"', () => {
+    // The age is a difference between two readings of ONE clock, which is what
+    // makes it free of that clock's offset — but not of a clock CHANGE between
+    // them. A match ends while the phone runs fast, fails to send, and is
+    // replayed after NTP corrects it: `clientNow` is now BEHIND `endedAt` and
+    // the difference comes out negative.
+    //
+    // Negative means the elapsed time is not knowable from these two numbers.
+    // "Just now" is the reading that lets the result overwrite whatever is
+    // stored, so it is exactly the wrong guess — the queued result would land
+    // on top of the newer one that overtook it. It is read as old instead.
+    const id = 'dev_modebackclock001';
+    init(id, 'ModeBackClock');
+
+    // The newer result lands first: a miss, run back to zero.
+    db.recordMatch(
+      match(id, {
+        mode: 'solo', difficulty: 'rookie', isWinner: false,
+        playerScore: 1, opponentScore: 5,
+        bestStreak: 4, endStreak: 0, earnedStreak: 4,
+        matchKey: 'back-new',
+      })
+    );
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+
+    // Then the queued one, whose two readings straddle the correction.
+    db.recordMatch(
+      match(id, {
+        mode: 'solo', difficulty: 'rookie', isWinner: true,
+        playerScore: 5, opponentScore: 1,
+        bestStreak: 9, endStreak: 9, earnedStreak: 9,
+        endedAt: 5_000_000, clientNow: 5_000_000 - 90_000, matchKey: 'back-old',
+      })
+    );
+    // The run stays broken. Its additive half is still paid — it happened.
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+    expect(db.getModeStats(id).solo?.matchesPlayed).toBe(2);
+    expect(db.getModeStats(id).solo?.bestStreak).toBe(9);
+  });
+
   it('does not care what a device thinks the time is, only how stale it is', () => {
     // Ordering off a device's absolute clock breaks in BOTH directions: a
     // phone running fast parks the stored stamp in the future and freezes the

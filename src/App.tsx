@@ -1882,6 +1882,13 @@ export default function App() {
     setIsProfileOpen(tourStage === 'profile');
     setIsLeaderboardOpen(tourStage === 'leaderboard');
     setIsMissionsOpen(tourStage === 'tasks');
+    // No stage wants these, but the scrim is pointer-events-none and the tab
+    // bar step points straight at them — so a player can open Achievements or
+    // Match History mid-tour, and the next stage would then open Tasks or the
+    // Leaderboard UNDERNEATH a modal still covering its anchor. Every surface
+    // the tour can reach has to be named here, not just the ones it uses.
+    setIsAchievementsOpen(false);
+    setIsHistoryOpen(false);
     if (tourStage === 'match') {
       // A real Solo match on the tour's own terms (see activeConfig) — Rookie
       // is open to everybody from the first match, so the tour is never the
@@ -2818,6 +2825,7 @@ export default function App() {
             onOpenMissions={() => setIsMissionsOpen(true)}
             onOpenSettings={() => setIsSettingsOpen(true)}
             tourPrematch={tourPrematchMode}
+          tourActive={tourActive}
           />
           </motion.div>
         ) : (

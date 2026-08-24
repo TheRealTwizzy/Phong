@@ -105,11 +105,27 @@ const liveSockets = new Set<LiveSocket>();
  * writes that used to lack an age could invert. Both readings come from the
  * caller's own clock, so the difference carries none of its offset.
  */
+/**
+ * The ceiling on a reported age, mirroring db.ts's MAX_RESULT_AGE_MS. Anything
+ * at or past it is simply "old", and bumpModeStats clamps to the same figure,
+ * so naming it here only has to agree in spirit.
+ */
+const MAX_CLIENT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
 function clientAgeMs(body: { endedAt?: unknown; clientNow?: unknown } | undefined): number | undefined {
   const ended = Number(body?.endedAt);
   const sent = Number(body?.clientNow);
   if (!Number.isFinite(ended) || !Number.isFinite(sent)) return undefined;
   const age = sent - ended;
+  // A NEGATIVE difference means the clock moved backwards between the two
+  // readings — an NTP correction, or a hand-set clock — so the elapsed time
+  // is not knowable from them. "Just now" is the reading that lets this
+  // result overwrite whatever is stored, which makes it the wrong guess: a
+  // match queued while the clock ran fast, replayed after the correction,
+  // would land on top of a newer one. Read as old as we allow instead. It
+  // costs at most the carry from a live report whose ordering the client's
+  // own write chain already handles, and that is the side to be wrong on.
+  if (age < 0) return MAX_CLIENT_AGE_MS;
   return age > 0 ? age : undefined;
 }
 
