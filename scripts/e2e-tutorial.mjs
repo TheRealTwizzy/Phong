@@ -189,6 +189,60 @@ ok('and it puts the court back if the player wanders off it');
 await wanderer.context().close();
 
 // ---------------------------------------------------------------------------
+// 4c. The tour runs on teaching terms, not the player's. A replay after they
+//     have tuned their own rules would demonstrate a serve at their serve
+//     power and a paddle at their paddle size — and, if they had turned the
+//     sonar or the radar off, the radar step would spotlight an element that
+//     is not rendered at all.
+// ---------------------------------------------------------------------------
+const tuner = await onboard('Tun');
+await tuner.waitForSelector('#onboarding-tour-card', { timeout: 10000 });
+await tuner.click('#btn-tour-skip');
+await tuner.click('#btn-tour-skip-confirm');
+await tuner.waitForSelector('#main-menu-screen', { timeout: 8000 });
+
+// Everything the tour's match steps depend on, turned off — through the same
+// localStorage the app reads its settings back from on load.
+await tuner.evaluate(() => {
+  const s = JSON.parse(localStorage.getItem('half_pong_settings') || '{}');
+  s.showRadar = false;
+  s.winningScore = 15;
+  s.rules = { ...(s.rules || {}), opponentSonar: false, paddleScale: 0.6, servePowerMax: 1.4 };
+  localStorage.setItem('half_pong_settings', JSON.stringify(s));
+});
+await tuner.reload({ waitUntil: 'networkidle' });
+await tuner.waitForSelector('#main-menu-screen', { timeout: 10000 });
+
+// Replay it from Settings, the way an existing player would.
+await tuner.click('#menu-nav-settings');
+await tuner.waitForSelector('#btn-settings-start-tour', { timeout: 8000 });
+await tuner.click('#btn-settings-start-tour');
+await tuner.waitForSelector('#onboarding-tour-card', { timeout: 8000 });
+
+// Walk it, and the radar has to appear at some point regardless.
+let radarSeen = false;
+let tunerTerms = null;
+for (let i = 0; i < 60; i++) {
+  const here = await tuner.evaluate(() => ({
+    open: !!document.querySelector('#onboarding-tour-card'),
+    radar: !!document.querySelector('#radar-preview-container'),
+    scoreboard: document.querySelector('#scoreboard-header')?.textContent || '',
+    court: !!document.querySelector('#half-court-canvas'),
+  }));
+  if (!here.open) break;
+  if (here.radar) radarSeen = true;
+  if (here.court && !tunerTerms) tunerTerms = here.scoreboard;
+  await tuner.click('#btn-tour-next');
+  await sleep(420);
+}
+if (!radarSeen) fail('the radar step spotlighted nothing for a player who had turned the radar off');
+if (!/to\s*3(?!\d)/.test(tunerTerms || '')) {
+  fail(`the replayed tour used the player's own winning score: ${JSON.stringify(tunerTerms)}`);
+}
+ok('a replay ignores the player\u2019s own rules and shows the radar anyway');
+await tuner.context().close();
+
+// ---------------------------------------------------------------------------
 // 5. Skipping counts as seen. A player who waves it away has decided about it.
 // ---------------------------------------------------------------------------
 const skipper = await onboard('Skp');

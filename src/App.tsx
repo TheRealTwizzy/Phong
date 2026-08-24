@@ -353,8 +353,12 @@ export default function App() {
     // a teaching aid on a rung everybody has open, and a replay from Settings
     // would otherwise walk a veteran through the basics of the game against
     // their own stored Cyber difficulty at first-to-15.
+    // Stock rules too, not just the difficulty and the score. A replay after
+    // the player has tuned their own would demonstrate a serve at their serve
+    // power, a paddle at their paddle size — and, if they have turned the
+    // sonar off, a radar step pointing at an element that is not rendered.
     tourStage === 'match'
-      ? { winningScore: TOUR_WINNING_SCORE, rules: settings.rules }
+      ? { winningScore: TOUR_WINNING_SCORE, rules: DEFAULT_MATCH_RULES }
       : mode === 'multiplayer' && roomConfig
         ? roomConfig
         : { winningScore: settings.winningScore, rules: settings.rules };
@@ -2866,8 +2870,11 @@ export default function App() {
           theme={currentTheme}
           language={currentLanguage}
           active={
-            settings.showRadar &&
-            activeConfig.rules.opponentSonar &&
+            // The tour has a step about the radar, so the radar exists while
+            // it runs. `showRadar` is a device preference rather than a match
+            // rule, so stock rules alone do not cover it — a player who had
+            // turned it off got a step spotlighting nothing.
+            (tourStage === 'match' || (settings.showRadar && activeConfig.rules.opponentSonar)) &&
             (mode === 'solo' || mode === 'multiplayer')
           }
           topClass={mode === 'multiplayer' ? 'top-[5.5rem]' : 'top-14'}
