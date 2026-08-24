@@ -217,3 +217,21 @@ async function runFlush(): Promise<number> {
 }
 
 export const pendingMatchCount = (): number => readQueue().length;
+
+/**
+ * Drop everything parked here, unsent. For the one moment a queued match
+ * must NOT survive: this device is giving up the identity that earned it
+ * (`startFreshIdentity` in App.tsx, the way off a released device). The
+ * queue is a flat, unnamespaced localStorage key — it does not know which
+ * account was active when an entry was queued — so left alone, a match
+ * queued under the old identity is still sitting here the moment the new,
+ * fresh one goes to onboard, and a later flush (once that fresh profile is
+ * initialized) credits it there instead: XP, rating, achievements and
+ * streaks earned by an account this browser no longer holds, paid to one
+ * that never played it. The same reasoning `attempt()` already applies to
+ * an `evicted` result — dropped rather than queued, because replaying it
+ * later would credit whatever identity this browser ends up with — applied
+ * one step earlier, to a result that was queued before the identity moved
+ * on rather than discovered after.
+ */
+export const clearPendingMatches = (): void => writeQueue([]);

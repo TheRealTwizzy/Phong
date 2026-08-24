@@ -20,7 +20,7 @@ import {
   RoomMatchConfig,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
-import { postMatchRecord, flushPendingMatches } from './net/matchRecord';
+import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
 import { nextRunSeq } from './net/runChain';
 import { THEMES, ThemeConfig } from './game/themes';
 import {
@@ -576,6 +576,15 @@ export default function App() {
       // best, the mode best and rally achievements are keyed on: a theme
       // unlock or an achievement for returns this player never made.
       carryRef.current = {};
+      // Same reasoning, a second piece of stale per-browser state: a match
+      // that failed to record before this device was released is still
+      // sitting in the on-device queue (net/matchRecord.ts), which is a flat
+      // localStorage key with no idea which account was active when an entry
+      // was parked. Left alone, the profile?.id effect below flushes it the
+      // moment this fresh account is initialized and credits the RELEASED
+      // account's match — XP, rating, achievements, streaks — to a player
+      // who never played it.
+      clearPendingMatches();
       setProfile(res.profile);
       setPlayerId(res.profile.id);
     }

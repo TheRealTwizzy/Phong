@@ -43,6 +43,7 @@ const fakeStorage = (backing: Map<string, string>) => ({
 let postMatchRecord: typeof import('../src/net/matchRecord').postMatchRecord;
 let flushPendingMatches: typeof import('../src/net/matchRecord').flushPendingMatches;
 let pendingMatchCount: typeof import('../src/net/matchRecord').pendingMatchCount;
+let clearPendingMatches: typeof import('../src/net/matchRecord').clearPendingMatches;
 
 const QUEUE_KEY = 'phong_pending_matches';
 
@@ -108,7 +109,7 @@ beforeEach(async () => {
   reloads = 0;
   vi.unstubAllGlobals();
   vi.resetModules();
-  ({ postMatchRecord, flushPendingMatches, pendingMatchCount } = await import(
+  ({ postMatchRecord, flushPendingMatches, pendingMatchCount, clearPendingMatches } = await import(
     '../src/net/matchRecord'
   ));
 });
@@ -342,5 +343,39 @@ describe('the queue cannot grow without bound', () => {
     expect(pendingMatchCount()).toBe(20);
     expect(queued()[0].matchKey).toBe('m5');
     expect(queued().at(-1)!.matchKey).toBe('m24');
+  });
+});
+
+describe('giving up this browser’s identity', () => {
+  it('clearPendingMatches drops everything parked, unsent', async () => {
+    // startFreshIdentity (App.tsx) calls this the moment a released device
+    // gives up its old identity for a brand new one. The queue is a flat
+    // localStorage key with no idea which account was active when an entry
+    // was parked — left alone, a match that failed to record under the OLD
+    // identity is still sitting here the moment the fresh one finishes
+    // onboarding, and the next flush credits it there instead: XP, rating,
+    // achievements and streaks earned by an account this browser no longer
+    // holds, paid to one that never played it. Same rule `attempt()` already
+    // applies to an `evicted` result, one step earlier: dropped, not queued,
+    // because replaying it would credit whatever identity comes next.
+    park('a', 'b', 'c');
+    expect(pendingMatchCount()).toBe(3);
+
+    clearPendingMatches();
+    expect(pendingMatchCount()).toBe(0);
+
+    // And it stays gone — nothing left for a later flush, under whatever
+    // identity this browser holds by then, to wrongly pick up.
+    const server = installServer(ok);
+    expect(await flushPendingMatches()).toBe(0);
+    expect(server.posts()).toBe(0);
+  });
+
+  it('is a plain reset, not scoped to any one identity', async () => {
+    // No playerId to compare against — the queue does not carry one and was
+    // never meant to. Calling this with nothing parked is simply a no-op.
+    expect(pendingMatchCount()).toBe(0);
+    clearPendingMatches();
+    expect(pendingMatchCount()).toBe(0);
   });
 });
