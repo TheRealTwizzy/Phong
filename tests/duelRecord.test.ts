@@ -276,6 +276,68 @@ describe('recording a duel', () => {
     p2.close();
   });
 
+  it('rates the second seat against the opponent it started against, whichever path records first', async () => {
+    // A duel reaches the ladder by two routes — the relay writes it the moment
+    // the score decides it, and each phone POSTs its own copy as the fallback
+    // for a match the relay never saw. Both used to read the opponent's rating
+    // live, so whichever committed first moved that player's rating and the
+    // second seat was rated against an opponent that had already played the
+    // match. In a P2P duel the two routes travel different connections, so
+    // which lands first is a race.
+    //
+    // The control is the same match with only the relay recording it. The
+    // loser's rating has to come out identical either way: it is the same
+    // match against the same opponent, and the opponent's own paperwork
+    // landing first is not a fact about the loser.
+    const ctlHost = await newDevice('RateCtlH');
+    const ctlGuest = await newDevice('RateCtlG');
+    const ctl = await seatDuel(ctlHost, ctlGuest, 3);
+    const FINAL = {
+      p1Score: 3, p2Score: 0,
+      bestStreaks: [5, 2] as [number, number],
+      streaks: [5, 2] as [number, number],
+      earnedBests: [5, 2] as [number, number],
+      servingPlayer: 0 as const,
+      crossingsThisPoint: 0,
+    };
+    ctl.p1.send({ type: 'match_sync', matchSeq: ctl.matchSeq, rev: 1, ...FINAL });
+    await ctl.p2.await('match_recorded');
+    const control = await getProfile(ctlGuest);
+    ctl.p1.close();
+    ctl.p2.close();
+
+    // The same match, with the winner's own POST landing first. It is
+    // cross-checked against a room the deciding sync has not reached yet, so
+    // it records a different result for the WINNER — which is the point: it
+    // moves their rating before the relay reaches the loser.
+    const host = await newDevice('RateRaceH');
+    const guest = await newDevice('RateRaceG');
+    const race = await seatDuel(host, guest, 3);
+    const early = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        playerScore: 3, opponentScore: 0,
+        bestStreak: 5, endStreak: 5, earnedStreak: 5,
+        mode: 'multiplayer', isWinner: true,
+        roomId: race.roomId, matchSeq: race.matchSeq,
+      }),
+    });
+    expect(early.status).toBe(200);
+    // It really did move: otherwise this proves nothing.
+    expect((await getProfile(host)).mmrMu).not.toBe(control.mmrMu);
+
+    race.p1.send({ type: 'match_sync', matchSeq: race.matchSeq, rev: 1, ...FINAL });
+    await race.p2.await('match_recorded');
+    const raced = await getProfile(guest);
+
+    expect(raced.mmrMu).toBeCloseTo(control.mmrMu, 10);
+    expect(raced.mmrSigma).toBeCloseTo(control.mmrSigma, 10);
+
+    race.p1.close();
+    race.p2.close();
+  }, 20000);
+
   it('takes a peer’s snapshot after the relay counted a crossing for the other', async () => {
     // A DataChannel does not fail for both peers at the same instant. The one
     // that notices first falls back and relays its next crossing; the one that

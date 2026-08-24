@@ -31,6 +31,7 @@ import {
   performanceWeight,
   PlayerSession,
   Room,
+  SeatRating,
   startMatch as resetRoomForMatch,
   reapRooms,
   breakStreakOnPoint,
@@ -208,6 +209,45 @@ function evictStaleSockets(): void {
  * fallback for a match the relay never saw, and the shared match key means
  * whichever of them arrives second is recognised rather than paid again.
  */
+/**
+ * Both seats' ratings as they stood before this match was recorded — sampled
+ * once, by whichever recording path reaches the room first, and reused by
+ * every path after it.
+ *
+ * A duel reaches the ladder by two routes: the relay writes it the moment the
+ * score decides it, and each phone POSTs its own copy as the fallback for a
+ * match the relay never saw. Both used to read the opponent's rating live, so
+ * whichever committed first moved that player's rating and the second was
+ * rated against an opponent that had already played the match. In a P2P duel
+ * the two routes travel different connections — the deciding match_sync over
+ * the WebSocket, the POST over HTTP — so which one lands first is a race, and
+ * the loser of it was rated against a post-match opponent.
+ *
+ * Sampling is safe at first touch rather than at game_start because every
+ * path samples strictly before it writes anything, so the first touch is
+ * always pre-match. Keying on matchSeq is what carries that across restarts:
+ * every way a room begins a new match advances it, including a rematch the
+ * peers agree between themselves and tell the relay about in applyMatchSync.
+ *
+ * Read from the VERIFIED device id, never from playerId, which falls back to
+ * a synthetic value for a socket that arrived without a cookie — getProfile
+ * mints for an id it has not seen, so a synthetic one would have handed back
+ * a stray empty profile's default rating as the opponent's.
+ */
+function duelStartRatings(room: Room): Array<SeatRating | null> {
+  if (!room.startRatings || room.startRatingsSeq !== room.matchSeq) {
+    const sample = (seat: 0 | 1): SeatRating | null => {
+      const player = room.players[seat];
+      if (!player?.deviceId || !seatStillHoldsAccount(player)) return null;
+      const p = db.getProfile(player.deviceId);
+      return { mu: p.mmrMu, sigma: p.mmrSigma };
+    };
+    room.startRatings = [sample(0), sample(1)];
+    room.startRatingsSeq = room.matchSeq;
+  }
+  return room.startRatings;
+}
+
 function recordRoomMatch(room: Room): void {
   const seats: Array<0 | 1> = [0, 1];
   // Both seats must still be occupied. A match decided after one player left
@@ -217,20 +257,7 @@ function recordRoomMatch(room: Room): void {
 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
-  // Both ratings as they stood BEFORE either result was written.
-  //
-  // The loop below commits seat 0 first, so reading seat 0's profile while
-  // building seat 1's payload returned its POST-match rating: seat 0 was rated
-  // against the opponent it actually faced and seat 1 against an opponent that
-  // had already moved. One match, two different preconditions, and the
-  // difference falls the same way every time — a seat-dependent bias in every
-  // ranked duel, and in the win probability each player's XP is scaled by.
-  const ratingBefore = seats.map((seat) => {
-    const player = room.players[seat];
-    if (!player?.deviceId || !seatStillHoldsAccount(player)) return null;
-    const p = db.getProfile(player.deviceId);
-    return { mu: p.mmrMu, sigma: p.mmrSigma };
-  });
+  const ratingBefore = duelStartRatings(room);
   for (const seat of seats) {
     const me = room.players[seat];
     const them = room.players[seat === 0 ? 1 : 0];
@@ -825,11 +852,12 @@ async function startServer() {
           payload.earnedStreak = room.earnedBests[seat];
           payload.isWinner = mine > theirs;
 
-          const opponent = room.players[seat === 0 ? 1 : 0];
-          if (opponent) {
-            const opp = db.getProfile(opponent.playerId);
-            context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
-          }
+          // The same pre-match pair the relay records from, so this POST and
+          // the relay's own write rate the two seats against each other as
+          // they stood at the start rather than against whichever of them
+          // happened to be committed first.
+          const oppRating = duelStartRatings(room)[seat === 0 ? 1 : 0];
+          if (oppRating) context.opponentRating = oppRating;
           context.performanceWeight = performanceWeight(mine, theirs, room.earnedBests[seat]);
         }
       }
@@ -1155,6 +1183,10 @@ async function startServer() {
             // One player, from this moment — the clock that expires a room
             // nobody ever joins, and a room somebody has left.
             soloSince: Date.now(),
+            // Sampled lazily by whichever recording path reaches the room
+            // first; matchSeq 0 is no match, so nothing is cached yet.
+            startRatings: null,
+            startRatingsSeq: 0,
           };
 
           rooms.set(code, room);

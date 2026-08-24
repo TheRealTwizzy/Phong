@@ -126,6 +126,30 @@ export interface Room {
    * is the leak the TTL was written to close.
    */
   soloSince: number | null;
+  /**
+   * Both seats' hidden ratings as they stood BEFORE this match was recorded,
+   * and the matchSeq they were sampled for. Data only — the sampling itself
+   * needs the database and so lives in server.ts (see duelStartRatings).
+   *
+   * A duel is recorded by two independent paths: the relay writes it the
+   * moment the score decides it, and each phone POSTs its own copy as the
+   * fallback for a match the relay never saw. Whichever commits first moves
+   * that player's rating, so a path reading the opponent's rating live got a
+   * post-match number and rated its seat against an opponent that had already
+   * moved. Sampling once per match and sharing it makes the pair the same
+   * whichever path gets there first — and keying it on matchSeq is what keeps
+   * it honest across restarts, since every way a room begins a new match
+   * (startMatch, and a rematch the peers agree between themselves in
+   * applyMatchSync) advances that number.
+   */
+  startRatings: [SeatRating | null, SeatRating | null] | null;
+  startRatingsSeq: number;
+}
+
+/** A seat's hidden rating, as the ladder in src/rating.ts models it. */
+export interface SeatRating {
+  mu: number;
+  sigma: number;
 }
 
 /** What a client is told when the room's match (re)starts. */

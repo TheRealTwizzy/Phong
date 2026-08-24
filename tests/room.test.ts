@@ -48,6 +48,8 @@ const room = (over: Partial<Room> = {}): Room => ({
   inPlay: false,
   matchSeq: 1,
   lastActive: 0,
+  startRatings: null,
+  startRatingsSeq: 0,
   soloSince: 0,
   ...over,
 });
