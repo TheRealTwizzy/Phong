@@ -409,6 +409,63 @@ describe('giving up this browser’s identity', () => {
     expect(pendingMatchCount()).toBe(0); // must not have resurrected itself
   });
 
+  it('does not RETRY under the new identity after a reset', async () => {
+    // Sharper than refusing the localStorage write. postMatchRecord's second
+    // pass is reached after a 900ms sleep, and the identity can change inside
+    // it — /api/session/reset swaps the device cookie. /api/match/record
+    // discards the payload's own playerId and stamps req.deviceId, so an
+    // attempt issued after that point reports the OLD account's match under
+    // the NEW one: its XP, rating, achievements and streaks credited to a
+    // player who never played it. The retry must not go out at all.
+    const server = installServer(() => json(500, {}));
+    const recording = postMatchRecord(match('retry-race'));
+
+    // Inside the retry delay, before the second attempt is due.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(server.posts()).toBe(1);
+    clearPendingMatches();
+
+    const outcome = await recording;
+    // Never asked a second time, and reported as what it is rather than as a
+    // queued match the player will get back.
+    expect(server.posts()).toBe(1);
+    expect(outcome).toEqual({ ok: false, reason: 'evicted' });
+    expect(pendingMatchCount()).toBe(0);
+  }, 10000);
+
+  it('stops flushing the rest of the queue after a reset', async () => {
+    // Every item a flush still has to get through was read from the OLD
+    // identity's queue. Once the cookie has changed, reporting them would
+    // file them against whoever holds this browser now.
+    park('q1', 'q2', 'q3');
+    let resolveFirst: ((r: Response) => void) | null = null;
+    let posts = 0;
+    vi.stubGlobal('fetch', (input: string) => {
+      if (String(input) === '/api/match/record') {
+        posts++;
+        if (posts === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve(ok());
+      }
+      return Promise.resolve(json(200, { status: 'active', sessionId: 's-x', profile: { id: 'p1' } }));
+    });
+
+    const flush = flushPendingMatches();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(posts).toBe(1); // item 1 in flight, 2 and 3 not yet asked
+
+    clearPendingMatches(); // the identity moves on
+    resolveFirst!(ok()); // item 1's own request completes under the old cookie
+    await flush;
+
+    // Items 2 and 3 were never reported under the new identity.
+    expect(posts).toBe(1);
+    expect(pendingMatchCount()).toBe(0);
+  }, 10000);
+
   it('drops runFlush’s own stale re-queue the same way', async () => {
     park('old-a');
     let resolveFetch: ((r: Response) => void) | null = null;
