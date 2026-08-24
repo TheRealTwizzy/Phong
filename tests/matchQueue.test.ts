@@ -81,10 +81,12 @@ const park = (...keys: string[]) =>
  */
 function installServer(answers: (() => Response)[] | (() => Response)) {
   const record: string[] = [];
+  const bodies: any[] = [];
   let n = 0;
-  vi.stubGlobal('fetch', async (input: string, init?: { method?: string }) => {
+  vi.stubGlobal('fetch', async (input: string, init?: { method?: string; body?: string }) => {
     const url = String(input);
     record.push(`${init?.method || 'GET'} ${url}`);
+    if (url === '/api/match/record' && init?.body) bodies.push(JSON.parse(init.body));
     if (url === '/api/session') {
       return json(200, { status: 'active', sessionId: `s-${n}`, profile: { id: 'p1' } });
     }
@@ -94,6 +96,7 @@ function installServer(answers: (() => Response)[] | (() => Response)) {
   });
   return {
     record,
+    bodies,
     posts: () => record.filter((r) => r.endsWith('/api/match/record')).length,
     mints: () => record.filter((r) => r === 'POST /api/session').length,
   };
@@ -275,6 +278,39 @@ describe('replaying what an earlier session parked', () => {
     park('two');
     expect(await flushPendingMatches()).toBe(1);
     expect(server.posts()).toBe(2);
+  });
+});
+
+describe('a replay carries no page-local ordering', () => {
+  it('strips runSeq before replaying a parked match', async () => {
+    // `runSeq` orders a write against the other writes of ONE page's chain.
+    // A parked payload keeps whatever number it had, and a replay happens on a
+    // different page: new session, counter restarted at 1. Sent, the server
+    // staples THIS session to a number from the last one — and if the replay
+    // wins on age, the next few genuinely newer writes carry lower numbers and
+    // are refused as not-newer. A replay is ordered by its age instead.
+    localStore.set(
+      QUEUE_KEY,
+      JSON.stringify([{ payload: { ...match('stale'), runSeq: 5 }, queuedAt: 1 }])
+    );
+    const server = installServer(ok);
+
+    expect(await flushPendingMatches()).toBe(1);
+    expect(server.bodies).toHaveLength(1);
+    expect(server.bodies[0].matchKey).toBe('stale');
+    expect('runSeq' in server.bodies[0]).toBe(false);
+    // The age still travels: it is what orders a replay.
+    expect(server.bodies[0].clientNow).toBeTypeOf('number');
+  });
+
+  it('keeps runSeq on a live attempt and its retry', async () => {
+    // The strip is about REPLAYS, not about the chain. A live write and its
+    // immediate retry are the same write from the same chain and must keep
+    // their place in it.
+    const server = installServer([() => json(500, {}), ok]);
+    await postMatchRecord({ ...match('live'), runSeq: 3 } as any);
+    expect(server.bodies).toHaveLength(2);
+    for (const body of server.bodies) expect(body.runSeq).toBe(3);
   });
 });
 

@@ -184,7 +184,17 @@ async function runFlush(): Promise<number> {
   let recovered = 0;
   for (const item of queue) {
     try {
-      await attempt(item.payload);
+      // Without its sequence number. `runSeq` orders a write against the other
+      // writes of ONE page's chain, and a replay has left that chain: the page
+      // is gone, the session is new, and the counter has restarted at 1. Sent,
+      // the server would staple THIS session to a number from the last one —
+      // and if the replay then won on age, the next few genuinely newer writes
+      // from this page would carry lower numbers and be refused as not-newer.
+      // A replay is ordered by how stale it says it is, which is exactly what
+      // the age is for. Stripped here rather than before parking, so a payload
+      // an older bundle already queued is covered too.
+      const { runSeq: _pageLocal, ...replay } = item.payload;
+      await attempt(replay);
       recovered++;
     } catch (e: any) {
       if (e?.needsSession) {
