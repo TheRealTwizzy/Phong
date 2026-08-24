@@ -427,6 +427,72 @@ describe('recording a duel', () => {
     race.p2.close();
   }, 20000);
 
+  it('samples the opponent rating at the START of the match, not at whoever records it first', async () => {
+    // duelStartRatings used to populate lazily, on first touch by whichever
+    // recording path reached the room first — safe against the room's OWN two
+    // recording paths racing each other, but not against a completely
+    // unrelated write moving the same player's mmrMu in between. The most
+    // concrete version: a stale SOLO match, queued from before this duel even
+    // started, finally replays successfully WHILE the duel is live — and if
+    // the cache is still empty at that point, the eventual sample captures the
+    // post-solo mmrMu instead of what the host had when the duel began.
+    //
+    // The control has no such interleaving. The two guests must be rated
+    // identically: it is the same duel against the same starting host, and an
+    // unrelated match the host happens to also be playing is not a fact about
+    // the host's rating AT THE MOMENT THIS DUEL STARTED.
+    const ctlHost = await newDevice('EagerCtlH');
+    const ctlGuest = await newDevice('EagerCtlG');
+    const ctl = await seatDuel(ctlHost, ctlGuest, 3);
+    const FINAL = {
+      p1Score: 3, p2Score: 0,
+      bestStreaks: [5, 2] as [number, number],
+      streaks: [5, 2] as [number, number],
+      earnedBests: [5, 2] as [number, number],
+      servingPlayer: 0 as const,
+      crossingsThisPoint: 0,
+    };
+    ctl.p1.send({ type: 'match_sync', matchSeq: ctl.matchSeq, rev: 1, ...FINAL });
+    await ctl.p2.await('match_recorded');
+    const control = await getProfile(ctlGuest);
+    ctl.p1.close();
+    ctl.p2.close();
+
+    const host = await newDevice('EagerRaceH');
+    const guest = await newDevice('EagerRaceG');
+    const race = await seatDuel(host, guest, 3);
+
+    // The interleaving write: an unrelated solo match for the HOST, landing
+    // strictly AFTER the duel has already started (seatDuel returns only once
+    // start_match has fired) and strictly BEFORE the duel is recorded.
+    const soloRes = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        playerScore: 5, opponentScore: 0,
+        bestStreak: 9, endStreak: 9, earnedStreak: 9,
+        mode: 'solo', difficulty: 'rookie', isWinner: true,
+        matchKey: 'solo:eager-interleave:1',
+      }),
+    });
+    expect(soloRes.status).toBe(200);
+    // It really did move: otherwise this proves nothing.
+    expect((await getProfile(host)).mmrMu).not.toBe(control.mmrMu);
+
+    race.p1.send({ type: 'match_sync', matchSeq: race.matchSeq, rev: 1, ...FINAL });
+    await race.p2.await('match_recorded');
+    const raced = await getProfile(guest);
+
+    // The guest is rated as though the interleaved solo match never happened
+    // — because as far as THIS duel is concerned, at the moment it started,
+    // it hadn't.
+    expect(raced.mmrMu).toBeCloseTo(control.mmrMu, 10);
+    expect(raced.mmrSigma).toBeCloseTo(control.mmrSigma, 10);
+
+    race.p1.close();
+    race.p2.close();
+  }, 20000);
+
   it('takes a peer’s snapshot after the relay counted a crossing for the other', async () => {
     // A DataChannel does not fail for both peers at the same instant. The one
     // that notices first falls back and relays its next crossing; the one that

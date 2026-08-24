@@ -77,7 +77,11 @@ function broadcast(room: Room, payload: unknown): void {
  * phone that is not told has not started.
  */
 function startMatch(room: Room, servingPlayer: 0 | 1): void {
-  broadcast(room, resetRoomForMatch(room, servingPlayer));
+  const payload = resetRoomForMatch(room, servingPlayer);
+  // Eagerly, not on whatever touches the room's recording first — see the
+  // note on duelStartRatings.
+  duelStartRatings(room);
+  broadcast(room, payload);
 }
 
 interface LiveSocket {
@@ -253,11 +257,22 @@ function evictStaleSockets(): void {
  * the WebSocket, the POST over HTTP — so which one lands first is a race, and
  * the loser of it was rated against a post-match opponent.
  *
- * Sampling is safe at first touch rather than at game_start because every
- * path samples strictly before it writes anything, so the first touch is
- * always pre-match. Keying on matchSeq is what carries that across restarts:
- * every way a room begins a new match advances it, including a rematch the
- * peers agree between themselves and tell the relay about in applyMatchSync.
+ * Populated EAGERLY, the instant a match begins — every one of the three
+ * ways a room begins a new match calls this right after matchSeq changes:
+ * `startMatch()` (a host's first `start_match`, and a relay-mediated
+ * `rematch_request`) and the P2P-agreed-rematch branch inside
+ * `applyMatchSync`. It used to be lazy — populated on first touch by whichever
+ * recording path reached the room first — on the reasoning that every
+ * recording path samples strictly before it writes anything, so the first
+ * touch is always pre-match. True for THIS room's own two recording paths
+ * racing each other, and not the whole story: nothing stops an UNRELATED
+ * write — a solo match this same player is also playing, queued and replayed
+ * mid-duel — from moving mmrMu between game_start and whenever this room's
+ * own recording first happens to touch the cache, which is exactly the
+ * post-match precondition this cache exists to keep out. Idempotent per
+ * matchSeq either way, so a lazy touch that still lands first (a build that
+ * predates one of the three call sites, say) is not wrong, only later than it
+ * needs to be.
  *
  * Read from the VERIFIED device id, never from playerId, which falls back to
  * a synthetic value for a socket that arrived without a cookie — getProfile
@@ -1524,12 +1539,19 @@ async function startServer() {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
+          // Whether this call is about to start a NEW match — the peers
+          // agreeing a rematch between themselves inside applyMatchSync,
+          // rather than through start_match/rematch_request. Checked before
+          // the call so a genuine change is unambiguous.
+          const seqBefore = room.matchSeq;
           // Deliberately silent: in a P2P match both phones already have this
           // score from each other, so echoing it back would be a second
           // score_update arriving a round-trip late, mid-serve.
           // Recording is the caller's job now: server/room.ts stays free of
           // the database so its guards can be tested without one.
-          if (applyMatchSync(room, msg).decided) recordRoomMatch(room);
+          const synced = applyMatchSync(room, msg);
+          if (room.matchSeq !== seqBefore) duelStartRatings(room); // see the note there
+          if (synced.decided) recordRoomMatch(room);
         } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
