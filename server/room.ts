@@ -110,17 +110,22 @@ export interface Room {
   matchSeq: number;
   lastActive: number;
   /**
-   * When the room was opened. Distinct from lastActive, which any traffic
-   * refreshes — a lobby whose host is sitting on the court moving their paddle
-   * is "active" forever, so an idle clock alone can never expire one.
+   * Since when this room has had nobody to play against — null while both
+   * seats are filled.
+   *
+   * Distinct from lastActive, which any traffic refreshes: a host sitting on
+   * the court behind the lobby sheet streams paddle_move, so an idle clock
+   * alone can never expire a room with one player in it.
+   *
+   * This started life as `pairedAt`, set once when a second player arrived and
+   * deliberately never cleared, on the grounds that a room which HAS been a
+   * duel is one a rematch can still happen in. That is true only while the
+   * other player is still there. Once a guest leaves, the room is back to one
+   * player and exempt from the clock that exists for exactly that — so an
+   * unpaired room could be made simply by having a guest join and leave, which
+   * is the leak the TTL was written to close.
    */
-  createdAt: number;
-  /**
-   * When a second player first took a seat, or null if none ever has. Never
-   * cleared: a room that HAS been a duel is a room a rematch can still happen
-   * in, and only the idle clock should judge that one.
-   */
-  pairedAt: number | null;
+  soloSince: number | null;
 }
 
 /** What a client is told when the room's match (re)starts. */
@@ -337,7 +342,10 @@ export interface ReapOptions {
   isLive: SocketLiveness;
   /** How long a room with a live socket may go quiet before it is abandoned. */
   idleMs: number;
-  /** How long a room may wait for a second player, however busy the first is. */
+  /**
+   * How long a room may sit with one player in it, however busy that player
+   * is — whether a second has never arrived or has come and gone.
+   */
   unpairedTtlMs: number;
 }
 
@@ -383,7 +391,7 @@ export function reapRooms(
     let reason: ReapReason | null = null;
     if (isRoomEmpty(room, opts.isLive)) reason = 'empty';
     else if (now - room.lastActive > opts.idleMs) reason = 'idle';
-    else if (room.pairedAt === null && now - room.createdAt > opts.unpairedTtlMs) {
+    else if (room.soloSince !== null && now - room.soloSince > opts.unpairedTtlMs) {
       reason = 'unpaired';
     }
     if (reason) dead.push({ id, reason, room });

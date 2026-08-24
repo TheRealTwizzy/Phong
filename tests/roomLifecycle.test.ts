@@ -31,6 +31,12 @@ afterAll(async () => {
 const roomStatus = async (code: string): Promise<number> =>
   (await fetch(`${base}/api/room/${code}`)).status;
 
+const waitingMs = async (code: string): Promise<number | null> => {
+  const res = await fetch(`${base}/api/room/${code}`);
+  if (!res.ok) return null;
+  return (await res.json()).waitingMs;
+};
+
 const activeRooms = async (): Promise<number> =>
   (await (await fetch(`${base}/api/health`)).json()).activeRooms;
 
@@ -130,6 +136,41 @@ describe('a socket that takes a second seat', () => {
 
     pb.close();
     pc.close();
+    await sleep(300);
+    expect(await activeRooms()).toBe(0);
+  }, 30000);
+
+  it('hands a room back to the solo clock when its guest leaves', async () => {
+    // Through the real relay, because the clock is started and stopped by the
+    // seat handlers rather than by the reaper (whose own rule is pinned in
+    // tests/room.test.ts). It used to be a one-way flag set when a second
+    // player arrived, so a room that had been a duel was exempt from the one
+    // clock that can expire a busy one-player room — which made the leak
+    // reachable by having somebody join and then leave.
+    const a = await relay.newDevice('RoomLifeH');
+    const b = await relay.newDevice('RoomLifeI');
+    const pa = await relay.openPhone(a);
+    const pb = await relay.openPhone(b);
+
+    pa.send({ type: 'create_room', playerId: a.id });
+    const code = (await pa.await('room_created')).roomId;
+    // One player: the clock is running.
+    expect(await waitingMs(code)).not.toBeNull();
+
+    pb.send({ type: 'join_room', roomId: code, playerId: b.id });
+    await pb.await('room_joined');
+    await sleep(150);
+    // Two players: stopped.
+    expect(await waitingMs(code)).toBeNull();
+
+    // The guest walks out. The host stays, and the room is one player again —
+    // so the clock restarts rather than staying stopped forever.
+    pb.close();
+    await sleep(300);
+    expect(await roomStatus(code)).toBe(200);
+    expect(await waitingMs(code)).not.toBeNull();
+
+    pa.close();
     await sleep(300);
     expect(await activeRooms()).toBe(0);
   }, 30000);

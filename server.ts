@@ -484,6 +484,12 @@ async function startServer() {
       // Read-only; lets a client (and the e2e) tell a waiting room from a
       // live one.
       inPlay: room.inPlay,
+      // How long this room has had nobody to play against, in ms, or null
+      // while both seats are filled. The clock that expires a one-player room
+      // however busy its occupant keeps it — including one whose guest has
+      // been and gone. Beside inPlay for the same reason: a waiting room and a
+      // live one are different things and this endpoint exists to say which.
+      waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
     });
   });
 
@@ -1134,8 +1140,9 @@ async function startServer() {
             ready: [false, false],
             matchSeq: 0,
             lastActive: Date.now(),
-            createdAt: Date.now(),
-            pairedAt: null,
+            // One player, from this moment — the clock that expires a room
+            // nobody ever joins, and a room somebody has left.
+            soloSince: Date.now(),
           };
 
           rooms.set(code, room);
@@ -1191,9 +1198,9 @@ async function startServer() {
           room.bestStreaks[1] = Math.max(room.bestStreaks[1], room.streaks[1]);
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
-          // Never cleared once set: a room that has been a duel is a room a
-          // rematch can still happen in, so only the idle clock judges it.
-          if (room.pairedAt === null) room.pairedAt = Date.now();
+          // Two players: the solo clock stops. It restarts if either of them
+          // leaves, which is what a room going back to one player IS.
+          room.soloSince = null;
           currentRoomId = code;
           playerIndex = 1;
 
@@ -1527,6 +1534,10 @@ async function startServer() {
       }
       if (!room.players[0] && !room.players[1]) {
         rooms.delete(currentRoomId);
+      } else {
+        // One player left in it. That is a room with nobody to play against,
+        // however busy the survivor keeps it, so the clock starts again.
+        room.soloSince = Date.now();
       }
       currentRoomId = null;
       playerIndex = null;

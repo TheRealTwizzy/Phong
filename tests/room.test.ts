@@ -48,8 +48,7 @@ const room = (over: Partial<Room> = {}): Room => ({
   inPlay: false,
   matchSeq: 1,
   lastActive: 0,
-  createdAt: 0,
-  pairedAt: null,
+  soloSince: 0,
   ...over,
 });
 
@@ -333,7 +332,7 @@ describe('reapRooms', () => {
   // is for. Only the unpaired clock may end that, and not for a while.
   it('keeps a room while one socket is still live', () => {
     const rooms = new Map<string, Room>([
-      ['HELD', room({ players: [seat(true, 0), seat(false, 1)], lastActive: MINUTE, createdAt: MINUTE })],
+      ['HELD', room({ players: [seat(true, 0), seat(false, 1)], lastActive: MINUTE, soloSince: MINUTE })],
     ]);
     expect(reapRooms(rooms, MINUTE, OPTS)).toEqual([]);
     expect(rooms.size).toBe(1);
@@ -341,14 +340,14 @@ describe('reapRooms', () => {
 
   it('deletes a live room that has gone quiet past the idle clock', () => {
     const rooms = new Map<string, Room>([
-      ['IDLE', room({ players: [seat(true, 0), seat(true, 1)], lastActive: 0, pairedAt: 0, createdAt: 0 })],
+      ['IDLE', room({ players: [seat(true, 0), seat(true, 1)], lastActive: 0, soloSince: null })],
     ]);
     expect(reapRooms(rooms, 5000, OPTS)[0].reason).toBe('idle');
   });
 
   it('keeps a live room that is still talking', () => {
     const rooms = new Map<string, Room>([
-      ['BUSY', room({ players: [seat(true, 0), seat(true, 1)], lastActive: 4500, pairedAt: 0, createdAt: 0 })],
+      ['BUSY', room({ players: [seat(true, 0), seat(true, 1)], lastActive: 4500, soloSince: null })],
     ]);
     expect(reapRooms(rooms, 5000, OPTS)).toEqual([]);
   });
@@ -359,32 +358,46 @@ describe('reapRooms', () => {
   // the phone. Nothing else in here can ever reach that room.
   it('expires a room that never got a second player, however busy its first is', () => {
     const rooms = new Map<string, Room>([
-      ['SOLO', room({ players: [seat(true, 0), null], createdAt: 0, lastActive: 9000, pairedAt: null })],
+      ['SOLO', room({ players: [seat(true, 0), null], soloSince: 0, lastActive: 9000 })],
     ]);
     expect(reapRooms(rooms, 9000, OPTS)[0].reason).toBe('unpaired');
   });
 
   it('leaves an unpaired room alone until its TTL is up', () => {
     const rooms = new Map<string, Room>([
-      ['WAIT', room({ players: [seat(true, 0), null], createdAt: 0, lastActive: 4000, pairedAt: null })],
+      ['WAIT', room({ players: [seat(true, 0), null], soloSince: 0, lastActive: 4000 })],
     ]);
     expect(reapRooms(rooms, 4000, OPTS)).toEqual([]);
   });
 
-  // pairedAt is never cleared, so a guest leaving does not hand the room back
-  // to the unpaired clock — a room that has been a duel is one a rematch can
-  // still happen in, and only the idle clock judges that.
-  it('never applies the unpaired TTL to a room that has been a duel', () => {
+  // A room that HAS been a duel and is back to one player gets the clock too.
+  // This used to be exempt: the flag was set once when a second player arrived
+  // and never cleared, on the grounds that such a room is one a rematch can
+  // still happen in — true only while the other player is still there. Once
+  // the guest leaves it is a one-player room like any other, and exempting it
+  // meant the leak the TTL exists for could be made simply by having somebody
+  // join and leave.
+  it('applies the unpaired TTL again once a room is back to one player', () => {
     const rooms = new Map<string, Room>([
-      ['USED', room({ players: [seat(true, 0), null], createdAt: 0, lastActive: 9000, pairedAt: 10 })],
+      // Paired at some point, alone again since t=0, and busy ever since.
+      ['USED', room({ players: [seat(true, 0), null], soloSince: 0, lastActive: 9000 })],
     ]);
-    expect(reapRooms(rooms, 9000, OPTS)).toEqual([]);
+    expect(reapRooms(rooms, 9000, OPTS)[0].reason).toBe('unpaired');
+  });
+
+  it('stops the clock for as long as both seats are filled', () => {
+    // Long past the unpaired TTL and still talking, so only that clock could
+    // reach it — and it must not, because there are two of them in there.
+    const rooms = new Map<string, Room>([
+      ['DUEL', room({ players: [seat(true, 0), seat(true, 1)], soloSince: null, lastActive: 9_000_000 })],
+    ]);
+    expect(reapRooms(rooms, 9_000_000, OPTS)).toEqual([]);
   });
 
   it('hands back what it removed and leaves the rest of the map alone', () => {
     const rooms = new Map<string, Room>([
       ['GONE', room({ id: 'GONE', lastActive: MINUTE })],
-      ['KEPT', room({ id: 'KEPT', players: [seat(true, 0), null], createdAt: MINUTE, lastActive: MINUTE })],
+      ['KEPT', room({ id: 'KEPT', players: [seat(true, 0), null], soloSince: MINUTE, lastActive: MINUTE })],
     ]);
     const dead = reapRooms(rooms, MINUTE, OPTS);
     expect(dead).toHaveLength(1);
