@@ -13,6 +13,14 @@ const RETRY_DELAY_MS = 900;
 
 type Queued = { payload: MatchEndPayload; queuedAt: number };
 
+/**
+ * Identity of a parked entry, for telling entries apart across a re-read of
+ * the queue (see runFlush). `matchKey` alone is not enough — an entry parked
+ * by an older bundle may not carry one — and `queuedAt` alone can collide
+ * inside a millisecond; together they are reliable.
+ */
+const queueKey = (q: Queued): string => `${q?.payload?.matchKey ?? ''}|${q?.queuedAt}`;
+
 function readQueue(): Queued[] {
   try {
     const raw = localStorage.getItem(QUEUE_KEY);
@@ -58,15 +66,43 @@ function writeQueue(items: Queued[]): void {
 // wire is left to succeed or fail on its own, since it went out under the old
 // cookie and correctly records onto the old account if it still can. What is
 // refused is starting a NEW attempt, or re-queueing, once the identity is gone.
-let generation = 0;
+//
+// Kept in localStorage rather than in a module variable, because the thing it
+// tracks is not per-tab. The device cookie and the queue are both per-ORIGIN,
+// so two tabs share them, and only the tab that ran Start Fresh would bump a
+// module-local counter — the other one's pending retry or flush would carry
+// straight on under the new cookie and hand the old identity's match to the
+// new profile, which is the exact failure this counter exists to stop. A
+// stored number crosses tabs for free and synchronously, with none of the
+// delivery caveats a BroadcastChannel brings. `localGeneration` mirrors it so
+// the guard still works within one tab when storage is unavailable, and so a
+// read can never go backwards if a write was the part that failed.
+const GENERATION_KEY = 'phong_queue_generation';
+let localGeneration = 0;
 
 function currentGeneration(): number {
-  return generation;
+  try {
+    const raw = localStorage.getItem(GENERATION_KEY);
+    const stored = raw === null ? NaN : Number(raw);
+    if (Number.isFinite(stored)) return Math.max(stored, localGeneration);
+  } catch {
+    /* unavailable — the module-local mirror is the whole answer */
+  }
+  return localGeneration;
 }
 
-/** Has this browser's identity moved on since `gen` was captured? */
+function bumpGeneration(): void {
+  localGeneration = currentGeneration() + 1;
+  try {
+    localStorage.setItem(GENERATION_KEY, String(localGeneration));
+  } catch {
+    /* this tab still honours it; another tab cannot be told */
+  }
+}
+
+/** Has this browser's identity moved on since `gen` was captured — in ANY tab? */
 function identityMovedOn(gen: number): boolean {
-  return gen !== generation;
+  return gen !== currentGeneration();
 }
 
 /** As writeQueue, but a no-op if the identity has moved on since `gen` was captured. */
@@ -244,7 +280,11 @@ async function runFlush(): Promise<number> {
   // them belong to it; the whole batch is dropped rather than written back.
   const gen = currentGeneration();
 
-  const stillPending: Queued[] = [];
+  // What this flush has FINISHED with — reported successfully, or dropped as
+  // unreplayable. Tracked instead of the inverse ("what is still pending"),
+  // because the write at the end has to be expressed against the queue as it
+  // is THEN, not as it was when this snapshot was taken: see below.
+  const resolved = new Set<string>();
   let recovered = 0;
   for (const item of queue) {
     // Same rule, per item. A flush is a sequence of round trips (plus an
@@ -266,27 +306,39 @@ async function runFlush(): Promise<number> {
       // request's own network time and can misorder it against a live write
       // that happens to have a faster round trip.
       await attempt(item.payload);
+      resolved.add(queueKey(item));
       recovered++;
     } catch (e: any) {
       if (e?.needsSession) {
         // No live session yet — this queue is flushed on load, which can beat
         // the session being minted. Keep everything and try the next time.
         await openSession();
-        stillPending.push(item);
         continue;
       }
       if (e?.staleBuild) {
         // Keep it and go get the new bundle; the queue survives the reload.
-        stillPending.push(item);
         refreshForBuild(e.build);
         continue;
       }
-      // Keep anything that might still land; drop outright refusals, and
-      // anything played under an account this device no longer holds.
-      if (!e?.permanent && !e?.evicted) stillPending.push(item);
+      // Drop outright refusals, and anything played under an account this
+      // device no longer holds. Anything else might still land, so it is
+      // simply not resolved and stays queued.
+      if (e?.permanent || e?.evicted) resolved.add(queueKey(item));
     }
   }
-  writeQueueFor(gen, stillPending);
+  // Re-read rather than writing back a list derived from the opening
+  // snapshot. This loop awaits the network between items, and postMatchRecord
+  // can APPEND during any of those gaps — a match finished and failed while
+  // the flush was still working through an older backlog, which is not a rare
+  // pairing at all: the same bad connection causes both. Replacing the whole
+  // queue with the snapshot's leftovers silently deleted that match, and the
+  // one promise this file makes is that no result is ever lost. So the write
+  // is expressed as "the queue as it stands now, minus what I actually
+  // finished with", which leaves anything appended in the meantime untouched.
+  writeQueueFor(
+    gen,
+    readQueue().filter((q) => !resolved.has(queueKey(q)))
+  );
   return recovered;
 }
 
@@ -316,6 +368,6 @@ export const pendingMatchCount = (): number => readQueue().length;
  * write whose captured generation no longer matches.
  */
 export const clearPendingMatches = (): void => {
-  generation++;
+  bumpGeneration();
   writeQueue([]);
 };

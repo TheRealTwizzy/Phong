@@ -346,6 +346,63 @@ describe('the queue cannot grow without bound', () => {
   });
 });
 
+describe('a flush and a fresh failure at the same time', () => {
+  it('keeps a match queued WHILE the flush was awaiting the network', async () => {
+    // Not a rare pairing: the same bad connection that filled the queue is
+    // the one that makes the match the player just finished fail too. The
+    // flush snapshots the queue at the start; postMatchRecord appends to
+    // localStorage during one of its awaits; and writing back a list derived
+    // from the opening snapshot silently deletes the new match — against the
+    // one promise this file makes, which is that no result is ever lost.
+    park('backlog');
+    let resolveBacklog: ((r: Response) => void) | null = null;
+    vi.stubGlobal('fetch', (input: string, init?: { body?: string }) => {
+      const url = String(input);
+      if (url === '/api/match/record') {
+        const key = JSON.parse(init!.body!).matchKey;
+        if (key === 'backlog') {
+          return new Promise<Response>((resolve) => {
+            resolveBacklog = resolve;
+          });
+        }
+        // The freshly finished match: queued at once, no retry sleep.
+        return Promise.resolve(json(403, { error: 'PROFILE_NOT_INITIALIZED' }));
+      }
+      return Promise.resolve(json(200, { status: 'active', sessionId: 's', profile: { id: 'p' } }));
+    });
+
+    const flush = flushPendingMatches();
+    await new Promise((r) => setTimeout(r, 50)); // the flush is now awaiting 'backlog'
+
+    const fresh = await postMatchRecord(match('just-played'));
+    expect(fresh.reason).toBe('unidentified');
+    expect(queued().map((p) => p.matchKey)).toContain('just-played');
+
+    // The backlog item fails transiently, so it stays queued too.
+    resolveBacklog!(json(500, {}));
+    await flush;
+
+    expect(queued().map((p) => p.matchKey).sort()).toEqual(['backlog', 'just-played']);
+  }, 10000);
+
+  it('still removes what the flush actually finished with', async () => {
+    // The other half of the same rule: rebuilding from a re-read must not
+    // turn into "keep everything". A match the flush reported successfully,
+    // and one the server refused outright, are both gone.
+    park('lands', 'refused', 'transient');
+    let n = 0;
+    installServer(() => {
+      n++;
+      if (n === 1) return ok(); // 'lands'
+      if (n === 2) return json(400, { error: 'BAD' }); // 'refused'
+      return json(503, {}); // 'transient'
+    });
+
+    expect(await flushPendingMatches()).toBe(1);
+    expect(queued().map((p) => p.matchKey)).toEqual(['transient']);
+  });
+});
+
 describe('giving up this browser’s identity', () => {
   it('clearPendingMatches drops everything parked, unsent', async () => {
     // startFreshIdentity (App.tsx) calls this the moment a released device
@@ -464,6 +521,30 @@ describe('giving up this browser’s identity', () => {
     // Items 2 and 3 were never reported under the new identity.
     expect(posts).toBe(1);
     expect(pendingMatchCount()).toBe(0);
+  }, 10000);
+
+  it('honours a reset made in ANOTHER tab', async () => {
+    // The device cookie and the queue are both per-ORIGIN, so two tabs share
+    // them — but a module-level counter is per-tab. Only the tab that ran
+    // Start Fresh would bump one, and the other tab's pending retry would
+    // carry straight on under the freshly-swapped cookie, handing the old
+    // identity's match to the new profile. Two module instances over one
+    // localStorage is exactly what two tabs are.
+    const tabA = { postMatchRecord, clearPendingMatches };
+    vi.resetModules();
+    const tabB = await import('../src/net/matchRecord');
+    expect(tabB.postMatchRecord).not.toBe(tabA.postMatchRecord); // genuinely separate
+
+    const server = installServer(() => json(500, {}));
+    const recording = tabA.postMatchRecord(match('other-tab'));
+    await new Promise((r) => setTimeout(r, 200)); // inside tab A's retry delay
+    expect(server.posts()).toBe(1);
+
+    tabB.clearPendingMatches(); // the OTHER tab starts fresh
+
+    const outcome = await recording;
+    expect(server.posts()).toBe(1); // tab A never retried under the new identity
+    expect(outcome).toEqual({ ok: false, reason: 'evicted' });
   }, 10000);
 
   it('drops runFlush’s own stale re-queue the same way', async () => {
