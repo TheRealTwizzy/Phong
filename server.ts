@@ -30,6 +30,7 @@ import {
   generateRoomCode,
   performanceWeight,
   PlayerSession,
+  partitionHeartbeats,
   Room,
   SeatRating,
   startMatch as resetRoomForMatch,
@@ -1084,6 +1085,9 @@ async function startServer() {
   // half an hour", which cannot see an empty room whose seat still holds a
   // socket that is already gone, and cannot see a one-player room at all
   // because its own paddle_move traffic keeps refreshing lastActive.
+  /** Whether each socket answered the last heartbeat probe. */
+  const alive = new WeakMap<WebSocket, boolean>();
+
   const ROOM_IDLE_MS = 30 * 60 * 1000;
   const ROOM_UNPAIRED_TTL_MS = 30 * 60 * 1000;
   const ROOM_SWEEP_MS = 15 * 1000;
@@ -1117,7 +1121,41 @@ async function startServer() {
     }
   }, ROOM_SWEEP_MS).unref?.();
 
+  /**
+   * Liveness, asked for rather than assumed.
+   *
+   * `readyState` answers "did this socket close", not "is anyone there". A
+   * peer whose network vanishes without a close handshake leaves it reading
+   * OPEN until a write times out at the TCP layer, which can be many minutes —
+   * and in the meantime every branch of the room reaper is blind: the seat
+   * looks live so the room is not empty, `vacateSeat` never ran so `soloSince`
+   * is null, and the surviving player's own paddle_move keeps `lastActive`
+   * fresh. They sit opposite a phantom and the room never expires.
+   *
+   * A terminate here fires the close handler, which is the only thing that
+   * vacates a seat — so nothing downstream changes, it just becomes true.
+   * Twice the sweep interval is the worst case, comfortably inside every TTL.
+   */
+  const HEARTBEAT_MS = 30 * 1000;
+  setInterval(() => {
+    const { dead, probe } = partitionHeartbeats(wss.clients, (sock) => alive.get(sock) !== false);
+    for (const sock of dead) {
+      alive.delete(sock);
+      sock.terminate();
+    }
+    for (const sock of probe) {
+      alive.set(sock, false);
+      sock.ping();
+    }
+  }, HEARTBEAT_MS).unref?.();
+
   wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
+    // Answered the last probe. A fresh socket has not been probed yet, so it
+    // starts alive rather than one sweep away from being terminated.
+    alive.set(ws, true);
+    ws.on('pong', () => alive.set(ws, true));
+    ws.addEventListener('close', () => alive.delete(ws));
+
     const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
 
     // A duel is the relay's own record-keeping: it writes a finished match

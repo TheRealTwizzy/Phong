@@ -437,6 +437,40 @@ export interface ReapedRoom {
   room: Room;
 }
 
+/**
+ * Which sockets a heartbeat sweep should give up on, and which to probe again.
+ *
+ * `readyState` is not liveness. A peer whose network vanishes without a close
+ * handshake — a phone going through a tunnel, a NAT dropping the mapping —
+ * leaves the server's socket reading OPEN, because nothing on the wire says
+ * otherwise until a write eventually times out at the TCP layer, which can be
+ * many minutes. Until then `isRoomEmpty` sees a live seat, `vacateSeat` has
+ * never run so `soloSince` is null, and the surviving player's own paddle_move
+ * keeps `lastActive` fresh: all three reap branches miss the room, and that
+ * player sits opposite a phantom.
+ *
+ * So liveness is asked for rather than assumed. Each sweep terminates anything
+ * that did not answer the last probe and probes the rest. A terminate fires
+ * the close handler, which is the ONLY thing that vacates a seat — so the
+ * whole room lifecycle downstream of this works unchanged, and simply becomes
+ * true.
+ *
+ * Pure, and takes the flag as a reader for the same reason `isLive` is a
+ * predicate: nothing in this file may touch a socket.
+ */
+export function partitionHeartbeats<T>(
+  sockets: Iterable<T>,
+  answeredLastProbe: (socket: T) => boolean
+): { dead: T[]; probe: T[] } {
+  const dead: T[] = [];
+  const probe: T[] = [];
+  for (const socket of sockets) {
+    if (answeredLastProbe(socket)) probe.push(socket);
+    else dead.push(socket);
+  }
+  return { dead, probe };
+}
+
 /** Whether every seat is either vacant or holds a socket that is already gone. */
 export function isRoomEmpty(room: Room, isLive: SocketLiveness): boolean {
   return !room.players.some((seat) => seat && isLive(seat.ws));
@@ -449,7 +483,8 @@ export function isRoomEmpty(room: Room, isLive: SocketLiveness): boolean {
  * Three ways a room dies. `empty` is the one that matters and the reason this
  * exists: a seat holding a socket that has already gone is not a player, and
  * nothing on the disconnect path can clear it — `vacateSeat` runs off a close
- * event, and a socket that dies without one (a half-open TCP connection, or a
+ * event, and a socket that dies without one (a half-open TCP connection, which
+ * the heartbeat in `partitionHeartbeats` is what makes visible here, or a
  * socket whose seat was orphaned when it took a second one) leaves a room that
  * no player can reach and no handler will ever remove.
  *

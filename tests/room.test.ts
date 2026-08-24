@@ -8,6 +8,7 @@ import {
   startMatchStreaks,
   generateRoomCode,
   isRoomEmpty,
+  partitionHeartbeats,
   performanceWeight,
   reapRooms,
   Room,
@@ -536,6 +537,50 @@ describe('rally streaks', () => {
   });
 });
 
+
+describe('the heartbeat sweep', () => {
+  // readyState answers "did this close", not "is anyone there". The sweep is
+  // what turns the second question into the first, and everything downstream —
+  // isRoomEmpty, vacateSeat, soloSince — is already correct once it does.
+  const sweep = (sockets: string[], answered: Set<string>) =>
+    partitionHeartbeats(sockets, (s) => answered.has(s));
+
+  it('terminates what did not answer and probes the rest', () => {
+    const { dead, probe } = sweep(['a', 'b', 'c'], new Set(['a', 'c']));
+    expect(dead).toEqual(['b']);
+    expect(probe).toEqual(['a', 'c']);
+  });
+
+  it('keeps a socket alive as long as it keeps answering', () => {
+    // The state machine over two rounds, which is what the caller runs: probe,
+    // clear the flag, and let a pong set it again. A live socket must never be
+    // terminated however many sweeps it survives.
+    const answered = new Set(['live']);
+    for (let round = 0; round < 5; round++) {
+      const { dead, probe } = sweep(['live'], answered);
+      expect(dead).toEqual([]);
+      expect(probe).toEqual(['live']);
+      answered.delete('live'); // the caller clears it when it probes
+      answered.add('live'); //    the pong comes back
+    }
+  });
+
+  it('gives up on a socket that stops answering', () => {
+    // The half-open case: the probe goes out, nothing comes back, and the next
+    // sweep terminates it. Two intervals worst case, which is the bound the
+    // room TTLs are chosen against.
+    const answered = new Set(['gone']);
+    expect(sweep(['gone'], answered).dead).toEqual([]);
+    answered.delete('gone'); // probed, and no pong ever arrives
+    expect(sweep(['gone'], answered).dead).toEqual(['gone']);
+  });
+
+  it('does not terminate a socket on its first sweep', () => {
+    // A socket that connected between sweeps has not been asked yet. Treating
+    // "never answered" as "dead" would cut off every new connection.
+    expect(sweep(['fresh'], new Set(['fresh'])).dead).toEqual([]);
+  });
+});
 
 describe('what a match earned, on the relay', () => {
   it('opens a match having earned nothing, and counts only returns made here', () => {
