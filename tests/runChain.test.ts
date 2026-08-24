@@ -80,4 +80,39 @@ describe('nextRunSeq', () => {
       clear: () => store.clear(),
     };
   });
+
+  it('never repeats a number when the read succeeds but the write does not', () => {
+    // The asymmetric case the read-and-write-both-fail test above cannot
+    // reach: a write can throw (quota, a private-browsing cap) while reads
+    // keep working. Handing back the incremented-but-unpersisted seq here
+    // would look fine for THIS call and wrong for every call after it — the
+    // next one re-reads the same un-incremented row, computes the identical
+    // "next" number, and this session's writes tie against each other from
+    // here on, exactly the collision this file exists to avoid.
+    nextRunSeq(); // establishes a real, persisted starting state
+    const writeThrows: Storage = {
+      getItem: (k: string) => store.get(k) ?? null, // still works
+      setItem: () => {
+        throw new Error('quota exceeded');
+      },
+      removeItem: () => {},
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    };
+    (globalThis as any).localStorage = writeThrows;
+
+    const a = nextRunSeq();
+    const b = nextRunSeq();
+    // Not the same chain, and not the same seq repeating — each failed write
+    // is isolated rather than silently echoing the last one.
+    expect(a.chainId).not.toBe(b.chainId);
+
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+      clear: () => store.clear(),
+    };
+  });
 });

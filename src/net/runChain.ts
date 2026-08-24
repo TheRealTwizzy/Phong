@@ -65,20 +65,28 @@ function readChain(): ChainState {
  * replayed later keeps the number it was actually decided at, rather than
  * one assigned by whenever the replay happens to run.
  *
- * If storage cannot be written, the chain simply does not persist: the next
- * call starts a fresh chain rather than continuing this one. Two writes never
- * compare as `sameChain` in that case, so ordering falls back to the age —
- * the same behavior as before this existed, not a broken one.
+ * If storage cannot be written, the chain simply does not persist: this call
+ * gets a chainId nothing else will ever share, so ordering for it falls back
+ * to the age — the same behavior as before this existed, not a broken one.
+ * That has to be a FRESH id, not the one the read returned: reads and writes
+ * fail independently (a write can throw on a quota a read is well under, or
+ * once private-browsing storage fills), so returning the read's chainId with
+ * an incremented-but-never-persisted seq would look identical to every OTHER
+ * call this happens to — the next one re-reads the same un-incremented row,
+ * computes the same "next" number, and every write for the rest of the
+ * session ties against the last, silently reintroducing the exact
+ * network-timing bug this file exists to remove.
  *
- * Not atomic across TABS. Reading the counter, incrementing it, and writing
- * it back are three separate steps, and nothing here stops two tabs on the
- * same device from both reading the same starting value before either write
- * lands — both then compute and report the SAME next number for two genuinely
- * different events. That collision is rare (it needs two tabs finishing or
- * resetting a run within the same instant) and is handled, not prevented: the
- * server falls back to the age when two writes from one chain tie on seq
- * (see `bumpModeStats`), rather than the two tabs silently overwriting one
- * another in whichever order their requests happen to arrive.
+ * Not atomic across TABS, separately from the above. Reading the counter,
+ * incrementing it, and writing it back are three separate steps, and nothing
+ * here stops two tabs on the same device from both reading the same starting
+ * value before either write lands — both then compute and report the SAME
+ * next number for two genuinely different events. That collision is rare (it
+ * needs two tabs finishing or resetting a run within the same instant) and is
+ * handled, not prevented: the server falls back to the age when two writes
+ * from one chain tie on seq (see `bumpModeStats`), rather than the two tabs
+ * silently overwriting one another in whichever order their requests happen
+ * to arrive.
  */
 export function nextRunSeq(): { chainId: string; runSeq: number } {
   const state = readChain();
@@ -86,7 +94,7 @@ export function nextRunSeq(): { chainId: string; runSeq: number } {
   try {
     localStorage.setItem(KEY, JSON.stringify(state));
   } catch {
-    /* storage full or unavailable */
+    return { chainId: randomChainId(), runSeq: 1 };
   }
   return { chainId: state.chainId, runSeq: state.seq };
 }
