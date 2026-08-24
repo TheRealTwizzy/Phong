@@ -94,6 +94,14 @@ export interface GameSettings {
   hapticIntensity: number; // 10 to 100
   tiltEnabled: boolean;
   showRadar: boolean;
+  // The two net indicators, both on by default. They are DEVICE preferences,
+  // like showRadar — but unlike it they survive inside a ranked match, which
+  // is the trade the opponent sonar now carries (see src/matchRules.ts): the
+  // sonar draws the far half and costs the rating; these two name where the
+  // opponent's paddle is and whether the ball is over there, and cost nothing.
+  // A match played WITH the sonar suppresses both, so the two never stack.
+  showOpponentIndicator: boolean;
+  showBallIndicator: boolean;
   // Telemetry visibility is deliberately NOT a stored setting: the panel is
   // per-match, starting hidden and toggled from the court (see App.tsx).
   showTrails: boolean;
@@ -525,6 +533,9 @@ export interface MatchEndPayload {
   matchKey?: string;
 }
 
+/** Where the ladder went: up, down, or nowhere. */
+export type RankDirection = 'up' | 'down' | 'none';
+
 export interface MatchEndResult {
   profile: PlayerProfile;
   earnedXp: number;
@@ -537,6 +548,15 @@ export interface MatchEndResult {
   tierChanged: boolean;
   /** False when the match ran on non-stock physics: XP paid, rating untouched. */
   ranked: boolean;
+  /**
+   * Which way the visible ranked rating moved, for the winner overlay's glyph.
+   *
+   * 'none' covers both "this match did not rate" (unranked rules, the sonar,
+   * a solo match at an unearned difficulty) and "it rated and landed where it
+   * started". Derived server-side from rankMu either side of the update — the
+   * mu itself is never sent anywhere it could be rendered.
+   */
+  rankDirection: RankDirection;
   newAchievements: Achievement[];
   // Today's missions after this match advanced them — server-owned, so the
   // client never computes mission progress itself.

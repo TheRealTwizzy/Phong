@@ -107,6 +107,19 @@ a loss. `tests/protocolParity.test.ts` reads the source and fails the moment a m
 added to one side only; `tests/p2pParity.test.ts` runs one identical script through both
 transports and compares what each player is told.
 
+**A presentation flag is free, except the one that is not.** Telemetry, quick chat and
+auto-serve never touch the ball and never touch the rating. The **opponent sonar** draws the
+half the whole game exists to hide, so it unranks the match — and `DEFAULT_MATCH_RULES` has to
+ship with it OFF, or every stock match is unranked with its net indicators suppressed.
+`tests/matchRules.test.ts` pins both halves and the default; `scripts/e2e-rules.mjs` drives the
+badge through the real sheet, and `scripts/e2e-duel.mjs` has the host ask for it in the lobby.
+
+**The pre-match badge answers the WHOLE question, not just the sliders.** It promised "counts
+for rank" for a Rookie solo match the server was always going to refuse to rate, and for
+Practice and Split Screen, which record no rating at all. `unrankedReasons` states mode,
+difficulty, sonar and physics in one ordered list so the sheet and the lobby cannot drift; a
+badge that is wrong about the one thing it exists to say is worse than no badge.
+
 **Never add a match-recording path without a `matchKey`.** A duel legitimately arrives up to
 three times — the relay writes it for both seats, both clients POST it as a fallback, the
 on-device queue may replay it — and `duelMatchKey()` is the only thing that says they are the
@@ -271,7 +284,11 @@ time to discover:
 
 - Drive multi-touch through **CDP `Input.dispatchTouchEvent`**, not synthetic `PointerEvent`s.
   `handlePointerDown` calls `setPointerCapture`, which throws on an untrusted pointer id, and
-  CDP is the only route to two fingers at once.
+  CDP is the only route to two fingers at once. `scripts/e2e-rules.mjs` needs it too now, for
+  the serving joystick: one thumb aims while the other steers, and there is no way to state
+  that without two fingers. It reads the paddle off `#telemetry-paddle-pos` rather than by
+  sampling pixels — the telemetry panel is the one place in the DOM that reports where the
+  paddle is.
 - When sampling, collect **runs** of matching pixels and discard short ones. The court is drawn
   with a hairline frame in the same cyan as P1's paddle; taking the first and last matching
   pixel puts every reading at dead centre regardless of where the paddle is.

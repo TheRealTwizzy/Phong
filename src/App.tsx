@@ -12,6 +12,7 @@ import {
   Achievement,
   MatchEndResult,
   MatchEndPayload,
+  RankDirection,
   PlayerStatus,
   DailyMission,
   LanguageCode,
@@ -114,7 +115,7 @@ import {
 import { DIFFICULTY_ORDER, playableDifficulty, playableWinningScore } from './achievements';
 import { TierBadge } from './components/TierBadge';
 import confetti from 'canvas-confetti';
-import { Trophy, RefreshCw, Home } from 'lucide-react';
+import { Trophy, RefreshCw, Home, ArrowUp, ArrowDown, Circle } from 'lucide-react';
 
 /** How many times a lost invitation socket is retried before giving up. */
 const MAX_INVITE_RETRIES = 2;
@@ -134,6 +135,11 @@ const DEFAULT_SETTINGS: GameSettings = {
   screenShakeIntensity: 60,
   tiltEnabled: false,
   showRadar: true,
+  // Both on by default. They are the ranked-legal way to know where the other
+  // player is: the sonar draws their whole half and costs the match its
+  // rating, these two do not.
+  showOpponentIndicator: true,
+  showBallIndicator: true,
   showTrails: true,
   // Taken from the ladder rather than written out, so the shipped default is
   // the easiest rung by construction and cannot drift into being a LOCKED one.
@@ -153,6 +159,13 @@ const DEFAULT_SETTINGS: GameSettings = {
  * on-device queue carry the key the first attempt used and the server can see
  * they are the same match rather than three.
  */
+/** What each rank movement is called, for the glyph's accessible name. */
+const RANK_MOVE_KEY: Record<RankDirection, string> = {
+  up: 'rank_up',
+  down: 'rank_down',
+  none: 'rank_steady',
+};
+
 const newSoloMatchKey = (): string =>
   `solo:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
 
@@ -372,6 +385,18 @@ export default function App() {
         : { winningScore: settings.winningScore, rules: settings.rules };
   /** Who the AI is playing as — see activeConfig for why the tour overrides. */
   const activeDifficulty: AIDifficulty = tourStage === 'match' ? TOUR_DIFFICULTY : settings.difficulty;
+
+  /**
+   * The two net indicators are suppressed for any match played WITH the
+   * opponent sonar. The sonar already draws the whole far half — stacking a
+   * paddle marker and a ball marker on top of it would be pointing at things
+   * the player can see in full a few pixels away — and it is the version that
+   * costs the match its rating, so the cheap ones do not ride along with it.
+   *
+   * Derived per match, never written back: the player's stored preferences are
+   * still on, and come back by themselves the next time the sonar is off.
+   */
+  const indicatorsAllowed = !activeConfig.rules.opponentSonar;
 
   // Refs for high-speed 60fps physics loop without stale closures
   const ballRef = useRef<BallState>(ball);
@@ -1160,7 +1185,10 @@ export default function App() {
             rules
           );
           setOppBall({
-            x: 0.5,
+            // Out of the middle of its OWN paddle, the same rule the player's
+            // serve obeys — it used to launch from a hardcoded centre no
+            // matter where the AI was actually standing.
+            x: aiRef.current.paddleX,
             y: PADDLE_Y - 0.05,
             vx: aiLaunch.vx,
             vy: aiLaunch.vy,
@@ -3122,11 +3150,11 @@ export default function App() {
             serveAngleLimitDeg={SERVE_MAX_ANGLE_DEG * activeConfig.rules.serveAngleMax}
             autoServeSeconds={activeConfig.rules.autoServeSeconds}
             serveCountdown={serveCountdown}
-            isBallInOpponentCourt={
-              mode !== 'practice' &&
-              (oppBall?.active || (!ball.active && !(isServing && isPlayerServer)))
-            }
-            oppEstimatedX={oppBall?.active ? 1 - oppBall.x : 0.5}
+            oppPaddleXRef={oppPaddleXRef}
+            oppBallRef={oppBallRef}
+            hasOpponent={mode === 'solo' || mode === 'multiplayer'}
+            showOpponentIndicator={settings.showOpponentIndicator && indicatorsAllowed}
+            showBallIndicator={settings.showBallIndicator && indicatorsAllowed}
             rallyCount={stats.streak}
             language={currentLanguage}
             shakeTrigger={shakeTrigger}
@@ -3200,28 +3228,55 @@ export default function App() {
                       label={t('progression', currentLanguage)}
                       value={`+${lastMatchResult.earnedXp}`}
                       tone="xp"
+                      // The odds had a tile of their own, in the slot the rank
+                      // now occupies permanently. They are a PRE-match
+                      // prediction and the XP they scaled is right above them,
+                      // so this is where they belong anyway.
+                      hint={`${t('predicted_odds', currentLanguage)} ${Math.round(
+                        lastMatchResult.winProbability * 100
+                      )}%`}
                     />
                     <StatTile
                       label={t('longest_rally', currentLanguage)}
                       value={stats.bestStreak}
                       tone="warn"
                     />
-                    {lastMatchResult.tier ? (
-                      <div className="flex flex-col items-center justify-center gap-1 rounded-card border border-line bg-surface-1 px-2 py-2.5">
-                        <TierBadge tier={lastMatchResult.tier} language={currentLanguage} />
-                        <span className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
-                          {lastMatchResult.tierChanged
-                            ? t('rank_updated', currentLanguage)
-                            : t('skill_tier', currentLanguage)}
+                    {/* Rank, always — the tile used to disappear entirely for
+                        an unranked result, which is exactly when a player most
+                        wants to be told the ladder did not move. The arrow is
+                        the whole answer; the mu behind it is never rendered
+                        anywhere (see components/ui/RankBadge.tsx). */}
+                    <div
+                      id="winner-rank-tile"
+                      className="flex flex-col items-center justify-center gap-1 rounded-card border border-line bg-surface-1 px-2 py-2.5"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <TierBadge
+                          tier={lastMatchResult.tier ?? 'unranked'}
+                          language={currentLanguage}
+                        />
+                        <span
+                          id={`rank-move-${lastMatchResult.rankDirection}`}
+                          role="img"
+                          aria-label={t(RANK_MOVE_KEY[lastMatchResult.rankDirection], currentLanguage)}
+                          title={t(RANK_MOVE_KEY[lastMatchResult.rankDirection], currentLanguage)}
+                          className="flex items-center"
+                        >
+                          {lastMatchResult.rankDirection === 'up' ? (
+                            <ArrowUp className="h-4 w-4 text-win" />
+                          ) : lastMatchResult.rankDirection === 'down' ? (
+                            <ArrowDown className="h-4 w-4 text-loss" />
+                          ) : (
+                            <Circle className="h-2.5 w-2.5 fill-current text-rank-steady" />
+                          )}
                         </span>
                       </div>
-                    ) : (
-                      <StatTile
-                        label={t('predicted_odds', currentLanguage)}
-                        value={`${Math.round(lastMatchResult.winProbability * 100)}%`}
-                        tone="accent"
-                      />
-                    )}
+                      <span className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
+                        {lastMatchResult.tierChanged
+                          ? t('rank_updated', currentLanguage)
+                          : t('skill_tier', currentLanguage)}
+                      </span>
+                    </div>
                   </div>
 
                   {profile && (
@@ -3335,6 +3390,7 @@ export default function App() {
           // would already be deleted.
           onDeleteAccount={screen === 'menu' ? handleDeleteAccount : undefined}
           onTriggerShake={() => setShakeTrigger(Date.now())}
+          indicatorsLockedBySonar={!indicatorsAllowed}
         />
 
         {/* 2-Phone Multiplayer Lobby */}

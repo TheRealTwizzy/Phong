@@ -236,7 +236,11 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
           {/* Paddle Pos Indicator */}
           <div className="px-2 py-1 rounded-lg bg-slate-950/60 border border-slate-800/80 flex items-center justify-between text-[10px] text-slate-400">
             <span>
-              {t('telemetry_paddle_pos', language)}: {Math.round(paddleX * 100)}%
+              {t('telemetry_paddle_pos', language)}:{' '}
+              {/* The paddle is drawn to canvas and appears nowhere else in the
+                  DOM, so this readout is the only place a browser suite can
+                  ask where it is without sampling pixels. */}
+              <span id="telemetry-paddle-pos">{Math.round(paddleX * 100)}</span>%
             </span>
             <span className="text-cyan-400 font-semibold">{t(ball.active ? 'telemetry_in_court' : 'telemetry_in_flight', language)}</span>
           </div>

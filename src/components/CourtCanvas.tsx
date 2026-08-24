@@ -1,7 +1,15 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { BallState, GameSettings, Particle, Ripple, LanguageCode } from '../types';
 import { ThemeConfig } from '../game/themes';
-import { PADDLE_Y, PADDLE_HEIGHT, SPIN_MAX, ServeAim } from '../game/physics';
+import {
+  PADDLE_Y,
+  PADDLE_HEIGHT,
+  SPIN_MAX,
+  ServeAim,
+  AIM_FULL_PUSH,
+  AIM_DEADZONE,
+  aimFromPush,
+} from '../game/physics';
 import { sound } from '../audio/soundEffects';
 import { t } from '../i18n/translations';
 
@@ -29,8 +37,23 @@ interface CourtCanvasProps {
   autoServeSeconds: number;
   /** Seconds left before an auto-serve fires, or null when not counting. */
   serveCountdown: number | null;
-  isBallInOpponentCourt: boolean;
-  oppEstimatedX?: number;
+  /**
+   * The two net indicators read the game's OWN refs, the way RadarPreview
+   * does, rather than taking a number prop per frame: `oppEstimatedX` used to
+   * sit in the render effect's dependency array, so the whole rAF loop tore
+   * itself down and re-armed on every ball update.
+   *
+   * Both hold the SENDER's frame — the AI's own half in solo, the opponent
+   * phone's in a duel — so the head-to-head mirror is applied here.
+   */
+  oppPaddleXRef: React.MutableRefObject<number>;
+  oppBallRef: React.MutableRefObject<BallState | null>;
+  /** Follows the opponent's paddle, always. */
+  showOpponentIndicator: boolean;
+  /** Follows the ball, but only while it is on the opponent's half. */
+  showBallIndicator: boolean;
+  /** False for the Practice Wall: nobody over there to point at. */
+  hasOpponent: boolean;
   rallyCount: number;
   language?: LanguageCode;
   onImpact?: (type: 'paddle' | 'wall' | 'net' | 'score') => void;
@@ -51,8 +74,11 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   serveAngleLimitDeg,
   autoServeSeconds,
   serveCountdown,
-  isBallInOpponentCourt,
-  oppEstimatedX = 0.5,
+  oppPaddleXRef,
+  oppBallRef,
+  showOpponentIndicator,
+  showBallIndicator,
+  hasOpponent,
   rallyCount,
   language = 'en',
   onImpact,
@@ -61,7 +87,6 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const isDraggingRef = useRef<boolean>(false);
   const paddleXRef = useRef<number>(paddleX);
   const particlesRef = useRef<Particle[]>([]);
   const ripplesRef = useRef<Ripple[]>([]);
@@ -251,12 +276,27 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     onImpact,
   ]);
 
-  // Serve aiming: while the serve prompt is up, a drag from the paddle sets
-  // direction and power. A plain tap still serves, so the old one-tap feel is
-  // intact for anyone who does not want to aim.
+  // Serving joystick, and who owns which finger.
+  //
+  // The aim gesture was always a joystick — push up from wherever the thumb
+  // landed, sideways for angle, upward reach for power — but nothing drew it,
+  // so the only affordance was a line of pulsing text. Now it draws itself
+  // where the thumb lands, for as long as the serve lasts.
+  //
+  // It is also properly multi-touch. There was ONE aim origin, so a second
+  // finger silently overwrote the first one's anchor and the aim jumped. Roles
+  // are per pointerId now, the same way SplitScreenMatch tells two players'
+  // thumbs apart: during your own serve the first fresh pointer takes the
+  // joystick and any other drives the paddle, so you can aim with one thumb
+  // and keep steering with the other. A pointer already driving the paddle
+  // when the point ended keeps it — the thumb you are playing with is never
+  // stolen mid-rally.
   const paddleWidthRef = useRef(paddleWidth);
   paddleWidthRef.current = paddleWidth;
-  const aimStartRef = useRef<{ x: number; y: number } | null>(null);
+  type PointerRole = 'paddle' | 'joystick' | 'spent';
+  const pointerRolesRef = useRef<Map<number, PointerRole>>(new Map());
+  /** Where the live joystick is anchored, in 0..1 of the canvas. */
+  const joystickRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [aim, setAim] = useState<ServeAim | null>(null);
   const aimRef = useRef<ServeAim | null>(null);
   aimRef.current = aim;
@@ -265,74 +305,77 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   const serveAngleLimitRef = useRef(serveAngleLimitDeg);
   serveAngleLimitRef.current = serveAngleLimitDeg;
 
-  // Drag distance up the court, in fractions of screen height, for full power.
-  const AIM_FULL_PUSH = 0.35;
-  const AIM_DEADZONE = 0.02;
-
+  /** The push from the live joystick's anchor to this event, as an aim. */
   const aimFromEvent = (e: React.PointerEvent<HTMLCanvasElement>): ServeAim | null => {
     const canvas = canvasRef.current;
-    const start = aimStartRef.current;
-    if (!canvas || !start) return null;
+    const stick = joystickRef.current;
+    if (!canvas || !stick) return null;
     const rect = canvas.getBoundingClientRect();
-    const dx = (e.clientX - rect.left) / rect.width - start.x;
-    const dy = (e.clientY - rect.top) / rect.height - start.y;
-    if (Math.hypot(dx, dy) < AIM_DEADZONE) return null;
-    // PUSH the serve up the court, don't pull it back. The paddle sits at 90%
-    // of the screen height, so a pull-back gesture only has ~10% of travel
-    // below it — maximum power was literally unreachable on a phone. Pushing
-    // up has the whole court to work with, and the aim follows the finger.
-    const power = Math.max(0, Math.min(1, -dy / AIM_FULL_PUSH));
-    const angle = Math.max(-1, Math.min(1, dx / AIM_FULL_PUSH));
-    return { angle, power };
+    return aimFromPush(
+      (e.clientX - rect.left) / rect.width - stick.x,
+      (e.clientY - rect.top) / rect.height - stick.y
+    );
   };
+
+  // The serve can fire without the joystick being released: the auto-serve
+  // timer, the space bar, or the opponent's ball arriving. Drop the stick, and
+  // leave the finger still holding it INERT rather than handing it the paddle —
+  // that would teleport the paddle to wherever the aiming thumb happened to be,
+  // at the exact moment the rally starts.
+  useEffect(() => {
+    if (isServing) return;
+    const stick = joystickRef.current;
+    if (stick) pointerRolesRef.current.set(stick.pointerId, 'spent');
+    joystickRef.current = null;
+    setAim(null);
+  }, [isServing]);
 
   // Pointer drag event handlers for mouse/touch
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (isServing) {
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {}
+    // During your own serve the first fresh pointer opens the joystick, so a
+    // single thumb and a mouse both still serve exactly as they always have.
+    if (isServing && !joystickRef.current) {
       const canvas = canvasRef.current;
-      if (canvas) {
-        const rect = canvas.getBoundingClientRect();
-        aimStartRef.current = {
-          x: (e.clientX - rect.left) / rect.width,
-          y: (e.clientY - rect.top) / rect.height,
-        };
-        try {
-          (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        } catch {}
-      }
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      joystickRef.current = {
+        pointerId: e.pointerId,
+        x: (e.clientX - rect.left) / rect.width,
+        y: (e.clientY - rect.top) / rect.height,
+      };
+      pointerRolesRef.current.set(e.pointerId, 'joystick');
+      setAim(null);
       return;
     }
-    isDraggingRef.current = true;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    pointerRolesRef.current.set(e.pointerId, 'paddle');
     updatePaddleFromEvent(e);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (aimStartRef.current) {
+    const role = pointerRolesRef.current.get(e.pointerId);
+    if (role === 'joystick') {
       setAim(aimFromEvent(e));
       return;
     }
-    if (isDraggingRef.current || e.buttons === 1) {
-      updatePaddleFromEvent(e);
-    }
+    if (role === 'spent') return;
+    if (role === 'paddle' || e.buttons === 1) updatePaddleFromEvent(e);
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (aimStartRef.current) {
-      const finalAim = aimFromEvent(e);
-      aimStartRef.current = null;
-      setAim(null);
-      try {
-        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-      } catch {}
-      // A tap with no meaningful drag serves the default way.
-      onServe(finalAim || undefined);
-      return;
-    }
-    isDraggingRef.current = false;
+    const role = pointerRolesRef.current.get(e.pointerId);
+    pointerRolesRef.current.delete(e.pointerId);
     try {
       (e.target as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
+    if (role !== 'joystick') return;
+    const finalAim = aimFromEvent(e);
+    joystickRef.current = null;
+    setAim(null);
+    // A tap with no meaningful drag serves the default way.
+    onServe(finalAim || undefined);
   };
 
   const updatePaddleFromEvent = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -447,27 +490,57 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       ctx.textAlign = 'center';
       ctx.fillText(netLabel ?? t('net_halfway_line', language), width / 2, 20);
 
-      // Pulsing sonar warning arrow when ball is over in the opponent's court
-      if (isBallInOpponentCourt) {
+      // The two net indicators.
+      //
+      // There used to be one, labelled OPPONENT IN PLAY, and it tracked the
+      // BALL — it named one thing and drew another, and it went dark exactly
+      // when the opponent was most worth watching. They are separate now
+      // because they answer separate questions: where is the other player
+      // standing, and is the ball over there. Both are mirrored into this
+      // player's frame, the same head-to-head flip the radar applies.
+      //
+      // Neither is the sonar. The sonar draws the far half and costs the match
+      // its rating; these two stay inside the ranked game, which is why a
+      // match played WITH the sonar suppresses them (see App.tsx) rather than
+      // stacking all three.
+      if (hasOpponent) {
         const pulse = (Math.sin(time / 150) + 1) / 2;
-        const indicatorX = oppEstimatedX * width;
 
-        ctx.save();
-        ctx.fillStyle = theme.opponentPaddleColor;
-        ctx.shadowColor = theme.opponentPaddleGlow;
-        ctx.shadowBlur = 10 + pulse * 10;
+        if (showOpponentIndicator) {
+          const oppX = (1 - (oppPaddleXRef.current ?? 0.5)) * width;
+          ctx.save();
+          ctx.fillStyle = theme.opponentPaddleColor;
+          ctx.shadowColor = theme.opponentPaddleGlow;
+          ctx.shadowBlur = 10 + pulse * 10;
+          ctx.beginPath();
+          ctx.moveTo(oppX, 28 + pulse * 4);
+          ctx.lineTo(oppX - 10, 38 + pulse * 4);
+          ctx.lineTo(oppX + 10, 38 + pulse * 4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.font = 'bold 10px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(t('indicator_opponent', language), oppX, 50 + pulse * 3);
+          ctx.restore();
+        }
 
-        // Draw animated indicator chevron at the net where the ball/opponent is active
-        ctx.beginPath();
-        ctx.moveTo(indicatorX, 28 + pulse * 6);
-        ctx.lineTo(indicatorX - 10, 38 + pulse * 6);
-        ctx.lineTo(indicatorX + 10, 38 + pulse * 6);
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.font = 'bold 10px monospace';
-        ctx.fillText(t('opponent_in_play', language), indicatorX, 52 + pulse * 4);
-        ctx.restore();
+        // A second row, so the two never overprint when the opponent is
+        // standing exactly where the ball is.
+        const ob = oppBallRef.current;
+        if (showBallIndicator && ob && ob.active) {
+          const ballX = (1 - ob.x) * width;
+          ctx.save();
+          ctx.fillStyle = theme.ballColor;
+          ctx.shadowColor = theme.ballGlow;
+          ctx.shadowBlur = 8 + pulse * 8;
+          ctx.beginPath();
+          ctx.arc(ballX, 62 + pulse * 3, 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.font = 'bold 9px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(t('indicator_ball', language), ballX, 78 + pulse * 3);
+          ctx.restore();
+        }
       }
 
       // Draw Ripples
@@ -661,10 +734,68 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       ctx.fillRect(paddleCenterPx - 3, paddleTopPx + 2, 6, paddleH - 4);
       ctx.restore();
 
-      // Serve Prompt Overlay, and the aim indicator once a drag starts.
+      // Serve Prompt Overlay, the joystick, and the aim indicator.
       if (isServing) {
         const liveAim = aimRef.current;
+        const stick = joystickRef.current;
         ctx.save();
+
+        // The serving joystick, drawn where the thumb actually landed. It
+        // floats rather than sitting in a fixed corner so either hand works
+        // and nothing has to be aimed for before it exists.
+        //
+        // The knob shows the CLAMPED aim, not the raw finger: past full push
+        // the serve stops getting stronger, and the knob stopping at the ring
+        // is how the player finds that out without being told.
+        if (stick) {
+          const ax = stick.x * width;
+          const ay = stick.y * height;
+          const reachX = AIM_FULL_PUSH * width;
+          const reachY = AIM_FULL_PUSH * height;
+
+          // Full-power boundary. Only the upward half is reachable — power is
+          // read off upward travel alone — so only the upward half is drawn.
+          ctx.save();
+          ctx.strokeStyle = theme.accentColor;
+          ctx.globalAlpha = 0.22;
+          ctx.lineWidth = 2;
+          ctx.setLineDash([5, 6]);
+          ctx.beginPath();
+          ctx.ellipse(ax, ay, reachX, reachY, 0, Math.PI, 0);
+          ctx.stroke();
+          ctx.restore();
+
+          // The deadzone: inside it there is no aim, and releasing is the
+          // plain tap-to-serve this has always had.
+          ctx.save();
+          ctx.strokeStyle = theme.accentColor;
+          ctx.globalAlpha = 0.5;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(ax, ay, AIM_DEADZONE * height, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+
+          const knobX = ax + (liveAim ? liveAim.angle : 0) * reachX;
+          const knobY = ay - (liveAim ? liveAim.power : 0) * reachY;
+          ctx.save();
+          ctx.strokeStyle = theme.accentColor;
+          ctx.globalAlpha = 0.55;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(ax, ay);
+          ctx.lineTo(knobX, knobY);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = theme.accentColor;
+          ctx.shadowColor = theme.accentColor;
+          ctx.shadowBlur = 10;
+          ctx.beginPath();
+          ctx.arc(knobX, knobY, 11, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
         if (liveAim) {
           // Slingshot readout: an arrow from the paddle showing the launch
           // direction, its length showing power.
@@ -702,7 +833,8 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
           ctx.fillRect(barX, barY, barW, 5);
           ctx.fillStyle = theme.accentColor;
           ctx.fillRect(barX, barY, barW * liveAim.power, 5);
-        } else {
+        }
+        if (!stick) {
           const pulse = (Math.sin(time / 200) + 1) / 2;
           ctx.fillStyle = `rgba(255, 255, 255, ${0.7 + pulse * 0.3})`;
           ctx.font = 'bold 13px monospace';
@@ -732,8 +864,9 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     theme,
     settings.showTrails,
     isServing,
-    isBallInOpponentCourt,
-    oppEstimatedX,
+    hasOpponent,
+    showOpponentIndicator,
+    showBallIndicator,
     language,
     netLabel,
     aim,

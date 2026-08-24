@@ -49,6 +49,36 @@ export interface ServeAim {
   power: number;
 }
 
+/**
+ * The serving joystick's geometry, in normalized court units.
+ *
+ * A push UP from wherever the thumb landed sets the serve: sideways is angle,
+ * upward reach is power. It pushes rather than pulls because the paddle sits
+ * at 90% of the court height — a pull-back has ~10% of the screen below it and
+ * full power would be unreachable.
+ *
+ * These live here rather than in the canvas component so the mapping is a rule
+ * the fast test layer can state, instead of something only a browser can
+ * observe. The component draws the ring; this decides what the ring means.
+ */
+export const AIM_FULL_PUSH = 0.35;
+export const AIM_DEADZONE = 0.02;
+
+/**
+ * A push from the joystick's origin as an aim, or null inside the deadzone —
+ * which is what makes a plain tap still a plain serve.
+ *
+ * `dx`/`dy` are current-minus-origin in normalized court units, so `dy` is
+ * NEGATIVE when the thumb has moved up the screen.
+ */
+export function aimFromPush(dx: number, dy: number): ServeAim | null {
+  if (Math.hypot(dx, dy) < AIM_DEADZONE) return null;
+  return {
+    angle: clamp(dx / AIM_FULL_PUSH, -1, 1),
+    power: clamp(-dy / AIM_FULL_PUSH, 0, 1),
+  };
+}
+
 /** Turn an aim into a launch velocity, bounded by the match rules. */
 export function serveVelocity(
   aim: ServeAim | null | undefined,
@@ -492,13 +522,21 @@ export function aiServeDelay(competence: number, pressure = 0.5): number {
  *
  * `playerPaddleX` is in the PLAYER's coordinates; the cross-net transform
  * mirrors x, so the AI targets the mirror of where the player is not.
+ *
+ * A player standing dead centre has left neither side open, and a bare
+ * `> 0.5` resolved that tie the same way every time — so the first AI serve of
+ * every match, taken against a paddle still sitting at its starting 0.5, was
+ * predictably to one side. A centred player draws a coin flip instead.
  */
 export function aiServeAim(competence: number, playerPaddleX: number): ServeAim {
   const skill = clamp(competence / MAX_AI_COMPETENCE, 0, 1);
   // Where the player stands, seen from the AI's own half.
   const playerInAiCoords = 1 - clamp(playerPaddleX, 0, 1);
-  // Serve to the side the player has left open.
-  const direction = playerInAiCoords > 0.5 ? -1 : 1;
+  // Serve to the side the player has left open — or either, if they are
+  // covering the middle and there is no open side to pick.
+  const offCentre = playerInAiCoords - 0.5;
+  const direction =
+    Math.abs(offCentre) < 1e-6 ? (Math.random() < 0.5 ? -1 : 1) : offCentre > 0 ? -1 : 1;
   const commitment = skill * 0.85;
   const noise = (Math.random() - 0.5) * 2 * (1 - skill) * 0.8;
   return {

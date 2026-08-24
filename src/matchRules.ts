@@ -1,4 +1,5 @@
-import { MatchRules, RoomMatchConfig } from './types';
+import { AIDifficulty, GameMode, MatchRules, RoomMatchConfig } from './types';
+import { soloCountsForRank } from './rating';
 
 // Pre-match match rules, shared by client and server like profileRules.ts and
 // rating.ts. In a solo match these are chosen on the MainMenu; in a duel they
@@ -12,8 +13,14 @@ import { MatchRules, RoomMatchConfig } from './types';
 // absorb a slightly wider paddle the way it absorbs a slightly better phone.
 // Outside it the match still pays XP but moves no rating and no tier: a 60%
 // paddle against a 180% ball is a party match, not a ladder result.
-// Presentation and convenience options (sonar, telemetry, quick chat,
-// auto-serve) never touch the ball, so they never affect ranking.
+// Telemetry, quick chat and auto-serve never touch the ball and never affect
+// ranking. The OPPONENT SONAR is the exception, and deliberately so: the whole
+// game is a blind half-court, so a live mini-map of the half you are not
+// allowed to see is not a presentation preference, it is the hardest rule in
+// the game turned off. It stays available, it still pays XP, and it costs the
+// match its rating — which is what makes the two lightweight net indicators
+// (opponent paddle, and the ball while it is over there) worth having, since
+// those stay inside the ranked game.
 
 export interface RuleSpec {
   min: number;
@@ -52,7 +59,10 @@ export const DEFAULT_MATCH_RULES: MatchRules = {
   ballSpeedMax: 1,
   serveAngleMax: 1,
   servePowerMax: 1,
-  opponentSonar: true,
+  // Off by default: on, it unranks the match and suppresses the two net
+  // indicators, so a shipped default of `true` would mean every stock match
+  // was unranked with its indicators hidden.
+  opponentSonar: false,
   trackTelemetry: true,
   quickChat: true,
   autoServeSeconds: 0,
@@ -106,9 +116,14 @@ export function isRuleRanked(key: PhysicsRuleKey, value: number): boolean {
  * Every physics rule has to sit inside its ranked band; one rule pushed past
  * its edge unranks the match on its own, because the ladder only means
  * something if a rated result was played on something close to stock.
+ *
+ * The opponent sonar unranks it too. It is not a physics rule and it is the
+ * only non-physics rule here that counts — see the header: it hands the player
+ * the half of the court the game exists to hide.
  */
 export function isRankedRules(rules: Partial<MatchRules> | null | undefined): boolean {
   const r = normalizeRules(rules);
+  if (r.opponentSonar) return false;
   return PHYSICS_RULE_KEYS.every((key) => isRuleRanked(key, r[key]));
 }
 
@@ -123,6 +138,50 @@ export function unrankedRuleKeys(rules: Partial<MatchRules> | null | undefined):
   const r = normalizeRules(rules);
   return PHYSICS_RULE_KEYS.filter((key) => !isRuleRanked(key, r[key]));
 }
+
+/**
+ * Everything that can stop a match counting for rank, in the order a player
+ * should hear about it.
+ *
+ * The rules are only half the question and the pre-match sheet used to ask
+ * only that half: it promised "counts for rank" for a Rookie solo match the
+ * server then refuses to rate (a solo result rates only at an EARNED
+ * difficulty), and for Practice and Split Screen, which record no rating at
+ * all. A badge that is wrong about the thing it exists to say is worse than no
+ * badge. This is the whole verdict in one place, so the sheet, the lobby and
+ * anything added later cannot each answer it differently.
+ *
+ * The SERVER still derives its own half from `isRankedRules(payload.rules)`
+ * plus `soloCountsForRank(difficulty)`; this does not replace that and is
+ * never trusted by it. It is the same rule stated once for display.
+ */
+export type UnrankedReason = 'mode' | 'difficulty' | 'sonar' | PhysicsRuleKey;
+
+export interface RankedMatchContext {
+  rules: Partial<MatchRules> | null | undefined;
+  mode: GameMode;
+  /** Solo only. A duel rates on its rules alone. */
+  difficulty?: AIDifficulty;
+}
+
+/** Modes that never write a rating for anybody, whatever the rules say. */
+const UNRATED_MODES: readonly GameMode[] = ['practice', 'split'];
+
+export function unrankedReasons(ctx: RankedMatchContext): UnrankedReason[] {
+  const reasons: UnrankedReason[] = [];
+  if (UNRATED_MODES.includes(ctx.mode)) reasons.push('mode');
+  if (ctx.mode === 'solo' && ctx.difficulty && !soloCountsForRank(ctx.difficulty)) {
+    reasons.push('difficulty');
+  }
+  const r = normalizeRules(ctx.rules);
+  if (r.opponentSonar) reasons.push('sonar');
+  reasons.push(...unrankedRuleKeys(r));
+  return reasons;
+}
+
+/** True when nothing at all stands between this match and the ladder. */
+export const isRankedMatch = (ctx: RankedMatchContext): boolean =>
+  unrankedReasons(ctx).length === 0;
 
 export function normalizeWinningScore(value: unknown): number {
   const n = Number(value);

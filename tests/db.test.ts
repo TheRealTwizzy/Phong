@@ -42,6 +42,58 @@ const init = (id: string, username: string) => {
   return result.profile!;
 };
 
+// Which way the ladder went, for the winner overlay's arrow. The overlay used
+// to drop its rank tile entirely when a match did not rate — which is exactly
+// when a player most wants to be told the ladder did not move — so 'none' has
+// to be a real answer rather than a missing one.
+describe('rankDirection', () => {
+  it('is up on a rated win and down on a rated loss', () => {
+    init('p_dir', 'DirCase');
+    expect(db.recordMatch(match('p_dir', { matchKey: 'dir-1' })).rankDirection).toBe('up');
+    expect(
+      db.recordMatch(
+        match('p_dir', { matchKey: 'dir-2', playerScore: 2, opponentScore: 7, isWinner: false })
+      ).rankDirection
+    ).toBe('down');
+  });
+
+  it('is none for a solo match at a difficulty that never rates', () => {
+    init('p_dir_rookie', 'DirRookie');
+    const res = db.recordMatch(
+      match('p_dir_rookie', { matchKey: 'dir-rookie', mode: 'solo', difficulty: 'rookie' })
+    );
+    // The match still PAID — this is a movement report, not a rejection.
+    expect(res.earnedXp).toBeGreaterThan(0);
+    expect(res.rankDirection).toBe('none');
+  });
+
+  it('is none when the rules unranked the match, sonar included', () => {
+    init('p_dir_sonar', 'DirSonar');
+    const sonar = db.recordMatch(
+      match('p_dir_sonar', {
+        matchKey: 'dir-sonar',
+        rules: { opponentSonar: true },
+      })
+    );
+    expect(sonar.ranked).toBe(false);
+    expect(sonar.rankDirection).toBe('none');
+
+    const custom = db.recordMatch(
+      match('p_dir_sonar', { matchKey: 'dir-custom', rules: { paddleScale: 1.6 } })
+    );
+    expect(custom.rankDirection).toBe('none');
+  });
+
+  it('replays the direction it reported the first time, never a second climb', () => {
+    init('p_dir_replay', 'DirReplay');
+    const first = db.recordMatch(match('p_dir_replay', { matchKey: 'dir-replay' }));
+    expect(first.rankDirection).toBe('up');
+    const again = db.recordMatch(match('p_dir_replay', { matchKey: 'dir-replay' }));
+    expect(again.alreadyRecorded).toBe(true);
+    expect(again.rankDirection).toBe('up');
+  });
+});
+
 describe('GameDatabase', () => {
   it('creates the SQLite database file in DATA_DIR', () => {
     expect(fs.existsSync(path.join(TMP, 'phong.db'))).toBe(true);

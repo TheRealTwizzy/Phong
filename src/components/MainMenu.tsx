@@ -610,6 +610,10 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 }
                 lang={lang}
                 mode={prematch.id}
+                // Already clamped to a rung this profile has earned (App.tsx
+                // does that on every achievement change), so the badge judges
+                // the difficulty the match will actually be played on.
+                difficulty={settings.difficulty}
               />
             </div>
           </>

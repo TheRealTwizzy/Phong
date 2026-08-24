@@ -14,6 +14,8 @@ import {
   isStockPhysics,
   duelMatchKey,
   unrankedRuleKeys,
+  unrankedReasons,
+  isRankedMatch,
   normalizeRules,
   normalizeRoomConfig,
   RANKED_AUTO_SERVE_SECONDS,
@@ -100,11 +102,26 @@ describe('match rules', () => {
     }
   });
 
-  it('never unranks a match on a presentation option', () => {
-    for (const key of ['opponentSonar', 'trackTelemetry', 'quickChat'] as const) {
-      expect(isRankedRules({ ...DEFAULT_MATCH_RULES, [key]: false })).toBe(true);
+  it('never unranks a match on a presentation option — except the sonar', () => {
+    for (const key of ['trackTelemetry', 'quickChat'] as const) {
+      for (const value of [true, false]) {
+        expect(isRankedRules({ ...DEFAULT_MATCH_RULES, [key]: value })).toBe(true);
+      }
     }
     expect(isRankedRules({ ...DEFAULT_MATCH_RULES, autoServeSeconds: 3 })).toBe(true);
+  });
+
+  it('unranks a match played with the opponent sonar', () => {
+    // The whole game is a blind half-court. A live mini-map of the half you
+    // are not allowed to see is not a presentation preference — it is the
+    // hardest rule in the game switched off — so it costs the rating, while
+    // still paying XP like any other unranked match.
+    expect(isRankedRules({ ...DEFAULT_MATCH_RULES, opponentSonar: true })).toBe(false);
+    expect(isRankedRules({ ...DEFAULT_MATCH_RULES, opponentSonar: false })).toBe(true);
+    // And the shipped default has to BE the ranked one, or every stock match
+    // is unranked with its net indicators suppressed.
+    expect(DEFAULT_MATCH_RULES.opponentSonar).toBe(false);
+    expect(isRankedRules(DEFAULT_MATCH_RULES)).toBe(true);
   });
 
   it('forces an auto-serve timer onto a ranked duel', () => {
@@ -131,6 +148,15 @@ describe('match rules', () => {
     });
     expect(isRankedRules(party.rules)).toBe(false);
     expect(party.rules.autoServeSeconds).toBe(0);
+
+    // Including one unranked by the SONAR rather than by a slider: the timer
+    // exists to protect a rated result, and there is no rated result here.
+    const sonarRoom = normalizeRoomConfig({
+      winningScore: 5,
+      rules: { ...DEFAULT_MATCH_RULES, opponentSonar: true, autoServeSeconds: 0 },
+    });
+    expect(isRankedRules(sonarRoom.rules)).toBe(false);
+    expect(sonarRoom.rules.autoServeSeconds).toBe(0);
   });
 
   it('keeps every ranked band a real window that contains stock', () => {
@@ -157,6 +183,66 @@ describe('match rules', () => {
     expect(clampBallSpeed(0.01, rules)).toBeCloseTo(lo, 10);
     expect(clampBallSpeed(99, rules)).toBeCloseTo(hi, 10);
     expect(clampBallSpeed((lo + hi) / 2, rules)).toBeCloseTo((lo + hi) / 2, 10);
+  });
+});
+
+// Everything standing between a match and the ladder, in one place.
+//
+// The pre-match sheet used to ask only half the question — it read the sliders
+// and promised "counts for rank" for a Rookie solo match the server was always
+// going to refuse to rate, and for Practice and Split Screen, which record no
+// rating at all. A badge that is wrong about the one thing it exists to say is
+// worse than no badge.
+describe('unrankedReasons', () => {
+  const stock = { rules: DEFAULT_MATCH_RULES } as const;
+
+  it('is empty for a stock ranked match, and that is the definition', () => {
+    expect(unrankedReasons({ ...stock, mode: 'multiplayer' })).toEqual([]);
+    expect(isRankedMatch({ ...stock, mode: 'multiplayer' })).toBe(true);
+    expect(unrankedReasons({ ...stock, mode: 'solo', difficulty: 'pro' })).toEqual([]);
+    expect(unrankedReasons({ ...stock, mode: 'solo', difficulty: 'cyber' })).toEqual([]);
+  });
+
+  it('names the mode when the mode never rates anybody', () => {
+    for (const mode of ['practice', 'split'] as const) {
+      expect(unrankedReasons({ ...stock, mode })).toEqual(['mode']);
+      expect(isRankedMatch({ ...stock, mode })).toBe(false);
+    }
+  });
+
+  it('names the difficulty for a solo rung that was never earned', () => {
+    expect(unrankedReasons({ ...stock, mode: 'solo', difficulty: 'rookie' })).toEqual([
+      'difficulty',
+    ]);
+    // A duel rates on its rules alone — a difficulty on the payload is not
+    // the duel's difficulty and must not unrank it.
+    expect(unrankedReasons({ ...stock, mode: 'multiplayer', difficulty: 'rookie' })).toEqual([]);
+  });
+
+  it('names the sonar', () => {
+    const rules = { ...DEFAULT_MATCH_RULES, opponentSonar: true };
+    expect(unrankedReasons({ rules, mode: 'multiplayer' })).toEqual(['sonar']);
+  });
+
+  it('names every physics rule pushed past its band, after the rest', () => {
+    const rules = { ...DEFAULT_MATCH_RULES, paddleScale: 1.6, ballScale: 1.8 };
+    expect(unrankedReasons({ rules, mode: 'multiplayer' })).toEqual(['paddleScale', 'ballScale']);
+  });
+
+  it('reports every reason at once, most fundamental first', () => {
+    // The strip has one line and shows the first of these; the count beside
+    // the header covers the rest, so the ORDER is what the player reads.
+    const rules = { ...DEFAULT_MATCH_RULES, opponentSonar: true, paddleScale: 1.6 };
+    expect(unrankedReasons({ rules, mode: 'solo', difficulty: 'rookie' })).toEqual([
+      'difficulty',
+      'sonar',
+      'paddleScale',
+    ]);
+    expect(unrankedReasons({ rules, mode: 'practice' })).toEqual([
+      'mode',
+      'sonar',
+      'paddleScale',
+    ]);
   });
 });
 
