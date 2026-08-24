@@ -404,6 +404,20 @@ export class P2PGameLink {
       // No `carried` argument: a locally agreed rematch continues the runs the
       // replica is already holding, which is exactly what carrying means.
       this.resetMatchState(nextServer);
+      // Tell the relay NOW, not at the new match's first crossing or point.
+      // The two peers agree a rematch entirely between themselves — the relay
+      // learns its matchSeq changed only from a later syncToRelay() call, and
+      // until then room.matchSeq still names the match that just ended. The
+      // room's pre-match rating snapshot is sampled the instant matchSeq is
+      // seen to change (server.ts, duelStartRatings), so a gap here is a gap
+      // there: an unrelated write to either player's rating — a queued solo
+      // result replaying mid-duel, say — landing inside that window is not
+      // "before the rematch" from the players' own point of view, but the
+      // snapshot would read it as such because the relay had not yet been
+      // told the rematch had happened. A zero-score sync sent the moment both
+      // votes land closes the gap to one network round trip instead of
+      // however long the next rally takes to produce a crossing.
+      this.syncToRelay();
       this.opts.onMessage({
         type: 'game_start',
         servingPlayer: nextServer,

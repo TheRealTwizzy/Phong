@@ -393,4 +393,27 @@ describe('the replica applies the relay rules it owns alone', () => {
     // serving; the rematch flips it back — the relay's own rule, replicated.
     expect(restart.servingPlayer).toBe(0);
   });
+
+  it('syncs the relay the moment a rematch is agreed, not at its first crossing', async () => {
+    // The peers agree a rematch entirely between themselves — nothing about it
+    // reaches the relay until a syncToRelay() call names the new matchSeq. Left
+    // to the first crossing or point of the new match, room.matchSeq (and the
+    // pre-match rating snapshot keyed on it) would still describe the match
+    // that just ended for however long the next rally takes to produce one,
+    // during which an unrelated write to a player's rating is indistinguishable
+    // from one that happened before the rematch even started.
+    const [a, b] = await pairedPeers();
+    for (let i = 0; i < 3; i++) a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
+    a.syncs.length = 0;
+    b.syncs.length = 0;
+    a.link.sendGame({ type: 'rematch_request' });
+    b.link.sendGame({ type: 'rematch_request' });
+
+    expect(a.syncs.at(-1)!.matchSeq).toBe(2);
+    expect(a.syncs.at(-1)!.p1Score).toBe(0);
+    expect(a.syncs.at(-1)!.p2Score).toBe(0);
+    expect(b.syncs.at(-1)!.matchSeq).toBe(2);
+    expect(b.syncs.at(-1)!.p1Score).toBe(0);
+    expect(b.syncs.at(-1)!.p2Score).toBe(0);
+  });
 });
