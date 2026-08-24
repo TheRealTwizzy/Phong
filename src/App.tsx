@@ -103,6 +103,7 @@ import {
 import { isLinkableId } from './profileRules';
 import {
   ClientSessionStatus,
+  deleteAccount,
   endSession,
   openSession,
   probeSession,
@@ -592,6 +593,38 @@ export default function App() {
       setPlayerId(res.profile.id);
     }
   }, []);
+
+  /**
+   * Delete this account, permanently, from the bottom of Settings.
+   *
+   * The username has already been typed exactly and the permanence confirmed
+   * by the time this runs; the server checks the name again, because the two
+   * steps in front of it live in a client.
+   *
+   * The two pieces of stale per-browser state startFreshIdentity has to clear
+   * apply here for the same reasons, and one of them is handled differently.
+   * The on-device match queue (net/matchRecord.ts) is a flat localStorage key
+   * with no idea which account was active when an entry was parked, so a match
+   * that failed to record before the deletion would be flushed onto the fresh
+   * profile this browser is about to be given — XP, rating and achievements
+   * paid to an account that never played it. That is cleared here. `carryRef`
+   * needs no such call only because this path RELOADS: the whole page goes,
+   * and with it every ref, which is also what puts the player on the
+   * onboarding modal a brand-new device sees.
+   */
+  const handleDeleteAccount = useCallback(
+    async (username: string): Promise<{ ok: boolean; error?: string }> => {
+      const result = await deleteAccount(username);
+      if (!result.ok) return result;
+      clearPendingMatches();
+      // Deliberately a full reload rather than a state swap: the account this
+      // page was built around no longer exists, and there is no piece of it
+      // worth carrying across.
+      window.location.reload();
+      return result;
+    },
+    []
+  );
 
   // Refetch once the profile exists (the device cookie is set by then) and
   // again whenever the UTC day rolls over while the tab stays open.
@@ -3295,6 +3328,12 @@ export default function App() {
           // and it must never be the thing that walks a player out of a live
           // match. In-match Settings is device preferences only anyway.
           onStartTour={screen === 'menu' ? () => startTour() : undefined}
+          // Menu only, for the same reason the tour is: from a live court it
+          // would walk the player out of a match — and out of a DUEL, leaving
+          // an opponent alone in a room that was never told anybody had gone.
+          // The relay would charge the abandon and the account it charged
+          // would already be deleted.
+          onDeleteAccount={screen === 'menu' ? handleDeleteAccount : undefined}
           onTriggerShake={() => setShakeTrigger(Date.now())}
         />
 

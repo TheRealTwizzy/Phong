@@ -47,3 +47,21 @@ export function usernameLockExpiry(usernameChangedAt: string): Date {
 export function isLinkableId(id: string | null | undefined): boolean {
   return typeof id === 'string' && /^(dev_|bot-)/.test(id);
 }
+
+// What a deleted account leaves behind in somebody ELSE's match history.
+//
+// Every seat files its own match row, so a duel writes two and the opponent's
+// copy is the opponent's record of a game they played — deleting it would take
+// that game out of their history while their career counters, which are not
+// derived from that table, went on counting it. So the row stays and the
+// pointers into the deleted account are scrubbed. Both of them: the id, and
+// the name, because a deleted username goes straight back into the pool and
+// would otherwise sit in Alice's history naming whoever claims it next.
+//
+// Deliberately matches neither `dev_` nor `bot-`, so isLinkableId already
+// refuses to make it tappable and nothing has to learn about it to be safe.
+export const DELETED_PLAYER_ID = 'deleted';
+// The stored fallback, in the same spirit as the 'Opponent' / 'AI (pro)'
+// names this table already carries. The client swaps in a localized label
+// when it recognises the id; this is what a client that does not sees.
+export const DELETED_PLAYER_NAME = 'Deleted Player';

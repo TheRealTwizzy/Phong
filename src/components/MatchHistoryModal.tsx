@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { MatchRecord, LanguageCode } from '../types';
 import { t } from '../i18n/translations';
-import { isLinkableId } from '../profileRules';
+import { isLinkableId, DELETED_PLAYER_ID } from '../profileRules';
 import { Sheet, Button, Panel, StatTile } from './ui';
 import {
   X,
@@ -216,8 +216,19 @@ export const MatchHistoryModal: React.FC<MatchHistoryModalProps> = ({
           const isP1 = match.player1Id === playerId;
           const playerScore = isP1 ? match.scoreP1 : match.scoreP2;
           const opponentScore = isP1 ? match.scoreP2 : match.scoreP1;
-          const opponentDisplayName = isP1 ? match.player2Name : match.player1Name;
           const opponentPlayerId = isP1 ? match.player2Id : match.player1Id;
+          // A player who deleted their account leaves this row behind — it is
+          // this player's own record of a game they really played — with the
+          // pointers into the deleted account scrubbed. The stored name is an
+          // English fallback for a client that predates this; here it becomes
+          // the localized label. isLinkableId already refuses the id, so the
+          // name is not a tap target either.
+          const opponentDeleted = opponentPlayerId === DELETED_PLAYER_ID;
+          const opponentDisplayName = opponentDeleted
+            ? t('history_deleted_player', language)
+            : isP1
+            ? match.player2Name
+            : match.player1Name;
           const opponentLinkable = onViewProfile && isLinkableId(opponentPlayerId);
 
           return (
