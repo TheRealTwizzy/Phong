@@ -217,6 +217,7 @@ const look = () =>
     court: !!document.querySelector('#half-court-canvas'),
     sheet: !!document.querySelector('#prematch-modal'),
     achievements: !!document.querySelector('#achievements-modal-container'),
+    lobby: !!document.querySelector('#multiplayer-lobby-modal'),
     tasks: !!document.querySelector('#missions-modal-container'),
     leaderboard: !!document.querySelector('#leaderboard-modal-container'),
     profile: !!document.querySelector('#profile-modal-container'),
@@ -243,15 +244,25 @@ for (let i = 0; i < 40; i++) {
   await nextStep();
 }
 
-// Probe 1: a modal the tour did not open must not survive the stage change.
+// Probe 1: a surface the tour did not open must not survive the stage change.
 // The stages after this open Tasks, the Leaderboard and Profile, any of which
-// would otherwise mount underneath it.
+// would otherwise mount underneath it. Two surfaces, because the rule is
+// "every one the tour can reach", not "the ones we happened to think of" —
+// the tab bar's Achievements, and the Duel lobby from the modes row.
 if (!(await poke('#menu-nav-achievements'))) fail('no Achievements tab to meddle with');
 await sleep(300);
 if (!(await look()).achievements) fail('could not open Achievements under the tour scrim');
 await nextStep();
 if ((await look()).achievements) {
   fail('a modal the player opened survived the stage change and covers the next step’s anchor');
+}
+
+if (!(await poke('#menu-mode-multiplayer'))) fail('no Duel row to meddle with');
+await sleep(300);
+if (!(await look()).lobby) fail('could not open the Duel lobby under the tour scrim');
+await nextStep();
+if ((await look()).lobby) {
+  fail('the Duel lobby the player opened survived the stage change and covers the next step’s anchor');
 }
 
 // Probe 2: the pre-match sheet. Tapping a mode row still sets the menu's own

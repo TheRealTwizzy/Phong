@@ -137,6 +137,34 @@ const code = await host.evaluate(() => {
 if (!code) fail('host never got a room code');
 ok(`host opened room ${code}`);
 
+// The HOST has the same window, and it was open. Asking for a room and being
+// given one are separate moments too, and before `room_created` lands roomId
+// is still null — so dismissing is a plain dismissal that asks nothing. The
+// answer then flips the screen to `game` and seats the host behind a shut
+// lobby: alone on a live court with no code to share and no Leave control,
+// while the relay goes on holding the room they may already have sent someone.
+const lone = await newPlayer('LbC');
+await lone.click('#menu-mode-multiplayer');
+await lone.waitForSelector('#btn-create-room', { timeout: 8000 });
+await lone.evaluate(() => {
+  document.querySelector('#btn-create-room').click();
+  document.querySelector('#btn-close-lobby').click();
+});
+await sleep(2500);
+const loneState = await lone.evaluate(() => ({
+  seated: !!document.querySelector('#half-court-canvas'),
+  onMenu: !!document.querySelector('#main-menu-screen'),
+  lobby: !!document.querySelector('#multiplayer-lobby-modal'),
+  code: (document.querySelector('#lobby-room-code')?.textContent || '').trim(),
+  leave: !!document.querySelector('#btn-leave-room'),
+}));
+if (loneState.onMenu || !loneState.seated) fail('the create never landed at all — wrong bug reproduced');
+if (!loneState.lobby) fail('host holds a room with the lobby shut — no code to share, no way out');
+if (!/^[A-Z0-9]{4}$/.test(loneState.code)) fail('the reopened lobby shows no room code');
+if (!loneState.leave) fail('host holds a room with no Leave control');
+ok('a room created into a shut lobby reopens it, code and Leave control and all');
+await lone.context().close();
+
 // Ask for the seat and shut the lobby in the same tick — the answer cannot
 // have arrived yet, so this is the window rather than a race against it.
 const guest = await newPlayer('LbG');

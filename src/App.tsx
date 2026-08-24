@@ -1225,6 +1225,14 @@ export default function App() {
   const handleServerMessage = (msg: WSServerMessage) => {
     switch (msg.type) {
       case 'room_created':
+        // Same rule as room_joined below, and it was missing here: asking for
+        // a room and being given one are separate moments, and the lobby can
+        // be dismissed in between — before roomId is set, so that dismissal is
+        // a plain one and asks nothing. This case then flips the screen to
+        // `game` and seats the host behind a shut lobby: alone on a live court
+        // with no room code to share and no Leave control, while the relay
+        // goes on holding the room they had probably already sent someone.
+        setIsMultiplayerOpen(true);
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
@@ -1882,13 +1890,17 @@ export default function App() {
     setIsProfileOpen(tourStage === 'profile');
     setIsLeaderboardOpen(tourStage === 'leaderboard');
     setIsMissionsOpen(tourStage === 'tasks');
-    // No stage wants these, but the scrim is pointer-events-none and the tab
-    // bar step points straight at them — so a player can open Achievements or
-    // Match History mid-tour, and the next stage would then open Tasks or the
-    // Leaderboard UNDERNEATH a modal still covering its anchor. Every surface
-    // the tour can reach has to be named here, not just the ones it uses.
+    // No stage wants any of these, but the scrim is pointer-events-none, so a
+    // player can open them mid-tour — Achievements and Match History from the
+    // tab bar step the tour points straight at, the Duel lobby from the modes
+    // step, a public profile from a username on the Leaderboard or Profile
+    // step. Left open, the next stage mounts its own surface UNDERNEATH one
+    // still covering the anchor. Every surface the tour can REACH belongs
+    // here, not just the ones it uses; the four it does use are set above.
     setIsAchievementsOpen(false);
     setIsHistoryOpen(false);
+    setIsMultiplayerOpen(false);
+    setPublicProfileId(null);
     if (tourStage === 'match') {
       // A real Solo match on the tour's own terms (see activeConfig) — Rookie
       // is open to everybody from the first match, so the tour is never the
