@@ -566,6 +566,16 @@ export default function App() {
     setSessionBusy(false);
     setSessionStatus(res.status);
     if (res.profile) {
+      // The fresh profile is swapped in WITHOUT a reload, unlike every other
+      // way this page changes identity (a recovery-code restore reloads the
+      // whole page instead). carryRef survives that swap, and it is read in
+      // PREFERENCE to the profile's own stored value ("what this page last
+      // saw for itself wins" — see streaks.ts) — so left alone, the brand new
+      // account's first Solo or Practice session opens on the RELEASED
+      // account's last run, and bestStreak opening on it is what the career
+      // best, the mode best and rally achievements are keyed on: a theme
+      // unlock or an achievement for returns this player never made.
+      carryRef.current = {};
       setProfile(res.profile);
       setPlayerId(res.profile.id);
     }
