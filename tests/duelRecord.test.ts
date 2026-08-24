@@ -276,6 +276,58 @@ describe('recording a duel', () => {
     p2.close();
   });
 
+  it('keeps a relay-counted return when the other peer has not noticed the link is down', async () => {
+    // The second half of a one-sided fallback. p2 notices first and relays its
+    // crossing, which the relay counts. p1 has not noticed, so it is told about
+    // that crossing only as a ball_incoming — a message its P2P replica never
+    // sees — and its next snapshot is a genuinely LATER revision describing a
+    // match one return short. Ordering cannot save this: the revision is not
+    // stale, the picture is. So the relay stops taking the fields a snapshot
+    // ASSIGNS once it is counting the match itself.
+    //
+    // Through the real relay because the flag is set in server.ts's handler;
+    // the room suite reaches countReturn directly and sets it by hand.
+    const host = await newDevice('DivergeH');
+    const guest = await newDevice('DivergeG');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+
+    // Mid-point, p1 three returns in. Sent on p2's socket so it is ordered
+    // against p2's crossing below; messages from two sockets are not.
+    p2.send({
+      type: 'match_sync', matchSeq, rev: 1,
+      p1Score: 0, p2Score: 0,
+      bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0],
+      servingPlayer: 0, crossingsThisPoint: 4,
+    });
+
+    // p2 falls back and relays its return. Awaiting p1's ball_incoming is the
+    // barrier: the relay has counted it before p1 says anything else.
+    await cross(p2, p1, 1);
+
+    // p1, still on P2P, reports the moment that ends the match — from a
+    // replica that never saw p2's return.
+    p1.send({
+      type: 'match_sync', matchSeq, rev: 2,
+      p1Score: 3, p2Score: 0,
+      bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0],
+      servingPlayer: 0, crossingsThisPoint: 4,
+    });
+
+    await p1.await('match_recorded');
+    await p2.await('match_recorded');
+
+    // The run p2 walks away with is the one the relay counted, not the one p1
+    // never knew about. Zero here means the snapshot undid the return.
+    const guestProfile = await getProfile(guest);
+    expect(guestProfile.modeStats?.multiplayer?.currentStreak).toBe(1);
+    // p1's own run is untouched either way — this is not a case of the relay
+    // taking something away from the peer that reported it.
+    expect((await getProfile(host)).modeStats?.multiplayer?.currentStreak).toBe(3);
+
+    p1.close();
+    p2.close();
+  }, 20000);
+
   it('rates the second seat against the opponent it started against, whichever path records first', async () => {
     // A duel reaches the ladder by two routes — the relay writes it the moment
     // the score decides it, and each phone POSTs its own copy as the fallback

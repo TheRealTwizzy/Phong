@@ -50,6 +50,7 @@ const room = (over: Partial<Room> = {}): Room => ({
   lastActive: 0,
   startRatings: null,
   startRatingsSeq: 0,
+  relayCounted: false,
   soloSince: 0,
   ...over,
 });
@@ -645,6 +646,53 @@ describe('what a match earned, on the relay', () => {
     applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
     expect(r.streaks).toEqual([4, 0]);
     expect(r.crossingsThisPoint).toBe(5);
+  });
+
+  it('stops taking a diverged peer\u2019s account of the run once it is counting itself', () => {
+    // The other half of the fallback, and the one a revision cannot catch.
+    // The peer that noticed first relays a crossing; the relay counts it. The
+    // peer that has NOT noticed is told about it only as a ball_incoming,
+    // which its replica never sees — so its next snapshot is a genuinely later
+    // revision describing a match one return short, and the fields it ASSIGNS
+    // would undo what the relay counted.
+    //
+    // Nothing is lost by refusing them: a peer stops syncing the moment it
+    // falls back, so a snapshot arriving after this can only be the diverged
+    // one. The maxed fields keep being applied, because a peer still scoring
+    // over its own link knows things the relay does not.
+    const r = room({ syncRev: 0, servingPlayer: 0, config: normalizeRoomConfig({ winningScore: 5 }) });
+    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+
+    countReturn(r, 0); // relayed by the peer that fell back
+    r.relayCounted = true; // as server.ts sets it beside that call
+    expect(r.streaks).toEqual([4, 0]);
+    expect(r.crossingsThisPoint).toBe(5);
+
+    // The diverged peer's next event. Later revision, older picture.
+    applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], servingPlayer: 1, crossingsThisPoint: 4 }));
+
+    // The run and the point phase are the relay's now.
+    expect(r.streaks).toEqual([4, 0]);
+    expect(r.crossingsThisPoint).toBe(5);
+    expect(r.servingPlayer).toBe(0);
+    // The score still lands: it only ever goes up, and that peer saw a point
+    // the relay did not.
+    expect(r.scores[0]).toBe(1);
+    // And the revision still moves, so the pair stays ordered.
+    expect(r.syncRev).toBe(5);
+  });
+
+  it('hands authority back to the peers when a new match starts', () => {
+    // A fallback belongs to the match it happened in. A rematch is a fresh
+    // link as far as this is concerned — and the peers can agree one between
+    // themselves, which the relay only learns about through applyMatchSync.
+    const r = room({ syncRev: 9, servingPlayer: 0, relayCounted: true, matchOver: true, matchSeq: 1, scores: [5, 2] });
+    applyMatchSync(r, sync({ matchSeq: 2, rev: 1, p1Score: 0, bestStreaks: [2, 2], streaks: [2, 2], earnedBests: [0, 0], servingPlayer: 1, crossingsThisPoint: 3 }));
+    expect(r.matchSeq).toBe(2);
+    expect(r.relayCounted).toBe(false);
+    expect(r.streaks).toEqual([2, 2]);
+    expect(r.servingPlayer).toBe(1);
+    expect(r.crossingsThisPoint).toBe(3);
   });
 
   it('still takes a peer that has not noticed the link is down', () => {

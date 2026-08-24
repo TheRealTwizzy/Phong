@@ -144,6 +144,33 @@ export interface Room {
    */
   startRatings: [SeatRating | null, SeatRating | null] | null;
   startRatingsSeq: number;
+  /**
+   * Whether the relay has counted a gameplay event for the CURRENT match —
+   * a crossing or a point that arrived over the WebSocket rather than the
+   * peers' DataChannel.
+   *
+   * A P2P snapshot is trustworthy because both peers run the same replica over
+   * the same events in the same order. A fallback breaks that, and it breaks
+   * it for ONE peer at a time: the peer that notices first relays its next
+   * crossing, which the relay counts, while the other peer is told about it
+   * only as a `ball_incoming` — a message its replica never sees. From that
+   * moment its snapshots describe a match missing that return, and the fields
+   * a snapshot ASSIGNS would put the relay back to it.
+   *
+   * A revision cannot catch that: the diverged peer's next revision is
+   * genuinely later than anything it has sent, and the relay's own crossings
+   * deliberately do not advance that counter (they are not the peers' events
+   * to count). So the answer is not an ordering but an authority — once the
+   * relay is counting, it owns where the run and the point are.
+   *
+   * Nothing is lost by it. A peer stops sending snapshots the moment it falls
+   * back (`sendGame` returns false, so the replica never counts and never
+   * syncs), so a snapshot arriving after this flag is set can only be from a
+   * peer that is missing what the relay counted. The MAXED fields — scores and
+   * the peaks — keep being applied, since a peer still scoring over its own
+   * link knows things the relay does not, and a maximum cannot go backwards.
+   */
+  relayCounted: boolean;
 }
 
 /** A seat's hidden rating, as the ladder in src/rating.ts models it. */
@@ -185,8 +212,11 @@ export function startMatch(room: Room, servingPlayer: 0 | 1): GameStartPayload {
   room.ready = [false, false];
   room.matchSeq += 1;
   // Each match's snapshot revisions count from zero, so the last match's
-  // high-water mark must not outlive it and reject all of this one's.
+  // high-water mark must not outlive it and reject all of this one's. And a
+  // fresh match starts with the peers authoritative again: a fallback belongs
+  // to the match it happened in.
   room.syncRev = 0;
+  room.relayCounted = false;
   // The config rides along with every start: a phone can never begin a match
   // on terms it has not been told, however it arrived in the room. So does the
   // sequence number, so both phones can name the match they are playing when
@@ -263,8 +293,10 @@ export function applyMatchSync(
     room.rematchVotes = [false, false];
     room.ready = [false, false];
     // A new match's revisions start over, so the old high-water mark would
-    // reject every snapshot of it.
+    // reject every snapshot of it. The peers agreed this rematch between
+    // themselves, so their link is up and they are authoritative again.
     room.syncRev = 0;
+    room.relayCounted = false;
   }
   if (room.matchOver) return { decided: false };
   // At or behind one already applied. Equal used to be kept, on the grounds
@@ -306,10 +338,16 @@ export function applyMatchSync(
   // has since been broken by a miss surviving anyway. A run can legitimately
   // go DOWN to zero, so a maximum is exactly the wrong operator here. Still
   // bounded by the peak: a run cannot stand higher than it ever reached.
-  room.streaks = [
-    Math.min(clampInt(sync.streaks?.[0], 0, 100000), room.bestStreaks[0]),
-    Math.min(clampInt(sync.streaks?.[1], 0, 100000), room.bestStreaks[1]),
-  ];
+  // ...but only while the peers are still the ones who know. See relayCounted:
+  // once the relay has counted an event itself, a snapshot can only be coming
+  // from the peer that has NOT noticed the link is down, and it describes a
+  // match missing that event.
+  if (!room.relayCounted) {
+    room.streaks = [
+      Math.min(clampInt(sync.streaks?.[0], 0, 100000), room.bestStreaks[0]),
+      Math.min(clampInt(sync.streaks?.[1], 0, 100000), room.bestStreaks[1]),
+    ];
+  }
   // What was actually built in this match, which is what it is paid on.
   // Bounded by the peak for the same reason as everything else here: a client
   // reports these, and a match cannot have earned more than it reached.
@@ -324,10 +362,12 @@ export function applyMatchSync(
   // these two fields. Left at whatever the last relayed point set them to, the
   // first crossing after the handover is read as a serve and dropped from the
   // streak, or a real serve is counted as a return.
-  if (sync.servingPlayer === 0 || sync.servingPlayer === 1) {
-    room.servingPlayer = sync.servingPlayer;
+  if (!room.relayCounted) {
+    if (sync.servingPlayer === 0 || sync.servingPlayer === 1) {
+      room.servingPlayer = sync.servingPlayer;
+    }
+    room.crossingsThisPoint = clampInt(sync.crossingsThisPoint, 0, 100000);
   }
-  room.crossingsThisPoint = clampInt(sync.crossingsThisPoint, 0, 100000);
   room.inPlay = true;
 
   if (room.scores[0] >= cap || room.scores[1] >= cap) {

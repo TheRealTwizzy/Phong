@@ -1187,6 +1187,7 @@ async function startServer() {
             // first; matchSeq 0 is no match, so nothing is cached yet.
             startRatings: null,
             startRatingsSeq: 0,
+            relayCounted: false,
           };
 
           rooms.set(code, room);
@@ -1346,6 +1347,12 @@ async function startServer() {
           // it belongs to their streak alone. The serve is not one, which is
           // the only thing crossingsThisPoint is consulted for.
           countReturn(room, playerIndex);
+          // The relay is counting this match now, so it owns where the run and
+          // the point are from here on. This crossing reaches the other phone
+          // as a ball_incoming, which its P2P replica never sees — so that
+          // replica is now missing a return, and the snapshots it keeps sending
+          // would ASSIGN the relay back to a match without it.
+          room.relayCounted = true;
           // Deliberately NOT touching room.syncRev. That counter means one
           // thing — how far the PEERS' replica had got when it last reported —
           // and the relay counting its own crossings into it made two
@@ -1388,6 +1395,7 @@ async function startServer() {
           // is the only streak that ends here. The scorer's runs on into the
           // next point — a rally streak is never decided by the other player.
           breakStreakOnPoint(room, scorerIndex, nextServer);
+          room.relayCounted = true; // see the note beside countReturn above
           // Both phones end the match on this same number, so neither is left
           // playing on alone. Votes from before the final point are dropped:
           // a rematch is agreed about a match that is actually finished.
