@@ -498,6 +498,48 @@ describe('recording a duel', () => {
     expect(profile.xp).toBe(first.profile.xp);
   });
 
+  it('rates both seats against the same pair of ratings', async () => {
+    // The relay writes both results, seat 0 first — and seat 0's write commits
+    // its MMR before seat 1's payload is built. Reading the opponent's profile
+    // inside the loop therefore gave seat 1 an opponent that had already
+    // moved: one match, two different preconditions, and the difference falls
+    // the same way every time.
+    //
+    // Two players with identical histories play a mirror-image match, so
+    // whatever the ratings do, they must do it symmetrically.
+    const a = await newDevice('SymA');
+    const b = await newDevice('SymB');
+    const { p1, p2 } = await seatDuel(a, b, 3);
+
+    // 3-0 to seat 0. The loser's loss must mirror the winner's win.
+    await point(p1, 'p1', 1);
+    await point(p1, 'p1', 2);
+    await point(p1, 'p1', 3);
+    const hostRecord = await p1.await('match_recorded');
+    const guestRecord = await p2.await('match_recorded');
+
+    // The prediction is the clean read. Two players cannot both be more likely
+    // than not to win: P(A beats B) and P(B beats A) sum to exactly 1, and
+    // they do so only if both were computed from the same pair of ratings.
+    // With seat 0 committed first, seat 1 was predicted against an opponent
+    // that had already absorbed its own win — so the pair summed to less.
+    //
+    // Deliberately not asserted on the mu change: performanceWeight scales
+    // that by margin of victory, so a 3-0 moves the two seats by different
+    // amounts on purpose and would hide this rather than show it.
+    // Tolerance because erf is approximated in-module (see rating.ts), so the
+    // pair lands about 1e-9 off exact. The defect being caught is four orders
+    // of magnitude wider than that: seat 0's mu moves by ~2.5 in this match,
+    // which shifts the second prediction by ~0.05.
+    const pWin = hostRecord.result.winProbability + guestRecord.result.winProbability;
+    expect(Math.abs(pWin - 1)).toBeLessThan(1e-6);
+    // Both did move, so this is not vacuously true of an unrated match.
+    expect((await getProfile(a)).mmrMu).toBeGreaterThan(25);
+    expect((await getProfile(b)).mmrMu).toBeLessThan(25);
+    p1.close();
+    p2.close();
+  });
+
   it('keeps both seats’ runs when a duel is abandoned', async () => {
     // A decided duel is written by recordRoomMatch; an abandoned one is
     // written by nobody, so both seats went back to whatever their last

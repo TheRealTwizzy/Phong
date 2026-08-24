@@ -220,6 +220,32 @@ if (roomsAfter !== roomsBefore) {
 }
 ok('and no room can be opened from under it');
 
+// A Solo match cannot be started from under it either. The tour's match stage
+// adopts and resets whatever it finds, so a match started this way would not
+// be recorded — but it would still be a match the tour did not put there, on a
+// court the tour is not describing yet. Both guards exist; this pins the one
+// that keeps the court empty until the tour asks for it.
+await skipper.click('#btn-close-lobby').catch(() => {});
+await sleep(300);
+// Dispatched rather than clicked: the tour CARD sits over part of the menu, so
+// Playwright's actionability check refuses some of these. The card moves from
+// step to step and the scrim is pointer-events-none, so which controls are
+// reachable depends on where the tour has got to — dispatching asks the
+// question the guard is actually for ("what if the player does reach it")
+// without depending on that.
+await skipper.evaluate(() => {
+  document.querySelector('#menu-mode-solo')?.click();
+});
+await sleep(600);
+await skipper.evaluate(() => {
+  document.querySelector('#menu-start-solo')?.click();
+});
+await sleep(1000);
+if (await skipper.$('#half-court-container')) {
+  fail('a Solo match was started from under the tour, on a court it had not reached');
+}
+ok('and no Solo match either');
+
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
 
 console.log('\nONBOARDING TOUR CHECKS PASSED');

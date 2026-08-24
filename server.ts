@@ -217,6 +217,20 @@ function recordRoomMatch(room: Room): void {
 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
+  // Both ratings as they stood BEFORE either result was written.
+  //
+  // The loop below commits seat 0 first, so reading seat 0's profile while
+  // building seat 1's payload returned its POST-match rating: seat 0 was rated
+  // against the opponent it actually faced and seat 1 against an opponent that
+  // had already moved. One match, two different preconditions, and the
+  // difference falls the same way every time — a seat-dependent bias in every
+  // ranked duel, and in the win probability each player's XP is scaled by.
+  const ratingBefore = seats.map((seat) => {
+    const player = room.players[seat];
+    if (!player?.deviceId || !seatStillHoldsAccount(player)) return null;
+    const p = db.getProfile(player.deviceId);
+    return { mu: p.mmrMu, sigma: p.mmrSigma };
+  });
   for (const seat of seats) {
     const me = room.players[seat];
     const them = room.players[seat === 0 ? 1 : 0];
@@ -253,10 +267,8 @@ function recordRoomMatch(room: Room): void {
     const context: RecordMatchContext = {
       performanceWeight: performanceWeight(mine, theirs, room.earnedBests[seat]),
     };
-    if (them.deviceId && seatStillHoldsAccount(them)) {
-      const opp = db.getProfile(them.deviceId);
-      context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
-    }
+    const oppRating = ratingBefore[seat === 0 ? 1 : 0];
+    if (oppRating) context.opponentRating = oppRating;
 
     try {
       const result = db.recordMatch(payload, context);

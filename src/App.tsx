@@ -1860,12 +1860,18 @@ export default function App() {
       // A real Solo match on the shipped default rung, which is open to
       // everybody from the first match — the tour must never be the thing
       // that asks a new player for an unlock they do not have.
-      if (screenRef.current !== 'game' || modeRef.current !== 'solo') {
-        tourMatchRef.current = true;
-        setMode('solo');
-        setScreen('game');
-        resetMatchRef.current();
-      }
+      //
+      // Marked and reset UNCONDITIONALLY, not only when a match has to be
+      // created. Skipping it for a match already in progress left that match
+      // unflagged, so it banked XP, missions, rating and achievements while
+      // the tour claimed to grant nothing — and it kept whatever score it had
+      // reached, which is not the frame the steps after this describe.
+      // startMatch refuses while the tour runs, so nothing should be here to
+      // adopt; this is the half that does not depend on remembering that.
+      tourMatchRef.current = true;
+      setMode('solo');
+      setScreen('game');
+      resetMatchRef.current();
     } else if (tourMatchRef.current) {
       tourMatchRef.current = false;
       setScreen('menu');
@@ -2275,6 +2281,14 @@ export default function App() {
   // Menu → court. Match settings (difficulty, winning score) are already
   // locked in on the menu before this runs — nothing re-opens them mid-match.
   const startMatch = (newMode: GameMode) => {
+    // Not from under the tour, for the reason handleCreateRoom is not: the
+    // scrim leaves the app usable, so the highlighted Solo controls still
+    // work, and a match started that way is one the tour's match stage would
+    // then ADOPT — it only marks a match as the tour's when it has to create
+    // one, so a match already running was never flagged and could be recorded
+    // for XP, missions, rating and achievements. The tour reaches the court by
+    // its own path below, never through here.
+    if (tourActive) return;
     setMode(newMode);
     setScreen('game');
     // Named explicitly: modeRef still holds the mode being left.
