@@ -1174,7 +1174,21 @@ class GameDatabase {
     const seq = Number.isFinite(Number(d.runSeq)) ? Math.floor(Number(d.runSeq)) : null;
     const sameChain =
       seq !== null && !!d.chainId && !!row?.streakChainId && d.chainId === row.streakChainId;
-    const isNewer = sameChain ? seq > (row?.streakSeq ?? 0) : stamp >= prevStamp;
+    const prevSeq = row?.streakSeq ?? 0;
+    // A HIGHER seq is unambiguously later. An EQUAL one is not necessarily a
+    // duplicate: `nextRunSeq()` reads its counter, increments, and writes it
+    // back in three separate steps, none of them atomic across TABS — two
+    // tabs on the same device can both read the same starting value before
+    // either write lands, and both then report the same chainId and the same
+    // next seq for two genuinely different events. Falling back to the age
+    // here is not claiming to resolve that race correctly — two truly
+    // simultaneous events have no meaningful "first" — only to stop always
+    // resolving it the SAME wrong way, which was "whichever request's own
+    // network trip happens to arrive at this server second always loses,"
+    // with no regard to which one actually happened later.
+    const isNewer = sameChain
+      ? seq > prevSeq || (seq === prevSeq && stamp > prevStamp)
+      : stamp >= prevStamp;
     const describesRun = d.endStreak !== undefined || d.won !== undefined;
 
     // A win streak IN THIS MODE: unlike the profile-wide one, a duel loss does

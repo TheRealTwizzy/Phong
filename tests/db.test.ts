@@ -878,6 +878,50 @@ describe('per-mode stats', () => {
     expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
   });
 
+  it('breaks a same-seq tie by age instead of always favoring arrival order', () => {
+    // Two TABS on one device can collide on the exact same chain position:
+    // nextRunSeq() reads its persisted counter, increments, and writes it
+    // back in three separate steps, none atomic across tabs — both can read
+    // the SAME starting value before either write lands, and both then report
+    // the identical chainId and the identical next seq for two genuinely
+    // different events. `seq > prevSeq` alone rejects whichever one's request
+    // happens to reach the database second, always, regardless of which one
+    // actually happened later. That is a real bias, not a coin flip, and this
+    // is what removes it: on a tie, fall back to the age.
+    const id = 'dev_modeseqtiebreak1';
+    init(id, 'ModeSeqTie');
+
+    // The server stamps on ITS OWN clock at write time, minus the reported
+    // age — so within one fast synchronous test, both calls land at nearly
+    // the same server "now" regardless of what endedAt says. The only way to
+    // make one genuinely stamp later than the other here is to give it the
+    // SMALLER age (closer to "now" when written), which is also exactly how
+    // this would look for real: a message that left the browser promptly
+    // stamps close to the moment it arrives, one that sat around first does
+    // not.
+    const write = (endStreak: number, key: string, ageMs: number) =>
+      db.recordMatch(
+        match(id, {
+          mode: 'solo', difficulty: 'rookie', isWinner: true,
+          playerScore: 5, opponentScore: 1,
+          bestStreak: 9, endStreak, earnedStreak: 4,
+          endedAt: 1_000_000, clientNow: 1_000_000 + ageMs, matchKey: key,
+          // Same chain, same seq — the collision.
+          chainId: 'chain_tie', runSeq: 4,
+        })
+      );
+
+    // The earlier of the two reaches the database first, as it usually would,
+    // carrying a large age (it sat around before being sent).
+    write(3, 'tie-earlier', 1_000);
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(3);
+
+    // The later one arrives second, tied on seq, with a near-zero age. It
+    // must still win: it is the one that actually happened after.
+    write(8, 'tie-later', 0);
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(8);
+  });
+
   it('will not read a backwards clock jump as "just now"', () => {
     // The age is a difference between two readings of ONE clock, which is what
     // makes it free of that clock's offset — but not of a clock CHANGE between
