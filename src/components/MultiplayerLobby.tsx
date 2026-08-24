@@ -17,7 +17,6 @@ import {
   ArrowRight,
   Play,
   User,
-  GraduationCap,
 } from 'lucide-react';
 
 interface MultiplayerLobbyProps {
@@ -34,7 +33,6 @@ interface MultiplayerLobbyProps {
   onCreateRoom: () => void;
   onJoinRoom: (roomId: string) => void;
   onLeaveRoom: () => void;
-  onOpenTutorial?: () => void;
   p2pEnabled?: boolean;
   onToggleP2P?: (enabled: boolean) => void;
   opponentId?: string | null;
@@ -72,7 +70,6 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   onToggleP2P,
   onJoinRoom,
   onLeaveRoom,
-  onOpenTutorial,
   opponentId = null,
   onViewProfile,
   winProbability = null,
@@ -530,21 +527,6 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
             {t('lobby_tip', language)}
           </span>
         </Panel>
-
-        {onOpenTutorial && (
-          <Button
-            id="btn-lobby-start-tutorial"
-            variant="ghost"
-            block
-            icon={<GraduationCap className="h-4 w-4" />}
-            onClick={() => {
-              onClose();
-              onOpenTutorial();
-            }}
-          >
-            {t('lobby_tutorial', language)}
-          </Button>
-        )}
       </Sheet>
 
       <UnlockHintSheet

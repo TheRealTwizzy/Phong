@@ -34,7 +34,7 @@ interface SettingsModalProps {
   settings: GameSettings;
   onUpdateSettings: (newSettings: Partial<GameSettings>) => void;
   profile?: PlayerProfile | null;
-  onOpenTutorial?: () => void;
+  onStartTour?: () => void;
   onTriggerShake?: () => void;
 }
 
@@ -44,7 +44,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   settings,
   onUpdateSettings,
   profile = null,
-  onOpenTutorial,
+  onStartTour,
   onTriggerShake,
 }) => {
   const lang = settings.language || 'en';
@@ -101,18 +101,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
-        {onOpenTutorial && (
+        {onStartTour && (
           <Button
-            id="btn-settings-start-tutorial"
+            id="btn-settings-start-tour"
             size="sm"
             variant="secondary"
             icon={<BookOpen className="h-3.5 w-3.5" />}
             onClick={() => {
               onClose();
-              onOpenTutorial();
+              onStartTour();
             }}
           >
-            {t('start_tutorial', lang)}
+            {t('tour_start', lang)}
           </Button>
         )}
         <button

@@ -1,6 +1,12 @@
 import { RoomMatchConfig, RTCSignalPayload, WSClientMessage, WSServerMessage } from '../types';
 import { DEFAULT_ROOM_CONFIG } from '../matchRules';
 import { transformBallForOpponent } from '../../server/transform';
+import {
+  StreakState,
+  breakStreakOnPoint,
+  countReturn,
+  startMatchStreaks,
+} from '../../server/room';
 
 // Peer-to-peer game link over WebRTC DataChannels.
 //
@@ -41,7 +47,17 @@ interface P2POptions {
    * both players a 0-0 loss, could not tell an abandon from a finished match,
    * and kept the room's settings editable mid-rally.
    */
-  onMatchSync?: (sync: { matchSeq: number; p1Score: number; p2Score: number; maxRally: number }) => void;
+  onMatchSync?: (sync: {
+    matchSeq: number;
+    p1Score: number;
+    p2Score: number;
+    bestStreaks: [number, number];
+    streaks: [number, number];
+    earnedBests: [number, number];
+    servingPlayer: 0 | 1;
+    crossingsThisPoint: number;
+    rev: number;
+  }) => void;
 }
 
 const CONNECT_TIMEOUT_MS = 8000;
@@ -62,8 +78,19 @@ export class P2PGameLink {
   private servingPlayer: 0 | 1 = 0;
   private rematchVotes: [boolean, boolean] = [false, false];
   private matchOver = false;
-  private rallyCount = 0;
-  private maxRallyInMatch = 0;
+  /**
+   * The relay's own streak rules, replicated exactly — imported rather than
+   * re-implemented, because "the replica must agree with the relay" is the one
+   * thing this class exists to be true and it has drifted once already.
+   */
+  private streaks: StreakState = {
+    streaks: [0, 0],
+    bestStreaks: [0, 0],
+    earnedStreaks: [0, 0],
+    earnedBests: [0, 0],
+    crossingsThisPoint: 0,
+    servingPlayer: 0,
+  };
   /**
    * Which match of the room this is. Seeded from the relay's game_start and
    * incremented locally for a rematch the peers agree between themselves —
@@ -150,40 +177,88 @@ export class P2PGameLink {
     this.config = config;
   }
 
-  /** Reset replicated match state; call on every game_start. */
-  public resetMatchState(servingPlayer: 0 | 1, matchSeq?: number): void {
+  /**
+   * Reset replicated match state; call on every game_start.
+   *
+   * `carried` is each seat's run as the relay has it — a streak carries
+   * between matches AND between rooms, and the relay is the only party that
+   * knows both sides of that. Starting from zero here reported the peak of
+   * only what happened after the reset, which the relay then took a maximum
+   * against its own carried value: a run of ten that gained two returns was
+   * recorded as ten.
+   */
+  public resetMatchState(
+    servingPlayer: 0 | 1,
+    matchSeq?: number,
+    carried: [number, number] = [this.streaks.streaks[0], this.streaks.streaks[1]]
+  ): void {
     this.scores = [0, 0];
     this.servingPlayer = servingPlayer;
     this.rematchVotes = [false, false];
     this.matchOver = false;
-    this.rallyCount = 0;
-    this.maxRallyInMatch = 0;
+    this.streaks.streaks = [Math.max(0, carried[0] || 0), Math.max(0, carried[1] || 0)];
+    startMatchStreaks(this.streaks, servingPlayer);
+    // A new match's revisions count from zero, matching the relay's reset.
+    this.syncRev = 0;
     // A relayed start names the match; a locally agreed rematch counts on.
     this.matchSeq = matchSeq ?? this.matchSeq + 1;
   }
 
+  /**
+   * How many events this match has produced here — a logical clock the relay
+   * uses to spot a snapshot that arrives behind one it has already applied.
+   * Both peers process the same events in the same order, so the same number
+   * means the same moment on either side of the link.
+   */
+  private syncRev = 0;
+
   /** Tell the relay where this match has got to. */
   private syncToRelay(): void {
+    this.syncRev += 1;
     this.opts.onMatchSync?.({
       matchSeq: this.matchSeq,
+      rev: this.syncRev,
       p1Score: this.scores[0],
       p2Score: this.scores[1],
-      maxRally: this.maxRallyInMatch,
+      bestStreaks: [this.streaks.bestStreaks[0], this.streaks.bestStreaks[1]],
+      // Where each run IS, not only how high it got. The relay sees no
+      // crossings and no points in a P2P match, so this is the only thing that
+      // tells it what to carry into the next one.
+      streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
+      earnedBests: [this.streaks.earnedBests[0], this.streaks.earnedBests[1]],
+      // Where the POINT is, so a handover back to the relay lands mid-rally
+      // without it having to guess. If the DataChannel dies, sendGame starts
+      // returning false and crossings go to the relay again — which judges
+      // them with countReturn, asking "was this the serve?" from exactly these
+      // two fields. Stale, the first crossing after the handover is read as a
+      // serve and dropped, or a real serve is counted as a return.
+      servingPlayer: this.streaks.servingPlayer,
+      crossingsThisPoint: this.streaks.crossingsThisPoint,
     });
   }
 
   /**
-   * A ball over the net, from either side — the relay counts both, so the
-   * replica must too or the rally length the match is rated on would be half
-   * of what was actually played.
+   * A ball over the net from `seat` — that player's own return, and their own
+   * streak. The relay reaches these numbers from exactly these events, so the
+   * replica reaches them the same way, through the same code.
    */
-  private countCrossing(): void {
-    this.rallyCount++;
-    if (this.rallyCount > this.maxRallyInMatch) this.maxRallyInMatch = this.rallyCount;
-    // The first crossing is what puts the match in play. Worth one message to
-    // the relay by itself: it is what makes a walk-out an abandon and what
-    // shuts the lobby's settings for the rest of the match.
-    if (this.rallyCount === 1) this.syncToRelay();
+  private countCrossing(seat: 0 | 1): void {
+    countReturn(this.streaks, seat);
+    // EVERY crossing, not just the first of the point.
+    //
+    // The first one earns a message on its own — it is what puts the match in
+    // play, which is what makes a walk-out an abandon and shuts the lobby's
+    // settings. But the relay is also where this match gets recorded, and a
+    // DataChannel can die in the middle of a rally: sendGame starts returning
+    // false and the rest of the point goes over the relay instead. Synced
+    // once per point, the relay resumes from the state it had at crossing one
+    // — every return since is simply gone from the streak, the XP, the daily
+    // tasks and the performance weight, and the phase it resumes on is wrong
+    // by the same amount, so the next relayed crossing is miscounted too.
+    //
+    // The cost is one small message per net crossing, and only in P2P mode.
+    // Relayed play already sends the relay strictly more than this.
+    this.syncToRelay();
   }
 
   /**
@@ -213,7 +288,7 @@ export class P2PGameLink {
       msg.type === 'rematch_request'
     ) {
       this.gameChannel!.send(JSON.stringify(msg));
-      if (msg.type === 'ball_cross_net') this.countCrossing();
+      if (msg.type === 'ball_cross_net') this.countCrossing(this.opts.myIndex);
       if (msg.type === 'point_scored') this.applyPointScored(msg.scorer);
       if (msg.type === 'rematch_request') this.applyRematchVote(this.opts.myIndex);
       // Note: a rematch_request sent before the replica saw the final point is
@@ -270,7 +345,7 @@ export class P2PGameLink {
         break;
 
       case 'ball_cross_net':
-        this.countCrossing();
+        this.countCrossing(this.opts.myIndex === 0 ? 1 : 0);
         this.opts.onMessage({ type: 'ball_incoming', ball: transformBallForOpponent(msg.ball) });
         break;
 
@@ -297,9 +372,11 @@ export class P2PGameLink {
   private applyPointScored(scorer: 'p1' | 'p2'): void {
     const scorerIndex = scorer === 'p1' ? 0 : 1;
     this.scores[scorerIndex]++;
-    this.rallyCount = 0;
     const nextServer: 0 | 1 = scorerIndex === 0 ? 1 : 0;
     this.servingPlayer = nextServer;
+    // The scorer's OPPONENT is the one who missed, so theirs is the only
+    // streak that ends. Same rule, same code, as the relay's handler.
+    breakStreakOnPoint(this.streaks, scorerIndex, nextServer);
     if (this.scores[scorerIndex] >= this.config.winningScore) {
       this.matchOver = true;
       this.rematchVotes = [false, false];
@@ -324,12 +401,15 @@ export class P2PGameLink {
     this.rematchVotes[voterIdx] = true;
     if (this.rematchVotes[0] && this.rematchVotes[1]) {
       const nextServer: 0 | 1 = this.servingPlayer === 0 ? 1 : 0;
+      // No `carried` argument: a locally agreed rematch continues the runs the
+      // replica is already holding, which is exactly what carrying means.
       this.resetMatchState(nextServer);
       this.opts.onMessage({
         type: 'game_start',
         servingPlayer: nextServer,
         config: this.config,
         matchSeq: this.matchSeq,
+        streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
       });
     } else {
       this.opts.onMessage({ type: 'rematch_state', votes: [...this.rematchVotes] });

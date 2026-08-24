@@ -34,6 +34,14 @@ interface Props {
   language?: LanguageCode;
 }
 
+// Solo before duel before practice: the order a player meets them in.
+const MODE_ORDER = ['solo', 'multiplayer', 'practice'] as const;
+const MODE_LABEL: Record<string, string> = {
+  solo: 'Solo AI',
+  multiplayer: 'Duel',
+  practice: 'Practice',
+};
+
 export const ProfileModal: React.FC<Props> = ({
   isOpen,
   onClose,
@@ -187,6 +195,14 @@ export const ProfileModal: React.FC<Props> = ({
   const xpCurrentLevelProgress = Math.max(0, profile.xp - xpCurrentLevelBase);
   const xpNeededForLevel = Math.max(1, profile.xpNext - xpCurrentLevelBase);
   const xpPercent = Math.min(100, Math.round((xpCurrentLevelProgress / xpNeededForLevel) * 100));
+
+  // A stable order, so the table does not reshuffle as rows appear. Modes with
+  // no row yet are simply absent — a player who has never opened Practice has
+  // nothing to say about it.
+  const modeRows = MODE_ORDER.flatMap((mode) => {
+    const st = profile.modeStats?.[mode];
+    return st && st.matchesPlayed > 0 ? [[mode, st] as const] : [];
+  });
 
   const header = (
     <div className="shrink-0">
@@ -506,7 +522,7 @@ export const ProfileModal: React.FC<Props> = ({
                       <span>Highest Rally</span>
                     </div>
                     <div className="text-2xl font-black text-white">{profile.highestRally}</div>
-                    <div className="text-[11px] text-slate-400 mt-1">Single Point Record</div>
+                    <div className="text-[11px] text-slate-400 mt-1">Best return streak</div>
                   </div>
 
                   <div className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-3.5 flex flex-col">
@@ -527,6 +543,59 @@ export const ProfileModal: React.FC<Props> = ({
                     <div className="text-[11px] text-slate-400 mt-1">Badges Unlocked</div>
                   </div>
                 </div>
+
+                {/* Per mode. The grid above pools solo and duel into single
+                    numbers, which say how much you have played and nothing
+                    about how you play each mode. Split Screen is absent
+                    because only one of the two people at that phone has an
+                    account to write to. */}
+                {modeRows.length > 0 && (
+                  <div id="profile-mode-stats" className="space-y-2">
+                    <div className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">
+                      By Mode
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px] text-slate-300">
+                        <thead>
+                          <tr className="text-slate-500 text-left whitespace-nowrap">
+                            <th className="py-1 pr-2 font-medium">Mode</th>
+                            <th className="py-1 px-1.5 font-medium text-right">Played</th>
+                            <th className="py-1 px-1.5 font-medium text-right">W–L</th>
+                            <th className="py-1 px-1.5 font-medium text-right">Pts</th>
+                            <th className="py-1 px-1.5 font-medium text-right">Streak</th>
+                            <th className="py-1 pl-1.5 font-medium text-right">Win run</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modeRows.map(([mode, st]) => (
+                            <tr
+                              key={mode}
+                              id={`profile-mode-${mode}`}
+                              className="border-t border-slate-800/80 whitespace-nowrap"
+                            >
+                              <td className="py-1.5 pr-2 text-slate-200">
+                                {MODE_LABEL[mode] || mode}
+                              </td>
+                              <td className="py-1.5 px-1.5 text-right tabular-nums">{st.matchesPlayed}</td>
+                              <td className="py-1.5 px-1.5 text-right tabular-nums">
+                                {mode === 'practice' ? '—' : `${st.matchesWon}–${st.matchesLost}`}
+                              </td>
+                              <td className="py-1.5 px-1.5 text-right tabular-nums">
+                                {mode === 'practice' ? '—' : st.pointsScored}
+                              </td>
+                              <td className="py-1.5 px-1.5 text-right tabular-nums text-orange-300">
+                                {st.bestStreak}
+                              </td>
+                              <td className="py-1.5 pl-1.5 text-right tabular-nums">
+                                {mode === 'practice' ? '—' : st.bestWinStreak}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="space-y-2.5">

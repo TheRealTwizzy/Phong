@@ -30,8 +30,13 @@ import {
   generateRoomCode,
   performanceWeight,
   PlayerSession,
+  partitionHeartbeats,
   Room,
+  SeatRating,
   startMatch as resetRoomForMatch,
+  reapRooms,
+  breakStreakOnPoint,
+  countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig } from './src/types';
@@ -41,6 +46,21 @@ import { Rating, winProbability } from './src/rating';
 
 
 const rooms = new Map<string, Room>();
+
+/**
+ * The duel run this device already has going. A rally streak carries between
+ * matches, and a new ROOM is not a reason to lose one — so a seat opens on it
+ * rather than on zero. Server-side, from the store, because a client-supplied
+ * streak would be a client-supplied rating input.
+ */
+function carriedStreak(deviceId: string | null): number {
+  if (!deviceId) return 0;
+  try {
+    return Math.max(0, Math.round(db.getModeStats(deviceId).multiplayer?.currentStreak ?? 0));
+  } catch {
+    return 0;
+  }
+}
 
 function broadcast(room: Room, payload: unknown): void {
   const json = JSON.stringify(payload);
@@ -57,7 +77,11 @@ function broadcast(room: Room, payload: unknown): void {
  * phone that is not told has not started.
  */
 function startMatch(room: Room, servingPlayer: 0 | 1): void {
-  broadcast(room, resetRoomForMatch(room, servingPlayer));
+  const payload = resetRoomForMatch(room, servingPlayer);
+  // Eagerly, not on whatever touches the room's recording first — see the
+  // note on duelStartRatings.
+  duelStartRatings(room);
+  broadcast(room, payload);
 }
 
 interface LiveSocket {
@@ -77,6 +101,52 @@ const liveSockets = new Set<LiveSocket>();
  * check cannot answer this on its own: ownership moves while sockets stay
  * open, and the relay writes a finished duel onto both seats itself.
  */
+/**
+ * How long before it was sent a client's report describes, in ms.
+ *
+ * Every write that ASSIGNS the carried run is ordered by this, and they all
+ * have to use the same one — a stamp taken on arrival makes a request that
+ * stalled look newer than whatever overtook it, which is exactly how the
+ * writes that used to lack an age could invert. Both readings come from the
+ * caller's own clock, so the difference carries none of its offset.
+ */
+/**
+ * The ceiling on a reported age, mirroring db.ts's MAX_RESULT_AGE_MS. Anything
+ * at or past it is simply "old", and bumpModeStats clamps to the same figure,
+ * so naming it here only has to agree in spirit.
+ */
+const MAX_CLIENT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function clientAgeMs(body: { endedAt?: unknown; clientNow?: unknown } | undefined): number | undefined {
+  const ended = Number(body?.endedAt);
+  const sent = Number(body?.clientNow);
+  if (!Number.isFinite(ended) || !Number.isFinite(sent)) return undefined;
+  const age = sent - ended;
+  // A NEGATIVE difference means the clock moved backwards between the two
+  // readings — an NTP correction, or a hand-set clock — so the elapsed time
+  // is not knowable from them. "Just now" is the reading that lets this
+  // result overwrite whatever is stored, which makes it the wrong guess: a
+  // match queued while the clock ran fast, replayed after the correction,
+  // would land on top of a newer one. Read as old as we allow instead. It
+  // costs at most the carry from a live report whose ordering the client's
+  // own write chain already handles, and that is the side to be wrong on.
+  if (age < 0) return MAX_CLIENT_AGE_MS;
+  return age > 0 ? age : undefined;
+}
+
+/**
+ * `chainId`, sanitized to a plain string or null.
+ *
+ * Purely a self-reported ordering hint — see the note on `MatchEndPayload`
+ * in src/types.ts — so this is not a trust boundary, just a type guard: a
+ * malformed value (the wrong JSON type, or an implausibly long string) must
+ * not reach a SQL bind parameter, which is the only thing that could throw.
+ */
+function chainIdOf(body: { chainId?: unknown } | undefined): string | null {
+  const v = body?.chainId;
+  return typeof v === 'string' && v.length > 0 && v.length <= 100 ? v : null;
+}
+
 function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: string | null }): boolean {
   if (!seat.deviceId) return false;
   if (db.releasedDevice(seat.deviceId)) return false;
@@ -92,6 +162,36 @@ function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: strin
   const owner = db.activeSessionId(seat.deviceId);
   // No recorded owner means nothing has displaced this seat.
   return !owner || owner === seat.sessionId;
+}
+
+/**
+ * Write both seats' runs for a duel that is ending WITHOUT being decided.
+ *
+ * `recordRoomMatch` writes the runs when a score decides a match. A duel can
+ * also just stop: somebody walks out, or the room is reaped for going quiet.
+ * Written from `room.streaks`, which the relay owns — a duel's runs belong to
+ * the room, not to either phone, which is why db.reportStreak refuses this
+ * mode to clients. Both seats, always: the player still sitting there is
+ * bounced just as abruptly and their run is just as real.
+ *
+ * One implementation for both endings, for the reason vacateSeat is one
+ * implementation for both departures — two copies of a rule are two rules.
+ * Counts no match and pays nothing.
+ */
+function persistDuelStreaks(room: Room): void {
+  if (!room.inPlay || room.matchOver) return;
+  if (!room.players[0] || !room.players[1]) return;
+  for (const seat of [0, 1] as const) {
+    const player = room.players[seat];
+    if (!player?.deviceId) continue;
+    try {
+      if (seatStillHoldsAccount({ deviceId: player.deviceId, sessionId: player.sessionId })) {
+        db.recordDuelStreak(player.deviceId, room.streaks[seat]);
+      }
+    } catch (e) {
+      console.error('duel streak record failed:', e);
+    }
+  }
 }
 
 /**
@@ -143,6 +243,80 @@ function evictStaleSockets(): void {
  * fallback for a match the relay never saw, and the shared match key means
  * whichever of them arrives second is recognised rather than paid again.
  */
+/**
+ * Both seats' ratings as they stood before this match was recorded — sampled
+ * once, by whichever recording path reaches the room first, and reused by
+ * every path after it.
+ *
+ * A duel reaches the ladder by two routes: the relay writes it the moment the
+ * score decides it, and each phone POSTs its own copy as the fallback for a
+ * match the relay never saw. Both used to read the opponent's rating live, so
+ * whichever committed first moved that player's rating and the second was
+ * rated against an opponent that had already played the match. In a P2P duel
+ * the two routes travel different connections — the deciding match_sync over
+ * the WebSocket, the POST over HTTP — so which one lands first is a race, and
+ * the loser of it was rated against a post-match opponent.
+ *
+ * Populated EAGERLY, the instant a match begins — every one of the three
+ * ways a room begins a new match calls this right after matchSeq changes:
+ * `startMatch()` (a host's first `start_match`, and a relay-mediated
+ * `rematch_request`) and the P2P-agreed-rematch branch inside
+ * `applyMatchSync`. It used to be lazy — populated on first touch by whichever
+ * recording path reached the room first — on the reasoning that every
+ * recording path samples strictly before it writes anything, so the first
+ * touch is always pre-match. True for THIS room's own two recording paths
+ * racing each other, and not the whole story: nothing stops an UNRELATED
+ * write — a solo match this same player is also playing, queued and replayed
+ * mid-duel — from moving mmrMu between game_start and whenever this room's
+ * own recording first happens to touch the cache, which is exactly the
+ * post-match precondition this cache exists to keep out. Idempotent per
+ * matchSeq either way, so a lazy touch that still lands first (a build that
+ * predates one of the three call sites, say) is not wrong, only later than it
+ * needs to be.
+ *
+ * Read from the VERIFIED device id, never from playerId, which falls back to
+ * a synthetic value for a socket that arrived without a cookie — getProfile
+ * mints for an id it has not seen, so a synthetic one would have handed back
+ * a stray empty profile's default rating as the opponent's.
+ */
+function duelStartRatings(room: Room): Array<SeatRating | null> {
+  if (!room.startRatings || room.startRatingsSeq !== room.matchSeq) {
+    const sample = (seat: 0 | 1): SeatRating | null => {
+      const player = room.players[seat];
+      if (!player?.deviceId || !seatStillHoldsAccount(player)) return null;
+      const p = db.getProfile(player.deviceId);
+      return { mu: p.mmrMu, sigma: p.mmrSigma };
+    };
+    room.startRatings = [sample(0), sample(1)];
+    room.startRatingsSeq = room.matchSeq;
+  }
+  return room.startRatings;
+}
+
+/**
+ * The relay has counted a gameplay event for this match, so it owns the match
+ * from here — and both phones have to be on the relay for that to mean
+ * anything.
+ *
+ * A DataChannel does not die for both peers at the same instant. The one that
+ * notices falls back on its own; the other keeps playing peer-to-peer against
+ * somebody who is no longer receiving it, and keeps sending the relay
+ * snapshots of a replica that is now missing whatever the relay counted. Every
+ * way of reconciling those two accounts after the fact trades one wrong answer
+ * for another — the relay either discards a return it counted, or discards the
+ * point the still-open peer scored. So they are not reconciled: the peers are
+ * put back on one transport, and the relay is the only thing keeping score.
+ *
+ * `relayCounted` stays as the guard behind it, because a broadcast is a
+ * request and a client takes a moment to act on one (or is an older bundle
+ * that does not know the message at all).
+ */
+function takeOverFromP2P(room: Room): void {
+  if (room.relayCounted) return;
+  room.relayCounted = true;
+  broadcast(room, { type: 'p2p_fallback' });
+}
+
 function recordRoomMatch(room: Room): void {
   const seats: Array<0 | 1> = [0, 1];
   // Both seats must still be occupied. A match decided after one player left
@@ -152,6 +326,7 @@ function recordRoomMatch(room: Room): void {
 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
+  const ratingBefore = duelStartRatings(room);
   for (const seat of seats) {
     const me = room.players[seat];
     const them = room.players[seat === 0 ? 1 : 0];
@@ -174,7 +349,9 @@ function recordRoomMatch(room: Room): void {
       opponentName: them.playerName,
       playerScore: mine,
       opponentScore: theirs,
-      maxRally: room.maxRallyInMatch,
+      bestStreak: room.bestStreaks[seat],
+      endStreak: room.streaks[seat],
+      earnedStreak: room.earnedBests[seat],
       mode: 'multiplayer',
       isWinner: mine > theirs,
       rules,
@@ -184,12 +361,10 @@ function recordRoomMatch(room: Room): void {
     };
 
     const context: RecordMatchContext = {
-      performanceWeight: performanceWeight(mine, theirs, room.maxRallyInMatch),
+      performanceWeight: performanceWeight(mine, theirs, room.earnedBests[seat]),
     };
-    if (them.deviceId && seatStillHoldsAccount(them)) {
-      const opp = db.getProfile(them.deviceId);
-      context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
-    }
+    const oppRating = ratingBefore[seat === 0 ? 1 : 0];
+    if (oppRating) context.opponentRating = oppRating;
 
     try {
       const result = db.recordMatch(payload, context);
@@ -417,6 +592,12 @@ async function startServer() {
       // Read-only; lets a client (and the e2e) tell a waiting room from a
       // live one.
       inPlay: room.inPlay,
+      // How long this room has had nobody to play against, in ms, or null
+      // while both seats are filled. The clock that expires a one-player room
+      // however busy its occupant keeps it — including one whose guest has
+      // been and gone. Beside inPlay for the same reason: a waiting room and a
+      // live one are different things and this endpoint exists to say which.
+      waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
     });
   });
 
@@ -451,6 +632,16 @@ async function startServer() {
   });
 
   // Live availability probe for the onboarding / rename forms.
+  // The onboarding tour has been seen. Behind requireActiveSession like every
+  // other write, and idempotent — a replay from Settings does not restamp it.
+  app.post('/api/profile/tutorial-complete', requireActiveSession, (req, res) => {
+    try {
+      res.json(db.completeTutorial(req.deviceId!));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get('/api/username-check', (req, res) => {
     try {
       const u = typeof req.query.u === 'string' ? req.query.u.trim() : '';
@@ -682,7 +873,16 @@ async function startServer() {
       if (!me.initialized) {
         return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
       }
-      const payload: MatchEndPayload = { ...req.body, playerId: req.deviceId!, username: me.username };
+      const payload: MatchEndPayload = {
+        ...req.body,
+        playerId: req.deviceId!,
+        username: me.username,
+        // Sanitized rather than trusted: chainId/runSeq are a self-reported
+        // ordering hint (see MatchEndPayload), not a credential, so there is
+        // nothing here to verify against — only a type to enforce so a
+        // malformed value cannot reach a SQL bind.
+        chainId: chainIdOf(req.body),
+      };
 
       // The achievement tree gates the ladder, so the gate is enforced here
       // too — the menu hides a locked difficulty, but the menu is the client.
@@ -725,15 +925,18 @@ async function startServer() {
           const theirs = room.scores[seat === 0 ? 1 : 0];
           payload.playerScore = mine;
           payload.opponentScore = theirs;
-          payload.maxRally = room.maxRallyInMatch;
+          payload.bestStreak = room.bestStreaks[seat];
+          payload.endStreak = room.streaks[seat];
+          payload.earnedStreak = room.earnedBests[seat];
           payload.isWinner = mine > theirs;
 
-          const opponent = room.players[seat === 0 ? 1 : 0];
-          if (opponent) {
-            const opp = db.getProfile(opponent.playerId);
-            context.opponentRating = { mu: opp.mmrMu, sigma: opp.mmrSigma };
-          }
-          context.performanceWeight = performanceWeight(mine, theirs, room.maxRallyInMatch);
+          // The same pre-match pair the relay records from, so this POST and
+          // the relay's own write rate the two seats against each other as
+          // they stood at the start rather than against whichever of them
+          // happened to be committed first.
+          const oppRating = duelStartRatings(room)[seat === 0 ? 1 : 0];
+          if (oppRating) context.opponentRating = oppRating;
+          context.performanceWeight = performanceWeight(mine, theirs, room.earnedBests[seat]);
         }
       }
 
@@ -759,6 +962,37 @@ async function startServer() {
 
   // Practice Wall: no match is recorded and no rating moves; the client
   // reports the streak it reached and the server decides what it is worth.
+  // Where a run stands, when no match is ending to say so — a player who
+  // carried a run in, missed, and quit. It counts no match and pays nothing;
+  // solo and practice only, since the relay owns a duel's runs. See
+  // db.reportStreak for why this grants a client nothing it did not have.
+  app.post('/api/profile/me/streak', requireActiveSession, (req, res) => {
+    try {
+      const me = db.getProfile(req.deviceId!);
+      if (!me.initialized) return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+      const mode = String(req.body?.mode || '');
+      if (mode !== 'solo' && mode !== 'practice') {
+        return res.status(400).json({ error: 'BAD_MODE' });
+      }
+      const endStreak = Number(req.body?.endStreak);
+      if (!Number.isFinite(endStreak) || endStreak < 0) {
+        return res.status(400).json({ error: 'BAD_REQUEST' });
+      }
+      // Ordered by the same age every other write to the run carries. It is
+      // sent as it happens, but "as it happens" is when it LEAVES the device,
+      // not when it arrives: stamped on arrival, a report that stalled for a
+      // second would outrank the match result that overtook it in flight.
+      const out = db.reportStreak(req.deviceId!, mode, endStreak, clientAgeMs(req.body), {
+        chainId: chainIdOf(req.body),
+        runSeq: Number(req.body?.runSeq),
+      });
+      if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
+      res.json({ modeStats: out.modeStats });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post('/api/practice/record', requireActiveSession, (req, res) => {
     try {
       const me = db.getProfile(req.deviceId!);
@@ -767,7 +1001,20 @@ async function startServer() {
       if (!Number.isFinite(streak) || streak < 0) {
         return res.status(400).json({ error: 'BAD_REQUEST' });
       }
-      res.json(db.recordPractice(req.deviceId!, streak));
+      // `bestStreak` is the run's peak; `earnedStreak` is how much of it was
+      // built in THIS session and is the only one XP is paid on; `endStreak` is
+      // where it stands, so the next session continues it. All three are
+      // bounded against each other in recordPractice.
+      res.json(
+        db.recordPractice(req.deviceId!, {
+          bestStreak: streak,
+          earnedStreak: Number(req.body?.earnedStreak),
+          endStreak: Number(req.body?.endStreak),
+          ageMs: clientAgeMs(req.body),
+          chainId: chainIdOf(req.body),
+          runSeq: Number(req.body?.runSeq),
+        })
+      );
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -858,17 +1105,86 @@ async function startServer() {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
 
-  // Clean up inactive rooms older than 30 minutes
+  // Sweep the rooms nobody is in.
+  //
+  // Short, because the case it exists for is a room with no live socket at
+  // all, and one of those is pure garbage the moment it appears — there is
+  // nobody to notice a delay and nobody to inconvenience by being quick. The
+  // old sweep ran once a minute and only ever asked "has this been quiet for
+  // half an hour", which cannot see an empty room whose seat still holds a
+  // socket that is already gone, and cannot see a one-player room at all
+  // because its own paddle_move traffic keeps refreshing lastActive.
+  /** Whether each socket answered the last heartbeat probe. */
+  const alive = new WeakMap<WebSocket, boolean>();
+
+  const ROOM_IDLE_MS = 30 * 60 * 1000;
+  const ROOM_UNPAIRED_TTL_MS = 30 * 60 * 1000;
+  const ROOM_SWEEP_MS = 15 * 1000;
   setInterval(() => {
-    const now = Date.now();
-    for (const [id, room] of rooms.entries()) {
-      if (now - room.lastActive > 30 * 60 * 1000) {
-        rooms.delete(id);
+    const dead = reapRooms(rooms, Date.now(), {
+      isLive: (sock) => sock.readyState === WebSocket.OPEN,
+      idleMs: ROOM_IDLE_MS,
+      unpairedTtlMs: ROOM_UNPAIRED_TTL_MS,
+    });
+    for (const { id, reason, room } of dead) {
+      // The runs, before anything else. reapRooms deletes the room from the
+      // map as it sweeps, so by the time the close below reaches a seat's
+      // handler there is no room left to find and vacateSeat returns at its
+      // first line — a duel reaped mid-rally lost both players' runs back to
+      // whatever their last COMPLETED match had stored.
+      //
+      // Streaks only, and no abandon: that is a penalty for walking out on
+      // somebody who was still playing, and a room reaped for going quiet for
+      // half an hour has nobody left to have walked out on.
+      persistDuelStreaks(room);
+      // An empty room has nothing attached by definition; the other two can
+      // still have somebody sitting on a court that no longer exists. Closing
+      // their socket is what returns them to the menu — the client reads an
+      // unexpected close as an ejection, which is exactly what this is.
+      if (reason !== 'empty') {
+        for (const seat of room.players) {
+          if (seat && seat.ws.readyState === WebSocket.OPEN) seat.ws.close(1000, reason);
+        }
       }
+      console.log(`room ${id} reaped: ${reason}`);
     }
-  }, 60000);
+  }, ROOM_SWEEP_MS).unref?.();
+
+  /**
+   * Liveness, asked for rather than assumed.
+   *
+   * `readyState` answers "did this socket close", not "is anyone there". A
+   * peer whose network vanishes without a close handshake leaves it reading
+   * OPEN until a write times out at the TCP layer, which can be many minutes —
+   * and in the meantime every branch of the room reaper is blind: the seat
+   * looks live so the room is not empty, `vacateSeat` never ran so `soloSince`
+   * is null, and the surviving player's own paddle_move keeps `lastActive`
+   * fresh. They sit opposite a phantom and the room never expires.
+   *
+   * A terminate here fires the close handler, which is the only thing that
+   * vacates a seat — so nothing downstream changes, it just becomes true.
+   * Twice the sweep interval is the worst case, comfortably inside every TTL.
+   */
+  const HEARTBEAT_MS = 30 * 1000;
+  setInterval(() => {
+    const { dead, probe } = partitionHeartbeats(wss.clients, (sock) => alive.get(sock) !== false);
+    for (const sock of dead) {
+      alive.delete(sock);
+      sock.terminate();
+    }
+    for (const sock of probe) {
+      alive.set(sock, false);
+      sock.ping();
+    }
+  }, HEARTBEAT_MS).unref?.();
 
   wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
+    // Answered the last probe. A fresh socket has not been probed yet, so it
+    // starts alive rather than one sweep away from being terminated.
+    alive.set(ws, true);
+    ws.on('pong', () => alive.set(ws, true));
+    ws.addEventListener('close', () => alive.delete(ws));
+
     const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
 
     // A duel is the relay's own record-keeping: it writes a finished match
@@ -934,6 +1250,19 @@ async function startServer() {
           while (rooms.has(code)) {
             code = generateRoomCode();
           }
+          // Taking a seat means giving up the one this socket already holds.
+          // The handlers below just overwrite currentRoomId/playerIndex, so
+          // without this the old room keeps a PlayerSession whose socket has
+          // moved on: when that socket eventually closes, vacateSeat only
+          // reaches the newer room, and the older one is left with a seat no
+          // close event will ever clear. Walking out of a live duel to open
+          // another room is an abandon, and vacateSeat is what judges that.
+          //
+          // Here, and in join_room only once the destination has been
+          // checked: a room is always created, but a join can be refused, and
+          // a refused join must not cost the seat the player already had —
+          // still less charge them an abandon for a match they are still in.
+          vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
           // Display names come from the cookie-verified profile, never from
@@ -953,8 +1282,16 @@ async function startServer() {
               null,
             ],
             scores: [0, 0],
-            rallyCount: 0,
-            maxRallyInMatch: 0,
+            // A duel streak carries between matches, so a seat starts on
+            // whatever run this player already had going in this mode. Read
+            // from the store rather than taken from the client: it decides
+            // what the match is rated and paid on.
+            streaks: [carriedStreak(cookieDeviceId), 0],
+            bestStreaks: [carriedStreak(cookieDeviceId), 0],
+            earnedStreaks: [0, 0],
+            earnedBests: [0, 0],
+            crossingsThisPoint: 0,
+            syncRev: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],
             config: normalizeRoomConfig(msg.config || DEFAULT_ROOM_CONFIG),
@@ -963,6 +1300,14 @@ async function startServer() {
             ready: [false, false],
             matchSeq: 0,
             lastActive: Date.now(),
+            // One player, from this moment — the clock that expires a room
+            // nobody ever joins, and a room somebody has left.
+            soloSince: Date.now(),
+            // Sampled lazily by whichever recording path reaches the room
+            // first; matchSeq 0 is no match, so nothing is cached yet.
+            startRatings: null,
+            startRatingsSeq: 0,
+            relayCounted: false,
           };
 
           rooms.set(code, room);
@@ -986,10 +1331,23 @@ async function startServer() {
             return;
           }
 
+          if (currentRoomId === code) {
+            // Already sitting in it. Refused rather than treated as a move,
+            // because the vacate below would empty this very room and delete
+            // it, and the seat would then be taken in an object no longer in
+            // the map — a room only its two sockets could reach.
+            ws.send(JSON.stringify({ type: 'error', message: 'You are already in this room.' }));
+            return;
+          }
+
           if (room.players[1] !== null) {
             ws.send(JSON.stringify({ type: 'error', message: 'Room is already full (2 players).' }));
             return;
           }
+
+          // The destination is real and has room, so the old seat can go. See
+          // the note in create_room: nothing above this line may fail.
+          vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
           const guestName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 2';
@@ -1001,8 +1359,13 @@ async function startServer() {
             deviceId: cookieDeviceId || null,
             sessionId: cookieSessionId,
           };
+          room.streaks[1] = carriedStreak(cookieDeviceId);
+          room.bestStreaks[1] = Math.max(room.bestStreaks[1], room.streaks[1]);
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
+          // Two players: the solo clock stops. It restarts if either of them
+          // leaves, which is what a room going back to one player IS.
+          room.soloSince = null;
           currentRoomId = code;
           playerIndex = 1;
 
@@ -1100,10 +1463,26 @@ async function startServer() {
           room.lastActive = Date.now();
           // A ball over the net is the moment the terms stop being editable.
           room.inPlay = true;
-          room.rallyCount++;
-          if (room.rallyCount > room.maxRallyInMatch) {
-            room.maxRallyInMatch = room.rallyCount;
-          }
+          // A ball over the net from this seat is that player's return — and
+          // it belongs to their streak alone. The serve is not one, which is
+          // the only thing crossingsThisPoint is consulted for.
+          countReturn(room, playerIndex);
+          // The relay is counting this match now, so it owns where the run and
+          // the point are — and both phones are told to come off P2P, because
+          // this crossing reaches the other one as a ball_incoming that its
+          // replica never sees.
+          takeOverFromP2P(room);
+          // Deliberately NOT touching room.syncRev. That counter means one
+          // thing — how far the PEERS' replica had got when it last reported —
+          // and the relay counting its own crossings into it made two
+          // independently advancing clocks share a number. A DataChannel does
+          // not fail for both peers at the same instant: the one that notices
+          // first relays its next crossing here, and the one that has not
+          // noticed then sends a legitimate snapshot carrying the revision the
+          // relay just took, which was refused as stale. It was not needed
+          // either: a snapshot describing the moment BEFORE this crossing
+          // carries the revision already applied, which the `<=` check in
+          // applyMatchSync rejects on its own.
 
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
@@ -1128,11 +1507,14 @@ async function startServer() {
           // msg.scorer is either 'p1' or 'p2'
           const scorerIndex = msg.scorer === 'p1' ? 0 : 1;
           room.scores[scorerIndex]++;
-          room.rallyCount = 0;
 
           // Next server
           const nextServer: 0 | 1 = scorerIndex === 0 ? 1 : 0;
-          room.servingPlayer = nextServer;
+          // The scorer's OPPONENT is the one who let the ball past, so theirs
+          // is the only streak that ends here. The scorer's runs on into the
+          // next point — a rally streak is never decided by the other player.
+          breakStreakOnPoint(room, scorerIndex, nextServer);
+          takeOverFromP2P(room); // see the note beside countReturn above
           // Both phones end the match on this same number, so neither is left
           // playing on alone. Votes from before the final point are dropped:
           // a rematch is agreed about a match that is actually finished.
@@ -1157,12 +1539,19 @@ async function startServer() {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
+          // Whether this call is about to start a NEW match — the peers
+          // agreeing a rematch between themselves inside applyMatchSync,
+          // rather than through start_match/rematch_request. Checked before
+          // the call so a genuine change is unambiguous.
+          const seqBefore = room.matchSeq;
           // Deliberately silent: in a P2P match both phones already have this
           // score from each other, so echoing it back would be a second
           // score_update arriving a round-trip late, mid-serve.
           // Recording is the caller's job now: server/room.ts stays free of
           // the database so its guards can be tested without one.
-          if (applyMatchSync(room, msg).decided) recordRoomMatch(room);
+          const synced = applyMatchSync(room, msg);
+          if (room.matchSeq !== seqBefore) duelStartRatings(room); // see the note there
+          if (synced.decided) recordRoomMatch(room);
         } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -1299,6 +1688,11 @@ async function startServer() {
       // never report one, and the second player's departure from an
       // already-abandoned room records nothing.
       const bothSeated = !!(room.players[0] && room.players[1]);
+      // A duel that is abandoned still HAPPENED, and both players' runs stand
+      // wherever the last crossing left them — recordRoomMatch writes those
+      // only when a score decides a match. Written for the leaver AND the
+      // survivor, who is about to be bounced to the menu just as abruptly.
+      persistDuelStreaks(room);
       if (bothSeated && room.inPlay && !room.matchOver && currentPlayerId) {
         try {
           // Same rule as recordRoomMatch: a seat that no longer holds
@@ -1322,6 +1716,10 @@ async function startServer() {
       }
       if (!room.players[0] && !room.players[1]) {
         rooms.delete(currentRoomId);
+      } else {
+        // One player left in it. That is a room with nobody to play against,
+        // however busy the survivor keeps it, so the clock starts again.
+        room.soloSince = Date.now();
       }
       currentRoomId = null;
       playerIndex = null;

@@ -89,24 +89,44 @@ const CONFIG = normalizeRoomConfig({ winningScore: 3 });
 interface Side {
   link: InstanceType<typeof P2PGameLink>;
   got: WSServerMessage[];
-  syncs: { matchSeq: number; p1Score: number; p2Score: number; maxRally: number }[];
+  /**
+   * Whatever the replica reports, in full — narrowing this to the fields a
+   * test happened to need is how a new one goes unasserted.
+   */
+  syncs: Parameters<NonNullable<ConstructorParameters<typeof P2PGameLink>[0]['onMatchSync']>>[0][];
 }
 
-/** Two linked peers, channels open, seeded on match 1 exactly as game_start does. */
-async function pairedPeers(): Promise<[Side, Side]> {
+/**
+ * Two linked peers, channels open, seeded on match 1 exactly as game_start does.
+ *
+ * `echoGameStart` mirrors what App.tsx actually does with a game_start: its
+ * handler calls `p2pRef.current.resetMatchState(...)` on this very replica,
+ * synchronously, inside the dispatch. That re-entrant call is invisible to a
+ * test whose onMessage merely records, and it resets state the replica had
+ * just set — so anything asserting about ordering AROUND a game_start has to
+ * model it or it is testing a shape the app never runs.
+ */
+async function pairedPeers(opts: { echoGameStart?: boolean } = {}): Promise<[Side, Side]> {
   const sides: Side[] = [];
   for (const myIndex of [0, 1] as const) {
     const got: WSServerMessage[] = [];
     const syncs: Side['syncs'] = [];
+    let self: InstanceType<typeof P2PGameLink> | null = null;
     const link = new P2PGameLink({
       myIndex,
       playerNames: NAMES,
       config: CONFIG,
       sendSignal: () => {},
-      onMessage: (m) => got.push(m),
+      onMessage: (m) => {
+        got.push(m);
+        if (opts.echoGameStart && m.type === 'game_start') {
+          self?.resetMatchState(m.servingPlayer, m.matchSeq, m.streaks);
+        }
+      },
       onStatus: () => {},
       onMatchSync: (s) => syncs.push(s),
     });
+    self = link;
     sides.push({ link, got, syncs });
   }
   const [a, b] = sides;
@@ -266,27 +286,88 @@ describe('the replica applies the relay rules it owns alone', () => {
     expect(a.got.find((m) => m.type === 'ball_incoming')).toBeUndefined();
   });
 
-  it('counts a crossing from either side toward the rally', async () => {
+  it('credits each crossing to the streak of the player who made it', async () => {
     const [a, b] = await pairedPeers();
-    // A rally is a ball going back and forth; counting only your own strokes
-    // would report half the rally the match is actually rated on.
-    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    b.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    // A rally streak belongs to one player: their own consecutive returns,
+    // never the opponent's. p1 serves, so p1's first ball opens the point
+    // rather than continuing one and counts for nobody. After that the two
+    // alternate, and each crossing is its sender's own return.
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1 serves
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 1
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 1
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 2
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 2
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 3
+    // p1 takes the point, so p2 is the one who let it past.
     a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
 
-    expect(a.syncs.at(-1)!.maxRally).toBe(3);
-    expect(b.syncs.at(-1)!.maxRally).toBe(3);
+    // Both peers reach the same two numbers from the same events — which is
+    // the whole point of the replica, and the thing that drifted before.
+    expect(a.syncs.at(-1)!.bestStreaks).toEqual([2, 3]);
+    expect(b.syncs.at(-1)!.bestStreaks).toEqual([2, 3]);
   });
 
-  it('tells the relay the match is live on the FIRST crossing, and once', async () => {
+  it('ends only the streak of the player who missed, and carries the other across the point', async () => {
+    const [a, b] = await pairedPeers();
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1 serves
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 1
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 1
+    a.link.sendGame({ type: 'point_scored', scorer: 'p1' }); // p2 let it past
+    // p2 serves the next point, so p1's next ball is a genuine return — and it
+    // CONTINUES the streak p1 already had. Winning a point was never a reason
+    // to lose your own streak, which is exactly what the shared counter did to
+    // both players every time either of them scored.
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2 serves
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p1: 2
+    b.link.sendGame({ type: 'ball_cross_net', ball: BALL }); // p2: 1
+    // A point always reports, and the last one is what the match is recorded
+    // from — but so does every crossing before it, so the relay is never more
+    // than one event behind the rally.
+    a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
+    expect(a.syncs.at(-1)!.bestStreaks).toEqual([2, 1]);
+    expect(b.syncs.at(-1)!.bestStreaks).toEqual([2, 1]);
+  });
+
+  it('tells the relay about EVERY crossing, not just the first of the point', async () => {
     const [a] = await pairedPeers();
     a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    // That one report is what makes a walk-out an abandon and what shuts the
-    // lobby's settings; the ones after it would be noise at 20Hz.
+    // The first still earns its report on its own — it is what puts the match
+    // in play, which is what makes a walk-out an abandon and shuts the lobby's
+    // settings.
     expect(a.syncs).toHaveLength(1);
+    expect(a.syncs.at(-1)!.crossingsThisPoint).toBe(1);
+
+    // And so does each one after it. This used to stop at one per point, on
+    // the grounds that the rest would be "noise at 20Hz" — which confused this
+    // with ball_pos. A crossing is one message per trip over the net, and the
+    // relay is where the match gets RECORDED: a DataChannel dying mid-rally
+    // hands the rest of the point back over the relay, which then resumes from
+    // whatever it was last told. Stale, every return since is gone from the
+    // streak, the XP and the daily tasks, and the point phase is wrong by the
+    // same amount so the next relayed crossing is miscounted too.
     a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
-    expect(a.syncs).toHaveLength(1);
+    expect(a.syncs).toHaveLength(2);
+    expect(a.syncs.at(-1)!.crossingsThisPoint).toBe(2);
+    expect(a.syncs.at(-1)!.bestStreaks).toEqual([1, 0]);
+
+    // Each one carries a revision that only goes up, so the relay can spot a
+    // snapshot arriving behind one it already applied — the fields saying
+    // where a run IS are assigned, so a late one would walk it backwards.
+    expect(a.syncs.map((s) => s.rev)).toEqual([1, 2]);
+  });
+
+  it('counts a new match’s revisions from the start again', async () => {
+    const [a] = await pairedPeers();
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    expect(a.syncs.at(-1)!.rev).toBe(2);
+    // The relay resets its high-water mark on game_start, so the replica has
+    // to reset with it or every snapshot of the new match is rejected.
+    a.link.resetMatchState(0, 2);
+    a.syncs.length = 0;
+    a.link.sendGame({ type: 'ball_cross_net', ball: BALL });
+    expect(a.syncs.at(-1)!.rev).toBe(1);
+    expect(a.syncs.at(-1)!.matchSeq).toBe(2);
   });
 
   it('reports every point to the relay, the last one especially', async () => {
@@ -312,7 +393,10 @@ describe('the replica applies the relay rules it owns alone', () => {
   });
 
   it('numbers a locally agreed rematch so its result is a different match', async () => {
-    const [a, b] = await pairedPeers();
+    // echoGameStart, because App.tsx's own game_start handler calls
+    // resetMatchState back on this replica synchronously — a harness whose
+    // onMessage merely records is asserting about a shape the app never runs.
+    const [a, b] = await pairedPeers({ echoGameStart: true });
     for (let i = 0; i < 3; i++) a.link.sendGame({ type: 'point_scored', scorer: 'p1' });
     a.link.sendGame({ type: 'rematch_request' });
     b.link.sendGame({ type: 'rematch_request' });
@@ -328,4 +412,5 @@ describe('the replica applies the relay rules it owns alone', () => {
     // serving; the rematch flips it back — the relay's own rule, replicated.
     expect(restart.servingPlayer).toBe(0);
   });
+
 });

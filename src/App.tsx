@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BallState,
+  AIDifficulty,
   GameMode,
   GameSettings,
   PlayerStats,
@@ -19,7 +20,8 @@ import {
   RoomMatchConfig,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
-import { postMatchRecord, flushPendingMatches } from './net/matchRecord';
+import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
+import { nextRunSeq } from './net/runChain';
 import { THEMES, ThemeConfig } from './game/themes';
 import {
   PADDLE_Y,
@@ -74,7 +76,18 @@ import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
 import { SessionGuard } from './components/SessionGuard';
-import { TutorialModal } from './components/TutorialModal';
+import { OnboardingTour } from './components/OnboardingTour';
+import { TOUR_DIFFICULTY, TOUR_STEPS, TOUR_WINNING_SCORE } from './game/tour';
+import {
+  CarryStore,
+  carriedStreak as carried,
+  opponentMiss,
+  opponentReturn,
+  ownMiss,
+  ownReturn,
+  rememberCarry,
+  startMatchStreaks,
+} from './game/streaks';
 import { OnboardingModal } from './components/OnboardingModal';
 import { PublicProfileModal } from './components/PublicProfileModal';
 import {
@@ -186,7 +199,39 @@ export default function App() {
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [isAchievementsOpen, setIsAchievementsOpen] = useState<boolean>(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
-  const [isTutorialOpen, setIsTutorialOpen] = useState<boolean>(false);
+  /**
+   * The onboarding tour. `null` when it is not running; otherwise the step.
+   *
+   * It walks the REAL product — the real menu, the real pre-match sheet, a
+   * real Solo Rookie match frozen mid-frame, the real Settings, Profile,
+   * Leaderboard and Active Tasks — because what it replaced was a deck of
+   * static dioramas that taught none of the actual game and was never shown to
+   * a new player anyway. It grants nothing: the match it plays is not
+   * recorded, and finishing pays no XP, no missions and no achievements.
+   */
+  const [tourStep, setTourStep] = useState<number | null>(null);
+  const [tourSkipOpen, setTourSkipOpen] = useState<boolean>(false);
+  /** Set for the whole time the tour owns the court, so nothing is banked. */
+  const tourMatchRef = useRef<boolean>(false);
+  /** Physics is held mid-frame while a step is talking about it. */
+  const tourFreezeRef = useRef<boolean>(false);
+  /** Reached by the tour so a step can put a ball in the air. */
+  const tourServeRef = useRef<() => void>(() => {});
+  const tourActive = tourStep !== null;
+  // Read from the socket handlers, which are built once and never see state.
+  const tourActiveRef = useRef<boolean>(false);
+  tourActiveRef.current = tourActive;
+  const tourStepDef = tourStep === null ? null : (TOUR_STEPS[tourStep] ?? null);
+  const tourStage = tourStepDef?.stage ?? null;
+  /**
+   * Held mid-frame for every match step, so the ball, the net, the radar and
+   * the scoreboard a step describes are the real ones and are still there when
+   * the player looks up from the card. Declared here rather than beside the
+   * driver because the serve timers below have to depend on it.
+   */
+  const [tourLive, setTourLive] = useState<boolean>(false);
+  const tourFreeze = tourStage === 'match' && !tourLive;
+  tourFreezeRef.current = tourFreeze;
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
   // Any tapped username opens this player's public profile (z-[60], above
   // whichever modal spawned it). null = closed.
@@ -232,8 +277,12 @@ export default function App() {
   const [stats, setStats] = useState<PlayerStats>({
     score: 0,
     opponentScore: 0,
-    rallyCount: 0,
-    maxRally: 0,
+    streak: 0,
+    bestStreak: 0,
+    earnedStreak: 0,
+    earnedBest: 0,
+    oppStreak: 0,
+    oppBestStreak: 0,
     aces: 0,
     matchesWon: 0,
   });
@@ -286,7 +335,13 @@ export default function App() {
   // "Are you sure?" gate for quitting a live duel — walking out mid-match is
   // an abandon, so it should never happen off a single mis-tap.
   const [quitConfirmOpen, setQuitConfirmOpen] = useState<boolean>(false);
+  // The same gate for walking out of a LOBBY. Dismissing that sheet used to
+  // only hide it, which left the player alone on the live court underneath —
+  // paddle working, serve refused, and the relay's room still open behind
+  // them. Leaving a room is now a decision, and taking it actually leaves.
+  const [leaveLobbyConfirmOpen, setLeaveLobbyConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
+  const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
   // An invitation link that never got its holder a seat. Silence here reads as
   // "the link is broken" — which it may well be (a dead room code), but the
   // player deserves to be told rather than left on a menu that swallowed it.
@@ -298,9 +353,21 @@ export default function App() {
   // The terms the CURRENT match is played on. A duel takes them from the room
   // so both sides agree; every other mode takes them from the menu.
   const activeConfig: RoomMatchConfig =
-    mode === 'multiplayer' && roomConfig
-      ? roomConfig
-      : { winningScore: settings.winningScore, rules: settings.rules };
+    // The tour's match is played on the tour's terms, not the player's. It is
+    // a teaching aid on a rung everybody has open, and a replay from Settings
+    // would otherwise walk a veteran through the basics of the game against
+    // their own stored Cyber difficulty at first-to-15.
+    // Stock rules too, not just the difficulty and the score. A replay after
+    // the player has tuned their own would demonstrate a serve at their serve
+    // power, a paddle at their paddle size — and, if they have turned the
+    // sonar off, a radar step pointing at an element that is not rendered.
+    tourStage === 'match'
+      ? { winningScore: TOUR_WINNING_SCORE, rules: DEFAULT_MATCH_RULES }
+      : mode === 'multiplayer' && roomConfig
+        ? roomConfig
+        : { winningScore: settings.winningScore, rules: settings.rules };
+  /** Who the AI is playing as — see activeConfig for why the tour overrides. */
+  const activeDifficulty: AIDifficulty = tourStage === 'match' ? TOUR_DIFFICULTY : settings.difficulty;
 
   // Refs for high-speed 60fps physics loop without stale closures
   const ballRef = useRef<BallState>(ball);
@@ -327,6 +394,19 @@ export default function App() {
   // Who served the point currently in play — an ace is a point won directly
   // off your own serve, so the winner alone doesn't identify one.
   const servedThisPointRef = useRef<boolean>(true);
+  const isPlayerServerRef = useRef<boolean>(true);
+  /**
+   * Whether the opponent has put the ball over yet THIS point.
+   *
+   * Both of these answer the same question in the two shapes it arrives in: a
+   * serve is not a return, so the opponent's first ball of a point is theirs
+   * only when they are not the one serving. In a duel the opponent's returns
+   * are only ever observed as balls arriving, so the count is what tells the
+   * serve from a rally; in solo they are observed directly as a paddle hit,
+   * and the flag is what tells an ace from a point won off a rally.
+   */
+  const oppCrossingsThisPointRef = useRef<number>(0);
+  const oppReturnedThisPointRef = useRef<boolean>(false);
   const settingsRef = useRef<GameSettings>(settings);
   const profileRef = useRef<PlayerProfile | null>(profile);
   // Which match of the room is being played, from the relay's game_start (or
@@ -343,6 +423,12 @@ export default function App() {
   // arrive twice — pushed by the relay and returned by our own POST — and the
   // player should not be congratulated twice for one match.
   const shownMatchKeyRef = useRef<string>('');
+  /**
+   * Where this page's own run stands, per mode — what the next match in that
+   * mode opens on, and why the profile alone is not enough to answer that.
+   * The rule, and the reasoning, are in src/game/streaks.ts.
+   */
+  const carryRef = useRef<CarryStore>({});
 
   // P2P link plumbing. dispatchRef always points at the CURRENT render's
   // message handler, so both the WebSocket and the P2P link dispatch into
@@ -368,6 +454,14 @@ export default function App() {
   const oppBallSeenRef = useRef<number>(0);
   const matchCountdownRef = useRef<number | null>(matchCountdown);
   const intentionalCloseRef = useRef<boolean>(false);
+  /**
+   * The room this page currently holds a seat in, for the socket handlers,
+   * which are built once and cannot see state. Cleared by handleLeaveRoom, so
+   * it answers "do we hold a seat right now" — which playerIndex does not: it
+   * keeps its last value after a leave, and is only ever overwritten by the
+   * next room_created/room_joined.
+   */
+  const roomIdRef = useRef<string | null>(null);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
 
   ballRef.current = ball;
@@ -377,10 +471,12 @@ export default function App() {
   screenRef.current = screen;
   wsRef.current = ws;
   isServingRef.current = isServing;
+  isPlayerServerRef.current = isPlayerServer;
   statsRef.current = stats;
   settingsRef.current = settings;
   profileRef.current = profile;
   playerIndexRef.current = playerIndex;
+  roomIdRef.current = roomId;
   opponentIdRef.current = opponentId;
   oppPaddleXRef.current = oppPaddleX;
   matchCountdownRef.current = matchCountdown;
@@ -470,6 +566,25 @@ export default function App() {
     setSessionBusy(false);
     setSessionStatus(res.status);
     if (res.profile) {
+      // The fresh profile is swapped in WITHOUT a reload, unlike every other
+      // way this page changes identity (a recovery-code restore reloads the
+      // whole page instead). carryRef survives that swap, and it is read in
+      // PREFERENCE to the profile's own stored value ("what this page last
+      // saw for itself wins" — see streaks.ts) — so left alone, the brand new
+      // account's first Solo or Practice session opens on the RELEASED
+      // account's last run, and bestStreak opening on it is what the career
+      // best, the mode best and rally achievements are keyed on: a theme
+      // unlock or an achievement for returns this player never made.
+      carryRef.current = {};
+      // Same reasoning, a second piece of stale per-browser state: a match
+      // that failed to record before this device was released is still
+      // sitting in the on-device queue (net/matchRecord.ts), which is a flat
+      // localStorage key with no idea which account was active when an entry
+      // was parked. Left alone, the profile?.id effect below flushes it the
+      // moment this fresh account is initialized and credits the RELEASED
+      // account's match — XP, rating, achievements, streaks — to a player
+      // who never played it.
+      clearPendingMatches();
       setProfile(res.profile);
       setPlayerId(res.profile.id);
     }
@@ -480,6 +595,10 @@ export default function App() {
   useEffect(() => {
     if (!profile?.id) return;
     // Replay anything an earlier session couldn't deliver, then refresh.
+    // A replay keeps the chain position (see src/net/runChain.ts) it was
+    // assigned when the match originally ended, so it is already ordered
+    // against whatever this browser assigns after this reload — it does not
+    // need to run through queueRunWrite as well.
     void flushPendingMatches().then((recovered) => {
       if (recovered > 0) fetchProfile();
     });
@@ -543,12 +662,54 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * Every client write that ASSIGNS the carried run, in the order it was made.
+   *
+   * The age each write carries orders it against writes from OTHER moments —
+   * a match replayed off the on-device queue days later says so and loses to
+   * what overtook it. It cannot order two writes made at nearly the same
+   * moment, because their ages are both ~0 and what separates them is time
+   * spent IN FLIGHT, which no stamp taken before sending can see. Reset
+   * reporting a run of 8, then a miss and a walk-out reporting 0, then the
+   * first request arriving last: both say "just now", and the server takes the
+   * later arrival.
+   *
+   * So the two mechanisms answer different questions and the writes need both.
+   * I removed this chain once on the grounds that the age superseded it; it
+   * does not, and that was the wrong call.
+   *
+   * The price is that a stuck write delays the ones behind it. They are
+   * corrections and results whose order matters more than their latency, and a
+   * write that never lands leaves the server where it already was.
+   */
+  const runWriteChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const queueRunWrite = useCallback(<T,>(work: () => Promise<T>): Promise<T> => {
+    const next = runWriteChainRef.current.then(work, work);
+    runWriteChainRef.current = next.catch(() => undefined);
+    return next;
+  }, []);
+
   // Record Match Result to Server Database and Track Daily Missions
   const recordMatchCompletion = useCallback(
     async (isWinner: boolean) => {
       // Practice Wall and Split Screen are unranked: no winner is ever set
       // for them, and even if one were, nothing gets recorded.
       if (modeRef.current === 'practice' || modeRef.current === 'split') return;
+      // The onboarding tour plays a real match and banks none of it. XP,
+      // missions, achievements and rating all advance only inside the
+      // server's recordMatch, which nothing but this POST reaches.
+      //
+      // Defence in depth rather than the thing doing the work: the tour's
+      // match never reaches a winner, because a step that leaves the court
+      // tears it down, so today nothing calls this for it at all. It is here
+      // for the change that lets the tour play a match out — removing it
+      // passes every test in the suite, which is exactly why it needs saying.
+      if (tourMatchRef.current) return;
+
+      // Where this player's run stands now, before anything is awaited. Play
+      // Again is a synchronous button and the POST below is not, so a replay
+      // that read the profile would open on the run from before this match.
+      rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
 
       // A duel's key is derived so the relay lands on the same one; a solo
       // match has only this device to report it, so it mints its own.
@@ -575,7 +736,20 @@ export default function App() {
               : `AI (${settingsRef.current.difficulty})`,
           playerScore: statsRef.current.score,
           opponentScore: statsRef.current.opponentScore,
-          maxRally: statsRef.current.maxRally,
+          bestStreak: statsRef.current.bestStreak,
+          endStreak: statsRef.current.streak,
+          earnedStreak: statsRef.current.earnedBest,
+          // Stamped here, at the whistle — not when this eventually POSTs.
+          // The queue can hold this through a whole replay, and the run it
+          // reports must not land back on top of a newer one.
+          endedAt: Date.now(),
+          // This browser's own ordering, assigned at the same moment as
+          // endedAt rather than at send time — see src/net/runChain.ts. A
+          // parked-and-replayed copy of this exact payload keeps the number
+          // assigned right here, so it stays correctly ordered against
+          // whatever this browser assigns after a reload, regardless of how
+          // long either request's own round trip takes.
+          ...nextRunSeq(),
           aces: statsRef.current.aces,
           mode: modeRef.current,
           difficulty: settingsRef.current.difficulty,
@@ -602,7 +776,7 @@ export default function App() {
           matchKey,
         };
 
-        const outcome = await postMatchRecord(payload);
+        const outcome = await queueRunWrite(() => postMatchRecord(payload));
         if (!outcome.ok) {
           if (outcome.reason === 'stale_build') {
             // A newer deployment is live and the page is already reloading.
@@ -639,7 +813,7 @@ export default function App() {
         if (shownMatchKeyRef.current !== matchKey) setToastRecordFailed(true);
       }
     },
-    [playerId, opponentId, opponentName, roomId, applyMatchResult]
+    [playerId, opponentId, opponentName, roomId, applyMatchResult, queueRunWrite]
   );
 
   // Trigger match completion on winner change. Guarded by a ref because the
@@ -738,7 +912,7 @@ export default function App() {
         const aiMsg: ChatMessage = {
           id: `ai_chat_${Date.now()}`,
           text: randomReply,
-          senderName: `AI (${settings.difficulty})`,
+          senderName: `AI (${activeDifficulty})`,
           isSelf: false,
           timestamp: Date.now(),
         };
@@ -784,8 +958,8 @@ export default function App() {
     sound.setEnabled(settings.soundEnabled);
     sound.setSfxVolume((settings.sfxVolume ?? 80) / 100);
     sound.setBgmVolume((settings.bgmVolume ?? 50) / 100);
-    aiRef.current.setDifficulty(settings.difficulty);
-  }, [settings]);
+    aiRef.current.setDifficulty(activeDifficulty);
+  }, [settings, activeDifficulty]);
 
   // Feed the AI the player's hidden rating so each difficulty slides part-way
   // toward them — Pro stays a real contest at any skill instead of a wall.
@@ -854,6 +1028,18 @@ export default function App() {
   // full" — about the room this player is in the middle of joining — so the
   // first attempt holds the door until the server has answered either way.
   const joinInFlightRef = useRef<boolean>(false);
+  /**
+   * A seat has been ASKED FOR and the relay has not answered yet.
+   *
+   * Distinct from roomId, which is only set once the answer lands, and from
+   * joinInFlightRef, which is about not sending a second join. This one exists
+   * because that window looks exactly like being on the menu — the lobby can
+   * be dismissed in it without a confirmation, and nothing else on screen says
+   * a request is outstanding. The tour used to be startable from inside it,
+   * and the seat then arrived underneath a running tour that walks away from
+   * it (see startTour and room_created).
+   */
+  const roomRequestRef = useRef<boolean>(false);
   // An invitation that loses its socket before the server has answered is not
   // a refusal — it is an unanswered question, and latching autoJoinedRef on
   // the ATTEMPT turned every such blip into "the link is broken". Bounded, so
@@ -887,6 +1073,8 @@ export default function App() {
   const handleServe = useCallback(
     (aim?: ServeAim) => {
       if (!isServingRef.current) return;
+      // Nothing is served under a frozen court.
+      if (tourFreezeRef.current) return;
       // A duel's serve needs someone on the other end. A host waiting in the
       // lobby is already on the court underneath it, so without this a serve
       // (auto or tapped) would fire the ball into an empty room, where it
@@ -983,7 +1171,8 @@ export default function App() {
         !isMultiplayerOpen &&
         !countdownArmed &&
         (matchCountdown ?? 0) <= 0);
-    const active = isServing && isPlayerServer && screen === 'game' && !winner && duelReady;
+    const active =
+      isServing && isPlayerServer && screen === 'game' && !winner && duelReady && !tourFreeze;
     if (!active || seconds <= 0) {
       setServeCountdown(null);
       return;
@@ -1010,6 +1199,7 @@ export default function App() {
     countdownArmed,
     matchCountdown,
     activeConfig.rules.autoServeSeconds,
+    tourFreeze,
     handleServe,
   ]);
 
@@ -1019,19 +1209,19 @@ export default function App() {
   // (Practice Wall has no opponent at all: the player always serves.)
   useEffect(() => {
     if (mode !== 'solo' || screen !== 'game') return;
-    if (!isServing || isPlayerServer || winner) return;
+    if (!isServing || isPlayerServer || winner || tourFreeze) return;
     const delayMs =
       aiServeDelay(
         aiRef.current.competence(),
         playerPressure({
           playerScore: statsRef.current.score,
           opponentScore: statsRef.current.opponentScore,
-          maxRally: statsRef.current.maxRally,
+          maxRally: statsRef.current.bestStreak,
         })
       ) * 1000;
     const timer = setTimeout(() => handleServe(), delayMs);
     return () => clearTimeout(timer);
-  }, [mode, screen, isServing, isPlayerServer, winner, handleServe]);
+  }, [mode, screen, isServing, isPlayerServer, winner, tourFreeze, handleServe]);
 
   // Build (or rebuild) the P2P link for the current room. The host creates
   // the offer; the guest side is created lazily when the first offer arrives.
@@ -1081,6 +1271,24 @@ export default function App() {
   const handleServerMessage = (msg: WSServerMessage) => {
     switch (msg.type) {
       case 'room_created':
+        roomRequestRef.current = false;
+        // A seat that arrives while the tour is running is one nobody can
+        // keep: the tour reaches its match stage and switches to Solo, and
+        // the relay would go on holding it. startTour refuses to start over an
+        // outstanding request, so this should be unreachable — it is here
+        // because the guarantee is about the SEAT, not about one entry point.
+        if (tourActiveRef.current) {
+          handleLeaveRoomRef.current();
+          break;
+        }
+        // Same rule as room_joined below, and it was missing here: asking for
+        // a room and being given one are separate moments, and the lobby can
+        // be dismissed in between — before roomId is set, so that dismissal is
+        // a plain one and asks nothing. This case then flips the screen to
+        // `game` and seats the host behind a shut lobby: alone on a live court
+        // with no room code to share and no Leave control, while the relay
+        // goes on holding the room they had probably already sent someone.
+        setIsMultiplayerOpen(true);
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
@@ -1095,6 +1303,11 @@ export default function App() {
         // Answered. Stop treating a later disconnect as an unfulfilled invite.
         pendingRoomRef.current = null;
         joinInFlightRef.current = false;
+        roomRequestRef.current = false;
+        if (tourActiveRef.current) {
+          handleLeaveRoomRef.current(); // see room_created
+          break;
+        }
         // Holding a seat means the lobby is the right surface until the match
         // starts, so a seat granted while the lobby is shut reopens it. The
         // player can dismiss the lobby in the moment between asking for a seat
@@ -1153,14 +1366,19 @@ export default function App() {
         shownMatchKeyRef.current = '';
         setRoomConfig(msg.config);
         p2pRef.current?.setConfig(msg.config);
-        setStats({
-          score: 0,
-          opponentScore: 0,
-          rallyCount: 0,
-          maxRally: 0,
-          aces: 0,
-          matchesWon: 0,
-        });
+        setStats((s) =>
+          startMatchStreaks(
+            { ...s, score: 0, opponentScore: 0, aces: 0, matchesWon: 0 },
+            // The relay's number, not the profile's: it seeded the seat from
+            // the store and it is what this match will be recorded on, so a
+            // phone that disagrees is a phone showing something else.
+            msg.streaks?.[playerIndexRef.current] ?? carriedStreak('multiplayer'),
+            // The other seat's, for the telemetry overlay. Shown, never
+            // counted: what the opponent is paid and rated on is their own
+            // phone's business and the relay's.
+            msg.streaks?.[playerIndexRef.current === 0 ? 1 : 0] ?? 0
+          )
+        );
         setTotalTouches(0);
         setMatchStartTime(Date.now());
         setIsPlayerServer(msg.servingPlayer === playerIndexRef.current);
@@ -1177,7 +1395,7 @@ export default function App() {
         // walks onto the court until the room says the match exists.
         setIsMultiplayerOpen(false);
         setIsServing(true);
-        p2pRef.current?.resetMatchState(msg.servingPlayer, matchSeqRef.current);
+        p2pRef.current?.resetMatchState(msg.servingPlayer, matchSeqRef.current, msg.streaks);
         break;
 
       case 'opponent_paddle':
@@ -1235,10 +1453,16 @@ export default function App() {
           spin: inc.spin || 0,
           speedMultiplier: inc.speedMultiplier,
         });
-        setStats((s) => {
-          const nextRally = s.rallyCount + 1;
-          return { ...s, rallyCount: nextRally, maxRally: Math.max(s.maxRally, nextRally) };
-        });
+        // The opponent put this ball over, so it is THEIR return and their
+        // streak — except when it is their serve, which opens the point
+        // rather than continuing one. Same rule the relay applies to a
+        // ball_cross_net; the client tracks it too so the HUD can show both
+        // streaks without waiting to be told.
+        {
+          const isOppServe = oppCrossingsThisPointRef.current === 0 && !isPlayerServerRef.current;
+          oppCrossingsThisPointRef.current += 1;
+          if (!isOppServe) setStats(opponentReturn);
+        }
         break;
       }
 
@@ -1248,12 +1472,7 @@ export default function App() {
         setOppBall(null);
         const myIdx = playerIndexRef.current;
         if (myIdx === 0) {
-          setStats((s) => ({
-            ...s,
-            score: msg.p1Score,
-            opponentScore: msg.p2Score,
-            rallyCount: 0,
-          }));
+          setStats((s) => applyDuelPoint(s, msg.p1Score, msg.p2Score));
           if (msg.p1Score >= configRef.current.winningScore) {
             setWinner('player');
             confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
@@ -1264,12 +1483,7 @@ export default function App() {
             setIsServing(true);
           }
         } else {
-          setStats((s) => ({
-            ...s,
-            score: msg.p2Score,
-            opponentScore: msg.p1Score,
-            rallyCount: 0,
-          }));
+          setStats((s) => applyDuelPoint(s, msg.p2Score, msg.p1Score));
           if (msg.p2Score >= configRef.current.winningScore) {
             setWinner('player');
             confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
@@ -1332,6 +1546,19 @@ export default function App() {
         }
         break;
 
+      case 'p2p_fallback':
+        // The relay has started counting this match itself, which means the
+        // other phone's DataChannel is gone. Ours may still look open — a link
+        // does not die for both peers at the same instant — and playing on
+        // over it means playing against somebody who is no longer receiving
+        // us, while reporting a replica the relay has already overtaken. Drop
+        // to the relay; gameplay continues there, which is what the fallback
+        // has always been for.
+        p2pRef.current?.close();
+        p2pRef.current = null;
+        setLinkStatus('relay');
+        break;
+
       case 'opponent_left': {
         setMatchPrediction(null);
         setOpponentName(null);
@@ -1347,8 +1574,17 @@ export default function App() {
         // match finished; let them read it — the rematch button disables
         // itself), and the lobby is still open (a host goes back to waiting
         // for the next opponent, which is what the lobby is for).
+        //
+        // That second case is about a HOST. For a guest it is the opposite:
+        // seat 0 is only ever filled by create_room, so a room whose host has
+        // gone can never have one again — join_room fills seat 1 and
+        // start_match is refused to anyone but seat 0. Left in the lobby, the
+        // guest waits on a room that cannot start, with nothing on screen to
+        // say so. They are sent back with the same notice a mid-match
+        // departure gets, which also empties the room behind them.
+        const strandedGuest = isMultiplayerOpen && playerIndexRef.current === 1;
         const midMatch = !winner && !isMultiplayerOpen && screenRef.current === 'game';
-        if (midMatch) {
+        if (midMatch || strandedGuest) {
           setToastOpponentLeft(true);
           setTimeout(() => setToastOpponentLeft(false), 6000);
           handleLeaveRoom();
@@ -1364,6 +1600,7 @@ export default function App() {
         // The server answered — a dead or full room is a verdict, not a blip.
         pendingRoomRef.current = null;
         joinInFlightRef.current = false;
+        roomRequestRef.current = false;
         alert(msg.message);
         break;
     }
@@ -1415,6 +1652,7 @@ export default function App() {
       // guard for good, and every later Join would return early without even
       // opening a replacement socket.
       joinInFlightRef.current = false;
+      roomRequestRef.current = false;
       // The socket dying UNDER a live duel means this player was ejected —
       // the relay has already recorded the abandon and told the opponent.
       // A deliberate leave sets the flag first and lands here silently.
@@ -1447,13 +1685,21 @@ export default function App() {
           setTimeout(() => setToastInviteFailed(false), 8000);
         }
       }
-      const midMatch =
-        modeRef.current === 'multiplayer' &&
-        screenRef.current === 'game' &&
-        !!opponentIdRef.current;
-      if (midMatch) {
-        setToastEjected(true);
-        setTimeout(() => setToastEjected(false), 8000);
+      // Anything the relay was holding a seat for. This used to require an
+      // opponent AND a live court, which missed exactly the case the unpaired
+      // TTL exists for: a host waiting alone, whose room the reaper deletes
+      // and whose socket it closes. They were left sitting in a lobby showing
+      // a room code that no longer resolved, so a friend typing it got "room
+      // not found" while the host still believed they were hosting. A guest
+      // who has joined but not yet started is the same shape — a seat, and no
+      // court yet. A deliberate leave returned above; this is the rest.
+      if (roomIdRef.current) {
+        // Two different things to say. Mid-match the relay has recorded an
+        // abandon and told the opponent, so "removed from the match" is the
+        // truth. Alone in a lobby there was never a match to be removed from.
+        const notice = opponentIdRef.current ? setToastEjected : setToastRoomExpired;
+        notice(true);
+        setTimeout(() => notice(false), 8000);
         handleLeaveRoomRef.current();
       }
     };
@@ -1488,6 +1734,16 @@ export default function App() {
   };
 
   const handleCreateRoom = () => {
+    // Not from under the tour. Its scrim is deliberately pointer-events-none —
+    // the app underneath is the real app and stays usable, which is the whole
+    // idea — but a room opened during it is one the tour then walks away from:
+    // reaching the match stage switches straight to Solo, and the relay is
+    // left holding the seat with a code somebody may already have been sent.
+    // Refusing here is NOT the whole of it, though it reads that way: the tour
+    // only opens from the menu and a room puts you on the court, but a room
+    // REQUEST leaves you on the menu with a seat on its way. See startTour.
+    if (tourActive) return;
+    roomRequestRef.current = true;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
@@ -1505,8 +1761,10 @@ export default function App() {
   };
 
   const handleJoinRoom = (code: string) => {
+    if (tourActive) return; // see handleCreateRoom
     if (joinInFlightRef.current) return;
     joinInFlightRef.current = true;
+    roomRequestRef.current = true;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
@@ -1561,6 +1819,23 @@ export default function App() {
     }
   };
 
+  /**
+   * A point landed in a duel. Only the player who let the ball past loses
+   * their streak, and this client already knows which that was: it sent the
+   * point_scored itself when the ball crossed its own baseline, and cleared
+   * its streak there. So what is left to do here is the OPPONENT's — their
+   * streak ends exactly when my score goes up — and to open a fresh point.
+   */
+  const applyDuelPoint = (s: PlayerStats, mine: number, theirs: number): PlayerStats => {
+    const iScored = mine > s.score;
+    oppCrossingsThisPointRef.current = 0;
+    oppReturnedThisPointRef.current = false;
+    const next = { ...s, score: mine, opponentScore: theirs };
+    // My own miss already ended my streak locally, a frame before the relay
+    // said so. What is left is the opponent's, and only when I scored.
+    return iScored ? opponentMiss(next) : next;
+  };
+
   /** Guest: signal (or withdraw) readiness. Host starts via handleStartMatch. */
   const handleSendReady = (ready: boolean) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1576,11 +1851,16 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
-    intentionalCloseRef.current = true;
     p2pRef.current?.close();
     p2pRef.current = null;
     setLinkStatus('relay');
     if (ws && ws.readyState === WebSocket.OPEN) {
+      // The flag labels a close WE cause, so it is set only when there is one
+      // to cause. Set unconditionally it outlived its socket — this is also
+      // reached FROM onclose, where the socket is already gone and no close
+      // event is coming to consume it, and the flag then swallowed the next
+      // socket's genuine ejection.
+      intentionalCloseRef.current = true;
       ws.send(JSON.stringify({ type: 'leave_room' }));
       ws.close();
     }
@@ -1593,10 +1873,196 @@ export default function App() {
     setCountdownArmed(false);
     setLobbyReady([false, false]);
     setQuitConfirmOpen(false);
+    setLeaveLobbyConfirmOpen(false);
+    // The lobby is a sheet over the court, not a screen. Leaving without
+    // closing it dropped the player back on the menu with it still floating.
+    setIsMultiplayerOpen(false);
     setMode('solo');
     setScreen('menu');
     resetMatch();
   };
+
+  /**
+   * The lobby's X and its Leave button are the same intent, and both are a
+   * request rather than an action: a seat in a room is something the relay is
+   * holding, so walking away from it has to actually tell the relay. Before a
+   * room exists there is nothing to leave, and dismissing is just dismissing —
+   * which is also the window a join can still be in flight in, where
+   * `room_joined` reopens the sheet rather than seating anyone behind it.
+   */
+  const requestLeaveLobby = () => {
+    if (roomId) {
+      setLeaveLobbyConfirmOpen(true);
+      return;
+    }
+    setIsMultiplayerOpen(false);
+  };
+
+  // ---------------------------------------------------------------------
+  // The onboarding tour
+  // ---------------------------------------------------------------------
+  /** The pre-match sheet a `prematch` step needs open, for MainMenu to obey. */
+  const tourPrematchMode: GameMode | null = tourStage === 'prematch' ? 'solo' : null;
+
+  const startTour = useCallback(() => {
+    // The tour starts at the menu and its first steps ARE the menu, so it can
+    // only be opened from there. Replaying it out of a live match used to walk
+    // menu steps over a court nobody had left: anchorless cards over a running
+    // game, and — because the match stage only checks whether it is already in
+    // a Solo match — a duel silently swapped for one, leaving the opponent
+    // alone in a room that was never told anybody had gone. The Settings row
+    // that calls this is hidden off the menu, so this guard is the rule
+    // written where the rule lives, matching the auto-open effect below.
+    if (screenRef.current !== 'menu') return;
+    // Being ON the menu is not the same as having no room coming. Create and
+    // Join both leave a request outstanding while roomId is still null, and in
+    // that window the lobby can be dismissed without a confirmation — which
+    // puts the player back on the menu with a seat on its way. Starting here
+    // then let the answer arrive underneath a running tour, which reaches its
+    // match stage and switches to Solo without ever leaving the room: relay
+    // seat still held, code possibly already sent to somebody.
+    if (roomRequestRef.current) return;
+    setIsSettingsOpen(false);
+    setIsProfileOpen(false);
+    setIsLeaderboardOpen(false);
+    setIsMissionsOpen(false);
+    setIsAchievementsOpen(false);
+    setIsHistoryOpen(false);
+    setTourStep(0);
+  }, []);
+
+  /**
+   * The steps that want the ball actually moving. Reaching the serve step with
+   * it parked on the paddle explains nothing, so the tour serves it, lets it
+   * fly, and freezes on a ball in mid-air — which is the frame the steps after
+   * this one are about.
+   */
+  useEffect(() => {
+    if (!tourActive || tourStage !== 'match' || !tourStepDef?.live) {
+      setTourLive(false);
+      return;
+    }
+    setTourLive(true);
+    // A frame for the freeze to lift before the serve goes out; handleServe
+    // refuses one under a frozen court, and rightly so.
+    const serve = setTimeout(() => tourServeRef.current(), 60);
+    const stop = setTimeout(() => setTourLive(false), tourStepDef.live);
+    return () => {
+      clearTimeout(serve);
+      clearTimeout(stop);
+    };
+  }, [tourActive, tourStage, tourStepDef?.id, tourStepDef?.live]);
+
+  /**
+   * Put the app where the step needs it. One effect rather than a branch per
+   * step: a step declares the stage it belongs to, and this is the only thing
+   * that knows how to reach one.
+   */
+  useEffect(() => {
+    if (!tourActive || !tourStage) return;
+    setIsSettingsOpen(tourStage === 'settings');
+    setIsProfileOpen(tourStage === 'profile');
+    setIsLeaderboardOpen(tourStage === 'leaderboard');
+    setIsMissionsOpen(tourStage === 'tasks');
+    // No stage wants any of these, but the scrim is pointer-events-none, so a
+    // player can open them mid-tour — Achievements and Match History from the
+    // tab bar step the tour points straight at, the Duel lobby from the modes
+    // step, a public profile from a username on the Leaderboard or Profile
+    // step. Left open, the next stage mounts its own surface UNDERNEATH one
+    // still covering the anchor. Every surface the tour can REACH belongs
+    // here, not just the ones it uses; the four it does use are set above.
+    setIsAchievementsOpen(false);
+    setIsHistoryOpen(false);
+    setIsMultiplayerOpen(false);
+    setPublicProfileId(null);
+    if (tourStage === 'match') {
+      // A real Solo match on the tour's own terms (see activeConfig) — Rookie
+      // is open to everybody from the first match, so the tour is never the
+      // thing that asks a new player for an unlock they do not have.
+      //
+      // Placed when it is NOT already placed, which covers two different
+      // things. Entering the stage: nothing is running, so this creates it,
+      // and it marks and resets rather than adopting — a match already in
+      // progress used to be adopted unflagged, so it banked XP, missions,
+      // rating and achievements from a tour that grants nothing, and kept
+      // whatever score it had reached, which is not the frame these steps
+      // describe. Mid-stage: the scrim is deliberately pointer-events-none, so
+      // the court's own Home and Reset stay live underneath it — tapping Home
+      // returned to the menu while the stage stayed `match`, and because this
+      // effect only watched the stage it never put the court back. Every
+      // remaining match step then pointed at elements that were not there.
+      //
+      // Checking placement rather than resetting on every step is what keeps
+      // the frozen ball where it is: the serve step leaves it mid-flight, and
+      // the two steps after it are about that frame.
+      const placed = tourMatchRef.current && screenRef.current === 'game' && modeRef.current === 'solo';
+      if (!placed) {
+        tourMatchRef.current = true;
+        setMode('solo');
+        setScreen('game');
+        resetMatchRef.current();
+      }
+    } else if (tourMatchRef.current) {
+      tourMatchRef.current = false;
+      setScreen('menu');
+      setMode('solo');
+      resetMatchRef.current();
+    }
+    // The step id, not just the stage: a step change is the moment to notice
+    // that the player has navigated out from under the tour.
+  }, [tourActive, tourStage, tourStepDef?.id]);
+
+  /**
+   * Show it once, to a player who has an account and has never seen it.
+   *
+   * NOT while an invitation is pending: that player tapped a link to play with
+   * somebody who is waiting for them right now, and the auto-join takes them
+   * straight into a lobby. They get it on their next load instead, which is
+   * the first moment it is not in the way of something.
+   */
+  const tourOfferedRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (tourOfferedRef.current) return;
+    if (!profile?.initialized || profile.tutorialCompletedAt) return;
+    if (pendingRoomRef.current) return;
+    if (screen !== 'menu') return;
+    tourOfferedRef.current = true;
+    setTourStep(0);
+  }, [profile?.initialized, profile?.tutorialCompletedAt, screen]);
+
+  /** Remember it was seen, whether it was walked or waved away. */
+  const markTourSeen = useCallback(async () => {
+    try {
+      const res = await fetch('/api/profile/tutorial-complete', { method: 'POST' });
+      if (res.ok) setProfile(await res.json());
+    } catch {
+      // A tour the server never heard about simply opens again next time,
+      // which is a far better failure than blocking the player on a POST.
+    }
+  }, []);
+
+  const endTour = useCallback(() => {
+    tourMatchRef.current = false;
+    tourFreezeRef.current = false;
+    setTourStep(null);
+    setTourSkipOpen(false);
+    setIsSettingsOpen(false);
+    setIsProfileOpen(false);
+    setIsLeaderboardOpen(false);
+    setIsMissionsOpen(false);
+    setScreen('menu');
+    setMode('solo');
+    resetMatchRef.current();
+    void markTourSeen();
+  }, [markTourSeen]);
+
+  const advanceTour = useCallback(() => {
+    setTourStep((i) => {
+      if (i === null) return null;
+      if (i + 1 >= TOUR_STEPS.length) return i; // endTour handles the last one
+      return i + 1;
+    });
+  }, []);
 
   // Main 60/120 FPS Physics Engine Loop
   useEffect(() => {
@@ -1623,7 +2089,15 @@ export default function App() {
       }
 
       // Idle while on the menu; split mode runs its own self-contained loop.
-      if (screenRef.current !== 'game' || modeRef.current === 'split' || isServingRef.current || winner) {
+      if (
+        screenRef.current !== 'game' ||
+        modeRef.current === 'split' ||
+        isServingRef.current ||
+        // Held mid-frame by the onboarding tour, so the court a step is
+        // describing is still exactly what it was when the card appeared.
+        tourFreezeRef.current ||
+        winner
+      ) {
         animId = requestAnimationFrame(gameLoop);
         return;
       }
@@ -1671,16 +2145,10 @@ export default function App() {
 
           sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
           setTotalTouches((t) => t + 1);
-          setStats((s) => {
-            const nextRally = s.rallyCount + 1;
-            // Practice Wall and Split Screen never record a match, so their
-            // guaranteed returns still can't feed the rally mission.
-            return {
-              ...s,
-              rallyCount: nextRally,
-              maxRally: Math.max(s.maxRally, nextRally),
-            };
-          });
+          // My own return, and my own streak. The serve never reaches here —
+          // handleServe sets the ball's velocity directly and seeds it clear
+          // of the paddle — so this site is already exactly "a return".
+          setStats(ownReturn);
         }
 
         // ==============================================================
@@ -1733,6 +2201,13 @@ export default function App() {
         if (b.y >= 1.05) {
           b.active = false;
           sound.playLose();
+          // Whatever the mode, the ball got past ME — so mine is the streak
+          // that ends, and only mine. In a duel the relay reaches the same
+          // conclusion from the point_scored below; this is the local half of
+          // the same rule, so the HUD does not wait for a round trip.
+          setStats(ownMiss);
+          oppReturnedThisPointRef.current = false;
+          oppCrossingsThisPointRef.current = 0;
 
           if (currentMode === 'multiplayer') {
             sendNetRef.current({
@@ -1740,9 +2215,8 @@ export default function App() {
               scorer: playerIndexRef.current === 0 ? 'p2' : 'p1',
             });
           } else if (currentMode === 'practice') {
-            // No opponent, no score — the streak just resets and the player
-            // serves again. Best streak stays on the board.
-            setStats((s) => ({ ...s, rallyCount: 0 }));
+            // No opponent, no score — the streak just reset above and the
+            // player serves again. Best streak stays on the board.
             setIsServing(true);
             setIsPlayerServer(true);
           } else {
@@ -1755,7 +2229,9 @@ export default function App() {
                 setIsServing(true);
                 setIsPlayerServer(true); // Player serves next
               }
-              return { ...s, opponentScore: nextOppScore, rallyCount: 0 };
+              // I let it past, so mine is the streak that ends. The AI's is
+              // untouched: a streak is never decided by the other player.
+              return { ...s, opponentScore: nextOppScore, streak: 0 };
             });
           }
         }
@@ -1811,7 +2287,8 @@ export default function App() {
 
           sound.playOpponentPaddleHit();
           setTotalTouches((t) => t + 1);
-          setStats((s) => ({ ...s, rallyCount: s.rallyCount + 1 }));
+          oppReturnedThisPointRef.current = true;
+          setStats(opponentReturn);
         }
 
         // Check Ball Crossing TOP Net BACK into Player's Court!
@@ -1833,12 +2310,21 @@ export default function App() {
         if (ob.y >= 1.05) {
           ob.active = false;
           sound.playScore();
+          // An ace: I served and the AI never got it back over, so the rally
+          // never actually started. Read off whether they returned it rather
+          // than off a counter — the counter is mine now, and mine does not
+          // move when I serve.
+          //
+          // Latched BEFORE the point is opened, and read from the latch inside
+          // the updater. setStats runs later, so clearing the ref first made
+          // every point won on my own serve an ace.
+          const wasAce = servedThisPointRef.current && !oppReturnedThisPointRef.current;
+          oppReturnedThisPointRef.current = false;
+          oppCrossingsThisPointRef.current = 0;
 
           setStats((s) => {
             const nextScore = s.score + 1;
-            // An ace: the player served and the opponent never got the ball
-            // back over, so the rally never actually started.
-            const ace = servedThisPointRef.current && s.rallyCount <= 1;
+            const ace = wasAce;
             if (nextScore >= configRef.current.winningScore) {
               setWinner('player');
               confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
@@ -1846,13 +2332,14 @@ export default function App() {
               setIsServing(true);
               setIsPlayerServer(false); // AI serves next
             }
-            return {
+            // The AI let it past, so theirs is the streak that ends — and
+            // mine is untouched, which is the whole rule.
+            return opponentMiss({
               ...s,
               score: nextScore,
               aces: s.aces + (ace ? 1 : 0),
               matchesWon: nextScore >= configRef.current.winningScore ? s.matchesWon + 1 : s.matchesWon,
-              rallyCount: 0,
-            };
+            });
           });
         }
 
@@ -1867,17 +2354,31 @@ export default function App() {
   }, [winner, playerIndex]);
 
   const resetMatchRef = useRef<() => void>(() => {});
+  tourServeRef.current = () => handleServe();
   const adoptSessionRef = useRef<() => Promise<ClientSessionStatus>>(async () => 'connecting');
   adoptSessionRef.current = adoptSession;
 
-  const resetMatch = () => {
-    setStats((s) => ({
-      ...s,
-      score: 0,
-      opponentScore: 0,
-      rallyCount: 0,
-      maxRally: 0,
-    }));
+  /**
+   * The run this player already has going in a mode. A streak carries between
+   * matches, so a new one opens on it — and it is read from the profile rather
+   * than kept in memory, because it has to survive a reload and a different
+   * browser too.
+   */
+  const carriedStreak = (m: GameMode): number =>
+    carried(carryRef.current, m, profileRef.current?.modeStats?.[m]?.currentStreak ?? 0);
+
+  /**
+   * `carried` overrides where the run opens. Only the HUD's Reset passes it —
+   * see handleResetMatch, which is also why it is a plain number here rather
+   * than something the caller has to know how to look up.
+   */
+  const resetMatch = (forMode: GameMode = modeRef.current, carried?: number) => {
+    setStats((s) =>
+      startMatchStreaks(
+        { ...s, score: 0, opponentScore: 0 },
+        carried ?? carriedStreak(forMode)
+      )
+    );
     setTotalTouches(0);
     setMatchStartTime(Date.now());
     setWinner(null);
@@ -1885,6 +2386,15 @@ export default function App() {
     setTelemetryOpen(false);
     setIsServing(true);
     setIsPlayerServer(true);
+    // A new match opens on a new POINT, and these three describe a point: who
+    // served it, whether the opponent has returned anything, and how many
+    // balls have crossed. Left alone across a reset they described the last
+    // point of the abandoned match — so a reset taken after the AI had
+    // returned a ball carried `oppReturned` into the next match and refused
+    // the first genuine ace of it, which is a stat the player keeps.
+    servedThisPointRef.current = true; // setIsPlayerServer(true), above
+    oppReturnedThisPointRef.current = false;
+    oppCrossingsThisPointRef.current = 0;
     // A new match is a new thing to record and a new result to show.
     matchKeyRef.current = '';
     shownMatchKeyRef.current = '';
@@ -1903,9 +2413,18 @@ export default function App() {
   // Menu → court. Match settings (difficulty, winning score) are already
   // locked in on the menu before this runs — nothing re-opens them mid-match.
   const startMatch = (newMode: GameMode) => {
+    // Not from under the tour, for the reason handleCreateRoom is not: the
+    // scrim leaves the app usable, so the highlighted Solo controls still
+    // work, and a match started that way is one the tour's match stage would
+    // then ADOPT — it only marks a match as the tour's when it has to create
+    // one, so a match already running was never flagged and could be recorded
+    // for XP, missions, rating and achievements. The tour reaches the court by
+    // its own path below, never through here.
+    if (tourActive) return;
     setMode(newMode);
     setScreen('game');
-    resetMatch();
+    // Named explicitly: modeRef still holds the mode being left.
+    resetMatch(newMode);
   };
 
   // Court → menu, from the HUD home button or the winner overlay. Multiplayer
@@ -1914,14 +2433,35 @@ export default function App() {
   // match is recorded and no rating moves — the server decides what the streak
   // is worth and holds a daily cap, since a guaranteed-return drill would
   // otherwise be the fastest XP in the game.
-  const submitPracticeSession = useCallback(async (bestStreak: number) => {
-    if (bestStreak < 3) return;
+  const submitPracticeSession = useCallback(
+    async (bestStreak: number, earnedStreak: number, endStreak: number) => {
+      // Where the run stood when the wall opened — read before the stamp
+      // below replaces it, because it is what decides whether this session
+      // has anything to say at all.
+      const carriedIn = carriedStreak('practice');
+      rememberCarry(carryRef.current, 'practice', endStreak);
+      // A session worth nothing is still worth carrying: leaving the wall on
+      // a run of two does not end it, so the report goes out either way. And
+      // a run that BROKE here is news even though it earned nothing — without
+      // that last clause the server keeps handing back, on the next load, the
+      // very run the player just lost.
+      if (earnedStreak < 3 && endStreak <= 0 && carriedIn <= 0) return;
     try {
-      const res = await fetch('/api/practice/record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bestStreak }),
-      });
+      const endedAt = Date.now();
+      // This browser's own ordering, assigned right alongside endedAt — see
+      // src/net/runChain.ts. Two sessions can be left seconds apart, and an
+      // older one ending at 8 must not land after a newer one that broke to 0,
+      // however each request's own round trip turns out.
+      const { chainId, runSeq } = nextRunSeq();
+      const res = await queueRunWrite(() =>
+        fetch('/api/practice/record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now(), chainId, runSeq,
+          }),
+        })
+      );
       if (!res.ok) return;
       const data = await res.json();
       if (data.profile) setProfile(data.profile);
@@ -1929,7 +2469,60 @@ export default function App() {
     } catch (e) {
       console.error('Failed to bank practice session:', e);
     }
-  }, []);
+  }, [queueRunWrite]);
+
+  /**
+   * Tell the server where a run stands when no match is ending to say so.
+   *
+   * Fire-and-forget on purpose: this is a correction, not a result. Failing to
+   * send it leaves the server on the old value, which is exactly where it was
+   * without this — while blocking the walk back to the menu on a request would
+   * make a network stall look like a frozen button.
+   */
+  /**
+   * Tell the server where a run stands when no match is ending to say so.
+   *
+   * Stamped WHEN THE RUN REACHED THIS VALUE, and sent alongside the clock as
+   * it goes out, exactly like a recorded match — the difference is the age,
+   * and the age is how the server orders every write that assigns the run.
+   *
+   * That pairing is the whole point. These go out fire-and-forget from Reset
+   * and from quitting, and they race each other and the match POST and the
+   * practice POST, all of which write the same field. Ordered by arrival, a
+   * report that stalled for a second outranks whatever overtook it in flight
+   * and restores a run that had already ended, permanently, for anyone who
+   * reloads. Ordered by age, a stalled report is simply old — which is the
+   * truth about it, and the same rule every other writer already obeys.
+   *
+   * Fire-and-forget on purpose: this is a correction, not a result. A failed
+   * send leaves the server where it was without it, while blocking the walk
+   * back to the menu on a request would make a stall look like a frozen
+   * button.
+   */
+  const reportStreak = useCallback(
+    (m: GameMode, endStreak: number): Promise<void> => {
+      if (m !== 'solo' && m !== 'practice') return Promise.resolve();
+      const endedAt = Date.now();
+      const { chainId, runSeq } = nextRunSeq();
+      return queueRunWrite(async () => {
+        try {
+          await fetch('/api/profile/me/streak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            // Stamped when the call was MADE, sent with the clock as it goes
+            // out. For a report those are close together and the age is
+            // small — the age is not what orders these against each other,
+            // this browser's chain position is (nextRunSeq, captured above
+            // alongside endedAt, before anything is queued or sent).
+            body: JSON.stringify({ mode: m, endStreak, endedAt, clientNow: Date.now(), chainId, runSeq }),
+          });
+        } catch {
+          // A correction, not a result: the server keeps what it had.
+        }
+      });
+    },
+    [queueRunWrite]
+  );
 
   const quitToMenu = () => {
     if (mode === 'multiplayer') {
@@ -1945,10 +2538,58 @@ export default function App() {
       return;
     }
     if (mode === 'practice') {
-      void submitPracticeSession(statsRef.current.maxRally);
+      void submitPracticeSession(
+        statsRef.current.bestStreak,
+        statsRef.current.earnedBest,
+        statsRef.current.streak
+      );
+    } else if (!tourMatchRef.current) {
+      // Walking out of an UNFINISHED match still ends wherever the run ends.
+      // Only a finished match reports itself, so without this a player who
+      // carried a run in, missed, and quit was seeded from the stale carry on
+      // their next match — the miss simply undone, and every return after it
+      // extending a run that should have been over. Practice says the same
+      // thing through its own report above; the tour says nothing at all,
+      // because the match it plays never happened.
+      //
+      // Told to the server as well as remembered here, or the miss survives a
+      // reload: the stored run is what a fresh page reads, and it would still
+      // hold whatever the last COMPLETED match left there.
+      rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
+      void reportStreak(modeRef.current, statsRef.current.streak);
     }
     setScreen('menu');
     resetMatch();
+  };
+
+  /**
+   * The HUD's Reset. Restarts the match; the run stands exactly where it
+   * stands, which is what Play Again does too — a restart is not a miss, and
+   * these are two buttons for the same intent. So a run broken by a miss
+   * stays broken and an unbroken one is not confiscated for pressing a button.
+   *
+   * It takes no arguments ON PURPOSE. Wired straight to onClick, resetMatch
+   * received the React event as its `forMode` — which happened to look up
+   * nothing and seed zero, so Reset cleared the run by accident rather than
+   * by decision, and tidying the wiring to `() => resetMatch()` would have
+   * silently turned that into "reload the stored carry", resurrecting a run
+   * the player had already missed away. Nothing in the component tree is
+   * typechecked (no @types/react), so this is the guard.
+   */
+  const handleResetMatch = () => {
+    const run = statsRef.current.streak;
+    // Carrying the run into the restarted match is only half of it. The other
+    // half is saying so — a player who missed and then pressed Reset has a run
+    // of zero, and neither this page's record nor the server's had heard: a
+    // reload before the restarted match finished put the pre-miss run straight
+    // back, ready for the next return to extend a streak that had ended. Same
+    // pair as quitting, for the same reason. The tour says nothing, because
+    // the match it plays never happened.
+    if (!tourMatchRef.current) {
+      rememberCarry(carryRef.current, modeRef.current, run);
+      void reportStreak(modeRef.current, run);
+    }
+    resetMatch(modeRef.current, run);
   };
 
   resetMatchRef.current = resetMatch;
@@ -2061,6 +2702,12 @@ export default function App() {
               content: t('connection_lost_notice', currentLanguage),
               onDismiss: () => setToastEjected(false),
             },
+            toastRoomExpired && {
+              id: 'toast-room-expired',
+              tone: 'warn' as const,
+              content: t('room_expired_notice', currentLanguage),
+              onDismiss: () => setToastRoomExpired(false),
+            },
             toastOpponentLeft && {
               id: 'toast-opponent-left',
               tone: 'loss' as const,
@@ -2116,6 +2763,95 @@ export default function App() {
         >
           <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
             {t('quit_confirm_body', currentLanguage)}
+          </p>
+        </Sheet>
+
+        <Sheet
+          id="leave-lobby-confirm-modal"
+          isOpen={leaveLobbyConfirmOpen}
+          onClose={() => setLeaveLobbyConfirmOpen(false)}
+          size="xs"
+          layer="over"
+          accent="warn"
+          title={t('lobby_leave_confirm_title', currentLanguage)}
+          footer={
+            <>
+              <Button
+                id="btn-leave-lobby-cancel"
+                variant="secondary"
+                block
+                onClick={() => setLeaveLobbyConfirmOpen(false)}
+              >
+                {t('lobby_leave_confirm_no', currentLanguage)}
+              </Button>
+              <Button
+                id="btn-leave-lobby-confirm"
+                variant="danger"
+                block
+                onClick={() => {
+                  setLeaveLobbyConfirmOpen(false);
+                  handleLeaveRoom();
+                }}
+              >
+                {t('lobby_leave_confirm_yes', currentLanguage)}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
+            {t(
+              playerIndex === 0
+                ? 'lobby_leave_confirm_body_host'
+                : 'lobby_leave_confirm_body_guest',
+              currentLanguage
+            )}
+          </p>
+        </Sheet>
+
+        {/* The onboarding tour. Mounted OUTSIDE the screen swap below, like
+            the onboarding modal: it walks the player from the menu onto a
+            live court and back, and a child of either branch would be torn
+            down at the transition it exists to narrate. */}
+        <OnboardingTour
+          isOpen={tourActive && !tourSkipOpen}
+          step={tourStepDef}
+          index={tourStep ?? 0}
+          total={TOUR_STEPS.length}
+          language={currentLanguage}
+          onBack={() => setTourStep((i) => (i === null ? null : Math.max(0, i - 1)))}
+          onNext={() => {
+            if (tourStep !== null && tourStep >= TOUR_STEPS.length - 1) endTour();
+            else advanceTour();
+          }}
+          onSkip={() => setTourSkipOpen(true)}
+        />
+
+        <Sheet
+          id="tour-skip-modal"
+          isOpen={tourSkipOpen}
+          onClose={() => setTourSkipOpen(false)}
+          size="xs"
+          layer="gate"
+          accent="warn"
+          title={t('tour_skip_title', currentLanguage)}
+          footer={
+            <>
+              <Button
+                id="btn-tour-skip-cancel"
+                variant="secondary"
+                block
+                onClick={() => setTourSkipOpen(false)}
+              >
+                {t('tour_skip_no', currentLanguage)}
+              </Button>
+              <Button id="btn-tour-skip-confirm" variant="danger" block onClick={endTour}>
+                {t('tour_skip_yes', currentLanguage)}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
+            {t('tour_skip_body', currentLanguage)}
           </p>
         </Sheet>
 
@@ -2178,7 +2914,8 @@ export default function App() {
             onOpenHistory={() => setIsHistoryOpen(true)}
             onOpenMissions={() => setIsMissionsOpen(true)}
             onOpenSettings={() => setIsSettingsOpen(true)}
-            onOpenTutorial={() => setIsTutorialOpen(true)}
+            tourPrematch={tourPrematchMode}
+          tourActive={tourActive}
           />
           </motion.div>
         ) : (
@@ -2207,11 +2944,17 @@ export default function App() {
           onToggleSound={() => setSettings((s) => ({ ...s, soundEnabled: !s.soundEnabled }))}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenProfile={() => setIsProfileOpen(true)}
-          onResetMatch={resetMatch}
-          canResetMatch={mode !== 'multiplayer'}
+          onResetMatch={handleResetMatch}
+          // Hidden in a duel because the score belongs to the room, and
+          // hidden under the tour because there is nothing there to restart:
+          // the tour drives its own match, and Reset only ever undoes the
+          // frame a step is in the middle of describing — the serve step
+          // leaves the ball mid-flight and the two steps after it talk about
+          // it. Home stays available, and now puts the court back.
+          canResetMatch={mode !== 'multiplayer' && tourStage !== 'match'}
           onQuitToMenu={quitToMenu}
           winningScore={activeConfig.winningScore}
-          opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${settings.difficulty})`}
+          opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${activeDifficulty})`}
           onViewOpponent={
             mode === 'multiplayer' && isLinkableId(opponentId)
               ? () => openPublicProfile(opponentId)
@@ -2231,8 +2974,11 @@ export default function App() {
           theme={currentTheme}
           language={currentLanguage}
           active={
-            settings.showRadar &&
-            activeConfig.rules.opponentSonar &&
+            // The tour has a step about the radar, so the radar exists while
+            // it runs. `showRadar` is a device preference rather than a match
+            // rule, so stock rules alone do not cover it — a player who had
+            // turned it off got a step spotlighting nothing.
+            (tourStage === 'match' || (settings.showRadar && activeConfig.rules.opponentSonar)) &&
             (mode === 'solo' || mode === 'multiplayer')
           }
           topClass={mode === 'multiplayer' ? 'top-[5.5rem]' : 'top-14'}
@@ -2281,8 +3027,10 @@ export default function App() {
               ball={ball}
               paddleX={paddleX}
               totalTouches={totalTouches}
-              rallyCount={stats.rallyCount}
-              maxRally={stats.maxRally}
+              streak={stats.streak}
+              bestStreak={stats.bestStreak}
+              oppStreak={stats.oppStreak}
+              oppBestStreak={stats.oppBestStreak}
               theme={currentTheme}
               isVisible={telemetryOpen}
               onToggleVisible={() => setTelemetryOpen((o) => !o)}
@@ -2319,7 +3067,7 @@ export default function App() {
               (oppBall?.active || (!ball.active && !(isServing && isPlayerServer)))
             }
             oppEstimatedX={oppBall?.active ? 1 - oppBall.x : 0.5}
-            rallyCount={stats.rallyCount}
+            rallyCount={stats.streak}
             language={currentLanguage}
             shakeTrigger={shakeTrigger}
             netLabel={mode === 'practice' ? t('return_line', currentLanguage) : undefined}
@@ -2395,7 +3143,7 @@ export default function App() {
                     />
                     <StatTile
                       label={t('longest_rally', currentLanguage)}
-                      value={stats.maxRally}
+                      value={stats.bestStreak}
                       tone="warn"
                     />
                     {lastMatchResult.tier ? (
@@ -2516,23 +3264,17 @@ export default function App() {
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
           profile={profile}
-          onOpenTutorial={() => setIsTutorialOpen(true)}
+          // Only from the menu: the tour's first steps are the menu itself,
+          // and it must never be the thing that walks a player out of a live
+          // match. In-match Settings is device preferences only anyway.
+          onStartTour={screen === 'menu' ? () => startTour() : undefined}
           onTriggerShake={() => setShakeTrigger(Date.now())}
-        />
-
-        {/* Tutorial & Onboarding Interactive Modal */}
-        <TutorialModal
-          isOpen={isTutorialOpen}
-          onClose={() => setIsTutorialOpen(false)}
-          onComplete={() => setIsTutorialOpen(false)}
-          theme={currentTheme}
-          language={currentLanguage}
         />
 
         {/* 2-Phone Multiplayer Lobby */}
         <MultiplayerLobby
           isOpen={isMultiplayerOpen}
-          onClose={() => setIsMultiplayerOpen(false)}
+          onClose={requestLeaveLobby}
           theme={currentTheme}
           roomId={roomId}
           playerIndex={playerIndex}
@@ -2541,7 +3283,7 @@ export default function App() {
           currentUsername={profile?.username}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
-          onLeaveRoom={handleLeaveRoom}
+          onLeaveRoom={requestLeaveLobby}
           opponentId={opponentId}
           onViewProfile={openPublicProfile}
           winProbability={matchPrediction}
@@ -2552,7 +3294,6 @@ export default function App() {
           onStartMatch={handleStartMatch}
           earnedAchievements={profile?.achievements || []}
           language={currentLanguage}
-          onOpenTutorial={() => setIsTutorialOpen(true)}
           p2pEnabled={p2pEnabled}
           onToggleP2P={setP2pEnabled}
         />

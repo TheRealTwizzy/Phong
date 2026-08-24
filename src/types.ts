@@ -143,10 +143,58 @@ export interface Ripple {
 export interface PlayerStats {
   score: number;
   opponentScore: number;
-  rallyCount: number;
-  maxRally: number;
+  /**
+   * A rally streak belongs to ONE player: it counts their own consecutive
+   * successful returns and it breaks only when THEY fail to return one. The
+   * opponent missing — a point YOU just won — leaves it alone, so a streak
+   * runs across points and ends only on your own miss. The serve is not a hit:
+   * the receiver's return of it is the receiver's first, and the server's
+   * streak resumes on their first return of that.
+   *
+   * What this replaced was a single shared counter that both players
+   * incremented and that reset whenever either of them scored, so your "rally"
+   * number was mostly a statement about your opponent.
+   */
+  streak: number;
+  bestStreak: number;
+  /**
+   * The same run, counted from ZERO at the start of this match.
+   *
+   * `bestStreak` opens on whatever was carried in, which is the right number
+   * for a career best and the wrong one for a reward: XP is paid per rally, so
+   * a carried run would be paid for again in every match it spans, and a
+   * player could open Practice and leave without touching the ball to collect
+   * it. This is the work actually done here, and it is what gets paid.
+   */
+  earnedStreak: number;
+  earnedBest: number;
+  /** The same two, for the opponent. Tracked separately, never mixed in. */
+  oppStreak: number;
+  oppBestStreak: number;
   aces: number;
   matchesWon: number;
+}
+
+/**
+ * One mode's own stats. The career totals on PlayerProfile pool solo and duel
+ * into one number; these keep them apart. Practice has no opponent, so its
+ * wins, losses and aces stay zero and only sessions and the streak move.
+ * Split Screen is absent: two people share one phone and only one of them has
+ * an account, so there is nobody to write the other side's numbers to.
+ */
+export interface ModeStats {
+  matchesPlayed: number;
+  matchesWon: number;
+  matchesLost: number;
+  pointsScored: number;
+  aces: number;
+  bestStreak: number;
+  /**
+   * The run still going in this mode. A streak carries across matches, so a
+   * new match in this mode starts from here rather than from zero.
+   */
+  currentStreak: number;
+  bestWinStreak: number;
 }
 
 export interface PlayerProfile {
@@ -194,6 +242,18 @@ export interface PlayerProfile {
    * good: the mission's XP is a daily reward, this is not.
    */
   eliteUnlocks?: string[];
+  /**
+   * Stats kept per mode, keyed by GameMode. Only ever sent to the profile's
+   * OWN device — PublicProfile is a separate, sanitized shape.
+   */
+  modeStats?: Record<string, ModeStats>;
+  /**
+   * When this player finished (or skipped) the onboarding tour. Server-side
+   * rather than in localStorage because an account follows the browser via
+   * device_links — a player signing in from a second browser has already been
+   * shown the game and must not be walked through it again.
+   */
+  tutorialCompletedAt?: string;
   dailyStreak: number;
   lastDailyDate?: string;
   achievements: string[]; // achievement IDs
@@ -370,7 +430,69 @@ export interface MatchEndPayload {
   opponentName?: string;
   playerScore: number;
   opponentScore: number;
-  maxRally: number;
+  /** THIS player's longest rally streak in this match — see PlayerStats. */
+  bestStreak: number;
+  /**
+   * How much of that was built HERE, counted from zero. A carried run is real
+   * and belongs in the career best; it is not work done in this match, and
+   * paying for it again every match it spans is a farm.
+   */
+  earnedStreak: number;
+  /**
+   * When this match ENDED, by the reporting device's clock.
+   *
+   * Everything else here is either additive (and so paid once, by matchKey) or
+   * a maximum. `endStreak` is neither: it is assigned, so the last write wins
+   * — and the last write is not the last match. A result can sit in the
+   * on-device queue through a whole replay and land afterwards, restoring a
+   * run the replay had already broken. This is what orders them.
+   *
+   * Never compared against the SERVER's clock: paired with `clientNow`, read
+   * at send time, it gives an elapsed age instead — and an age from two
+   * readings of one clock is free of whatever offset that clock carries. A
+   * phone set a week slow would otherwise have every result it ever sent look
+   * older than what is already stored, and be ignored forever.
+   */
+  endedAt?: number;
+  /**
+   * That same clock, read as this attempt goes out — see `endedAt`. Set by
+   * the transport rather than the caller, so a retry or a queued replay says
+   * how stale it actually is rather than repeating the first attempt's answer.
+   */
+  clientNow?: number;
+  /**
+   * This browser's position in ITS OWN run-write chain, assigned once per
+   * event at the same moment as `endedAt` (see `src/net/runChain.ts`) and
+   * PERSISTED, so a payload parked and replayed after a reload keeps the
+   * number it was actually decided at.
+   *
+   * The age alone cannot order two writes from one browser: it never counts
+   * a request's own time on the wire, so whichever of two writes happens to
+   * have the faster round trip can reach the server "later" in stamped time
+   * even though it was decided first. Comparing this instead — paired with
+   * `chainId`, so it is only ever compared against another write from the
+   * SAME browser — sidesteps network timing entirely: whichever carries the
+   * higher number was decided later, however long either one took to arrive.
+   *
+   * Absent for a caller with no chain (an older bundle, or the relay's own
+   * writes), which falls back to the age alone.
+   */
+  runSeq?: number;
+  /**
+   * Which browser's chain that seq belongs to. Purely a self-reported ordering
+   * hint, like `runSeq` itself — not a credential, and not verified against
+   * anything. A modified client could already misreport any field a match
+   * payload carries (see the trust model in CLAUDE.md §5); this adds no reach
+   * beyond that.
+   */
+  chainId?: string | null;
+  /**
+   * The streak this player finished the match ON. Zero if the last thing they
+   * did was miss. A streak carries into the next match, so this is what the
+   * next one starts from — and it is a different number from the peak above,
+   * which is what the match is rated and paid on.
+   */
+  endStreak: number;
   mode: GameMode;
   difficulty?: AIDifficulty;
   isWinner: boolean;
@@ -460,7 +582,13 @@ export type WSClientMessage =
   // This tells it where the match got to — absolute values, not a delta, so a
   // dropped one heals itself and a duplicate is a no-op. Without it the relay
   // believed every P2P match was still 0-0 and had never started.
-  | { type: 'match_sync'; matchSeq: number; p1Score: number; p2Score: number; maxRally: number }
+  // `bestStreaks` is per SEAT, [p1, p2]. One number for the whole match was
+  // fine when the counter was shared and is not now: the relay writes each
+  // seat its own result, and rating it on the other player's streak would be
+  // rating it on the wrong thing. NOTE this member stays on ONE line —
+  // tests/protocolParity.test.ts reads this union to the first line-ending
+  // semicolon, and a multi-line member truncates the whole parse.
+  | { type: 'match_sync'; matchSeq: number; rev: number; p1Score: number; p2Score: number; bestStreaks: [number, number]; streaks: [number, number]; earnedBests: [number, number]; servingPlayer: 0 | 1; crossingsThisPoint: number }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
   | { type: 'rtc_signal'; payload: RTCSignalPayload }
@@ -477,7 +605,7 @@ export type WSServerMessage =
   | { type: 'quick_chat'; text: string; senderName: string; senderIdx: number }
   | { type: 'room_config'; config: RoomMatchConfig }
   | { type: 'ready_state'; ready: [boolean, boolean] }
-  | { type: 'game_start'; servingPlayer: 0 | 1; config: RoomMatchConfig; matchSeq: number }
+  | { type: 'game_start'; servingPlayer: 0 | 1; config: RoomMatchConfig; matchSeq: number; streaks: [number, number] }
   | { type: 'match_prediction'; winProbability: number }
   | { type: 'score_update'; p1Score: number; p2Score: number; reason: string; nextServer: 0 | 1 }
   | { type: 'rematch_state'; votes: [boolean, boolean] }
@@ -492,6 +620,13 @@ export type WSServerMessage =
   // load, or minted under a previous deployment). Sent immediately before the
   // close, so the client can act on the reason rather than on a bare 1006.
   | { type: 'session_invalid'; status: SessionStatus; build: string }
+  // The relay has started counting this match's gameplay itself, so both
+  // phones must come off their DataChannel and play through it. A link does
+  // not die for both peers at the same instant: the one that notices falls
+  // back on its own, and without this the other keeps playing P2P against an
+  // opponent who is no longer there — and keeps reporting a replica the relay
+  // has already overtaken. One transport, one authority.
+  | { type: 'p2p_fallback' }
   | { type: 'pong'; timestamp: number }
   | { type: 'error'; message: string };
 

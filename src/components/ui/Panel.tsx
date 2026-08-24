@@ -19,7 +19,11 @@ const ACCENT = {
   locked: 'border-locked/40',
 } as const;
 
-export interface PanelProps extends React.HTMLAttributes<HTMLDivElement> {
+// HTMLElement rather than HTMLDivElement: `as` makes this a div, an li or a
+// section, and the props that pass through have to be assignable to whichever
+// one it renders. Typed for a div, a Panel rendered `as="li"` was handing an
+// li every div-shaped event handler.
+export interface PanelProps extends React.HTMLAttributes<HTMLElement> {
   variant?: keyof typeof VARIANT;
   accent?: keyof typeof ACCENT;
   /** Adds press feedback. Use on a Panel that is itself a tap target. */

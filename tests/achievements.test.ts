@@ -115,7 +115,12 @@ describe('level jumps', () => {
         username: `Run${difficulty}${seedStart}`,
         playerScore: won ? 5 : Math.floor(rnd() * 5),
         opponentScore: won ? Math.floor(rnd() * 5) : 5,
-        maxRally: 4 + Math.floor(rnd() * 22),
+        // Rescaled with the rally rework. The old 4..26 was the spread of a
+        // shared counter that both players fed within a point; one player's
+        // own consecutive returns measures about 0.72x that, and simulating
+        // on the old spread against the new XP_PER_RALLY would model matches
+        // nobody can actually play.
+        bestStreak: 3 + Math.floor(rnd() * 16), endStreak: 0, earnedStreak: 3 + Math.floor(rnd() * 16),
         mode: 'solo',
         difficulty,
         isWinner: won,
@@ -171,7 +176,7 @@ describe('the band cap in practice', () => {
     init('p_early_rally', 'EarlyRally');
     const early = db.recordMatch({
       playerId: 'p_early_rally', username: 'EarlyRally',
-      playerScore: 5, opponentScore: 0, maxRally: 50,
+      playerScore: 5, opponentScore: 0, bestStreak: 50, endStreak: 0, earnedStreak: 50,
       mode: 'solo', difficulty: 'cyber', isWinner: true,
     });
     const rally50 = early.newAchievements.find((a) => a.id === 'rally_50')!;
@@ -188,7 +193,7 @@ describe('the band cap in practice', () => {
     // A match that trips several achievements at once.
     const res = db.recordMatch({
       playerId: id, username: 'BatchCase',
-      playerScore: 5, opponentScore: 0, maxRally: 30,
+      playerScore: 5, opponentScore: 0, bestStreak: 30, endStreak: 0, earnedStreak: 30,
       mode: 'solo', difficulty: 'cyber', isWinner: true,
     });
     expect(res.newAchievements.length).toBeGreaterThan(2);
@@ -336,9 +341,9 @@ describe('level and rank gates', () => {
     const play = (over: Record<string, unknown> = {}) =>
       db.recordMatch({
         playerId: 'g_bank', username: 'GateBank', playerScore: 5, opponentScore: 1,
-        maxRally: 5, mode: 'solo', difficulty: 'rookie', isWinner: true, ...over,
+        bestStreak: 5, endStreak: 0, earnedStreak: 5, mode: 'solo', difficulty: 'rookie', isWinner: true, ...over,
       } as never);
-    play({ maxRally: 150 });
+    play({ bestStreak: 150 });
     const early = db.getProfile('g_bank');
     expect(early.highestRally).toBe(150);
     expect(early.achievements).toContain('rally_100');
@@ -367,7 +372,7 @@ describe('parent gating in play', () => {
   const solo = (id: string, over: Record<string, unknown> = {}) =>
     db.recordMatch({
       playerId: id, username: 'Gate', playerScore: 5, opponentScore: 1,
-      maxRally: 5, mode: 'solo', difficulty: 'pro', isWinner: true, ...over,
+      bestStreak: 5, endStreak: 0, earnedStreak: 5, mode: 'solo', difficulty: 'pro', isWinner: true, ...over,
     } as never);
 
   it('refuses a deep rung to a player who skipped the path', () => {
@@ -419,7 +424,7 @@ describe('parent gating in play', () => {
   it('lets one result climb a chain when it genuinely satisfies every rung', () => {
     init('g_rally', 'GateRally');
     // A 50-hit rally really is also a 25 and a 10, so all three land at once.
-    const ids = solo('g_rally', { maxRally: 50 }).newAchievements.map((a) => a.id);
+    const ids = solo('g_rally', { bestStreak: 50 }).newAchievements.map((a) => a.id);
     expect(ids).toContain('rally_10');
     expect(ids).toContain('rally_25');
     expect(ids).toContain('rally_50');

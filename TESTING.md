@@ -40,19 +40,20 @@ coverage number.
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
 | `physics` `spin` `transform` | Ball, collisions, spin, AI competence, the cross-net mirror |
-| `room` | The relay's room rules, including the adversarial `match_sync` guards |
+| `streaks` | A rally streak: whose it is, what ends it, and what it carries into |
+| `room` | The relay's room rules, the reaper, and the adversarial `match_sync` guards |
 | `matchRules` | Ranked bands, normalization, `duelMatchKey` |
 | `themes` | All 20 themes × every route that unlocks them |
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
-| `duelRecord` `deviceSession` `accountRecovery` | Three suites that boot the real server (see §4) |
+| `duelRecord` `deviceSession` `accountRecovery` `roomLifecycle` | Four suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` | The one-shot migrations |
 
 ### Browser layer
 
 `profiles` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `split` · `eject` · `build-id`
+`lobby` · `split` · `streak` · `tutorial` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -133,6 +134,13 @@ device may restore with the account's own recovery code, and the release row sur
 so an abandoned account stays traceable. The matching browser assertions are in
 `scripts/e2e-invite.mjs`.
 
+**The onboarding tour opens by itself, and grants nothing.** It is part of onboarding, not
+a menu row, so every browser suite's onboarding helper has to wave it away (`skipTour`)
+before it can touch the menu. `scripts/e2e-tutorial.mjs` pins the rest: it opens for a new
+player, it actually reaches every stage it claims to (the real pre-match sheet, a real
+frozen court, the real Settings/Profile/Leaderboard/Tasks), it pays no XP and records no
+match for the one it plays, skipping counts as seen, and it does not come back.
+
 **Onboarding ends on the sign-in code.** It is the only way back into an account from a
 browser the current one cannot reach, so a player who was never shown it does not have it.
 Every browser suite's onboarding helper clicks through that step; `e2e-profiles` is where it is
@@ -171,6 +179,57 @@ their noise. The ladder-spread check flaked at roughly 3 runs in 400 until its s
 tripled and its threshold moved below the tail rather than beside the mean — it surfaced as
 `expected 0.19999999999999996 to be greater than 0.2` on a docs-only PR. Measure the
 distribution before picking a bound; do not tune it until the red goes away.
+
+**A rally streak belongs to one player, and only their own miss ends it.** It carries across
+points and across matches, so the run is stored per mode rather than kept in a component.
+The rule is written once and shared: `server/room.ts` for the relay, imported wholesale by
+the P2P replica; `src/game/streaks.ts` for the client, which is the only authority in a solo
+match. Pinned in `tests/room.test.ts`, `tests/streaks.test.ts`, `tests/p2pParity.test.ts` and
+— the whole chain through a real server — `tests/duelRecord.test.ts`.
+
+**Nothing is ever paid twice for one carried run.** Because a streak survives the match it
+was built in, a match's peak is not a measure of what that match did, and paying on it makes
+a farm out of simply not missing — at its worst, opening the Practice Wall on a carried run
+and leaving without touching the ball. So every reward reads the from-zero figure
+(`earnedStreak`/`earnedBests`) while the career best, the mode best and the achievements read
+the true peak. Each half is asserted separately, because a test that only checks the peak
+passes on the bug: `tests/streaks.test.ts` and `tests/room.test.ts` hold the client and relay
+counters apart, `tests/db.test.ts` holds that a carried run is not paid for twice, and
+`scripts/e2e-rules.mjs` closes the practice farm through a real server.
+
+**Copy that quotes a threshold is checked against the threshold.** A theme's unlock line is
+free text sitting beside the structured fields it describes, so the rally rescale moved the
+fields and left the copy asking for a 10-hit rally to open something that opens at 7.
+`tests/themes.test.ts` now allows a number in that copy only if the requirement actually
+holds it — via `minRally`/`minLevel`/`minWins`, the linked elite mission's target, or the
+linked achievement's own (rescaled) description — and requires a `minRally` to be stated at
+all. Rewording to dodge it is not a fix; the numbers are the point.
+
+**A rename is a rule about every table that keys off the name.** `moveAccount` renames
+`players.id`, so any table keyed on it must move in the same transaction or be orphaned —
+`tests/identity.test.ts` asserts the per-mode rows arrive and that nothing is left behind
+under the old id. Add a playerId-keyed table and that suite is where it has to be claimed.
+
+**When a browser cannot state a rule directly, look for the observable it CAN state.** The
+run-carry rules need a real miss to distinguish, which a scripted paddle cannot be relied on
+to produce — but "did the page tell the server" does not. `scripts/e2e-streak.mjs` knocks the
+stored run out of step through the real route, presses Reset, and asserts the page put it
+back; that fails outright when the report is removed, where an assertion about the streak
+readout alone passes on the bug. Reach for the side effect before loosening the assertion.
+
+**Where two sources can answer the same question, the precedence is a rule too.** The run a
+new match opens on has two: the profile (which survives a reload) and what this page last saw
+its own match end on (which is fresher, because Play Again fires long before the match POST
+returns). That precedence lives in `src/game/streaks.ts` as `CarryStore`, not in `App.tsx`,
+for the reason below — and it is asserted in both directions, since a test that only checks
+the fallback passes on the bug.
+
+**Asserting a game RULE through a browser is a last resort, not a first one.** The streak
+rule was attempted that way and abandoned: it needs a real solo rally, a scripted paddle
+cannot be relied on to produce one (a first-to-5 against Rookie goes 5-0 often enough to fail
+the suite for a reason that is not the rule), and the fix was to move the rule somewhere it
+could be stated — `src/game/streaks.ts` — rather than to loosen the assertion until it
+passed. `scripts/e2e-streak.mjs` keeps only what a browser can say without luck.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit.

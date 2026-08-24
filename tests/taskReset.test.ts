@@ -37,7 +37,7 @@ describe('resetting everybody active tasks, once', () => {
     for (let i = 0; i < 4; i++) {
       mod.db.recordMatch({
         playerId: PLAYER, username: 'R', playerScore: 7, opponentScore: 0,
-        maxRally: 20, aces: 4, mode: 'multiplayer', isWinner: true, matchKey: `reset:${i}`,
+        bestStreak: 20, endStreak: 0, earnedStreak: 20, aces: 4, mode: 'multiplayer', isWinner: true, matchKey: `reset:${i}`,
       });
     }
     for (const m of mod.db.getMissions(PLAYER)) {

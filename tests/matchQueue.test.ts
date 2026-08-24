@@ -43,6 +43,7 @@ const fakeStorage = (backing: Map<string, string>) => ({
 let postMatchRecord: typeof import('../src/net/matchRecord').postMatchRecord;
 let flushPendingMatches: typeof import('../src/net/matchRecord').flushPendingMatches;
 let pendingMatchCount: typeof import('../src/net/matchRecord').pendingMatchCount;
+let clearPendingMatches: typeof import('../src/net/matchRecord').clearPendingMatches;
 
 const QUEUE_KEY = 'phong_pending_matches';
 
@@ -52,7 +53,7 @@ const match = (key: string): MatchEndPayload =>
     username: 'Queued',
     playerScore: 5,
     opponentScore: 2,
-    maxRally: 7,
+    bestStreak: 7, endStreak: 0, earnedStreak: 7,
     mode: 'solo',
     isWinner: true,
     matchKey: key,
@@ -81,10 +82,12 @@ const park = (...keys: string[]) =>
  */
 function installServer(answers: (() => Response)[] | (() => Response)) {
   const record: string[] = [];
+  const bodies: any[] = [];
   let n = 0;
-  vi.stubGlobal('fetch', async (input: string, init?: { method?: string }) => {
+  vi.stubGlobal('fetch', async (input: string, init?: { method?: string; body?: string }) => {
     const url = String(input);
     record.push(`${init?.method || 'GET'} ${url}`);
+    if (url === '/api/match/record' && init?.body) bodies.push(JSON.parse(init.body));
     if (url === '/api/session') {
       return json(200, { status: 'active', sessionId: `s-${n}`, profile: { id: 'p1' } });
     }
@@ -94,6 +97,7 @@ function installServer(answers: (() => Response)[] | (() => Response)) {
   });
   return {
     record,
+    bodies,
     posts: () => record.filter((r) => r.endsWith('/api/match/record')).length,
     mints: () => record.filter((r) => r === 'POST /api/session').length,
   };
@@ -105,7 +109,7 @@ beforeEach(async () => {
   reloads = 0;
   vi.unstubAllGlobals();
   vi.resetModules();
-  ({ postMatchRecord, flushPendingMatches, pendingMatchCount } = await import(
+  ({ postMatchRecord, flushPendingMatches, pendingMatchCount, clearPendingMatches } = await import(
     '../src/net/matchRecord'
   ));
 });
@@ -278,6 +282,57 @@ describe('replaying what an earlier session parked', () => {
   });
 });
 
+describe('a replay keeps its chain position', () => {
+  it('sends chainId and runSeq unchanged when replaying a parked match', async () => {
+    // Earlier design: runSeq was assigned per PAGE and stripped before a
+    // replay, because a parked payload's number meant nothing once the page
+    // that assigned it was gone. It is now assigned once, at event time, from
+    // a counter PERSISTED in localStorage (src/net/runChain.ts) — so a parked
+    // payload's chainId/runSeq are exactly as meaningful after a reload as
+    // they were the moment the match ended, and a replay must send them
+    // exactly as parked rather than stripping them.
+    localStore.set(
+      QUEUE_KEY,
+      JSON.stringify([
+        { payload: { ...match('stale'), chainId: 'chain_a', runSeq: 5 }, queuedAt: 1 },
+      ])
+    );
+    const server = installServer(ok);
+
+    expect(await flushPendingMatches()).toBe(1);
+    expect(server.bodies).toHaveLength(1);
+    expect(server.bodies[0].matchKey).toBe('stale');
+    expect(server.bodies[0].chainId).toBe('chain_a');
+    expect(server.bodies[0].runSeq).toBe(5);
+    // The age still travels too; the two are independent signals.
+    expect(server.bodies[0].clientNow).toBeTypeOf('number');
+  });
+
+  it('keeps chainId and runSeq on a live attempt and its retry', async () => {
+    // A live write and its retry are the same write, decided once; both
+    // attempts must report the same position in the chain.
+    const server = installServer([() => json(500, {}), ok]);
+    await postMatchRecord({ ...match('live'), chainId: 'chain_b', runSeq: 3 } as any);
+    expect(server.bodies).toHaveLength(2);
+    for (const body of server.bodies) {
+      expect(body.chainId).toBe('chain_b');
+      expect(body.runSeq).toBe(3);
+    }
+  });
+
+  it('flushes with no gate parameter at all', async () => {
+    // The gate this suite tested earlier is gone: ordering a replay against a
+    // live write no longer needs to serialize them through one queue, because
+    // a persisted, event-time seq compares correctly regardless of which
+    // request's own round trip finishes first. flushPendingMatches takes
+    // nothing now.
+    park('solo');
+    const server = installServer(ok);
+    expect(await flushPendingMatches()).toBe(1);
+    expect(server.posts()).toBe(1);
+  });
+});
+
 describe('the queue cannot grow without bound', () => {
   it('keeps the most recent matches and forgets the oldest', async () => {
     // A device offline for a long time must not fill its storage quota with
@@ -289,4 +344,96 @@ describe('the queue cannot grow without bound', () => {
     expect(queued()[0].matchKey).toBe('m5');
     expect(queued().at(-1)!.matchKey).toBe('m24');
   });
+});
+
+describe('a flush and a fresh failure at the same time', () => {
+  it('keeps a match queued WHILE the flush was awaiting the network', async () => {
+    // Not a rare pairing: the same bad connection that filled the queue is
+    // the one that makes the match the player just finished fail too. The
+    // flush snapshots the queue at the start; postMatchRecord appends to
+    // localStorage during one of its awaits; and writing back a list derived
+    // from the opening snapshot silently deletes the new match — against the
+    // one promise this file makes, which is that no result is ever lost.
+    park('backlog');
+    let resolveBacklog: ((r: Response) => void) | null = null;
+    vi.stubGlobal('fetch', (input: string, init?: { body?: string }) => {
+      const url = String(input);
+      if (url === '/api/match/record') {
+        const key = JSON.parse(init!.body!).matchKey;
+        if (key === 'backlog') {
+          return new Promise<Response>((resolve) => {
+            resolveBacklog = resolve;
+          });
+        }
+        // The freshly finished match: queued at once, no retry sleep.
+        return Promise.resolve(json(403, { error: 'PROFILE_NOT_INITIALIZED' }));
+      }
+      return Promise.resolve(json(200, { status: 'active', sessionId: 's', profile: { id: 'p' } }));
+    });
+
+    const flush = flushPendingMatches();
+    await new Promise((r) => setTimeout(r, 50)); // the flush is now awaiting 'backlog'
+
+    const fresh = await postMatchRecord(match('just-played'));
+    expect(fresh.reason).toBe('unidentified');
+    expect(queued().map((p) => p.matchKey)).toContain('just-played');
+
+    // The backlog item fails transiently, so it stays queued too.
+    resolveBacklog!(json(500, {}));
+    await flush;
+
+    expect(queued().map((p) => p.matchKey).sort()).toEqual(['backlog', 'just-played']);
+  }, 10000);
+
+  it('still removes what the flush actually finished with', async () => {
+    // The other half of the same rule: rebuilding from a re-read must not
+    // turn into "keep everything". A match the flush reported successfully,
+    // and one the server refused outright, are both gone.
+    park('lands', 'refused', 'transient');
+    let n = 0;
+    installServer(() => {
+      n++;
+      if (n === 1) return ok(); // 'lands'
+      if (n === 2) return json(400, { error: 'BAD' }); // 'refused'
+      return json(503, {}); // 'transient'
+    });
+
+    expect(await flushPendingMatches()).toBe(1);
+    expect(queued().map((p) => p.matchKey)).toEqual(['transient']);
+  });
+});
+
+describe('giving up this browser’s identity', () => {
+  it('clearPendingMatches drops everything parked, unsent', async () => {
+    // startFreshIdentity (App.tsx) calls this the moment a released device
+    // gives up its old identity for a brand new one. The queue is a flat
+    // localStorage key with no idea which account was active when an entry
+    // was parked — left alone, a match that failed to record under the OLD
+    // identity is still sitting here the moment the fresh one finishes
+    // onboarding, and the next flush credits it there instead: XP, rating,
+    // achievements and streaks earned by an account this browser no longer
+    // holds, paid to one that never played it. Same rule `attempt()` already
+    // applies to an `evicted` result, one step earlier: dropped, not queued,
+    // because replaying it would credit whatever identity comes next.
+    park('a', 'b', 'c');
+    expect(pendingMatchCount()).toBe(3);
+
+    clearPendingMatches();
+    expect(pendingMatchCount()).toBe(0);
+
+    // And it stays gone — nothing left for a later flush, under whatever
+    // identity this browser holds by then, to wrongly pick up.
+    const server = installServer(ok);
+    expect(await flushPendingMatches()).toBe(0);
+    expect(server.posts()).toBe(0);
+  });
+
+  it('is a plain reset, not scoped to any one identity', async () => {
+    // No playerId to compare against — the queue does not carry one and was
+    // never meant to. Calling this with nothing parked is simply a no-op.
+    expect(pendingMatchCount()).toBe(0);
+    clearPendingMatches();
+    expect(pendingMatchCount()).toBe(0);
+  });
+
 });

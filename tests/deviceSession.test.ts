@@ -89,7 +89,7 @@ const soloWin = (key: string): MatchEndPayload =>
   ({
     playerScore: 10,
     opponentScore: 4,
-    maxRally: 8,
+    bestStreak: 8, endStreak: 0, earnedStreak: 8,
     mode: 'solo',
     difficulty: 'rookie',
     isWinner: true,

@@ -40,8 +40,8 @@ export const MISSION_POOL: MissionDef[] = [
   { id: 'mission_games_6', type: 'games_played', tier: 'regular', titleKey: 'mission_games6_title', descKey: 'mission_games6_desc', target: 6, xpReward: 180 },
   { id: 'mission_win', type: 'matches_won', tier: 'regular', titleKey: 'mission_win_title', descKey: 'mission_win_desc', target: 1, xpReward: 150 },
   { id: 'mission_win_3', type: 'matches_won', tier: 'regular', titleKey: 'mission_win3_title', descKey: 'mission_win3_desc', target: 3, xpReward: 220 },
-  { id: 'mission_rally', type: 'rally', tier: 'regular', titleKey: 'mission_rally_title', descKey: 'mission_rally_desc', target: 8, xpReward: 120 },
-  { id: 'mission_rally_15', type: 'rally', tier: 'regular', titleKey: 'mission_rally15_title', descKey: 'mission_rally15_desc', target: 15, xpReward: 200 },
+  { id: 'mission_rally', type: 'rally', tier: 'regular', titleKey: 'mission_rally_title', descKey: 'mission_rally_desc', target: 6, xpReward: 120 },
+  { id: 'mission_rally_15', type: 'rally', tier: 'regular', titleKey: 'mission_rally15_title', descKey: 'mission_rally15_desc', target: 11, xpReward: 200 },
   { id: 'mission_multi', type: 'multiplayer', tier: 'regular', titleKey: 'mission_multi_title', descKey: 'mission_multi_desc', target: 1, xpReward: 200 },
   { id: 'mission_points', type: 'points_scored', tier: 'regular', titleKey: 'mission_points_title', descKey: 'mission_points_desc', target: 12, xpReward: 120 },
   { id: 'mission_points_25', type: 'points_scored', tier: 'regular', titleKey: 'mission_points25_title', descKey: 'mission_points25_desc', target: 25, xpReward: 200 },
@@ -56,7 +56,7 @@ export const MISSION_POOL: MissionDef[] = [
  */
 export const ELITE_POOL: MissionDef[] = [
   { id: 'elite_cyber_3', type: 'matches_won', tier: 'elite', titleKey: 'elite_cyber3_title', descKey: 'elite_cyber3_desc', target: 3, xpReward: 600, difficulty: 'cyber', unlocks: 'void-runner' },
-  { id: 'elite_rally_40', type: 'rally', tier: 'elite', titleKey: 'elite_rally40_title', descKey: 'elite_rally40_desc', target: 40, xpReward: 600, unlocks: 'crimson-tide' },
+  { id: 'elite_rally_40', type: 'rally', tier: 'elite', titleKey: 'elite_rally40_title', descKey: 'elite_rally40_desc', target: 28, xpReward: 600, unlocks: 'crimson-tide' },
   { id: 'elite_shutout_2', type: 'shutouts', tier: 'elite', titleKey: 'elite_shutout2_title', descKey: 'elite_shutout2_desc', target: 2, xpReward: 600, unlocks: 'arctic-glass' },
   { id: 'elite_points_60', type: 'points_scored', tier: 'elite', titleKey: 'elite_points60_title', descKey: 'elite_points60_desc', target: 60, xpReward: 600, unlocks: 'molten-core' },
   { id: 'elite_duel_3', type: 'matches_won', tier: 'elite', titleKey: 'elite_duel3_title', descKey: 'elite_duel3_desc', target: 3, xpReward: 600, mode: 'multiplayer', unlocks: 'signal-lost' },
@@ -219,7 +219,19 @@ export function applyMatchToProgress(
   if (def.type === 'rally') {
     if (def.difficulty && (match.difficulty !== def.difficulty || match.mode !== 'solo')) return current;
     if (def.mode && match.mode !== def.mode) return current;
-    return Math.min(def.target, Math.max(current, Math.max(0, Math.round(match.maxRally || 0))));
+    // The run EARNED here, not the peak it reached. A streak carries between
+    // matches, so bestStreak opens on whatever was carried in — and a rally
+    // task dealt or rerolled onto a player already on a long run completed
+    // itself on the next recorded match without them returning another ball.
+    // At its worst that paid an elite task's 600 XP and its permanent theme
+    // for nothing. It also broke the rule the deal is built on: a dealt task
+    // starts from zero and must never arrive already finished.
+    //
+    // The honest limit of using this number: a run that spans the deal
+    // boundary counts only the part built after it, so a carried 3 plus 5 more
+    // is 5 against the target and not 8. That is the safe side of the trade —
+    // the alternative pays for work done before the task existed.
+    return Math.min(def.target, Math.max(current, Math.max(0, Math.round(match.earnedStreak || 0))));
   }
   return Math.min(def.target, current + missionProgressDelta(def, match));
 }

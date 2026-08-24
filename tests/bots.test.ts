@@ -94,7 +94,7 @@ describe('seeding', () => {
     db.initializeProfile('dev_111111111111111111', 'RealPlayer');
     db.recordMatch({
       playerId: 'dev_111111111111111111', username: 'RealPlayer',
-      playerScore: 5, opponentScore: 2, maxRally: 6, mode: 'multiplayer', isWinner: true,
+      playerScore: 5, opponentScore: 2, bestStreak: 6, endStreak: 0, earnedStreak: 6, mode: 'multiplayer', isWinner: true,
     } as any);
 
     const withBots = db.getLeaderboard('elo', 50, true);

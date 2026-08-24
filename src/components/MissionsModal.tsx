@@ -174,6 +174,7 @@ export const MissionsModal: React.FC<Props> = ({
 
   return (
     <Sheet
+      cardId="missions-modal-container"
       isOpen={isOpen}
       onClose={onClose}
       size="md"

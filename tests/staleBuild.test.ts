@@ -31,7 +31,7 @@ const payload = {
   username: 'Stale',
   playerScore: 5,
   opponentScore: 1,
-  maxRally: 4,
+  bestStreak: 4, endStreak: 0, earnedStreak: 4,
   mode: 'solo' as const,
   isWinner: true,
   matchKey: 'solo:stale-build',

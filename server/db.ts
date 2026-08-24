@@ -10,6 +10,8 @@ import {
   LeaderboardEntry,
   MatchEndPayload,
   MatchEndResult,
+  ModeStats,
+  GameMode,
   DailyMission,
 } from '../src/types';
 import { validateUsername, usernameLockExpiry } from '../src/profileRules';
@@ -89,11 +91,54 @@ const WIPE_V2_KEY = 'wipe_v2';
 // ranked bands, the eight-branch achievement tree, the Cyber climb, abandon
 // penalties. Everything stored was earned under rules that no longer exist.
 const WIPE_V3_KEY = 'wipe_v3';
+// A fourth, for the rally rework. A rally number used to be a single counter
+// both players incremented, reset whenever either of them scored; it is now
+// one player's own consecutive returns, broken only by their own miss. Every
+// banked highestRally, every matches.maxRally and every rally mission's
+// progress was measured on the old rule and is not comparable to the new one
+// — and the thresholds moved under them in the same release. There is no
+// conversion that would be honest, so the slate is cleared.
+const WIPE_V4_KEY = 'wipe_v4';
+
+/**
+ * The oldest a reported result may claim to be, for ordering purposes.
+ *
+ * A nonsense age — a clock that jumped, a hand-written payload — should sort
+ * as simply old rather than place a row before the epoch. Thirty days is well
+ * past anything the on-device queue realistically holds.
+ */
+const MAX_RESULT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long before it was SENT a reported match ended, in ms.
+ *
+ * Both readings come from the reporting device's own clock — one at the
+ * whistle, one as the attempt goes out — so the difference is an elapsed
+ * duration and carries none of that clock's offset. Either missing means
+ * "just now", which is what a first attempt that landed, or a payload the
+ * relay built itself, actually is.
+ */
+const resultAgeMs = (payload: { endedAt?: number; clientNow?: number }): number | undefined => {
+  const ended = Number(payload.endedAt);
+  const sent = Number(payload.clientNow);
+  if (!Number.isFinite(ended) || !Number.isFinite(sent)) return undefined;
+  const age = sent - ended;
+  // A NEGATIVE difference means the clock moved backwards between the two
+  // readings — an NTP correction, or a hand-set clock — so the elapsed time
+  // is not knowable from them. "Just now" is the reading that lets this
+  // result overwrite whatever is stored, which makes it the wrong guess: a
+  // match queued while the clock ran fast, replayed after the correction,
+  // would land on top of a newer one. Read as old as we allow instead. It
+  // costs at most the carry from a live report whose ordering the client's
+  // own write chain already handles, and that is the side to be wrong on.
+  if (age < 0) return MAX_RESULT_AGE_MS;
+  return age > 0 ? age : undefined;
+};
 // Every key, oldest first. applyWipe re-stamps ALL of them after running:
 // stamping only some would leave a hole that re-triggers an earlier wipe on
 // the next boot — and since each wipe clears `meta`, two half-stamped keys
 // would take turns wiping the database on every single start.
-const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY];
+const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY, WIPE_V4_KEY];
 
 /**
  * How long a recorded match stays deduplicable. Long enough to cover a match
@@ -194,6 +239,7 @@ interface PlayerRow {
   recoveryCode: string | null;
   initializedAt: string | null;
   usernameChangedAt: string | null;
+  tutorialCompletedAt: string | null;
   // From the LEFT JOIN on avatars; NULL when the player has no avatar.
   avatarUpdatedAt?: string | null;
 }
@@ -219,6 +265,7 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
     recoveryCode: row.recoveryCode || undefined,
     initializedAt: row.initializedAt || undefined,
     usernameChangedAt: row.usernameChangedAt || undefined,
+    tutorialCompletedAt: row.tutorialCompletedAt || undefined,
     initialized: Boolean(row.initializedAt),
     hasAvatar: Boolean(avatarUpdatedAt),
     avatarVersion: avatarUpdatedAt ? Date.parse(avatarUpdatedAt) : undefined,
@@ -307,7 +354,8 @@ class GameDatabase {
         initializedAt TEXT,
         usernameChangedAt TEXT,
         activeSessionId TEXT,
-        activeSessionAt TEXT
+        activeSessionAt TEXT,
+        tutorialCompletedAt TEXT
       );
       CREATE TABLE IF NOT EXISTS matches (
         id TEXT PRIMARY KEY,
@@ -326,6 +374,41 @@ class GameDatabase {
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
       CREATE INDEX IF NOT EXISTS idx_matches_p2 ON matches(player2Id);
+      -- Per-mode stats. The career totals on the players table mix solo and
+      -- duel into a single number, which answers "how much have you played"
+      -- and nothing at all about how you play each mode. A separate table
+      -- rather than four times the columns: upsertProfile is a hand-written
+      -- INSERT whose column list, VALUES tuple, DO UPDATE SET and positional
+      -- args all have to agree, and every column added there is four chances
+      -- to get it wrong. Split Screen is absent by design — it is two people
+      -- on one phone and only one of them has an account.
+      CREATE TABLE IF NOT EXISTS player_mode_stats (
+        playerId TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        matchesPlayed INTEGER NOT NULL DEFAULT 0,
+        matchesWon INTEGER NOT NULL DEFAULT 0,
+        matchesLost INTEGER NOT NULL DEFAULT 0,
+        pointsScored INTEGER NOT NULL DEFAULT 0,
+        aces INTEGER NOT NULL DEFAULT 0,
+        bestStreak INTEGER NOT NULL DEFAULT 0,
+        -- The run still going. A rally streak carries across matches, not just
+        -- across points, so it has to outlive the match it was built in — and
+        -- across a reload and a different browser too, which means it lives
+        -- here rather than in the client.
+        currentStreak INTEGER NOT NULL DEFAULT 0,
+        -- When the match that set currentStreak ended, by its own device's
+        -- clock. Every other column here is additive (paid once per matchKey)
+        -- or a maximum, so order cannot hurt them. currentStreak is assigned,
+        -- and the last WRITE is not the last MATCH: a result can sit in the
+        -- on-device queue through a whole replay and land after it, restoring
+        -- a run the replay had already broken.
+        streakAt INTEGER NOT NULL DEFAULT 0,
+        streakChainId TEXT,
+        streakSeq INTEGER NOT NULL DEFAULT 0,
+        winStreak INTEGER NOT NULL DEFAULT 0,
+        bestWinStreak INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, mode)
+      );
       CREATE TABLE IF NOT EXISTS avatars (
         playerId TEXT PRIMARY KEY,
         data BLOB NOT NULL,
@@ -473,6 +556,7 @@ class GameDatabase {
     this.applyWipe(WIPE_V1_KEY, 'wipe_v1: cleared all player data for the fresh launch (0 players)');
     this.applyWipe(WIPE_V2_KEY, 'wipe_v2: cleared all player data for the rebalanced AI ladder (0 players)');
     this.applyWipe(WIPE_V3_KEY, 'wipe_v3: cleared all player data for the progression overhaul (0 players)');
+    this.applyWipe(WIPE_V4_KEY, 'wipe_v4: cleared all player data for the rally-streak rework (0 players)');
   }
 
   private applyWipe(key: string, message: string): void {
@@ -498,6 +582,7 @@ class GameDatabase {
       // been deleted out from under them.
       this.sql.exec('DROP TABLE IF EXISTS device_links');
       this.sql.exec('DROP TABLE IF EXISTS recent_missions');
+      this.sql.exec('DROP TABLE IF EXISTS player_mode_stats');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -526,6 +611,19 @@ class GameDatabase {
         this.sql.exec(`ALTER TABLE players ADD COLUMN ${ddl}`);
       }
     };
+    // The same, for player_mode_stats — the only other table this project has
+    // ever needed to widen after the fact.
+    const modeCols = this.sql
+      .prepare('PRAGMA table_info(player_mode_stats)')
+      .all() as unknown as Array<{ name: string }>;
+    if (modeCols.length && !modeCols.some((c) => c.name === 'streakAt')) {
+      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakAt INTEGER NOT NULL DEFAULT 0');
+    }
+    if (modeCols.length && !modeCols.some((c) => c.name === 'streakChainId')) {
+      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakChainId TEXT');
+      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakSeq INTEGER NOT NULL DEFAULT 0');
+    }
+
     addColumn('recoveryCode', 'recoveryCode TEXT');
     // TrueSkill-style ratings replaced the old fixed-delta ELO.
     addColumn('mmrMu', 'mmrMu REAL NOT NULL DEFAULT 25');
@@ -548,6 +646,7 @@ class GameDatabase {
     // One account, one live session. Which one is recorded here.
     addColumn('activeSessionId', 'activeSessionId TEXT');
     addColumn('activeSessionAt', 'activeSessionAt TEXT');
+    addColumn('tutorialCompletedAt', 'tutorialCompletedAt TEXT');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
     // Uniqueness is case-insensitive and applies to chosen names only:
     // uninitialized rows keep their Paddle-XXXX placeholders outside the
@@ -697,8 +796,9 @@ class GameDatabase {
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins,
            winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, cyberWins, abandons, dailyStreak, lastDailyDate,
-           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt,
+           tutorialCompletedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
@@ -715,7 +815,8 @@ class GameDatabase {
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive,
            recoveryCode=excluded.recoveryCode, initializedAt=excluded.initializedAt,
-           usernameChangedAt=excluded.usernameChangedAt`
+           usernameChangedAt=excluded.usernameChangedAt,
+           tutorialCompletedAt=excluded.tutorialCompletedAt`
       )
       .run(
         p.id,
@@ -749,7 +850,8 @@ class GameDatabase {
         p.lastActive,
         p.recoveryCode ?? null,
         p.initializedAt ?? null,
-        p.usernameChangedAt ?? null
+        p.usernameChangedAt ?? null,
+        p.tutorialCompletedAt ?? null
       );
   }
 
@@ -786,7 +888,11 @@ class GameDatabase {
     if (!row) return null;
     // Elite unlocks live in their own permanent table; the client checks them
     // when deciding which themes are available, so they ride the profile.
-    return { ...rowToProfile(row), eliteUnlocks: this.eliteUnlocks(id) };
+    return {
+      ...rowToProfile(row),
+      eliteUnlocks: this.eliteUnlocks(id),
+      modeStats: this.getModeStats(id),
+    };
   }
 
   public getProfile(id: string): PlayerProfile {
@@ -965,9 +1071,313 @@ class GameDatabase {
     return { counted: true, penalized, abandonsToday: row.count };
   }
 
+  /**
+   * Fold one result into a mode's own row.
+   *
+   * The career totals on `players` mix solo and duel into a single number,
+   * which answers "how much have you played" and nothing at all about how you
+   * play each mode. These are the same measures kept apart, per mode.
+   *
+   * Additive and derived here, like every other counter: a client reports a
+   * match, never a total. Split Screen never reaches this — it is two people
+   * on one phone and only one of them has an account to write to.
+   */
+  private bumpModeStats(
+    playerId: string,
+    mode: GameMode,
+    d: {
+      played?: number;
+      won?: boolean;
+      pointsScored?: number;
+      aces?: number;
+      bestStreak?: number;
+      /**
+       * The run still going when the match ended — zero if it ended on a miss.
+       * Absent means "leave it alone", which is what a write that is not about
+       * a finished match wants.
+       */
+      endStreak?: number;
+      /**
+       * How long before it was SENT the match ended, in ms — see the note on
+       * `stamp` below. Absent means "just now", which is what a write
+       * happening as it happens wants: the relay's own record of a duel, a
+       * practice session, or a first attempt that landed.
+       */
+      ageMs?: number;
+      /**
+       * This browser's own position in its run-write chain (see
+       * `src/net/runChain.ts`), assigned once per event and PERSISTED — so it
+       * survives a reload and orders a replayed write against whatever this
+       * same browser assigns after it, with no regard to how long either
+       * request's own round trip takes. Absent for anything with no chain —
+       * an older bundle, or the relay's own writes.
+       */
+      chainId?: string | null;
+      runSeq?: number;
+    }
+  ): void {
+    const row = this.stmt(
+        `SELECT winStreak, currentStreak, streakAt, streakChainId, streakSeq
+           FROM player_mode_stats WHERE playerId = ? AND mode = ?`
+      )
+      .get(playerId, mode) as
+      | {
+          winStreak: number;
+          currentStreak: number;
+          streakAt: number;
+          streakChainId: string | null;
+          streakSeq: number;
+        }
+      | undefined;
+    // Two of these columns describe THE RUN AS IT STANDS rather than a total,
+    // and a run is a statement about a sequence — so they are the two that
+    // need the results in order, and the additive ones do not. Idempotency
+    // tells two matches apart; it does not put them in sequence. A result that
+    // failed to POST sits in the on-device queue while the player replays and
+    // lands afterwards.
+    //
+    // Ordered on the SERVER's clock, from how stale the caller says it is.
+    //
+    // A device's absolute clock cannot be used for this in either direction. A
+    // phone running fast parks the stored stamp ahead of real time and freezes
+    // the column until reality catches up; a phone running slow has every
+    // result it ever sends look older than what is stored and be ignored the
+    // same way. Both are one bug — comparing two clocks — and clamping only
+    // the upper end fixes only half of it.
+    //
+    // An AGE has neither problem: it is the difference between two readings of
+    // one clock, so whatever offset that clock carries cancels. The caller
+    // measures how long ago the match ended and the server places it on its
+    // own timeline. Bounded, because a nonsense age is still possible and a
+    // result from "sixty years ago" should just sort as old, not underflow.
+    const now = Date.now();
+    const age = Math.min(MAX_RESULT_AGE_MS, Math.max(0, Math.round(Number(d.ageMs) || 0)));
+    const stamp = now - age;
+    const prevStamp = row?.streakAt ?? 0;
+    // A stamp is `event + time on the wire`, and the wire is not constant, so
+    // two writes from the SAME browser can still invert: whichever of them
+    // happens to have the faster round trip can reach the server "later" in
+    // stamped time even though it was decided first — a stall does this to a
+    // serialized chain, and an ordinary difference in per-request latency does
+    // it even without one, which the chain alone cannot fix once a queued
+    // write is replayed from a page that no longer exists.
+    //
+    // A `runSeq` sidesteps network timing rather than reasoning about it: it
+    // is assigned once, at the moment the event happens, before any request is
+    // sent, and PERSISTED on the browser — so it means the same thing whether
+    // this write lands in a second or resurfaces from the on-device queue
+    // after a reload. `chainId` says which browser assigned it, so two numbers
+    // are only ever compared when they came from the same one. Same chain,
+    // higher seq — later, however long either request's own trip took. A
+    // different chain, or no seq at all, has nothing in common to compare and
+    // falls back to the age.
+    const seq = Number.isFinite(Number(d.runSeq)) ? Math.floor(Number(d.runSeq)) : null;
+    const sameChain =
+      seq !== null && !!d.chainId && !!row?.streakChainId && d.chainId === row.streakChainId;
+    const prevSeq = row?.streakSeq ?? 0;
+    // A HIGHER seq is unambiguously later. An EQUAL one is not necessarily a
+    // duplicate: `nextRunSeq()` reads its counter, increments, and writes it
+    // back in three separate steps, none of them atomic across TABS — two
+    // tabs on the same device can both read the same starting value before
+    // either write lands, and both then report the same chainId and the same
+    // next seq for two genuinely different events. Falling back to the age
+    // here is not claiming to resolve that race correctly — two truly
+    // simultaneous events have no meaningful "first" — only to stop always
+    // resolving it the SAME wrong way, which was "whichever request's own
+    // network trip happens to arrive at this server second always loses,"
+    // with no regard to which one actually happened later.
+    const isNewer = sameChain
+      ? seq > prevSeq || (seq === prevSeq && stamp > prevStamp)
+      : stamp >= prevStamp;
+    const describesRun = d.endStreak !== undefined || d.won !== undefined;
+
+    // A win streak IN THIS MODE: unlike the profile-wide one, a duel loss does
+    // not end a solo streak and vice versa. Undefined `won` (a practice
+    // session) leaves both alone rather than counting as a loss.
+    //
+    // An out-of-order result does not move it. Applied on arrival, an older
+    // win landing after a newer loss extends the run THAT LOSS ENDED, and
+    // bestWinStreak is a maximum so the inflation is permanent. The cost is
+    // the mirror case — an older win that belonged to an unbroken run is not
+    // added — and that is the side to be wrong on: a run not credited is
+    // recoverable, a best that was never played is not.
+    const nextWinStreak =
+      d.won === undefined || !isNewer
+        ? (row?.winStreak ?? 0)
+        : d.won
+          ? (row?.winStreak ?? 0) + 1
+          : 0;
+    // The run that carries. Assigned, not accumulated and not maxed: it can
+    // legitimately go DOWN to zero, because ending a match on a miss is
+    // exactly what ends a streak — which is why assigning it blindly is wrong.
+    // Match A's run of 10 comes back over replay B's 0, and the next reload
+    // starts on a run that was already broken. An older result is still kept
+    // for its additive part: it happened, and it is owed the match, the points
+    // and its share of the peak.
+    const nextCurrent =
+      d.endStreak === undefined || !isNewer
+        ? (row?.currentStreak ?? 0)
+        : Math.max(0, Math.round(d.endStreak));
+    const nextStamp = describesRun && isNewer ? stamp : prevStamp;
+    // The chain this run was last assigned by, so the next write from the same
+    // browser can be ordered against it without the wire getting a vote.
+    const nextChainId = describesRun && isNewer ? (d.chainId ?? null) : (row?.streakChainId ?? null);
+    const nextSeq = describesRun && isNewer ? (seq ?? 0) : (row?.streakSeq ?? 0);
+    this.stmt(
+        `INSERT INTO player_mode_stats
+           (playerId, mode, matchesPlayed, matchesWon, matchesLost,
+            pointsScored, aces, bestStreak, currentStreak, streakAt, streakChainId,
+            streakSeq, winStreak, bestWinStreak)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(playerId, mode) DO UPDATE SET
+           matchesPlayed = matchesPlayed + excluded.matchesPlayed,
+           matchesWon    = matchesWon    + excluded.matchesWon,
+           matchesLost   = matchesLost   + excluded.matchesLost,
+           pointsScored  = pointsScored  + excluded.pointsScored,
+           aces          = aces          + excluded.aces,
+           bestStreak    = MAX(bestStreak, excluded.bestStreak),
+           currentStreak = excluded.currentStreak,
+           streakAt      = excluded.streakAt,
+           streakChainId = excluded.streakChainId,
+           streakSeq     = excluded.streakSeq,
+           winStreak     = excluded.winStreak,
+           bestWinStreak = MAX(bestWinStreak, excluded.winStreak)`
+      )
+      .run(
+        playerId,
+        mode,
+        d.played ?? 0,
+        d.won === true ? 1 : 0,
+        d.won === false ? 1 : 0,
+        Math.max(0, Math.round(d.pointsScored ?? 0)),
+        Math.max(0, Math.round(d.aces ?? 0)),
+        Math.max(0, Math.round(d.bestStreak ?? 0)),
+        nextCurrent,
+        nextStamp,
+        nextChainId,
+        nextSeq,
+        nextWinStreak,
+        nextWinStreak
+      );
+  }
+
+  /**
+   * Where a run stands, reported outside a match.
+   *
+   * Only a FINISHED match reports itself, and a run does not only change when
+   * one finishes: a player can carry a run in, miss, and walk out. Without
+   * this the stored run is whatever the last completed match left, so the miss
+   * survives a reload and every return after it extends a run that was over.
+   *
+   * Deliberately narrow. It counts no match, pays nothing, and moves no
+   * rating — it writes one number. `multiplayer` is refused because the relay
+   * owns a duel's runs and writes them itself from state no client can touch;
+   * `split` banks nothing at all. What is left is solo and practice, both of
+   * which are already client-authoritative (see the trust model in CLAUDE.md
+   * §5) and already report this exact number through their own routes, so
+   * this adds no reach a modified client did not have.
+   */
+  public reportStreak(
+    playerId: string,
+    mode: GameMode,
+    endStreak: number,
+    /**
+     * How long before it was SENT the run reached this value. Not optional in
+     * spirit: a report that stalls on a slow connection is stamped by ARRIVAL
+     * without it, which makes it newer than the match result that overtook it.
+     */
+    ageMs?: number,
+    /** This report's position in the browser's run-write chain; see bumpModeStats. */
+    chain?: { chainId?: string | null; runSeq?: number }
+  ): { ok: boolean; modeStats: Record<string, ModeStats> } {
+    if (mode !== 'solo' && mode !== 'practice') return { ok: false, modeStats: {} };
+    const profile = this.getProfile(playerId);
+    if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
+    const n = Math.floor(Number(endStreak));
+    if (!Number.isFinite(n) || n < 0) return { ok: false, modeStats: this.getModeStats(playerId) };
+    // No `played`, no `won`: nothing here says a match happened.
+    this.bumpModeStats(playerId, mode, {
+      endStreak: Math.min(100000, n),
+      ageMs: Number(ageMs) || undefined,
+      chainId: chain?.chainId,
+      runSeq: chain?.runSeq,
+    });
+    return { ok: true, modeStats: this.getModeStats(playerId) };
+  }
+
+  /**
+   * A duel seat's run, written by the RELAY.
+   *
+   * `reportStreak` refuses `multiplayer` on purpose — a duel's runs belong to
+   * the room, not to either phone. This is the room's own way to say the same
+   * thing, and it exists because a duel does not only end by being decided: a
+   * player walks out and it is abandoned. `recordRoomMatch` writes the runs
+   * when the score decides it; without this, an abandoned duel left both seats
+   * on whatever the last COMPLETED match stored, so a miss during it was
+   * undone and a run built during it was thrown away.
+   *
+   * Counts no match and pays nothing — the abandon itself is recorded
+   * separately, and it is the only thing an abandoned duel costs.
+   */
+  public recordDuelStreak(playerId: string, endStreak: number): void {
+    const n = Math.floor(Number(endStreak));
+    if (!Number.isFinite(n) || n < 0) return;
+    if (!this.readProfile(playerId)?.initializedAt) return;
+    this.bumpModeStats(playerId, 'multiplayer', { endStreak: Math.min(100000, n) });
+  }
+
+  /** Every mode this player has a row for, keyed by mode. */
+  public getModeStats(playerId: string): Record<string, ModeStats> {
+    const rows = this.stmt(
+        `SELECT mode, matchesPlayed, matchesWon, matchesLost, pointsScored,
+                aces, bestStreak, currentStreak, bestWinStreak
+           FROM player_mode_stats WHERE playerId = ?`
+      )
+      .all(playerId) as unknown as (ModeStats & { mode: string })[];
+    const out: Record<string, ModeStats> = {};
+    for (const r of rows) {
+      const { mode, ...rest } = r;
+      out[mode] = rest;
+    }
+    return out;
+  }
+
+  /**
+   * Mark the onboarding tour as seen — walked through OR skipped, because a
+   * player who waved it away has still decided about it. One-shot: the first
+   * stamp is the one that stands, so a replay from Settings does not rewrite
+   * when they were first shown the game.
+   */
+  public completeTutorial(playerId: string): PlayerProfile {
+    const profile = this.getProfile(playerId);
+    if (!profile.tutorialCompletedAt) {
+      profile.tutorialCompletedAt = new Date().toISOString();
+      this.upsertProfile(profile);
+    }
+    return this.getProfile(playerId);
+  }
+
+  /**
+   * A Practice Wall session.
+   *
+   * Three numbers, because they answer three different questions. `bestStreak`
+   * is the run's peak, carried run included — that is a real run and it is what
+   * the wall achievements and the mode's best are about. `earnedStreak` is how
+   * much of it was built HERE, and it is the only one XP is paid on: paying on
+   * the peak let a player carry a run in, open the wall, leave without touching
+   * the ball, and collect for it again, up to the daily cap, every day.
+   * `endStreak` is where the run stands, so the next session continues it.
+   */
   public recordPractice(
     playerId: string,
-    bestStreak: number,
+    session: {
+      bestStreak: number;
+      earnedStreak?: number;
+      endStreak?: number;
+      ageMs?: number;
+      chainId?: string | null;
+      runSeq?: number;
+    },
     now: Date = new Date()
   ): {
     earnedXp: number;
@@ -978,6 +1388,31 @@ class GameDatabase {
     const profile = this.getProfile(playerId);
     if (!profile.initializedAt) throw new Error('PROFILE_NOT_INITIALIZED');
 
+    const whole = (v: unknown): number => {
+      const n = Math.floor(Number(v));
+      return Number.isFinite(n) ? Math.max(0, n) : 0;
+    };
+    const peak = whole(session.bestStreak);
+    // Neither of these can stand higher than the run ever reached.
+    const earned = Math.min(peak, whole(session.earnedStreak));
+    const ended = Math.min(peak, whole(session.endStreak));
+
+    // Practice has no opponent, so it has no wins, losses or aces — a session
+    // and a streak are all there is to keep. Banked whatever the daily XP cap
+    // says, because the cap is about XP, not about what happened.
+    this.bumpModeStats(playerId, 'practice', {
+      played: 1,
+      bestStreak: peak,
+      endStreak: ended,
+      // Ordered like every other write to the run. Two sessions can be left
+      // seconds apart and their reports can land in either order — an older
+      // one ending at 8 landing after a newer one that broke to 0 would put
+      // the broken run back for anyone who reloads.
+      ageMs: session.ageMs,
+      chainId: session.chainId,
+      runSeq: session.runSeq,
+    });
+
     const dayKey = missionDayKey(now);
     const row = this.stmt(`SELECT xpAwarded FROM daily_practice WHERE playerId = ? AND dayKey = ?`)
       .get(playerId, dayKey) as { xpAwarded: number } | undefined;
@@ -985,12 +1420,14 @@ class GameDatabase {
 
     const earnedXp = Math.max(
       0,
-      Math.min(practiceXp(bestStreak), PRACTICE_XP_DAILY_CAP - alreadyPaid)
+      Math.min(practiceXp(earned), PRACTICE_XP_DAILY_CAP - alreadyPaid)
     );
 
     // The rally branch's wall rungs are the only achievements a player who
     // never records a match can reach, so they are checked here as well.
-    const streak = Math.max(0, Math.floor(bestStreak || 0));
+    // The rungs are about the run, so they read the peak — a carried run is a
+    // real run of returns, however many sessions it took.
+    const streak = peak;
     const newAchievements: Achievement[] = [];
     let budget = achievementXpCap(profile.level);
     const wallProgress = { level: profile.level, tier: profile.tier };
@@ -1634,9 +2071,29 @@ class GameDatabase {
     const winProb = winProbability(myMmr, oppRating);
 
     // 2. Experience — always positive, never subtracted: levels can't regress.
+    // Coerced, not trusted. A client that omits the field — an older bundle
+    // mid-deploy, or a malformed POST — used to reach matchXp with undefined,
+    // which multiplies to NaN, lands NaN in profile.xp and only surfaces as
+    // "NOT NULL constraint failed: players.xp" from a write three functions
+    // later. Everything else read off the payload is bounded; this is too.
+    const bound = (v: unknown): number => {
+      const n = Math.floor(Number(v));
+      return Number.isFinite(n) ? Math.max(0, Math.min(100000, n)) : 0;
+    };
+    const bestStreak = bound(payload.bestStreak);
+    payload.bestStreak = bestStreak;
+    // The run cannot end higher than it ever reached.
+    const endStreak = Math.min(bound(payload.endStreak), bestStreak);
+    payload.endStreak = endStreak;
+    // Nor can a match have EARNED more than it reached. This is the number XP
+    // is paid on: bestStreak opens on whatever was carried in, so paying on
+    // that would pay for the same run again in every match it spans.
+    const earnedStreak = Math.min(bound(payload.earnedStreak), bestStreak);
+    payload.earnedStreak = earnedStreak;
+
     const earnedXp = matchXp({
       playerScore: payload.playerScore,
-      maxRally: payload.maxRally,
+      bestStreak: earnedStreak,
       won: isWin,
       winProb,
       mode: payload.mode,
@@ -1725,6 +2182,30 @@ class GameDatabase {
     // the achievements being once-only.
     profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
     if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
+    // The same result, kept per mode as well as pooled — written down in the
+    // transaction below rather than here. It is the one write in this function
+    // with no ceiling of its own: mission progress caps at its target and the
+    // profile is upserted whole, but matchesPlayed and the rest only ever add,
+    // so a bump that landed while the match went unstamped would be counted
+    // again by the retry, and again by the one after that.
+    const modeDelta = {
+      played: 1,
+      won: isWin,
+      pointsScored: payload.playerScore,
+      aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
+      bestStreak: payload.bestStreak,
+      endStreak,
+      // How long ago this match ended, by the reporting device's own clock —
+      // the gap between the whistle and the moment this attempt went out. A
+      // result that queued through a replay therefore says so and does not
+      // land back on top of a newer one. Absent (an older client, or a payload
+      // the relay built itself) means "just now".
+      ageMs: resultAgeMs(payload),
+      // This browser's own chain position, for the writes the age cannot
+      // order — see the note beside `stamp` in bumpModeStats.
+      chainId: payload.chainId,
+      runSeq: payload.runSeq,
+    };
     // Streaks, shutouts and per-difficulty wins are derived here and only
     // here, from the result the server just accepted — a client can report a
     // match, never a total.
@@ -1737,8 +2218,10 @@ class GameDatabase {
       else if (difficulty === 'pro') profile.proWins += 1;
       else if (difficulty === 'cyber') profile.cyberWins += 1;
     }
-    if (payload.maxRally > profile.highestRally) {
-      profile.highestRally = payload.maxRally;
+    // The career best rally STREAK — this player's own consecutive returns,
+    // never the opponent's, and never a whole point's worth of both.
+    if (payload.bestStreak > profile.highestRally) {
+      profile.highestRally = payload.bestStreak;
     }
     profile.lastActive = new Date().toISOString();
 
@@ -1794,7 +2277,13 @@ class GameDatabase {
     const placed = isPlaced(profile.rankedGames, profile.rankSigma);
 
     // Foundation
-    if (payload.maxRally >= 1) unlock('first_serve');
+    // Finishing a match at all. This used to read `payload.maxRally >= 1`,
+    // which under the shared counter was true of anyone who had touched the
+    // ball once. A streak is one player's own returns now, so a player who
+    // never returns a single ball has a best streak of zero — and first_serve
+    // is what opens `mode:multiplayer`, so keying it on that would have left
+    // them unable to reach a duel at all.
+    unlock('first_serve');
     if (isWin) unlock('first_win');
     if (shutOut) unlock('shutout');
     if (profile.matchesPlayed >= 10) unlock('veteran_10');
@@ -1805,11 +2294,16 @@ class GameDatabase {
     // Rally. Measured on the profile's banked best, not this match's rally,
     // so a feat performed before a gate opened is not lost — the rung lands
     // on the first match after the gate is met.
-    if (profile.highestRally >= 10) unlock('rally_10');
-    if (profile.highestRally >= 25) unlock('rally_25');
-    if (profile.highestRally >= 50) unlock('rally_50');
-    if (profile.highestRally >= 100) unlock('rally_100');
-    if (profile.highestRally >= 150) unlock('rally_150');
+    // Rescaled by 0.72 with the counting change: a rally number is one
+    // player's own consecutive returns now rather than a whole point's worth
+    // of both players', which measures about 0.72x the old figure across the
+    // ladder and both winning scores. These rungs are therefore as far away as
+    // they always were.
+    if (profile.highestRally >= 7) unlock('rally_10');
+    if (profile.highestRally >= 18) unlock('rally_25');
+    if (profile.highestRally >= 36) unlock('rally_50');
+    if (profile.highestRally >= 72) unlock('rally_100');
+    if (profile.highestRally >= 108) unlock('rally_150');
 
     // Ladder. The rungs fire in order so a single result can climb a chain
     // it genuinely satisfies, and each one opens the next.
@@ -1881,7 +2375,7 @@ class GameDatabase {
       winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
       scoreP1: payload.playerScore,
       scoreP2: payload.opponentScore,
-      maxRally: payload.maxRally,
+      maxRally: payload.bestStreak,
       mode: payload.mode,
       difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
       timestamp: new Date().toISOString(),
@@ -1902,6 +2396,15 @@ class GameDatabase {
 
     this.sql.exec('BEGIN');
     try {
+      this.bumpModeStats(profile.id, payload.mode, modeDelta);
+      // Read back what that just wrote, from inside the transaction that wrote
+      // it. `profile` was loaded before the bump, so its per-mode snapshot is
+      // the one from BEFORE this match — and it is the object handed to the
+      // client in MatchEndResult, which installs it whole. Left stale, the
+      // first match's row was missing entirely and every later one was a match
+      // behind for the rest of the page session. `result` holds this same
+      // object, so the stamp below records the fresh rows too.
+      profile.modeStats = this.getModeStats(profile.id);
       this.upsertProfile(profile);
       this.insertMatch(matchRecord);
       // Keep only the most recent 500 matches (parity with the JSON store)
@@ -2112,6 +2615,16 @@ class GameDatabase {
       this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, fromId);
       this.stmt('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
       this.stmt('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
+      // Per-mode history and, with it, the run each mode is still on. Left
+      // behind, the account arrived on the new browser having played nothing
+      // and every carried streak reset to zero — and the next match recorded
+      // there wrote that zero back over the run the player actually had.
+      // The DELETE is load-bearing, not tidiness: the primary key is
+      // (playerId, mode), so a placeholder profile that had played on this
+      // browser would collide with the rows moving in.
+      this.stmt('DELETE FROM player_mode_stats WHERE playerId = ?').run(newDeviceId);
+      this.stmt('UPDATE player_mode_stats SET playerId = ? WHERE playerId = ?')
+        .run(newDeviceId, fromId);
       // Everything already pointed at the account follows it, and both ends of
       // the move are members from here on.
       this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);

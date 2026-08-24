@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Achievement,
   DailyMission,
@@ -42,7 +42,6 @@ import {
   History,
   User,
   Settings,
-  BookOpen,
   Play,
   Shield,
   Flame,
@@ -97,7 +96,14 @@ interface MainMenuProps {
   onOpenHistory: () => void;
   onOpenMissions: () => void;
   onOpenSettings: () => void;
-  onOpenTutorial: () => void;
+  /**
+   * The pre-match sheet the onboarding tour wants open. The sheet is MainMenu's
+   * own state — a duel's lives in App, because a lobby owns a room — so the
+   * tour, which does live in App, has to be able to reach in and open it.
+   */
+  tourPrematch?: GameMode | null;
+  /** Whether the tour is running at all — see openPrematch. */
+  tourActive?: boolean;
 }
 
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -122,16 +128,57 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onOpenHistory,
   onOpenMissions,
   onOpenSettings,
-  onOpenTutorial,
+  tourPrematch = null,
+  tourActive = false,
 }) => {
   const lang = settings.language || 'en';
   // Which mode's pre-match sheet is open. A duel's lives in App (the lobby
   // owns a room, not just a form), so this only ever holds the other three.
   const [prematchMode, setPrematchMode] = useState<GameMode | null>(null);
+  // The tour's choice is the ONLY one while it is running, so a step that is
+  // ABOUT the pre-match sheet always has one on screen to point at — and every
+  // other step has none.
+  //
+  // A nullish fallback was wrong in the second half: the scrim is
+  // pointer-events-none, so a player can tap the highlighted Solo row during
+  // the modes step and set prematchMode themselves. Once the tour's own
+  // pre-match step passed and tourPrematch went back to null, that private
+  // value came back and left the sheet covering the tab bar and every modal
+  // stage after it.
+  const openPrematch = tourActive ? tourPrematch : prematchMode;
   // Which gate the player tapped, so the reason a rung is shut is something
   // they can read rather than a tooltip no touch device will ever show.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
   const [queueInfoOpen, setQueueInfoOpen] = useState(false);
+  // Same bug as openPrematch, on two more sheets the tour never asks for: the
+  // scrim leaves the locked-difficulty hint and the Quick Match stub tappable
+  // on every menu and pre-match step, and neither state lives in App, so the
+  // per-step cleanup there can't reach in and close them. Left open past the
+  // step that opened them, a layer-60 sheet sits above the layer-50 modal a
+  // later stage opens and hides its spotlight target for the rest of the
+  // tour. No step ever wants either one, so — unlike openPrematch — there is
+  // no tour-owned value to fall back to: both are simply forced shut for as
+  // long as the tour is running.
+  const openGateHint = tourActive ? null : gateHint;
+  const openQueueInfo = tourActive ? false : queueInfoOpen;
+  // All three overrides above only stop a stray tap from MATTERING while the
+  // tour runs — nothing clears the tap itself. The tour ENDING is also a
+  // transition, and an unclear one: the moment tourActive goes false, every
+  // override above reads the raw state again, and a tap banked minutes
+  // earlier — the Solo row during the modes step, a locked pill during the
+  // tour's own prematch step — pops its sheet open over the post-tour menu,
+  // as though the player had just tapped it. This is the missing mirror
+  // image: during the tour a stray tap is overridden or forced shut: the
+  // instant it stops owning the screen, it must not un-happen retroactively.
+  // Runs on the true start/end transition only (the dependency is tourActive
+  // itself, not any of the three states), so it never fights the overrides
+  // above while the tour is actually running.
+  useEffect(() => {
+    if (tourActive) return;
+    setPrematchMode(null);
+    setGateHint(null);
+    setQueueInfoOpen(false);
+  }, [tourActive]);
   const quickMatch = useQuickMatch();
 
   const modes: {
@@ -168,7 +215,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     else if (id === 'split') onStartSplit();
   };
 
-  const prematch = modes.find((m) => m.id === prematchMode) ?? null;
+  const prematch = modes.find((m) => m.id === openPrematch) ?? null;
 
   // Hidden MMR drives every prediction on this screen (solo play moves it,
   // even though it can never move the visible tier).
@@ -400,17 +447,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           </>
         )}
 
-        <button
-          id="menu-nav-tutorial"
-          onClick={onOpenTutorial}
-          className="flex shrink-0 items-center gap-2 rounded-card border border-line bg-surface-2/60 px-3 py-2.5 text-left text-ink-muted transition-colors active:scale-[0.99] motion-reduce:active:scale-100"
-        >
-          <BookOpen className="h-4 w-4 shrink-0" />
-          <span className="flex-1 text-2xs font-normal tracking-normal">
-            {t('menu_how_to_play', lang)}
-          </span>
-          <ChevronRight className="h-4 w-4 shrink-0 text-ink-dim" />
-        </button>
       </main>
 
       {/* A flex sibling, not position:fixed — dvh changes as mobile browser
@@ -581,14 +617,14 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       </Sheet>
 
       <UnlockHintSheet
-        achievement={gateHint}
+        achievement={openGateHint}
         onClose={() => setGateHint(null)}
         closeLabel={t('close', lang)}
       />
 
       <Sheet
         id="quickmatch-info-sheet"
-        isOpen={queueInfoOpen}
+        isOpen={openQueueInfo}
         onClose={() => setQueueInfoOpen(false)}
         size="xs"
         layer="over"

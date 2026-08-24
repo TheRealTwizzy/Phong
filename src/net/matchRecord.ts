@@ -13,6 +13,14 @@ const RETRY_DELAY_MS = 900;
 
 type Queued = { payload: MatchEndPayload; queuedAt: number };
 
+/**
+ * Identity of a parked entry, for telling entries apart across a re-read of
+ * the queue (see runFlush). `matchKey` alone is not enough — an entry parked
+ * by an older bundle may not carry one — and `queuedAt` alone can collide
+ * inside a millisecond; together they are reliable.
+ */
+const queueKey = (q: Queued): string => `${q?.payload?.matchKey ?? ''}|${q?.queuedAt}`;
+
 function readQueue(): Queued[] {
   try {
     const raw = localStorage.getItem(QUEUE_KEY);
@@ -36,7 +44,13 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
   const res = await fetch('/api/match/record', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    // `clientNow` is read HERE rather than in the payload, so it is this
+    // attempt's clock and not the whistle's. The server never uses either
+    // absolute value: it takes the DIFFERENCE, which says how long ago the
+    // match ended and cancels whatever offset this device's clock carries.
+    // Every path lands here — first try, retry, and a replay off the queue
+    // days later — so each says how stale it really is.
+    body: JSON.stringify({ ...payload, clientNow: Date.now() }),
   });
   if (!res.ok) {
     let body: any = null;
@@ -174,33 +188,71 @@ async function runFlush(): Promise<number> {
   const queue = readQueue();
   if (!queue.length) return 0;
 
-  const stillPending: Queued[] = [];
+  // What this flush has FINISHED with — reported successfully, or dropped as
+  // unreplayable. Tracked instead of the inverse ("what is still pending"),
+  // because the write at the end has to be expressed against the queue as it
+  // is THEN, not as it was when this snapshot was taken: see below.
+  const resolved = new Set<string>();
   let recovered = 0;
   for (const item of queue) {
     try {
+      // Sent as originally built, chainId and runSeq included: those are this
+      // BROWSER's persisted ordering (src/net/runChain.ts), assigned when the
+      // match ended and unaffected by how long it then sat in this queue or
+      // how long this specific replay's own round trip takes. Stripping them
+      // would leave the replay ordered by age alone, which cannot see a
+      // request's own network time and can misorder it against a live write
+      // that happens to have a faster round trip.
       await attempt(item.payload);
+      resolved.add(queueKey(item));
       recovered++;
     } catch (e: any) {
       if (e?.needsSession) {
         // No live session yet — this queue is flushed on load, which can beat
         // the session being minted. Keep everything and try the next time.
         await openSession();
-        stillPending.push(item);
         continue;
       }
       if (e?.staleBuild) {
         // Keep it and go get the new bundle; the queue survives the reload.
-        stillPending.push(item);
         refreshForBuild(e.build);
         continue;
       }
-      // Keep anything that might still land; drop outright refusals, and
-      // anything played under an account this device no longer holds.
-      if (!e?.permanent && !e?.evicted) stillPending.push(item);
+      // Drop outright refusals, and anything played under an account this
+      // device no longer holds. Anything else might still land, so it is
+      // simply not resolved and stays queued.
+      if (e?.permanent || e?.evicted) resolved.add(queueKey(item));
     }
   }
-  writeQueue(stillPending);
+  // Re-read rather than writing back a list derived from the opening
+  // snapshot. This loop awaits the network between items, and postMatchRecord
+  // can APPEND during any of those gaps — a match finished and failed while
+  // the flush was still working through an older backlog, which is not a rare
+  // pairing at all: the same bad connection causes both. Replacing the whole
+  // queue with the snapshot's leftovers silently deleted that match, and the
+  // one promise this file makes is that no result is ever lost. So the write
+  // is expressed as "the queue as it stands now, minus what I actually
+  // finished with", which leaves anything appended in the meantime untouched.
+  writeQueue(readQueue().filter((q) => !resolved.has(queueKey(q))));
   return recovered;
 }
 
 export const pendingMatchCount = (): number => readQueue().length;
+
+/**
+ * Drop everything parked here, unsent. For the one moment a queued match
+ * must NOT survive: this device is giving up the identity that earned it
+ * (`startFreshIdentity` in App.tsx, the way off a released device). The
+ * queue is a flat, unnamespaced localStorage key — it does not know which
+ * account was active when an entry was queued — so left alone, a match
+ * queued under the old identity is still sitting here the moment the new,
+ * fresh one goes to onboard, and a later flush (once that fresh profile is
+ * initialized) credits it there instead: XP, rating, achievements and
+ * streaks earned by an account this browser no longer holds, paid to one
+ * that never played it. The same reasoning `attempt()` already applies to
+ * an `evicted` result — dropped rather than queued, because replaying it
+ * later would credit whatever identity this browser ends up with — applied
+ * one step earlier, to a result that was queued before the identity moved
+ * on rather than discovered after.
+ */
+export const clearPendingMatches = (): void => writeQueue([]);

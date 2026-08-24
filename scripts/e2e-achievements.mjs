@@ -29,10 +29,28 @@ await page.click('#btn-onboarding-submit');
 await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
   .then((b) => b.click())
   .catch(() => {});
+await skipTour(page);
 await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
 
 await page.click('#menu-mode-solo');
 await page.waitForSelector('#menu-diff-rookie', { timeout: 5000 });
+// The onboarding tour opens by itself for a player who has never seen it —
+// it is part of onboarding now, not a menu row. Every suite past this point
+// wants the menu, so it is waved away here. Tolerant: a suite that reaches
+// this another way is not broken by its absence.
+async function skipTour(page) {
+  const card = await page
+    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
+    .catch(() => null);
+  if (!card) return false;
+  await page.click('#btn-tour-skip');
+  await page.click('#btn-tour-skip-confirm');
+  await page
+    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
+    .catch(() => {});
+  return true;
+}
+
 const dis = async (sel) => page.$eval(sel, (el) => el.disabled);
 if (await dis('#menu-diff-rookie')) fail('Rookie should be open from the start');
 if (!(await dis('#menu-diff-pro'))) fail('Pro should be locked for a new player');
@@ -47,7 +65,7 @@ ok('short matches open, long matches locked');
 // The server enforces it too, not just the menu.
 const blocked = await page.evaluate(async () => {
   const r = await fetch('/api/match/record', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ playerScore: 5, opponentScore: 0, maxRally: 8, mode: 'solo', difficulty: 'cyber', isWinner: true }) });
+    body: JSON.stringify({ playerScore: 5, opponentScore: 0, bestStreak: 8, earnedStreak: 8, mode: 'solo', difficulty: 'cyber', isWinner: true }) });
   return { status: r.status, body: await r.text() };
 });
 if (blocked.status !== 403) fail(`server let a locked difficulty through: ${blocked.status}`);
@@ -56,7 +74,7 @@ ok(`server rejects a locked difficulty (${blocked.status} ${JSON.parse(blocked.b
 // Beat Rookie -> Pro opens.
 await page.evaluate(async () => {
   await fetch('/api/match/record', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ playerScore: 5, opponentScore: 1, maxRally: 8, mode: 'solo', difficulty: 'rookie', isWinner: true }) });
+    body: JSON.stringify({ playerScore: 5, opponentScore: 1, bestStreak: 8, earnedStreak: 8, mode: 'solo', difficulty: 'rookie', isWinner: true }) });
 });
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
@@ -70,7 +88,7 @@ ok('beating Rookie opens Pro, and only Pro');
 // ten Pro wins AND level 10 — a climb, not an accident.
 await page.evaluate(async () => {
   await fetch('/api/match/record', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ playerScore: 5, opponentScore: 2, maxRally: 8, mode: 'solo', difficulty: 'pro', isWinner: true }) });
+    body: JSON.stringify({ playerScore: 5, opponentScore: 2, bestStreak: 8, earnedStreak: 8, mode: 'solo', difficulty: 'pro', isWinner: true }) });
 });
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
@@ -85,7 +103,7 @@ for (let i = 0; i < 60; i++) {
   if (p.achievements.includes('ai_pro_10')) break;
   await page.evaluate(async () => {
     await fetch('/api/match/record', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ playerScore: 5, opponentScore: 2, maxRally: 8, mode: 'solo', difficulty: 'pro', isWinner: true }) });
+      body: JSON.stringify({ playerScore: 5, opponentScore: 2, bestStreak: 8, earnedStreak: 8, mode: 'solo', difficulty: 'pro', isWinner: true }) });
   });
 }
 const climbed = await page.evaluate(async () => (await fetch('/api/profile/me')).json());

@@ -9,8 +9,12 @@ import {
   surpriseMultiplier,
 } from '../src/rating';
 
+// A representative match. The streak was 10 when a rally number counted both
+// players' hits within a point; one player's own consecutive returns measures
+// about 0.72x that, so a typical match is nearer 7 — and XP_PER_RALLY went up
+// by the reciprocal, which is what keeps a rally worth what it always was.
 const match = (winProb: number, won: boolean, mode: 'solo' | 'multiplayer' = 'solo') =>
-  matchXp({ playerScore: 3, maxRally: 10, won, winProb, mode });
+  matchXp({ playerScore: 3, bestStreak: 7, won, winProb, mode });
 
 describe('surprise multiplier', () => {
   it('pays more the less likely the win was', () => {
@@ -47,7 +51,7 @@ describe('match XP', () => {
   it('is never negative and never below the floor', () => {
     for (const p of [0, 0.25, 0.5, 0.75, 1]) {
       for (const won of [true, false]) {
-        const xp = matchXp({ playerScore: 0, maxRally: 0, won, winProb: p, mode: 'solo' });
+        const xp = matchXp({ playerScore: 0, bestStreak: 0, won, winProb: p, mode: 'solo' });
         expect(xp).toBeGreaterThanOrEqual(XP_FLOOR);
       }
     }
@@ -138,21 +142,21 @@ describe('every match is progression', () => {
     // reads as no progression at all. It must now be a real fraction of a band.
     const band = levelBand(3);
     for (const winProb of [0.05, 0.25, 0.5, 0.75, 0.95]) {
-      const xp = matchXp({ playerScore: 1, maxRally: 5, won: false, winProb, mode: 'solo' });
+      const xp = matchXp({ playerScore: 1, bestStreak: 5, won: false, winProb, mode: 'solo' });
       expect(xp).toBeGreaterThan(XP_FLOOR - 1);
       expect(band / xp).toBeLessThan(12); // fewer than 12 losses per level
     }
   });
 
   it('never pays zero, even for a 0-point loss with no rally at all', () => {
-    const xp = matchXp({ playerScore: 0, maxRally: 0, won: false, winProb: 0.99, mode: 'solo' });
+    const xp = matchXp({ playerScore: 0, bestStreak: 0, won: false, winProb: 0.99, mode: 'solo' });
     expect(xp).toBeGreaterThanOrEqual(XP_FLOOR);
   });
 
   it('still pays a win more than a loss at the same prediction', () => {
     for (const winProb of [0.1, 0.5, 0.9]) {
-      const win = matchXp({ playerScore: 5, maxRally: 9, won: true, winProb, mode: 'solo' });
-      const loss = matchXp({ playerScore: 5, maxRally: 9, won: false, winProb, mode: 'solo' });
+      const win = matchXp({ playerScore: 5, bestStreak: 9, won: true, winProb, mode: 'solo' });
+      const loss = matchXp({ playerScore: 5, bestStreak: 9, won: false, winProb, mode: 'solo' });
       expect(win).toBeGreaterThan(loss);
     }
   });
@@ -160,12 +164,12 @@ describe('every match is progression', () => {
   it('keeps a single easy win under one level band', () => {
     // The pacing complaint that started this: one Rookie win must not skip a
     // level on its own.
-    const xp = matchXp({ playerScore: 3, maxRally: 10, won: true, winProb: 0.87, mode: 'solo' });
+    const xp = matchXp({ playerScore: 3, bestStreak: 10, won: true, winProb: 0.87, mode: 'solo' });
     expect(xp).toBeLessThan(levelBand(1));
   });
 
   it('keeps PvP heavier than solo for the same result', () => {
-    const args = { playerScore: 3, maxRally: 8, won: false, winProb: 0.5 } as const;
+    const args = { playerScore: 3, bestStreak: 8, won: false, winProb: 0.5 } as const;
     expect(matchXp({ ...args, mode: 'multiplayer' })).toBeGreaterThan(
       matchXp({ ...args, mode: 'solo' })
     );

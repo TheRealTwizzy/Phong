@@ -19,8 +19,10 @@ interface StatsOverlayProps {
   ball: BallState;
   paddleX: number;
   totalTouches: number;
-  rallyCount: number;
-  maxRally: number;
+  streak: number;
+  bestStreak: number;
+  oppStreak: number;
+  oppBestStreak: number;
   theme: ThemeConfig;
   isVisible: boolean;
   onToggleVisible: () => void;
@@ -32,8 +34,10 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
   ball,
   paddleX,
   totalTouches,
-  rallyCount,
-  maxRally,
+  streak,
+  bestStreak,
+  oppStreak,
+  oppBestStreak,
   theme,
   isVisible,
   onToggleVisible,
@@ -199,8 +203,22 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
                 <Flame className="w-2.5 h-2.5 text-orange-400" />
                 {t('telemetry_rally_max', language)}
               </span>
+              {/* Two streaks, side by side and never mixed: yours and theirs.
+                  A streak counts one player's own consecutive returns, so
+                  putting them in one number — which is what this used to be —
+                  told you neither. */}
               <span className="text-xs font-bold text-slate-200 mt-0.5">
-                <span className="text-orange-400 font-black">{rallyCount}</span> / {maxRally}
+                <span id="telemetry-my-streak" className="text-orange-400 font-black">
+                  {streak}
+                </span>
+                {' / '}
+                <span id="telemetry-my-best">{bestStreak}</span>
+                <span className="text-slate-500">
+                  {' · '}
+                  <span id="telemetry-opp-streak">{oppStreak}</span>
+                  {' / '}
+                  <span id="telemetry-opp-best">{oppBestStreak}</span>
+                </span>
               </span>
             </div>
 

@@ -11,6 +11,23 @@
 // nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
 
+
+// The onboarding tour opens by itself for a player who has never seen it —
+// it is part of onboarding now, not a menu row. Every suite past this point
+// wants the menu, so it is waved away here. Tolerant: a suite that reaches
+// this another way is not broken by its absence.
+async function skipTour(page) {
+  const card = await page
+    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
+    .catch(() => null);
+  if (!card) return false;
+  await page.click('#btn-tour-skip');
+  await page.click('#btn-tour-skip-confirm');
+  await page
+    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
+    .catch(() => {});
+  return true;
+}
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
 const EXEC = process.env.CHROMIUM_PATH;
 if (!EXEC) {
@@ -39,6 +56,7 @@ async function newPlayer(prefix) {
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
+  await skipTour(page);
   await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
   return page;
 }
@@ -68,7 +86,7 @@ const openLadder = (page) =>
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          playerScore: 5, opponentScore: 1, maxRally: 6,
+          playerScore: 5, opponentScore: 1, bestStreak: 6, earnedStreak: 6,
           mode: 'solo', difficulty, isWinner: true,
         }),
       });
@@ -125,7 +143,7 @@ await openLadder(climber);
 const oddsBefore = await oddsAfterSoloRun(climber);
 for (let i = 0; i < 8; i++) {
   await record(climber, {
-    playerScore: 5, opponentScore: 0, maxRally: 22,
+    playerScore: 5, opponentScore: 0, bestStreak: 22, earnedStreak: 22,
     mode: 'solo', difficulty: 'cyber', isWinner: true,
   });
 }
@@ -152,7 +170,7 @@ if (/\b1[0-9]{3}\s*(ELO|Rating)\b/i.test(bodyText)) fail('a raw rating number is
 ok('no ELO / raw rating number rendered on the menu');
 
 // ---- 3. XP scales with the prediction ------------------------------------
-const base = { playerScore: 3, opponentScore: 1, maxRally: 10, mode: 'solo', isWinner: true };
+const base = { playerScore: 3, opponentScore: 1, bestStreak: 10, earnedStreak: 10, mode: 'solo', isWinner: true };
 await openLadder(alice);
 const hardWin = await record(alice, { ...base, difficulty: 'cyber' });
 const easyPlayer = await newPlayer('Easy');
@@ -228,8 +246,20 @@ if (!start.missions?.length) fail('no missions served');
 if (start.missions.some((m) => m.current > 0 || m.claimed)) fail('a fresh day started dirty');
 ok(`server serves ${start.missions.length} missions, all at zero`);
 
-// Rookie: the only difficulty a fresh player has open.
-await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, maxRally: 9 });
+// Rookie: the only difficulty a fresh player has open. The payload is the
+// wide one for the same reason the completion loop below uses it — see the
+// note there. `base` alone leaves four of the twelve regular missions unable
+// to move (aces, shutout, multi, pro_win), and a hand drawn from those four
+// advances nothing; a shutout at rally 15 with aces cuts that to two, and two
+// missions cannot fill three slots.
+await record(questPlayer, {
+  ...base,
+  difficulty: 'rookie',
+  playerScore: 5,
+  opponentScore: 0,
+  bestStreak: 15, earnedStreak: 15,
+  aces: 3,
+});
 const advanced = (await missionsOf(questPlayer)).missions;
 if (!advanced.some((m) => m.current > 0)) {
   fail(`a recorded win advanced nothing: ${JSON.stringify(advanced.map((m) => [m.id, m.current]))}`);
@@ -253,7 +283,7 @@ ok('clearing browser storage does not reset mission progress');
 // player id, which is a fresh random device per run. So this loop has to
 // satisfy every mission the deal could hand it, not just a typical one.
 //
-// It used to record { opponentScore: 1, maxRally: 12 } with no aces, which
+// It used to record { opponentScore: 1, bestStreak: 12, earnedStreak: 12 } with no aces, which
 // leaves five of the twelve uncompletable — rally_15, multi, pro_win, aces
 // and shutout — and a three-card hand drawn entirely from those five
 // completes nothing. That is C(5,3)/C(12,3), and simulating the real
@@ -272,7 +302,7 @@ for (let i = 0; i < 12; i++) {
     difficulty: 'rookie',
     playerScore: 5,
     opponentScore: 0, // shutout -> mission_shutout
-    maxRally: 15, //     -> mission_rally / mission_rally_15
+    bestStreak: 15, earnedStreak: 15, //     -> mission_rally / mission_rally_15
     aces: 3, //          -> mission_aces
   });
 }
