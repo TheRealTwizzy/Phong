@@ -2847,7 +2847,13 @@ export default function App() {
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenProfile={() => setIsProfileOpen(true)}
           onResetMatch={handleResetMatch}
-          canResetMatch={mode !== 'multiplayer'}
+          // Hidden in a duel because the score belongs to the room, and
+          // hidden under the tour because there is nothing there to restart:
+          // the tour drives its own match, and Reset only ever undoes the
+          // frame a step is in the middle of describing — the serve step
+          // leaves the ball mid-flight and the two steps after it talk about
+          // it. Home stays available, and now puts the court back.
+          canResetMatch={mode !== 'multiplayer' && tourStage !== 'match'}
           onQuitToMenu={quitToMenu}
           winningScore={activeConfig.winningScore}
           opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${activeDifficulty})`}

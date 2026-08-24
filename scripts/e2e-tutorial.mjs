@@ -173,6 +173,17 @@ await wanderer.waitForSelector('#onboarding-tour-card', { timeout: 10000 });
 await wanderer.click('#btn-tour-next');
 await wanderer.waitForSelector('#half-court-canvas', { timeout: 8000 });
 
+// Reset is not offered while the tour owns the match. Home is an escape hatch
+// and recovers; Reset would only ever undo the frame the step is in the middle
+// of describing — the serve step leaves the ball mid-flight and the two after
+// it talk about it — so there is nothing there to restart. Checked here, with
+// the court actually on screen: after the Home tap below there is no scoreboard
+// at all and the assertion would pass for the wrong reason.
+if (!(await wanderer.$('#btn-sound-toggle'))) fail('the match HUD is not on screen to check');
+if (await wanderer.$('#btn-reset-match')) {
+  fail('the HUD offered Reset during the tour, which only breaks the frame it is explaining');
+}
+
 // Out from under it, the way a curious player would.
 await wanderer.click('#btn-quit-to-menu');
 await wanderer.waitForSelector('#main-menu-screen', { timeout: 8000 });
