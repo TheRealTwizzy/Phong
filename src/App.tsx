@@ -217,6 +217,9 @@ export default function App() {
   /** Reached by the tour so a step can put a ball in the air. */
   const tourServeRef = useRef<() => void>(() => {});
   const tourActive = tourStep !== null;
+  // Read from the socket handlers, which are built once and never see state.
+  const tourActiveRef = useRef<boolean>(false);
+  tourActiveRef.current = tourActive;
   const tourStepDef = tourStep === null ? null : (TOUR_STEPS[tourStep] ?? null);
   const tourStage = tourStepDef?.stage ?? null;
   /**
@@ -994,6 +997,18 @@ export default function App() {
   // full" — about the room this player is in the middle of joining — so the
   // first attempt holds the door until the server has answered either way.
   const joinInFlightRef = useRef<boolean>(false);
+  /**
+   * A seat has been ASKED FOR and the relay has not answered yet.
+   *
+   * Distinct from roomId, which is only set once the answer lands, and from
+   * joinInFlightRef, which is about not sending a second join. This one exists
+   * because that window looks exactly like being on the menu — the lobby can
+   * be dismissed in it without a confirmation, and nothing else on screen says
+   * a request is outstanding. The tour used to be startable from inside it,
+   * and the seat then arrived underneath a running tour that walks away from
+   * it (see startTour and room_created).
+   */
+  const roomRequestRef = useRef<boolean>(false);
   // An invitation that loses its socket before the server has answered is not
   // a refusal — it is an unanswered question, and latching autoJoinedRef on
   // the ATTEMPT turned every such blip into "the link is broken". Bounded, so
@@ -1225,6 +1240,16 @@ export default function App() {
   const handleServerMessage = (msg: WSServerMessage) => {
     switch (msg.type) {
       case 'room_created':
+        roomRequestRef.current = false;
+        // A seat that arrives while the tour is running is one nobody can
+        // keep: the tour reaches its match stage and switches to Solo, and
+        // the relay would go on holding it. startTour refuses to start over an
+        // outstanding request, so this should be unreachable — it is here
+        // because the guarantee is about the SEAT, not about one entry point.
+        if (tourActiveRef.current) {
+          handleLeaveRoomRef.current();
+          break;
+        }
         // Same rule as room_joined below, and it was missing here: asking for
         // a room and being given one are separate moments, and the lobby can
         // be dismissed in between — before roomId is set, so that dismissal is
@@ -1247,6 +1272,11 @@ export default function App() {
         // Answered. Stop treating a later disconnect as an unfulfilled invite.
         pendingRoomRef.current = null;
         joinInFlightRef.current = false;
+        roomRequestRef.current = false;
+        if (tourActiveRef.current) {
+          handleLeaveRoomRef.current(); // see room_created
+          break;
+        }
         // Holding a seat means the lobby is the right surface until the match
         // starts, so a seat granted while the lobby is shut reopens it. The
         // player can dismiss the lobby in the moment between asking for a seat
@@ -1539,6 +1569,7 @@ export default function App() {
         // The server answered — a dead or full room is a verdict, not a blip.
         pendingRoomRef.current = null;
         joinInFlightRef.current = false;
+        roomRequestRef.current = false;
         alert(msg.message);
         break;
     }
@@ -1590,6 +1621,7 @@ export default function App() {
       // guard for good, and every later Join would return early without even
       // opening a replacement socket.
       joinInFlightRef.current = false;
+      roomRequestRef.current = false;
       // The socket dying UNDER a live duel means this player was ejected —
       // the relay has already recorded the abandon and told the opponent.
       // A deliberate leave sets the flag first and lands here silently.
@@ -1676,9 +1708,11 @@ export default function App() {
     // idea — but a room opened during it is one the tour then walks away from:
     // reaching the match stage switches straight to Solo, and the relay is
     // left holding the seat with a code somebody may already have been sent.
-    // The tour cannot START over a room (it only opens from the menu, and a
-    // room puts you on the court), so refusing here is the whole of it.
+    // Refusing here is NOT the whole of it, though it reads that way: the tour
+    // only opens from the menu and a room puts you on the court, but a room
+    // REQUEST leaves you on the menu with a seat on its way. See startTour.
     if (tourActive) return;
+    roomRequestRef.current = true;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
@@ -1699,6 +1733,7 @@ export default function App() {
     if (tourActive) return; // see handleCreateRoom
     if (joinInFlightRef.current) return;
     joinInFlightRef.current = true;
+    roomRequestRef.current = true;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       socket = connectWebSocket();
@@ -1848,6 +1883,14 @@ export default function App() {
     // that calls this is hidden off the menu, so this guard is the rule
     // written where the rule lives, matching the auto-open effect below.
     if (screenRef.current !== 'menu') return;
+    // Being ON the menu is not the same as having no room coming. Create and
+    // Join both leave a request outstanding while roomId is still null, and in
+    // that window the lobby can be dismissed without a confirmation — which
+    // puts the player back on the menu with a seat on its way. Starting here
+    // then let the answer arrive underneath a running tour, which reaches its
+    // match stage and switches to Solo without ever leaving the room: relay
+    // seat still held, code possibly already sent to somebody.
+    if (roomRequestRef.current) return;
     setIsSettingsOpen(false);
     setIsProfileOpen(false);
     setIsLeaderboardOpen(false);

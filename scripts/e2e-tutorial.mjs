@@ -343,6 +343,54 @@ ok('a replay ignores the player\u2019s own rules and shows the radar anyway');
 await tuner.context().close();
 
 // ---------------------------------------------------------------------------
+// 4e. A room REQUEST is not a room, and that is the hole. Between tapping
+//     Create and the relay answering, roomId is still null — so the lobby
+//     dismisses without a confirmation and the player is back on a menu that
+//     looks idle. Starting the tour there let the seat arrive underneath it,
+//     and the match stage then switched to Solo without ever leaving the room:
+//     relay seat still held, code possibly already sent to somebody.
+// ---------------------------------------------------------------------------
+const racer = await onboard('Rce');
+await racer.waitForSelector('#onboarding-tour-card', { timeout: 10000 });
+await racer.click('#btn-tour-skip');
+await racer.click('#btn-tour-skip-confirm');
+await racer.waitForSelector('#main-menu-screen', { timeout: 8000 });
+
+// Ask for a room and shut the lobby in the same tick, so the answer cannot
+// have arrived: this is the window itself, not a race against it.
+await racer.click('#menu-mode-multiplayer');
+await racer.waitForSelector('#btn-create-room', { timeout: 8000 });
+await racer.evaluate(() => {
+  document.querySelector('#btn-create-room').click();
+  document.querySelector('#btn-close-lobby').click();
+});
+
+// Straight to Settings and replay, before the relay comes back.
+await racer.evaluate(() => {
+  document.querySelector('#menu-nav-settings')?.click();
+});
+const replay = await racer.waitForSelector('#btn-settings-start-tour', { timeout: 8000 }).catch(() => null);
+if (replay) await racer.evaluate(() => document.querySelector('#btn-settings-start-tour')?.click());
+await sleep(3000);
+
+const raced = await racer.evaluate(async () => ({
+  tour: !!document.querySelector('#onboarding-tour-card'),
+  lobby: !!document.querySelector('#multiplayer-lobby-modal'),
+  code: (document.querySelector('#lobby-room-code')?.textContent || '').trim(),
+}));
+// Either outcome is fine on its own — the tour refused and the room landed, or
+// the tour ran and the room was let go. What must never happen is BOTH: a tour
+// running over a seat the relay is still holding.
+if (raced.tour && raced.code) {
+  fail(`the tour started over an outstanding room request and kept the seat (${raced.code})`);
+}
+// And whichever way it went, the room must not be orphaned: if a code exists,
+// the player is in the lobby holding it and can leave.
+if (raced.code && !raced.lobby) fail('a room was created with no lobby to leave it from');
+ok('and it never runs on top of a seat the relay is still holding');
+await racer.context().close();
+
+// ---------------------------------------------------------------------------
 // 5. Skipping counts as seen. A player who waves it away has decided about it.
 // ---------------------------------------------------------------------------
 const skipper = await onboard('Skp');
