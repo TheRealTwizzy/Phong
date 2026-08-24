@@ -1,11 +1,13 @@
 // Browser E2E for pre-match match rules, the aimed serve, Practice Wall XP and
 // "every match is progression":
 //   1. The menu shows a ranked/unranked badge that tracks the rules.
-//   2. Changing the PHYSICS unranks the match; presentation toggles never do.
+//   2. Changing the PHYSICS unranks the match, and so does the opponent sonar
+//      and an unearned difficulty; telemetry and quick chat never do.
 //   3. A custom-rules win pays XP but moves no rating.
 //   4. A 0-5 loss still pays real XP.
 //   5. Practice Wall banks capped XP and records no match.
-//   6. Drag-to-aim serves the ball.
+//   6. The serving joystick: push-up-to-aim serves, and two thumbs work at
+//      once — one aims while the other keeps steering the paddle.
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
 // nothing but hands this a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
@@ -80,11 +82,33 @@ const openLadder = (page) =>
 const page = await newPlayer('Rules');
 await page.click('#menu-mode-solo');
 await page.waitForSelector('#menu-rules-toggle', { timeout: 5000 });
-const RATES = (s) => /counts for rank/i.test(s);
-const NO_RATE = (s) => /Past ranked/i.test(s);
+// "counts for rank" is a substring of half the UNRANKED lines too ("this
+// difficulty never counts for rank"), so the ranked test has to be the ranked
+// line itself rather than a phrase both sides share.
+const RATES = (s) => /within ranked limits/i.test(s);
+const NO_RATE = (s) => !RATES(s);
 let status = (await page.textContent('#menu-rules-status')).trim();
-if (!RATES(status)) fail(`fresh menu should read ranked, got "${status}"`);
-ok(`default rules show as ranked: "${status}"`);
+
+// A fresh player can only play Rookie, and Rookie feeds hidden MMR alone — it
+// never moves the visible ladder. The badge used to promise "counts for rank"
+// anyway, for a match the server was always going to refuse to rate.
+if (!NO_RATE(status)) fail(`a Rookie solo match must not read ranked, got "${status}"`);
+if (!/difficulty/i.test(status)) fail(`the badge should name the difficulty, got "${status}"`);
+ok(`a Rookie solo match reads unranked, and says why: "${status}"`);
+
+// Earn Pro and the same stock rules start counting. Nothing about the RULES
+// changed between these two assertions — only the rung being played.
+await openLadder(page);
+await page.reload({ waitUntil: 'networkidle' });
+await skipTour(page);
+await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
+await page.click('#menu-mode-solo');
+await page.waitForSelector('#menu-diff-pro', { timeout: 5000 });
+await page.click('#menu-diff-pro');
+await page.waitForTimeout(300);
+status = (await page.textContent('#menu-rules-status')).trim();
+if (!RATES(status)) fail(`stock rules on Pro should read ranked, got "${status}"`);
+ok(`the same stock rules on an EARNED rung read ranked: "${status}"`);
 
 await page.click('#menu-rules-toggle');
 await page.waitForSelector('#menu-rules-panel', { timeout: 4000 });
@@ -157,16 +181,36 @@ status = await setSlider('paddleScale', 1.5);
 if (!NO_RATE(status)) fail(`a 150% paddle should stop rating, got "${status}"`);
 ok(`a paddle past its band flips the badge: "${status}"`);
 
-// A presentation toggle must NOT unrank.
-await page.click('#menu-rule-toggle-trackTelemetry');
-await page.waitForTimeout(300);
+// Telemetry is free and must stay free.
 await page.click('#menu-rules-reset');
 await page.waitForTimeout(300);
+await page.click('#menu-rule-toggle-trackTelemetry');
+await page.waitForTimeout(300);
+status = (await page.textContent('#menu-rules-status')).trim();
+if (NO_RATE(status)) fail(`the telemetry toggle must not unrank: "${status}"`);
+ok('telemetry never costs the match its rating');
+
+// The SONAR is not. The whole game is a blind half-court, so a live mini-map
+// of the half you are not allowed to see is the hardest rule in the game
+// switched off — it still pays XP, and it costs the rating.
 await page.click('#menu-rule-toggle-opponentSonar');
 await page.waitForTimeout(300);
 status = (await page.textContent('#menu-rules-status')).trim();
-if (NO_RATE(status)) fail(`turning sonar off must not unrank: "${status}"`);
-ok('presentation toggles never cost the match its rating');
+if (!NO_RATE(status)) fail(`turning the sonar ON must unrank: "${status}"`);
+if (!/sonar/i.test(status)) fail(`the badge should name the sonar, got "${status}"`);
+if (!(await page.$('#menu-sonar-unranked-note'))) {
+  fail('the sonar toggle should say what it costs, where it is switched');
+}
+ok(`turning the sonar on unranks the match: "${status}"`);
+
+// And back off puts the rating back — nothing was spent, it is a choice.
+await page.click('#menu-rule-toggle-opponentSonar');
+await page.waitForTimeout(300);
+status = (await page.textContent('#menu-rules-status')).trim();
+if (!RATES(status)) fail(`turning the sonar back off should re-rank: "${status}"`);
+await page.click('#menu-rules-reset');
+await page.waitForTimeout(300);
+ok('turning it back off restores the rating');
 
 // ---- 2. A custom-rules match pays XP but moves no rating -----------------
 const beforeCustom = await me(page);
@@ -281,11 +325,96 @@ const served = await page.evaluate(() => !/PUSH UP TO AIM/.test(document.body.te
 if (!served) fail('a push-release did not serve the ball');
 ok('push-up-to-aim reaches full power on screen and serves');
 
+// ---- 5b. Two thumbs: one aims, the other steers --------------------------
+// The serve gesture kept ONE aim origin, so a second finger silently
+// overwrote the first one's anchor and the aim jumped. Roles are per pointer
+// now: during your own serve the first fresh finger takes the joystick and any
+// other drives the paddle, so you can line up a serve without giving up the
+// paddle you are about to rally with.
+//
+// Only a browser can say this — and only through CDP, because
+// setPointerCapture throws on a synthetic pointer id, so dispatched
+// PointerEvents cannot get two fingers onto this canvas at once.
+{
+  const two = await newPlayer('TwoThumb');
+  await two.click('#menu-mode-solo');
+  await two.click('#menu-start-solo');
+  await two.waitForSelector('#half-court-canvas', { timeout: 5000 });
+  // The paddle is drawn to canvas and is nowhere in the DOM; the telemetry
+  // panel is the one place that reports where it is. It starts hidden.
+  await two.click('#btn-show-stats-overlay');
+  await two.waitForSelector('#telemetry-paddle-pos', { timeout: 5000 });
+
+  const cbox = await (await two.$('#half-court-canvas')).boundingBox();
+  const cdp = await two.context().newCDPSession(two);
+  const touch = (type, points) =>
+    cdp.send('Input.dispatchTouchEvent', {
+      type,
+      touchPoints: points.map((p) => ({
+        x: cbox.x + cbox.width * p.x,
+        y: cbox.y + cbox.height * p.y,
+        id: p.id,
+        radiusX: 5,
+        radiusY: 5,
+        force: 1,
+      })),
+    });
+  const paddlePct = () =>
+    two.$eval('#telemetry-paddle-pos', (el) => parseInt(el.textContent, 10));
+  const settle = () =>
+    two.evaluate(
+      () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+    );
+
+  await settle();
+  const before = await paddlePct();
+
+  // Thumb one lands during the serve: it takes the joystick, not the paddle.
+  await touch('touchStart', [{ x: 0.5, y: 0.9, id: 1 }]);
+  await touch('touchMove', [{ x: 0.62, y: 0.58, id: 1 }]);
+  await settle();
+  const aiming = await paddlePct();
+  if (aiming !== before) fail(`the aiming thumb dragged the paddle (${before} -> ${aiming})`);
+  ok('the first thumb down during a serve aims, and leaves the paddle where it was');
+
+  // Thumb two steers while the first keeps aiming.
+  await touch('touchStart', [
+    { x: 0.62, y: 0.58, id: 1 },
+    { x: 0.22, y: 0.9, id: 2 },
+  ]);
+  await touch('touchMove', [
+    { x: 0.62, y: 0.58, id: 1 },
+    { x: 0.3, y: 0.9, id: 2 },
+  ]);
+  await settle();
+  const steered = await paddlePct();
+  if (Math.abs(steered - 30) > 4) {
+    fail(`the second thumb did not steer the paddle (${before} -> ${steered}, wanted ~30)`);
+  }
+  ok('a second thumb steers the paddle while the first is still aiming');
+
+  // Lifting the aiming thumb is the serve.
+  await touch('touchEnd', []);
+  await two.waitForTimeout(700);
+  const served = await two.evaluate(() => !/PUSH UP TO AIM/.test(document.body.textContent));
+  if (!served) fail('releasing the joystick did not serve');
+  ok('releasing the aiming thumb serves');
+  await two.context().close();
+}
+
 if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
-// ---- 6. Sonar tracks sides frame-accurately; telemetry starts hidden ------
+// ---- 6. Sonar: opt-in, tracks sides frame-accurately, and owns the net
+//         indicators while it runs. Telemetry starts hidden. -------------
 {
   const solo = await newPlayer('Sonar');
   await solo.click('#menu-mode-solo');
+  // The sonar is opt-in now, and opting in costs the match its rating — it
+  // draws the half the whole game exists to hide. It used to be on by default,
+  // which is why this suite never had to ask for it.
+  await solo.click('#menu-rules-toggle');
+  await solo.waitForSelector('#menu-rule-toggle-opponentSonar', { timeout: 4000 });
+  await solo.click('#menu-rule-toggle-opponentSonar');
+  await solo.waitForTimeout(300);
   await solo.click('#menu-start-solo');
   await solo.waitForSelector('#half-court-canvas', { timeout: 5000 });
 
@@ -334,6 +463,27 @@ if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
   if (!sawHidden) fail('sonar never hid while the ball was on the player half');
   if (!dotMoved) fail('the sonar ball dot never moved between frames');
   ok('sonar appears on the opponent half, hides on the player half, and the dot tracks live');
+
+  // The two net indicators are suppressed for a match played WITH the sonar —
+  // it already draws the whole far half. The rows have to SAY that rather than
+  // reading as on while nothing is drawn, and the stored preference is not
+  // spent: it comes back by itself the next time the sonar is off.
+  await solo.click('#btn-open-settings');
+  await solo.waitForSelector('#toggle-opponent-indicator', { timeout: 5000 });
+  for (const id of ['#toggle-opponent-indicator', '#toggle-ball-indicator']) {
+    if (!(await solo.$eval(id, (el) => el.disabled))) {
+      fail(`${id} should be locked while the sonar is on`);
+    }
+  }
+  const lockedNote = await solo.$eval('#toggle-opponent-indicator', (el) =>
+    el.closest('div.flex.items-center.justify-between').textContent
+  );
+  if (!/sonar/i.test(lockedNote)) {
+    fail(`the locked indicator rows should say why: "${lockedNote}"`);
+  }
+  ok('a sonar match locks both net indicators off, and says the sonar owns them');
+  await solo.click('#btn-close-settings').catch(() => solo.keyboard.press('Escape'));
+  await solo.waitForTimeout(400);
 
   // Open telemetry mid-match, then start a NEW match: it must be hidden again.
   await solo.click('#btn-show-stats-overlay');

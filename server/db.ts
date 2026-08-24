@@ -11,6 +11,7 @@ import {
   MatchEndPayload,
   MatchEndResult,
   ModeStats,
+  RankDirection,
   GameMode,
   DailyMission,
 } from '../src/types';
@@ -2170,6 +2171,10 @@ class GameDatabase {
     // the player had to EARN. Rookie is the tutorial rung — placing against it
     // would be a formality — so it feeds hidden MMR only.
     const ranksThisMatch = ranked && (isPvp || soloCountsForRank(difficulty));
+    // Sampled before the update so the overlay can say which way the ladder
+    // went. Only the DIRECTION ever leaves the server — the mu itself is not
+    // something the client renders (see src/components/ui/RankBadge.tsx).
+    const rankMuBefore = profile.rankMu;
     if (ranksThisMatch) {
       // While still unplaced, a ranked match sheds uncertainty faster — the
       // whole point of placement matches, and what makes the profile screen's
@@ -2201,6 +2206,16 @@ class GameDatabase {
       profile.rankedGames += 1;
     }
     profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma);
+    // 'none' is both "did not rate" and "rated and did not move" — from the
+    // player's side those are the same fact, and the overlay says so with one
+    // glyph rather than distinguishing a difference nobody can act on.
+    const rankDirection: RankDirection = !ranksThisMatch
+      ? 'none'
+      : profile.rankMu > rankMuBefore + 1e-9
+        ? 'up'
+        : profile.rankMu < rankMuBefore - 1e-9
+          ? 'down'
+          : 'none';
 
     // 3. Update Match Statistics
     profile.matchesPlayed += 1;
@@ -2423,6 +2438,7 @@ class GameDatabase {
       tier: ranksThisMatch ? profile.tier : null,
       tierChanged: ranksThisMatch && profile.tier !== previousTier,
       ranked,
+      rankDirection,
       newAchievements,
       missions: this.getMissions(payload.playerId, now),
     };
@@ -2484,6 +2500,7 @@ class GameDatabase {
       tier: null,
       tierChanged: false,
       ranked: false,
+      rankDirection: 'none',
       newAchievements: [],
       ...stored,
       profile: this.readProfile(playerId)!,

@@ -1,15 +1,15 @@
 import React, { useState } from 'react';
 import { ChevronDown, RotateCcw, ShieldAlert, ShieldCheck } from 'lucide-react';
-import { LanguageCode, MatchRules } from '../types';
+import { AIDifficulty, GameMode, LanguageCode, MatchRules } from '../types';
 import {
   AUTO_SERVE_OPTIONS,
   DEFAULT_MATCH_RULES,
   PHYSICS_RULES,
   PhysicsRuleKey,
-  isRankedRules,
+  UnrankedReason,
   isRuleRanked,
   clampRule,
-  unrankedRuleKeys,
+  unrankedReasons,
 } from '../matchRules';
 import { t } from '../i18n/translations';
 import { SegmentedControl } from './ui';
@@ -29,8 +29,15 @@ interface Props {
   rules: MatchRules;
   onUpdateRules: (patch: Partial<MatchRules>) => void;
   lang: LanguageCode;
-  /** Solo/practice/split have no chat or sonar to speak of. */
-  mode: string;
+  /** Practice and split have no chat or sonar to speak of. */
+  mode: GameMode;
+  /**
+   * Solo only, and only for the ranked verdict — a duel rates on its rules
+   * alone. Rookie feeds hidden MMR and never the visible ladder, which the
+   * badge used to say nothing about: it promised "counts for rank" for a match
+   * the server was always going to refuse to rate.
+   */
+  difficulty?: AIDifficulty;
   /** The guest's view of the host's rules: visible, not editable. */
   readOnly?: boolean;
   /** Keeps ids unique when the lobby renders over the menu. */
@@ -48,17 +55,39 @@ const SLIDERS: { key: PhysicsRuleKey; labelKey: string }[] = [
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
+/**
+ * The strip has one line, so it names the FIRST reason — `unrankedReasons`
+ * returns them most-fundamental first, so that is the one worth saying. The
+ * count beside the header covers the rest.
+ */
+const UNRANKED_COPY_KEY = (reason: UnrankedReason | undefined): string => {
+  switch (reason) {
+    case 'mode':
+      return 'rules_unranked_mode';
+    case 'difficulty':
+      return 'rules_unranked_difficulty';
+    case 'sonar':
+      return 'rules_unranked_sonar';
+    default:
+      return 'rules_unranked';
+  }
+};
+
 export const MatchRulesPanel: React.FC<Props> = ({
   rules,
   onUpdateRules,
   lang,
   mode,
+  difficulty,
   readOnly = false,
   idPrefix = 'menu',
 }) => {
   const [open, setOpen] = useState(false);
-  const ranked = isRankedRules(rules);
-  const beyond = unrankedRuleKeys(rules);
+  // Everything standing between this match and the ladder, not just the
+  // sliders: the mode, the difficulty and the sonar count too.
+  const blockers = unrankedReasons({ rules, mode, difficulty });
+  const ranked = blockers.length === 0;
+  const sonarUnranks = blockers.includes('sonar');
 
   const toggles: { key: 'opponentSonar' | 'trackTelemetry' | 'quickChat'; labelKey: string; shown: boolean }[] = [
     { key: 'opponentSonar', labelKey: 'rule_sonar', shown: mode === 'solo' || mode === 'multiplayer' },
@@ -82,7 +111,7 @@ export const MatchRulesPanel: React.FC<Props> = ({
           {t('match_rules', lang)}
           {!ranked && (
             <span id={`${idPrefix}-rules-altered-count`} className="text-warn">
-              ({beyond.length})
+              ({blockers.length})
             </span>
           )}
         </span>
@@ -97,7 +126,7 @@ export const MatchRulesPanel: React.FC<Props> = ({
             : 'border border-warn/40 bg-warn/10 text-warn'
         }`}
       >
-        {ranked ? t('rules_ranked', lang) : t('rules_unranked', lang)}
+        {ranked ? t('rules_ranked', lang) : t(UNRANKED_COPY_KEY(blockers[0]), lang)}
       </div>
 
       {open && (
@@ -172,6 +201,18 @@ export const MatchRulesPanel: React.FC<Props> = ({
                 </span>
               </button>
             ))}
+
+          {/* The sonar is the one presentation toggle that costs the rating,
+              so it is the one that has to say so where it is switched.
+              Telemetry and quick chat are still free and still say nothing. */}
+          {sonarUnranks && (
+            <span
+              id={`${idPrefix}-sonar-unranked-note`}
+              className="text-2xs font-normal tracking-normal text-warn"
+            >
+              {t('rules_unranked_sonar', lang)}
+            </span>
+          )}
 
           {mode === 'multiplayer' && (
             <div className="flex flex-col gap-1">

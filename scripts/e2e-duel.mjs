@@ -495,6 +495,21 @@ for (const transport of ['relay', 'p2p']) {
   const guest = await newPage();
   const code = await hostCreateRoom(host, { p2p: transport === 'p2p' });
   await guestJoin(guest, code);
+  // The sonar is opt-in now, and it belongs to the ROOM: the host asks for it
+  // and both phones get it. It costs the match its rating — it draws the half
+  // the whole game exists to hide — which is why it is no longer the default.
+  await host.click('#lobby-rules-toggle');
+  await host.waitForSelector('#lobby-rule-toggle-opponentSonar', { timeout: 5000 });
+  await host.click('#lobby-rule-toggle-opponentSonar');
+  await host.waitForTimeout(400);
+  const sonarStatus = await guest
+    .$eval('#lobby-rules-status', (el) => (el.textContent || '').trim())
+    .catch(() => '');
+  if (!/sonar/i.test(sonarStatus)) {
+    fail(`the guest should be told the sonar unranked the room, got "${sonarStatus}"`);
+  }
+  ok('the host turns the sonar on and the guest is told it costs the rating');
+  await host.click('#lobby-rules-toggle'); // collapse so Play stays reachable
   await startDuel(host, guest);
 
   for (const [page, who] of [[host, 'host'], [guest, 'guest']]) {

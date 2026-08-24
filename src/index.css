@@ -35,6 +35,11 @@
   --color-warn: #ffb224;    /* unranked rules, waiting on someone            */
   --color-xp: #ffc53d;      /* level and XP ONLY — never a generic highlight */
   --color-locked: #4c5668;  /* a gated affordance                            */
+  /* Rank movement after a match. Green climbed, red fell — and this is the
+     third state, which is neither: the match did not rate, or it rated and
+     landed where it started. It earns its own name rather than borrowing
+     `ink-dim`, because "your rank held" is a result, not absent text.        */
+  --color-rank-steady: #a78bfa;
 
   /* -- Type. 11px is the FLOOR; text-[8px]..text-[10px] are retired. ------ */
   --font-display: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,

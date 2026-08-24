@@ -14,6 +14,9 @@ import {
   AI_SERVE_DELAY_MAX,
   MAX_AI_COMPETENCE,
   competenceForMu,
+  aimFromPush,
+  AIM_FULL_PUSH,
+  AIM_DEADZONE,
 } from '../src/game/physics';
 import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
@@ -320,6 +323,24 @@ describe('AI serving', () => {
     expect(power(MAX_AI_COMPETENCE)).toBeGreaterThan(power(0.08));
   });
 
+  it('picks a side at random when the player is covering the middle', () => {
+    // A player on dead centre has left neither side open, and a bare `> 0.5`
+    // resolved that tie the same way every time — so the first AI serve of
+    // every match, taken against a paddle still on its starting 0.5, went
+    // predictably to one side.
+    let left = 0;
+    let right = 0;
+    for (let i = 0; i < 400; i++) {
+      // Full competence so commitment dominates the noise and the side the
+      // AI CHOSE is the sign of the angle.
+      const angle = aiServeAim(MAX_AI_COMPETENCE, 0.5).angle;
+      if (angle < 0) left++;
+      else if (angle > 0) right++;
+    }
+    expect(left).toBeGreaterThan(120);
+    expect(right).toBeGreaterThan(120);
+  });
+
   it('never produces an aim the serve engine would reject', () => {
     for (const c of [0.05, 0.3, 0.66, 1]) {
       for (let i = 0; i < 300; i++) {
@@ -330,6 +351,42 @@ describe('AI serving', () => {
         expect(aim.power).toBeLessThanOrEqual(1);
       }
     }
+  });
+});
+
+// The serving joystick's contract. This mapping used to live inside the canvas
+// component, where the only thing that could observe it was a browser driving
+// a real drag; it is a rule, so it is stated here instead.
+describe('aimFromPush', () => {
+  it('returns nothing inside the deadzone, which is what keeps tap-to-serve', () => {
+    expect(aimFromPush(0, 0)).toBeNull();
+    expect(aimFromPush(AIM_DEADZONE * 0.5, 0)).toBeNull();
+    expect(aimFromPush(0, -AIM_DEADZONE * 0.9)).toBeNull();
+    // And is an aim the moment the push clears it.
+    expect(aimFromPush(0, -AIM_DEADZONE * 1.5)).not.toBeNull();
+  });
+
+  it('reads power off UPWARD travel alone', () => {
+    // dy is negative when the thumb has moved up the screen: the gesture
+    // pushes the serve up the court rather than pulling it back, because the
+    // paddle sits at 90% of the height and a pull-back cannot reach full power.
+    expect(aimFromPush(0, -AIM_FULL_PUSH)!.power).toBeCloseTo(1, 10);
+    expect(aimFromPush(0, -AIM_FULL_PUSH / 2)!.power).toBeCloseTo(0.5, 10);
+    // Pulling DOWN is the softest serve, never a negative one.
+    expect(aimFromPush(0, AIM_FULL_PUSH)!.power).toBe(0);
+  });
+
+  it('reads angle off sideways travel, signed toward the finger', () => {
+    expect(aimFromPush(AIM_FULL_PUSH, -AIM_FULL_PUSH)!.angle).toBeCloseTo(1, 10);
+    expect(aimFromPush(-AIM_FULL_PUSH, -AIM_FULL_PUSH)!.angle).toBeCloseTo(-1, 10);
+    expect(aimFromPush(0, -AIM_FULL_PUSH)!.angle).toBe(0);
+  });
+
+  it('clamps past full push, so the knob stopping at the ring is the truth', () => {
+    const far = aimFromPush(AIM_FULL_PUSH * 4, -AIM_FULL_PUSH * 4)!;
+    expect(far.angle).toBe(1);
+    expect(far.power).toBe(1);
+    expect(aimFromPush(-AIM_FULL_PUSH * 4, 0)!.angle).toBe(-1);
   });
 });
 

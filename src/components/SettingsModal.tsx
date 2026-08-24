@@ -18,6 +18,7 @@ import {
   Activity,
   Globe,
   Flame,
+  Crosshair,
   Radio,
   Lock,
   CheckCircle,
@@ -41,6 +42,14 @@ interface SettingsModalProps {
   onStartTour?: () => void;
   onTriggerShake?: () => void;
   /**
+   * True while the match's rules have the opponent sonar on. The two net
+   * indicators are suppressed for that match — the sonar draws the whole far
+   * half anyway — so the rows show what is actually happening (off, and not
+   * yours to change right now) instead of promising something that is not on
+   * screen. The stored preferences are untouched and come back by themselves.
+   */
+  indicatorsLockedBySonar?: boolean;
+  /**
    * Delete this account for good. Absent means the section is not offered —
    * from a live match, where deleting would strand an opponent in a room
    * nobody told, and for a profile with no account to delete yet.
@@ -59,6 +68,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   profile = null,
   onStartTour,
   onTriggerShake,
+  indicatorsLockedBySonar = false,
   onDeleteAccount,
 }) => {
   const lang = settings.language || 'en';
@@ -550,7 +560,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Toggles: Ball Trails, Live Stats Overlay, Gyroscope Tilt, Sonar Radar */}
+        {/* Toggles: Ball Trails, Gyroscope Tilt, Sonar Radar, the two net markers */}
         <div className="flex flex-col gap-2">
           {/* Dynamic Ball Velocity Trails */}
           <div className="flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800">
@@ -623,6 +633,65 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               />
             </button>
           </div>
+
+          {/* The two net indicators. Unlike the sonar above them these survive
+              inside a ranked match, which is the whole trade: the sonar hands
+              you the far half and costs the rating, these two name where the
+              opponent is and whether the ball is over there, and cost nothing.
+              A match played WITH the sonar suppresses both, and the rows say
+              so rather than reading as on while nothing is drawn. */}
+          {(
+            [
+              {
+                id: 'toggle-opponent-indicator',
+                key: 'showOpponentIndicator',
+                labelKey: 'setting_opponent_indicator',
+                hintKey: 'setting_opponent_indicator_hint',
+              },
+              {
+                id: 'toggle-ball-indicator',
+                key: 'showBallIndicator',
+                labelKey: 'setting_ball_indicator',
+                hintKey: 'setting_ball_indicator_hint',
+              },
+            ] as const
+          ).map((row) => {
+            const on = settings[row.key] && !indicatorsLockedBySonar;
+            return (
+              <div
+                key={row.id}
+                className={`flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800 ${
+                  indicatorsLockedBySonar ? 'opacity-60' : ''
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Crosshair className="w-4 h-4 text-cyan-400" />
+                  <div>
+                    <div className="text-xs font-mono font-medium">{t(row.labelKey, lang)}</div>
+                    <div className="text-[10px] text-zinc-400">
+                      {indicatorsLockedBySonar
+                        ? t('indicator_locked_by_sonar', lang)
+                        : t(row.hintKey, lang)}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  id={row.id}
+                  disabled={indicatorsLockedBySonar}
+                  onClick={() => onUpdateSettings({ [row.key]: !settings[row.key] })}
+                  className={`w-11 h-6 rounded-full transition-colors relative p-0.5 disabled:cursor-not-allowed ${
+                    on ? 'bg-cyan-500' : 'bg-zinc-700'
+                  }`}
+                >
+                  <div
+                    className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                      on ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            );
+          })}
         </div>
 
         {/* Danger zone — last in the sheet, deliberately. Everything above is a
