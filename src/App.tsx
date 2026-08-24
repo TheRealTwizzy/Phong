@@ -575,7 +575,14 @@ export default function App() {
   useEffect(() => {
     if (!profile?.id) return;
     // Replay anything an earlier session couldn't deliver, then refresh.
-    void flushPendingMatches().then((recovered) => {
+    // Through the same chain as every live write to the run. A replay is
+    // ordered by its age, and an age cannot see its own time on the wire — so
+    // a replay that stalls is stamped as though it landed when it was sent,
+    // and could overwrite a live write that was made later and arrived first.
+    // Sharing the chain makes that interleaving impossible: the live write is
+    // not sent until the replay resolves, and then carries a chain position
+    // the replay deliberately does not have.
+    void flushPendingMatches((work) => queueRunWrite(() => work())).then((recovered) => {
       if (recovered > 0) fetchProfile();
     });
     void refreshMissions();

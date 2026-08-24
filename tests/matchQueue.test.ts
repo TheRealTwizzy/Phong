@@ -314,6 +314,49 @@ describe('a replay carries no page-local ordering', () => {
   });
 });
 
+describe('a replay shares the caller\u2019s write queue', () => {
+  it('runs every replay through the gate it is given', async () => {
+    // The gate is what stops a stalled replay being overtaken. Ordered by age
+    // alone, a replay that hangs is stamped as though it landed when it was
+    // sent, so a live write made later and arriving first can be overwritten.
+    // Through one queue that cannot happen — the live write is not sent until
+    // the replay resolves.
+    localStore.set(
+      QUEUE_KEY,
+      JSON.stringify(
+        ['a', 'b'].map((k) => ({ payload: match(k), queuedAt: 1 }))
+      )
+    );
+    installServer(ok);
+
+    const order: string[] = [];
+    let depth = 0;
+    const gate = async <T,>(work: () => Promise<T>): Promise<T> => {
+      // Serialized, not merely wrapped: the real chain admits one at a time.
+      expect(depth).toBe(0);
+      depth++;
+      order.push('enter');
+      try {
+        return await work();
+      } finally {
+        depth--;
+        order.push('leave');
+      }
+    };
+
+    expect(await flushPendingMatches(gate)).toBe(2);
+    expect(order).toEqual(['enter', 'leave', 'enter', 'leave']);
+  });
+
+  it('still flushes when no gate is given', async () => {
+    // The parameter is optional so a caller without a chain keeps working.
+    park('solo');
+    const server = installServer(ok);
+    expect(await flushPendingMatches()).toBe(1);
+    expect(server.posts()).toBe(1);
+  });
+});
+
 describe('the queue cannot grow without bound', () => {
   it('keeps the most recent matches and forgets the oldest', async () => {
     // A device offline for a long time must not fill its storage quota with

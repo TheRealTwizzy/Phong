@@ -168,15 +168,29 @@ let flushing: Promise<number> | null = null;
  * Replay anything parked by an earlier session. Runs on load, drops payloads
  * the server rejects outright, and keeps the rest for the next attempt.
  */
-export function flushPendingMatches(): Promise<number> {
+export function flushPendingMatches(gate: RunWriteGate = (work) => work()): Promise<number> {
   if (flushing) return flushing;
-  flushing = runFlush().finally(() => {
+  flushing = runFlush(gate).finally(() => {
     flushing = null;
   });
   return flushing;
 }
 
-async function runFlush(): Promise<number> {
+/**
+ * Lets the caller put each replay in the same queue as its live writes.
+ *
+ * A replay is ordered on the server by its AGE, and an age never includes the
+ * request's own time on the wire — so a replay that stalls is stamped as
+ * though it had arrived when it was sent, and can land on top of a live write
+ * that was made later and got there first. Run through the same chain, that
+ * interleaving cannot happen: the live write is not sent until the replay has
+ * resolved, so it arrives afterwards and carries a chain position the replay
+ * does not have. Defaults to no gating, so a caller that has no chain (a test,
+ * or a future one) still works.
+ */
+export type RunWriteGate = <T>(work: () => Promise<T>) => Promise<T>;
+
+async function runFlush(gate: RunWriteGate): Promise<number> {
   const queue = readQueue();
   if (!queue.length) return 0;
 
@@ -194,7 +208,7 @@ async function runFlush(): Promise<number> {
       // the age is for. Stripped here rather than before parking, so a payload
       // an older bundle already queued is covered too.
       const { runSeq: _pageLocal, ...replay } = item.payload;
-      await attempt(replay);
+      await gate(() => attempt(replay));
       recovered++;
     } catch (e: any) {
       if (e?.needsSession) {
