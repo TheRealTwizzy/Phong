@@ -293,6 +293,52 @@ describe('leaving the device', () => {
   });
 });
 
+describe('deleting the account', () => {
+  it('sends the typed name and reports what the server said', async () => {
+    // The username is the confirmation and the SERVER is what checks it, so
+    // the one thing this side must not do is decide for itself: it sends what
+    // was typed, verbatim, and passes the verdict back up. The two-step flow
+    // in Settings needs the reason to tell a near-miss from a dead network.
+    let sent: { url: string; init: any } | null = null;
+    vi.stubGlobal('fetch', async (url: string, init: any) => {
+      sent = { url, init };
+      return { ok: true, json: async () => ({ deleted: true, username: 'Departing' }) };
+    });
+
+    expect(await session.deleteAccount('Departing')).toEqual({ ok: true });
+    expect(sent!.url).toBe('/api/profile/me');
+    expect(sent!.init.method).toBe('DELETE');
+    expect(JSON.parse(sent!.init.body)).toEqual({ username: 'Departing' });
+  });
+
+  it('passes a refusal back rather than swallowing it', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      json: async () => ({ error: 'USERNAME_MISMATCH' }),
+    }));
+    expect(await session.deleteAccount('departing')).toEqual({
+      ok: false,
+      error: 'USERNAME_MISMATCH',
+    });
+
+    // A refusal with no body at all is still a refusal, not a deletion.
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      json: async () => {
+        throw new SyntaxError('no body');
+      },
+    }));
+    expect((await session.deleteAccount('Departing')).ok).toBe(false);
+  });
+
+  it('calls a dead network offline, and deletes nothing', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    expect(await session.deleteAccount('Departing')).toEqual({ ok: false, error: 'OFFLINE' });
+  });
+});
+
 describe('refreshForBuild', () => {
   it('reloads onto the deployment being served, once per build', () => {
     expect(session.refreshForBuild('b2')).toBe(true);

@@ -47,13 +47,13 @@ coverage number.
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
-| `duelRecord` `deviceSession` `accountRecovery` `roomLifecycle` | Four suites that boot the real server (see §4) |
+| `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` | The one-shot migrations |
 
 ### Browser layer
 
 `profiles` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `split` · `streak` · `tutorial` · `eject` · `build-id`
+`lobby` · `split` · `streak` · `tutorial` · `delete` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -209,6 +209,20 @@ all. Rewording to dodge it is not a fix; the numbers are the point.
 `players.id`, so any table keyed on it must move in the same transaction or be orphaned —
 `tests/identity.test.ts` asserts the per-mode rows arrive and that nothing is left behind
 under the old id. Add a playerId-keyed table and that suite is where it has to be claimed.
+
+**A delete is that rule with nowhere for a missed row to go.** `deleteAccount` walks a
+hand-written list, so `tests/identity.test.ts` reads the LIVE schema and fails when a
+`playerId`-keyed table exists that `PLAYER_KEYED_TABLES` does not name — a source list checked
+against the thing it claims to describe, because the failure mode is somebody adding a table
+for a good reason and never looking here. The row that bites is `device_links`: outliving what
+it points at, it resolves as `superseded`, which is a full-screen wall about an account that
+exists nowhere. `matches` is the deliberate exception — a duel files one row per seat, so the
+opponent's copy is theirs and keeps the game with the pointers scrubbed rather than losing it.
+`tests/accountDeletion.test.ts` holds the HTTP seam (the username checked exactly, the session
+spent, the browser back as a NEW player, the relay socket closed); `scripts/e2e-delete.mjs`
+holds the flow, which is not a rule and cannot be: the section reachable at the bottom of a
+scrolling sheet, a case-flipped name refused, exactly `DELETE` and `BACK` on the last step, and
+`BACK` landing on the open Settings panel with the account intact.
 
 **When a browser cannot state a rule directly, look for the observable it CAN state.** The
 run-carry rules need a real miss to distinguish, which a scripted paddle cannot be relied on

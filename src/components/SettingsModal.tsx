@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { CourtTheme, GameSettings, LanguageCode, PlayerProfile, SoundscapeType } from '../types';
 import { THEMES, isThemeUnlocked } from '../game/themes';
 import { LANGUAGES, t } from '../i18n/translations';
+import { USERNAME_MAX } from '../profileRules';
 import { sound } from '../audio/soundEffects';
 import { Sheet, Button } from './ui';
 import {
@@ -23,6 +24,9 @@ import {
   BookOpen,
   Waves,
   Zap,
+  Trash2,
+  AlertTriangle,
+  Loader2,
 } from 'lucide-react';
 
 // Device & presentation preferences only. Match settings (mode, difficulty,
@@ -36,6 +40,15 @@ interface SettingsModalProps {
   profile?: PlayerProfile | null;
   onStartTour?: () => void;
   onTriggerShake?: () => void;
+  /**
+   * Delete this account for good. Absent means the section is not offered —
+   * from a live match, where deleting would strand an opponent in a room
+   * nobody told, and for a profile with no account to delete yet.
+   *
+   * Resolves to the outcome rather than throwing: the flow has to be able to
+   * say WHY it failed without unwinding the two steps the player just took.
+   */
+  onDeleteAccount?: (username: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -46,8 +59,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   profile = null,
   onStartTour,
   onTriggerShake,
+  onDeleteAccount,
 }) => {
   const lang = settings.language || 'en';
+
+  // Deleting the account: idle → name → confirm. Two steps, because the one
+  // action in the app with no undo should not be one tap away from a slider.
+  //  - `name`    the username, typed exactly. The gate, not a formality.
+  //  - `confirm` the reminder that this is permanent, and the last word on it:
+  //              DELETE does it, BACK returns to the open Settings panel.
+  const [deleteStep, setDeleteStep] = useState<'idle' | 'name' | 'confirm'>('idle');
+  const [typedName, setTypedName] = useState('');
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Closing the sheet abandons the flow. Without this, a player who backed out
+  // by shutting Settings would find the confirmation still armed and waiting
+  // the next time they opened it, with no memory of having asked for it.
+  useEffect(() => {
+    if (isOpen) return;
+    setDeleteStep('idle');
+    setTypedName('');
+    setDeleteError(null);
+  }, [isOpen]);
+
+  const accountName = profile?.username || '';
+  // Compared exactly — case included, and untrimmed. The server does the same
+  // (DELETE /api/profile/me), and the two have to agree or Continue would
+  // enable on something the server then refuses. Phone keyboards capitalize
+  // the first letter by themselves, which is why the input turns that off.
+  const nameMatches = accountName.length > 0 && typedName === accountName;
+
+  const closeDeleteFlow = () => {
+    setDeleteStep('idle');
+    setTypedName('');
+    setDeleteError(null);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!onDeleteAccount || deleteBusy || !nameMatches) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    const result = await onDeleteAccount(typedName);
+    // On success the page is on its way to reloading as a brand-new player, so
+    // there is deliberately nothing to put back: leaving the button spinning
+    // is truer than flashing the panel back to idle over a dead account.
+    if (!result.ok) {
+      setDeleteBusy(false);
+      setDeleteError(result.error || 'DELETE_FAILED');
+    }
+  };
 
   const handleRequestTiltPermission = async () => {
     const DeviceOrientation = window.DeviceOrientationEvent as unknown as {
@@ -563,6 +624,165 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Danger zone — last in the sheet, deliberately. Everything above is a
+            preference that can be flipped back; this is the only thing here
+            that cannot be, so it sits past all of it rather than beside it.
+            Absent entirely mid-match and for a profile with no account yet:
+            see the onDeleteAccount prop. */}
+        {onDeleteAccount && profile?.initialized && (
+          <div
+            id="danger-zone"
+            className="mt-2 flex flex-col gap-2.5 rounded-2xl border border-rose-500/30 bg-rose-950/20 p-3.5"
+          >
+            <div className="flex items-center gap-1.5 text-rose-300">
+              <Trash2 className="h-4 w-4" />
+              <span className="text-xs font-mono font-bold uppercase tracking-wider">
+                {t('delete_account_title', lang)}
+              </span>
+            </div>
+
+            {deleteStep === 'idle' && (
+              <>
+                <p className="text-[10px] leading-relaxed text-zinc-400">
+                  {t('delete_account_desc', lang)}
+                </p>
+                <Button
+                  id="btn-delete-account"
+                  variant="ghost"
+                  size="md"
+                  block
+                  icon={<Trash2 className="h-3.5 w-3.5" />}
+                  onClick={() => {
+                    setTypedName('');
+                    setDeleteError(null);
+                    setDeleteStep('name');
+                  }}
+                  className="border-rose-500/40 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+                >
+                  {t('delete_account_start', lang)}
+                </Button>
+              </>
+            )}
+
+            {/* Step 1 — the username, typed exactly. */}
+            {deleteStep === 'name' && (
+              <>
+                <p className="text-[11px] font-medium leading-relaxed text-zinc-200">
+                  {t('delete_account_name_prompt', lang)}
+                </p>
+                <p className="text-[10px] leading-relaxed text-zinc-400">
+                  {t('delete_account_name_hint', lang)}
+                </p>
+                <div
+                  id="delete-account-name-echo"
+                  className="select-all rounded-xl border border-zinc-800 bg-slate-950 py-1.5 text-center font-mono text-sm font-bold tracking-wider text-zinc-300"
+                >
+                  {accountName}
+                </div>
+                <input
+                  id="input-delete-confirm-name"
+                  type="text"
+                  value={typedName}
+                  onChange={(e) => setTypedName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && nameMatches) setDeleteStep('confirm');
+                  }}
+                  // A phone keyboard capitalizes the first letter and offers
+                  // corrections by default, both of which would fight a
+                  // case-sensitive compare the player cannot see losing.
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={USERNAME_MAX}
+                  placeholder={t('delete_account_name_prompt', lang)}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 font-mono text-base text-slate-100 transition placeholder:text-slate-600 focus:border-rose-400 focus:outline-none"
+                />
+                {typedName.length > 0 && !nameMatches && (
+                  <p id="delete-account-name-mismatch" className="text-[10px] font-mono text-rose-400">
+                    {t('delete_account_name_mismatch', lang)}
+                  </p>
+                )}
+                <div className="flex items-center gap-2">
+                  <Button
+                    id="btn-delete-account-cancel"
+                    variant="secondary"
+                    size="md"
+                    block
+                    onClick={closeDeleteFlow}
+                  >
+                    {t('cancel', lang)}
+                  </Button>
+                  <Button
+                    id="btn-delete-account-continue"
+                    variant="danger"
+                    size="md"
+                    block
+                    disabled={!nameMatches}
+                    onClick={() => setDeleteStep('confirm')}
+                  >
+                    {t('delete_account_continue', lang)}
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {/* Step 2 — the reminder IS the last word. Two buttons and no
+                third: DELETE goes through with it, BACK returns to the open
+                Settings panel with nothing spent. */}
+            {deleteStep === 'confirm' && (
+              <>
+                <div className="flex items-center gap-1.5 text-rose-300">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span className="text-xs font-bold uppercase tracking-wider">
+                    {t('delete_account_permanent_title', lang)}
+                  </span>
+                </div>
+                <p
+                  id="delete-account-permanent-warning"
+                  className="text-[11px] leading-relaxed text-amber-200/90"
+                >
+                  {t('delete_account_permanent_body', lang, { name: accountName })}
+                </p>
+                {deleteError && (
+                  <p id="delete-account-error" className="text-[10px] font-mono text-rose-400">
+                    {t('delete_account_failed', lang)}
+                  </p>
+                )}
+                <div className="flex items-center gap-2">
+                  <Button
+                    id="btn-delete-account-back"
+                    variant="secondary"
+                    size="lg"
+                    block
+                    disabled={deleteBusy}
+                    onClick={closeDeleteFlow}
+                  >
+                    {t('delete_account_back', lang)}
+                  </Button>
+                  <Button
+                    id="btn-delete-account-final"
+                    variant="danger"
+                    size="lg"
+                    block
+                    disabled={deleteBusy}
+                    onClick={() => void handleConfirmDelete()}
+                    icon={
+                      deleteBusy ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )
+                    }
+                  >
+                    {t('delete_account_final', lang)}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Done Button */}
     </Sheet>

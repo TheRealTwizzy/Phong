@@ -14,7 +14,12 @@ import {
   GameMode,
   DailyMission,
 } from '../src/types';
-import { validateUsername, usernameLockExpiry } from '../src/profileRules';
+import {
+  validateUsername,
+  usernameLockExpiry,
+  DELETED_PLAYER_ID,
+  DELETED_PLAYER_NAME,
+} from '../src/profileRules';
 import { isRankedRules } from '../src/matchRules';
 import { ALL_ACHIEVEMENTS, achievementById, isUnlockable } from '../src/achievements';
 import {
@@ -153,6 +158,34 @@ const RECORDED_MATCH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
  * the row itself stays put so ensureSlots still knows the day was dealt.
  */
 const RETIRED_SLOT = '';
+
+/**
+ * Every table whose rows belong to one account, keyed by a `playerId` column.
+ *
+ * deleteAccount walks this list, so a table added without being named here is
+ * a table that survives its owner. That is not a tidiness problem: a row under
+ * a deleted id is a pointer into nothing, and the last time this list was
+ * incomplete — `player_mode_stats`, missed by moveAccount — an account arrived
+ * on its new browser having played nothing and the next match recorded there
+ * wrote that zero over the run the player actually had.
+ *
+ * `players` is absent because its key is `id`, not `playerId`, and `matches`
+ * because its rows are not all one player's — see deleteAccount for both.
+ * tests/identity.test.ts reads the schema and fails if a playerId-keyed table
+ * exists that this list does not name.
+ */
+export const PLAYER_KEYED_TABLES = [
+  'avatars',
+  'player_mode_stats',
+  'daily_missions',
+  'daily_mission_slots',
+  'daily_abandons',
+  'daily_rerolls',
+  'daily_practice',
+  'elite_completions',
+  'recent_missions',
+  'recorded_matches',
+] as const;
 
 // Result of any operation that (re)names a profile. Optional fields rather
 // than a discriminated union — strictNullChecks is off in this repo, so
@@ -2644,6 +2677,77 @@ class GameDatabase {
       throw e;
     }
     return this.readProfile(newDeviceId);
+  }
+
+  /**
+   * Erase an account and everything keyed on it. Permanent, deliberately.
+   *
+   * This is the one destructive thing a player can do to themselves, so it has
+   * to be the complete one. `moveAccount` above is the same rule with a softer
+   * edge — a rename is a statement about every table that keys off the id, and
+   * a delete is that statement with nowhere for a missed row to go. Two of
+   * them bite rather than merely litter:
+   *
+   *  - `device_links`. A surviving row reads as "linked, not holding" in
+   *    resolveSession, which is `superseded` — so another of this player's
+   *    browsers would meet a full-screen wall saying the account is live
+   *    somewhere else, about an account that no longer exists anywhere. wipe_v1
+   *    shipped without dropping this table and learned it the same way.
+   *  - `released_devices`, for the same reason one step removed: a tombstone
+   *    pointing at a deleted account leaves a browser walled off with a
+   *    recovery code that can no longer match anything.
+   *
+   * `matches` is handled apart from the list because those rows are not all
+   * this player's. Every seat files its OWN row (recordMatch writes the
+   * reporter as player1), so a duel produces two and the second one is the
+   * opponent's record of a game they played. Deleting it would take that game
+   * out of their history while their career counters — which are not derived
+   * from this table — went on counting it. Their rows stay; only the pointers
+   * into this account are scrubbed.
+   *
+   * The username goes back into the pool as a side effect of the row going:
+   * the unique index covers initialized rows only.
+   *
+   * Returns the browsers that belonged to the account so the caller can shut
+   * their sockets. The relay records duels itself, and a phone must not be
+   * left playing on an account that is no longer there.
+   */
+  public deleteAccount(playerId: string): { deleted: boolean; username: string | null; devices: string[] } {
+    const row = this.stmt('SELECT id, username FROM players WHERE id = ?').get(playerId) as
+      | { id: string; username: string }
+      | undefined;
+    if (!row) return { deleted: false, username: null, devices: [] };
+    // The holder's own id IS the account id, and it may or may not have a
+    // link row of its own (an account that never signed in anywhere has none).
+    const devices = new Set<string>([playerId, ...this.linkedDevices(playerId).map((d) => d.deviceId)]);
+
+    this.sql.exec('BEGIN');
+    try {
+      for (const table of PLAYER_KEYED_TABLES) {
+        this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(playerId);
+      }
+      this.stmt('DELETE FROM players WHERE id = ?').run(playerId);
+      // Both directions, and every browser: the rows naming this account, and
+      // any naming one of the browsers that belonged to it.
+      this.stmt('DELETE FROM device_links WHERE playerId = ?').run(playerId);
+      this.stmt('DELETE FROM released_devices WHERE movedToPlayerId = ?').run(playerId);
+      for (const id of devices) {
+        this.stmt('DELETE FROM device_links WHERE deviceId = ?').run(id);
+        this.stmt('DELETE FROM released_devices WHERE deviceId = ?').run(id);
+      }
+      // This account's own history goes first, so the scrub below cannot spend
+      // itself on rows that are already on their way out.
+      this.stmt('DELETE FROM matches WHERE player1Id = ?').run(playerId);
+      this.stmt('UPDATE matches SET player2Id = ?, player2Name = ? WHERE player2Id = ?')
+        .run(DELETED_PLAYER_ID, DELETED_PLAYER_NAME, playerId);
+      this.stmt('UPDATE matches SET winnerId = ?, winnerName = ? WHERE winnerId = ?')
+        .run(DELETED_PLAYER_ID, DELETED_PLAYER_NAME, playerId);
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    return { deleted: true, username: row.username, devices: [...devices] };
   }
 
   /** Mint a new sign-in code for an account, retiring the old one. */

@@ -231,6 +231,31 @@ function evictStaleSockets(): void {
 }
 
 /**
+ * Close every socket belonging to a set of browsers, whatever they were doing.
+ *
+ * For the one case the two functions above cannot answer: an account that has
+ * been DELETED. `seatStillHoldsAccount` asks whether anything has displaced
+ * this seat, and after a delete nothing has — the row is simply gone, so
+ * `activeSessionId` finds no owner and "no owner" reads as "nothing took it
+ * from you". The upgrade check refuses a NEW socket for a device with no live
+ * session, but an already-open one sails past both, and the relay writes a
+ * finished duel onto whichever seats it is holding. So the sockets are named
+ * explicitly rather than inferred.
+ */
+function closeAccountSockets(deviceIds: string[]): void {
+  const gone = new Set(deviceIds);
+  for (const entry of liveSockets) {
+    if (!gone.has(entry.deviceId)) continue;
+    try {
+      entry.ws.send(JSON.stringify({ type: 'session_invalid', status: 'released', build: buildId() }));
+      entry.ws.close(4001, 'account deleted');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/**
  * Write a decided duel onto BOTH players' profiles, from the score the relay
  * owns, and hand each of them the result.
  *
@@ -845,6 +870,51 @@ async function startServer() {
       const code = db.rotateRecoveryCode(req.deviceId!);
       if (!code) return res.status(404).json({ error: 'PROFILE_NOT_FOUND' });
       res.json({ recoveryCode: code });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Delete this account and everything that belongs to it. There is no undo,
+  // and nothing here pretends otherwise.
+  //
+  // The confirmation is the player's own username, matched EXACTLY — case and
+  // all, untrimmed. That is enforced here and not only in the two-step flow
+  // the Settings sheet puts in front of it, because the client is also where a
+  // stale bundle, a replayed request or a mis-wired automation comes from, and
+  // the one call with no way back is not one to accept on a bare verb.
+  //
+  // The device cookie is untouched: this is still the same browser, it simply
+  // has no account any more. The next profile read mints it a fresh
+  // uninitialized one and onboarding opens — exactly the state a new phone is
+  // in, which is what "deleted" has to mean if the username is to be free
+  // again and this browser is to be usable at all.
+  app.delete('/api/profile/me', requireActiveSession, (req, res) => {
+    try {
+      const me = db.getProfile(req.deviceId!);
+      if (!me.initialized) {
+        // Nothing to delete, and no name to type at it either.
+        return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+      }
+      const confirm = typeof req.body?.username === 'string' ? req.body.username : '';
+      // Deliberately not trimmed and deliberately not case-folded. "Type your
+      // username exactly" is the step; a forgiving compare turns it into a
+      // button with one more tap in front of it.
+      if (confirm !== me.username) {
+        return res.status(400).json({ error: 'USERNAME_MISMATCH' });
+      }
+      const result = db.deleteAccount(req.deviceId!);
+      if (!result.deleted) {
+        return res.status(404).json({ error: 'NOT_FOUND' });
+      }
+      // Every browser that belonged to the account comes off the relay now,
+      // rather than at its next heartbeat — see closeAccountSockets for why
+      // neither of the other two eviction paths covers this one.
+      closeAccountSockets(result.devices);
+      // The session named an account that no longer exists, so it is spent.
+      // The device cookie stays: sessions are disposable, the browser is not.
+      clearSessionCookie(req, res);
+      res.json({ deleted: true, username: result.username });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

@@ -3,18 +3,23 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
+import { DatabaseSync } from 'node:sqlite';
 import type { MatchEndPayload } from '../src/types';
+import { DELETED_PLAYER_ID, DELETED_PLAYER_NAME } from '../src/profileRules';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-identity-test-'));
 process.env.DATA_DIR = TMP;
+const DB_FILE = path.join(TMP, 'phong.db');
 
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 let db: typeof import('../server/db').db;
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
+let PLAYER_KEYED_TABLES: typeof import('../server/db').PLAYER_KEYED_TABLES;
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
 let auth: typeof import('../server/auth');
 
 beforeAll(async () => {
-  ({ db } = await import('../server/db'));
+  ({ db, PLAYER_KEYED_TABLES } = await import('../server/db'));
   auth = await import('../server/auth');
 });
 
@@ -244,6 +249,179 @@ describe('sign-in codes and the browsers an account belongs to', () => {
   it('never leaks recovery codes through the leaderboard', () => {
     const rows = db.getLeaderboard('elo', 100) as unknown as Array<Record<string, unknown>>;
     expect(rows.every((r) => !('recoveryCode' in r))).toBe(true);
+  });
+});
+
+// Deleting an account: the same rule the rename above holds to, with nowhere
+// for a missed row to go.
+//
+// `moveAccount` renames players.id and every table keyed on it has to move in
+// the same transaction or be orphaned — player_mode_stats was missed once and
+// an account arrived on its new browser having played nothing. A delete is
+// that rule with a sharper edge: a surviving row does not merely diverge, it
+// points at an account that is not there. The one that bites is device_links,
+// where "linked but not holding" resolves as `superseded` — a full-screen wall
+// telling another of the player's browsers that the account is live somewhere
+// else, about an account that exists nowhere at all.
+
+/** Every table in the live schema that keys rows by a `playerId` column. */
+function playerKeyedTablesInSchema(): string[] {
+  const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+  try {
+    const tables = raw
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .all() as unknown as Array<{ name: string }>;
+    return tables
+      .filter((tbl) => {
+        const cols = raw.prepare(`PRAGMA table_info(${tbl.name})`).all() as unknown as Array<{ name: string }>;
+        return cols.some((c) => c.name === 'playerId');
+      })
+      .map((tbl) => tbl.name)
+      .sort();
+  } finally {
+    raw.close();
+  }
+}
+
+describe('deleting an account', () => {
+  it('names every playerId-keyed table the schema actually has', () => {
+    // The list deleteAccount walks is hand-written, so this is the thing that
+    // fails when a table is added without being added to it — the same way
+    // player_mode_stats was added without being added to moveAccount. Proven
+    // able to fail by dropping a name from PLAYER_KEYED_TABLES.
+    //
+    // device_links is the one deliberate omission: its rows have to go by
+    // BOTH columns (every browser of the account, not only the id the account
+    // lives under), so deleteAccount handles it by hand rather than in the
+    // loop. Named here so the exception is a decision and not a gap.
+    const HANDLED_APART = ['device_links'];
+    expect(playerKeyedTablesInSchema()).toEqual(
+      [...PLAYER_KEYED_TABLES, ...HANDLED_APART].sort()
+    );
+  });
+
+  it('erases the account, everything keyed on it, and frees the name', () => {
+    const device = 'dev_aaaaaaaaaaaaaaaa21';
+    init(device, 'Departing');
+    db.setAvatar(device, new Uint8Array([9, 9, 9, 9]));
+    db.recordMatch({
+      playerId: device, username: 'Departing', playerScore: 5, opponentScore: 1,
+      bestStreak: 9, endStreak: 9, earnedStreak: 9, mode: 'solo',
+      difficulty: 'rookie', isWinner: true, matchKey: 'delete:solo:1',
+    } as never);
+    db.recordPractice(device, { bestStreak: 4, earnedStreak: 4, endStreak: 4 });
+    // Held tasks, a reroll allowance row, a day-keyed abandon: the day-keyed
+    // working state a live account accumulates without being asked.
+    db.getMissions(device);
+
+    const before = db.getProfile(device);
+    expect(before.initialized).toBe(true);
+    expect(before.modeStats?.solo?.currentStreak).toBe(9);
+
+    const result = db.deleteAccount(device);
+    expect(result.deleted).toBe(true);
+    expect(result.username).toBe('Departing');
+
+    // Nothing left in any table that keys off the id.
+    const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      for (const table of PLAYER_KEYED_TABLES) {
+        const row = raw.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE playerId = ?`).get(device) as { n: number };
+        expect({ table, n: row.n }).toEqual({ table, n: 0 });
+      }
+      const players = raw.prepare('SELECT COUNT(*) AS n FROM players WHERE id = ?').get(device) as { n: number };
+      expect(players.n).toBe(0);
+      const links = raw.prepare('SELECT COUNT(*) AS n FROM device_links WHERE deviceId = ? OR playerId = ?')
+        .get(device, device) as { n: number };
+      expect(links.n).toBe(0);
+    } finally {
+      raw.close();
+    }
+
+    // The name is back in the pool, and the browser is a new player rather
+    // than a walled-off one: getProfile mints it a fresh, uninitialized row.
+    expect(db.isUsernameAvailable('Departing')).toBe(true);
+    expect(db.isUsernameAvailable('departing')).toBe(true);
+    const after = db.getProfile(device);
+    expect(after.initialized).toBe(false);
+    expect(after.modeStats?.solo).toBeUndefined();
+    expect(after.recoveryCode).not.toBe(before.recoveryCode);
+    // And that fresh row can claim the freed name, which is what "released
+    // back into the pool" has to mean for the player who wants it back.
+    expect(db.initializeProfile(device, 'Departing').ok).toBe(true);
+  });
+
+  it('takes the sign-in code with it, and every browser signed in to it', () => {
+    const first = 'dev_aaaaaaaaaaaaaaaa22';
+    const second = 'dev_aaaaaaaaaaaaaaaa23';
+    init(first, 'MultiBrowser');
+    const code = db.getProfile(first).recoveryCode!;
+    // A second browser signs in — the account moves to it and BOTH are members.
+    expect(db.signInWithCode(code, second)).not.toBeNull();
+    expect(db.linkedDevices(second).map((d) => d.deviceId).sort()).toEqual([first, second].sort());
+
+    const result = db.deleteAccount(second);
+    expect(result.deleted).toBe(true);
+    // Both browsers are reported, so the caller can shut both their sockets.
+    expect([...result.devices].sort()).toEqual([first, second].sort());
+
+    // The code matches nothing, and — the part that bites — neither browser is
+    // left linked to a playerId that no longer exists. A surviving link
+    // resolves as `superseded`: a wall saying the account is live elsewhere.
+    expect(db.profileByRecoveryCode(code)).toBeNull();
+    expect(db.signInWithCode(code, first)).toBeNull();
+    expect(db.linkedAccount(first)).toBeNull();
+    expect(db.linkedAccount(second)).toBeNull();
+    expect(db.reclaimLinkedAccount(first, 'ses_000000000000000000000000')).toBeNull();
+  });
+
+  it("keeps the opponent's own record of the match, minus the pointers", () => {
+    // Every seat files its OWN match row (recordMatch writes the reporter as
+    // player1), so a duel produces two. Deleting the opponent's copy would
+    // take a game they played out of their history while their career
+    // counters — which are not derived from that table — went on counting it.
+    const leaver = 'dev_aaaaaaaaaaaaaaaa24';
+    const stayer = 'dev_aaaaaaaaaaaaaaaa25';
+    init(leaver, 'Leaver');
+    init(stayer, 'Stayer');
+    db.recordMatch({
+      playerId: stayer, username: 'Stayer', opponentId: leaver, opponentName: 'Leaver',
+      playerScore: 3, opponentScore: 5, bestStreak: 4, endStreak: 4, earnedStreak: 4,
+      mode: 'multiplayer', isWinner: false, matchKey: 'delete:duel:1',
+    } as never);
+    db.recordMatch({
+      playerId: leaver, username: 'Leaver', opponentId: stayer, opponentName: 'Stayer',
+      playerScore: 5, opponentScore: 3, bestStreak: 6, endStreak: 6, earnedStreak: 6,
+      mode: 'multiplayer', isWinner: true, matchKey: 'delete:duel:1',
+    } as never);
+    // Two rows, and each player's history matches both of them — a duel is
+    // filed once per seat and getMatchHistory looks at both id columns. That
+    // is the product as it stands and not what this test is about; what
+    // matters below is which of the two survives whom.
+    expect(db.getMatchHistory(leaver).length).toBe(2);
+    expect(db.getMatchHistory(stayer).length).toBe(2);
+
+    db.deleteAccount(leaver);
+
+    // The leaver's own row is gone, and the stayer's no longer names them, so
+    // there is nothing left for the deleted id to match.
+    expect(db.getMatchHistory(leaver)).toEqual([]);
+    // The stayer keeps their own record of the game, and it still reads as a
+    // loss — scrubbing the winner's id must not silently hand them the win.
+    const kept = db.getMatchHistory(stayer);
+    expect(kept.length).toBe(1);
+    expect(kept[0].player1Id).toBe(stayer);
+    expect(kept[0].player2Id).toBe(DELETED_PLAYER_ID);
+    expect(kept[0].player2Name).toBe(DELETED_PLAYER_NAME);
+    expect(kept[0].winnerId).toBe(DELETED_PLAYER_ID);
+    expect(kept[0].winnerId).not.toBe(stayer);
+    // Nothing points back at a name that is now anybody's to claim.
+    expect(JSON.stringify(kept)).not.toContain('Leaver');
+    expect(db.getPublicProfile(DELETED_PLAYER_ID)).toBeNull();
+  });
+
+  it('is a no-op for a browser with no account', () => {
+    expect(db.deleteAccount('dev_aaaaaaaaaaaaaaaa26').deleted).toBe(false);
   });
 });
 

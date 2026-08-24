@@ -316,6 +316,10 @@ export type ProfileApiErrorCode =
   | 'USERNAME_INVALID'
   | 'USERNAME_TAKEN'
   | 'USERNAME_LOCKED'
+  // The confirmation typed at DELETE /api/profile/me was not this account's
+  // username. Compared exactly — case included — so this is also what a
+  // near-miss gets.
+  | 'USERNAME_MISMATCH'
   | 'ALREADY_INITIALIZED'
   | 'PROFILE_NOT_INITIALIZED'
   | 'AVATAR_INVALID'

@@ -163,6 +163,40 @@ export async function resetDevice(): Promise<{ status: ClientSessionStatus; prof
 }
 
 /**
+ * Delete this browser's account, for good.
+ *
+ * The username is the confirmation and the server compares it exactly — see
+ * DELETE /api/profile/me. It is sent rather than assumed so the check is the
+ * server's to make: this is the one call in the client with nothing behind it.
+ *
+ * On success the browser keeps its device identity and loses its account, so
+ * the next load mints a fresh uninitialized profile and onboarding opens. The
+ * caller reloads to get there, which is also what clears every piece of
+ * in-memory state that belonged to the account that just went.
+ */
+export async function deleteAccount(
+  username: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/profile/me', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
+    if (res.ok) {
+      // The account is gone; nothing this page holds about it is worth
+      // keeping, and the session cookie it was using has been spent.
+      mySessionId = null;
+      return { ok: true };
+    }
+    const data = await res.json().catch(() => ({}));
+    return { ok: false, error: (data?.error as string) || 'DELETE_FAILED' };
+  } catch {
+    return { ok: false, error: 'OFFLINE' };
+  }
+}
+
+/**
  * Hand the account back on the way out. Best-effort; never awaited.
  *
  * The session id THIS page was given rides along, and the server ends nothing

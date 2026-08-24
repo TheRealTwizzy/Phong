@@ -39,6 +39,7 @@ const SUITES = [
   { name: 'split', ownsServer: false },
   { name: 'streak', ownsServer: false },
   { name: 'tutorial', ownsServer: false },
+  { name: 'delete', ownsServer: false },
   { name: 'eject', ownsServer: true },
   { name: 'build-id', ownsServer: true, needsBrowser: false },
 ];
