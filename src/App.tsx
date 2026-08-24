@@ -2256,10 +2256,14 @@ export default function App() {
       // very run the player just lost.
       if (earnedStreak < 3 && endStreak <= 0 && carriedIn <= 0) return;
     try {
+      const endedAt = Date.now();
       const res = await fetch('/api/practice/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bestStreak, earnedStreak, endStreak }),
+        // The same age every other write to the run carries: two sessions can
+        // be left seconds apart and land in either order, and an older one
+        // ending at 8 must not overwrite a newer one that broke to 0.
+        body: JSON.stringify({ bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now() }),
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -2279,35 +2283,37 @@ export default function App() {
    * make a network stall look like a frozen button.
    */
   /**
-   * One at a time, in the order they were made.
+   * Tell the server where a run stands when no match is ending to say so.
    *
-   * These go out fire-and-forget from Reset and from quitting, and both can
-   * happen within a second of each other — Reset on a run of 8, then a miss
-   * and a walk-out on 0. Two overlapping requests over separate connections
-   * can land in either order, and the server has nothing to tell it which
-   * describes the later moment: both say "now". The older one landing last
-   * restores the run the newer one had ended, permanently, for anyone who
-   * reloads. Chaining them is what makes call order arrival order — and one
-   * page's reports are the only ones that can race like this, because a
-   * recorded match carries a real age and is ordered by that instead.
+   * Stamped WHEN THE RUN REACHED THIS VALUE, and sent alongside the clock as
+   * it goes out, exactly like a recorded match — the difference is the age,
+   * and the age is how the server orders every write that assigns the run.
+   *
+   * That pairing is the whole point. These go out fire-and-forget from Reset
+   * and from quitting, and they race each other and the match POST and the
+   * practice POST, all of which write the same field. Ordered by arrival, a
+   * report that stalled for a second outranks whatever overtook it in flight
+   * and restores a run that had already ended, permanently, for anyone who
+   * reloads. Ordered by age, a stalled report is simply old — which is the
+   * truth about it, and the same rule every other writer already obeys.
+   *
+   * Fire-and-forget on purpose: this is a correction, not a result. A failed
+   * send leaves the server where it was without it, while blocking the walk
+   * back to the menu on a request would make a stall look like a frozen
+   * button.
    */
-  const reportChainRef = useRef<Promise<void>>(Promise.resolve());
-  const reportStreak = useCallback((m: GameMode, endStreak: number): Promise<void> => {
-    if (m !== 'solo' && m !== 'practice') return Promise.resolve();
-    reportChainRef.current = reportChainRef.current
-      .catch(() => {})
-      .then(async () => {
-        try {
-          await fetch('/api/profile/me/streak', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode: m, endStreak }),
-          });
-        } catch {
-          // A correction, not a result: the server simply keeps what it had.
-        }
+  const reportStreak = useCallback(async (m: GameMode, endStreak: number): Promise<void> => {
+    if (m !== 'solo' && m !== 'practice') return;
+    const endedAt = Date.now();
+    try {
+      await fetch('/api/profile/me/streak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: m, endStreak, endedAt, clientNow: Date.now() }),
       });
-    return reportChainRef.current;
+    } catch {
+      // See above: the server simply keeps what it had.
+    }
   }, []);
 
   const quitToMenu = () => {

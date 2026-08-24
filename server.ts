@@ -95,6 +95,23 @@ const liveSockets = new Set<LiveSocket>();
  * check cannot answer this on its own: ownership moves while sockets stay
  * open, and the relay writes a finished duel onto both seats itself.
  */
+/**
+ * How long before it was sent a client's report describes, in ms.
+ *
+ * Every write that ASSIGNS the carried run is ordered by this, and they all
+ * have to use the same one — a stamp taken on arrival makes a request that
+ * stalled look newer than whatever overtook it, which is exactly how the
+ * writes that used to lack an age could invert. Both readings come from the
+ * caller's own clock, so the difference carries none of its offset.
+ */
+function clientAgeMs(body: { endedAt?: unknown; clientNow?: unknown } | undefined): number | undefined {
+  const ended = Number(body?.endedAt);
+  const sent = Number(body?.clientNow);
+  if (!Number.isFinite(ended) || !Number.isFinite(sent)) return undefined;
+  const age = sent - ended;
+  return age > 0 ? age : undefined;
+}
+
 function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: string | null }): boolean {
   if (!seat.deviceId) return false;
   if (db.releasedDevice(seat.deviceId)) return false;
@@ -837,9 +854,11 @@ async function startServer() {
       if (!Number.isFinite(endStreak) || endStreak < 0) {
         return res.status(400).json({ error: 'BAD_REQUEST' });
       }
-      // Sent as it happens, so it is never stale — the age argument exists
-      // for results that queue, and this one does not.
-      const out = db.reportStreak(req.deviceId!, mode, endStreak);
+      // Ordered by the same age every other write to the run carries. It is
+      // sent as it happens, but "as it happens" is when it LEAVES the device,
+      // not when it arrives: stamped on arrival, a report that stalled for a
+      // second would outrank the match result that overtook it in flight.
+      const out = db.reportStreak(req.deviceId!, mode, endStreak, clientAgeMs(req.body));
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
       res.json({ modeStats: out.modeStats });
     } catch (e: any) {
@@ -864,6 +883,7 @@ async function startServer() {
           bestStreak: streak,
           earnedStreak: Number(req.body?.earnedStreak),
           endStreak: Number(req.body?.endStreak),
+          ageMs: clientAgeMs(req.body),
         })
       );
     } catch (e: any) {
@@ -1275,6 +1295,12 @@ async function startServer() {
           // it belongs to their streak alone. The serve is not one, which is
           // the only thing crossingsThisPoint is consulted for.
           countReturn(room, playerIndex);
+          // The relay is counting this itself, so the shared event clock moves
+          // with it. A P2P link that died mid-rally can still have a snapshot
+          // in flight describing the moment before this crossing; without the
+          // advance it would arrive looking current and undo the return just
+          // counted here.
+          room.syncRev += 1;
 
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
@@ -1306,6 +1332,7 @@ async function startServer() {
           // is the only streak that ends here. The scorer's runs on into the
           // next point — a rally streak is never decided by the other player.
           breakStreakOnPoint(room, scorerIndex, nextServer);
+          room.syncRev += 1; // see the note beside countReturn above
           // Both phones end the match on this same number, so neither is left
           // playing on alone. Votes from before the final point are dropped:
           // a rematch is agreed about a match that is actually finished.

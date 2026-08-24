@@ -1206,6 +1206,11 @@ class GameDatabase {
     playerId: string,
     mode: GameMode,
     endStreak: number,
+    /**
+     * How long before it was SENT the run reached this value. Not optional in
+     * spirit: a report that stalls on a slow connection is stamped by ARRIVAL
+     * without it, which makes it newer than the match result that overtook it.
+     */
     ageMs?: number
   ): { ok: boolean; modeStats: Record<string, ModeStats> } {
     if (mode !== 'solo' && mode !== 'practice') return { ok: false, modeStats: {} };
@@ -1286,7 +1291,7 @@ class GameDatabase {
    */
   public recordPractice(
     playerId: string,
-    session: { bestStreak: number; earnedStreak?: number; endStreak?: number },
+    session: { bestStreak: number; earnedStreak?: number; endStreak?: number; ageMs?: number },
     now: Date = new Date()
   ): {
     earnedXp: number;
@@ -1313,6 +1318,11 @@ class GameDatabase {
       played: 1,
       bestStreak: peak,
       endStreak: ended,
+      // Ordered like every other write to the run. Two sessions can be left
+      // seconds apart and their reports can land in either order — an older
+      // one ending at 8 landing after a newer one that broke to 0 would put
+      // the broken run back for anyone who reloads.
+      ageMs: session.ageMs,
     });
 
     const dayKey = missionDayKey(now);

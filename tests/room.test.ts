@@ -53,6 +53,9 @@ const room = (over: Partial<Room> = {}): Room => ({
   ...over,
 });
 
+let revCounter = 0;
+const nextRev = (): number => (revCounter += 1);
+
 const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
   matchSeq: 1,
   p1Score: 0,
@@ -63,9 +66,10 @@ const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
   servingPlayer: 0 as 0 | 1,
   crossingsThisPoint: 0,
   // A logical clock, so the room can spot a snapshot arriving behind one it
-  // already applied. Nothing before this cared, so a high default keeps every
-  // existing case describing "the latest thing the peers have seen".
-  rev: 1000,
+  // already applied. Every real snapshot describes a NEW event, so the default
+  // counts up — a fixed one would have consecutive calls in a test look like
+  // the same moment reported twice, which the room is now right to reject.
+  rev: nextRev(),
   ...over,
 });
 
@@ -594,14 +598,54 @@ describe('what a match earned, on the relay', () => {
     expect(r.streaks).toEqual([9, 4]);
     expect(r.crossingsThisPoint).toBe(6);
 
-    // The same revision is kept, not rejected: the two peers report the same
-    // number for the same event, and the second copy says the same thing.
-    applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
+    // The same revision is rejected too. While the link is up that is merely
+    // the other peer saying the same thing, and dropping it costs nothing; at
+    // the moment the link goes DOWN it is a duplicate still in flight carrying
+    // a revision the relay has already counted past itself, and applying it
+    // would undo the return the relay has since counted.
+    const duplicate = applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
+    expect(duplicate.decided).toBe(false);
     expect(r.streaks).toEqual([9, 4]);
 
     // And the rally moves on.
     applyMatchSync(r, sync({ rev: 6, p1Score: 1, bestStreaks: [9, 5], streaks: [9, 5], earnedBests: [9, 5], crossingsThisPoint: 7 }));
     expect(r.streaks).toEqual([9, 5]);
+  });
+
+  it('does not let a snapshot in flight undo what the relay has since counted', () => {
+    // The handover itself. The link dies, the rest of the point goes over the
+    // relay, and a snapshot describing the moment BEFORE the relay's crossing
+    // is still on the wire. The relay counts its own events into the same
+    // clock, so that snapshot arrives at or behind the mark and is refused —
+    // without which it would put the streak back to before the return.
+    const r = room({ syncRev: 0, servingPlayer: 0 });
+    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    expect(r.streaks).toEqual([3, 0]);
+
+    // Fallback: the relay counts the next crossing itself, as server.ts does.
+    countReturn(r, 0);
+    r.syncRev += 1;
+    expect(r.streaks).toEqual([4, 0]);
+
+    // The duplicate lands, still describing the state one crossing ago.
+    applyMatchSync(r, sync({ rev: 5, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    expect(r.streaks).toEqual([4, 0]);
+    expect(r.crossingsThisPoint).toBe(5);
+  });
+
+  it('takes a snapshot that names no revision, and lets it move nothing', () => {
+    // The relay's contract has to stay honest for a caller that does not send
+    // one: unknown means current, not refused. It must also not claim the
+    // mark, or the next real revision would look stale beside it.
+    const r = room({ syncRev: 7 });
+    const out = applyMatchSync(r, {
+      matchSeq: 1, p1Score: 2, p2Score: 0,
+      bestStreaks: [3, 1], streaks: [3, 1], earnedBests: [3, 1],
+      servingPlayer: 0, crossingsThisPoint: 2,
+    } as unknown as Parameters<typeof applyMatchSync>[1]);
+    expect(out.decided).toBe(false);
+    expect(r.scores).toEqual([2, 0]);
+    expect(r.syncRev).toBe(7);
   });
 
   it('starts a new match’s revisions over', () => {

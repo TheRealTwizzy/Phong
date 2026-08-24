@@ -238,13 +238,25 @@ export function applyMatchSync(
     room.syncRev = 0;
   }
   if (room.matchOver) return { decided: false };
-  // Behind one already applied: this describes a moment the rally has passed,
-  // and the assigned fields below would walk a live run backwards. Equal is
-  // kept — the two peers report the same revision for the same event, and the
-  // second copy is harmless because it says the same thing.
-  const rev = clampInt(sync.rev, 0, Number.MAX_SAFE_INTEGER);
-  if (rev < room.syncRev) return { decided: false };
-  room.syncRev = rev;
+  // At or behind one already applied. Equal used to be kept, on the grounds
+  // that the two peers report the same revision for the same event and the
+  // second copy says the same thing — true while the link is up, and wrong at
+  // the moment it goes down. After a fallback the relay counts crossings
+  // itself and advances syncRev with them, so a duplicate snapshot still in
+  // flight carries a revision the relay has already passed and would undo the
+  // return it has since counted. A duplicate that really is identical loses
+  // nothing by being dropped, so rejecting it costs nothing either way.
+  // A snapshot that names no revision says nothing about when it happened, so
+  // it is taken as current and moves the mark for nobody — the same rule a
+  // result with no age gets. That keeps the relay's contract honest for any
+  // caller that has not been told about revisions, rather than silently
+  // refusing everything it sends.
+  const claimedRev = Number(sync.rev);
+  if (Number.isFinite(claimedRev)) {
+    const rev = clampInt(claimedRev, 0, Number.MAX_SAFE_INTEGER);
+    if (rev <= room.syncRev) return { decided: false };
+    room.syncRev = rev;
+  }
 
   const cap = room.config.winningScore;
   room.scores = [

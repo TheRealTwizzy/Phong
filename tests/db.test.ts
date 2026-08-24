@@ -929,6 +929,23 @@ describe('reporting a run with no match to report it', () => {
     expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
   });
 
+  it('is ordered against a practice session too, not only against matches', () => {
+    // Every writer that ASSIGNS the run shares one mechanism, or the ones that
+    // do not are simply stamped on arrival and outrank whatever overtook them.
+    const id = 'dev_report0000000005';
+    init(id, 'Reporter5');
+    // A session ending on a broken run, sent as it happens.
+    db.recordPractice(id, { bestStreak: 9, earnedStreak: 9, endStreak: 0 });
+    expect(db.getModeStats(id).practice?.currentStreak).toBe(0);
+    // An older session's report, stalled a minute on the wire, must not put
+    // its run back.
+    db.recordPractice(id, { bestStreak: 8, earnedStreak: 8, endStreak: 8, ageMs: 60_000 });
+    expect(db.getModeStats(id).practice?.currentStreak).toBe(0);
+    // ...while a genuinely newer one is taken.
+    db.recordPractice(id, { bestStreak: 8, earnedStreak: 8, endStreak: 8 });
+    expect(db.getModeStats(id).practice?.currentStreak).toBe(8);
+  });
+
   it('refuses nonsense rather than storing it', () => {
     const id = 'dev_report0000000004';
     init(id, 'Reporter4');
