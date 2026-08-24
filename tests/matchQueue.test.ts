@@ -378,4 +378,56 @@ describe('giving up this browser’s identity', () => {
     clearPendingMatches();
     expect(pendingMatchCount()).toBe(0);
   });
+
+  it('drops a stale re-queue from a write still in flight when this ran', async () => {
+    // Clearing the CURRENT value is not the whole fix. A write for an old
+    // identity's match can already be in flight — a slow connection, or
+    // sitting in its own retry delay — when Start Fresh runs. Without a
+    // generation check, that write finally resolves AFTER the clear and
+    // calls writeQueue with the very payload just removed, resurrecting it
+    // for the fresh identity's next flush to pick up.
+    let resolveFetch: ((r: Response) => void) | null = null;
+    vi.stubGlobal('fetch', (input: string) => {
+      if (String(input) === '/api/match/record') {
+        return new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        });
+      }
+      return Promise.resolve(json(200, { status: 'active', sessionId: 's-x', profile: { id: 'p1' } }));
+    });
+
+    const recording = postMatchRecord(match('stale-race'));
+    expect(pendingMatchCount()).toBe(0); // nothing written yet — still in flight
+
+    clearPendingMatches(); // the identity moves on while that write is stuck
+
+    // The stalled request finally answers, with the kind of failure that
+    // would ordinarily be queued for later.
+    resolveFetch!(json(403, { error: 'PROFILE_NOT_INITIALIZED' }));
+    await recording;
+
+    expect(pendingMatchCount()).toBe(0); // must not have resurrected itself
+  });
+
+  it('drops runFlush’s own stale re-queue the same way', async () => {
+    park('old-a');
+    let resolveFetch: ((r: Response) => void) | null = null;
+    vi.stubGlobal('fetch', (input: string) => {
+      if (String(input) === '/api/match/record') {
+        return new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        });
+      }
+      return Promise.resolve(json(200, { status: 'active', sessionId: 's-x', profile: { id: 'p1' } }));
+    });
+
+    const flush = flushPendingMatches();
+    clearPendingMatches(); // identity moves on mid-flush, the one item still in flight
+    expect(pendingMatchCount()).toBe(0); // the clear itself always lands
+
+    resolveFetch!(json(500, {})); // a transient failure — ordinarily kept for later
+    await flush;
+
+    expect(pendingMatchCount()).toBe(0); // the stale batch was not written back
+  });
 });

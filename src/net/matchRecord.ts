@@ -31,6 +31,31 @@ function writeQueue(items: Queued[]): void {
   }
 }
 
+// Bumped only by clearPendingMatches, when this browser's identity changes
+// out from under whatever is currently queued. postMatchRecord and runFlush
+// each capture the generation in force when THEY started, and check it again
+// immediately before every write that RE-QUEUES a payload after a failure —
+// not just clear the queue at that moment, but at the moment the write
+// actually lands. Without this, a write already in flight when the identity
+// changes (a slow fetch, a retry's own delay) can still resolve afterward and
+// call writeQueue with the OLD identity's payload, resurrecting it into a
+// queue that now belongs to the fresh one — clearPendingMatches only ever
+// touched the CURRENT value, not writes still on their way. This is
+// deliberately narrower than cancelling the underlying request: the request
+// itself is harmless and may even succeed (correctly recording onto the old
+// account, if it still can) — only a FAILURE-triggered re-queue is stale.
+let generation = 0;
+
+function currentGeneration(): number {
+  return generation;
+}
+
+/** As writeQueue, but a no-op if the identity has moved on since `gen` was captured. */
+function writeQueueFor(gen: number, items: Queued[]): void {
+  if (gen !== generation) return;
+  writeQueue(items);
+}
+
 /** One attempt. Throws with a classification the caller can act on. */
 async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null> {
   const res = await fetch('/api/match/record', {
@@ -119,6 +144,10 @@ export interface RecordOutcome {
  * payload for replay if it still doesn't land.
  */
 export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordOutcome> {
+  // Captured once, at the moment this match's recording began — the identity
+  // it was actually played and reported under. Every write below checks it
+  // again at write time; see writeQueueFor.
+  const gen = currentGeneration();
   for (let tryIndex = 0; tryIndex < 2; tryIndex++) {
     try {
       const result = await attempt(payload);
@@ -126,7 +155,7 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
     } catch (e: any) {
       if (e?.unidentified) {
         // Keep the match: once the player re-onboards it can still be paid.
-        writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
+        writeQueueFor(gen, [...readQueue(), { payload, queuedAt: Date.now() }]);
         return { ok: false, reason: 'unidentified' };
       }
       if (e?.evicted) {
@@ -137,7 +166,7 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
       if (e?.staleBuild) {
         // Park it first: the reload replays the queue under the new build, so
         // the match is paid rather than lost to the refresh.
-        writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
+        writeQueueFor(gen, [...readQueue(), { payload, queuedAt: Date.now() }]);
         refreshForBuild(e.build);
         return { ok: false, reason: 'stale_build' };
       }
@@ -153,7 +182,7 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
       if (tryIndex === 0) await sleep(RETRY_DELAY_MS);
     }
   }
-  writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
+  writeQueueFor(gen, [...readQueue(), { payload, queuedAt: Date.now() }]);
   return { ok: false, reason: 'queued' };
 }
 
@@ -179,6 +208,11 @@ export function flushPendingMatches(): Promise<number> {
 async function runFlush(): Promise<number> {
   const queue = readQueue();
   if (!queue.length) return 0;
+  // Captured once, before this flush's own async work begins — see
+  // postMatchRecord and writeQueueFor. Every item this loop keeps was read
+  // BEFORE this call started, so if the identity moves on mid-flush, none of
+  // them belong to it; the whole batch is dropped rather than written back.
+  const gen = currentGeneration();
 
   const stillPending: Queued[] = [];
   let recovered = 0;
@@ -212,7 +246,7 @@ async function runFlush(): Promise<number> {
       if (!e?.permanent && !e?.evicted) stillPending.push(item);
     }
   }
-  writeQueue(stillPending);
+  writeQueueFor(gen, stillPending);
   return recovered;
 }
 
@@ -233,5 +267,15 @@ export const pendingMatchCount = (): number => readQueue().length;
  * later would credit whatever identity this browser ends up with — applied
  * one step earlier, to a result that was queued before the identity moved
  * on rather than discovered after.
+ *
+ * Clearing the CURRENT value is not the whole fix: a write already in
+ * flight when this runs (a slow fetch, a retry's own delay) can still
+ * resolve afterward and re-queue the very payload just cleared. Bumping
+ * `generation` is what closes that — every in-flight write captured the
+ * generation in force when IT started, and writeQueueFor refuses to apply a
+ * write whose captured generation no longer matches.
  */
-export const clearPendingMatches = (): void => writeQueue([]);
+export const clearPendingMatches = (): void => {
+  generation++;
+  writeQueue([]);
+};
