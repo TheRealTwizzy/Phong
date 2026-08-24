@@ -294,14 +294,29 @@ if ((await look()).sheet) {
 }
 
 let sheetOverModal = false;
+let tourEnded = false;
 for (let i = 0; i < 40; i++) {
   const here = await look();
-  if (!here.open) break; // once the tour ends, the player's own sheet is their own tap
+  if (!here.open) { tourEnded = true; break; }
   if (here.sheet && (here.tasks || here.leaderboard || here.profile)) sheetOverModal = true;
   await nextStep();
 }
 if (sheetOverModal) fail('the pre-match sheet the player opened covered a later step’s modal');
 ok('and a surface the player opened under the scrim never covers a later step');
+
+// The tour ENDING is a transition too, and an unclear one. prematchMode and
+// queueInfoOpen are still sitting at whatever the pokes above left them —
+// nothing has cleared either since — so the instant tourActive itself goes
+// false, the override in MainMenu that reads them (openPrematch/openQueueInfo)
+// reads the raw state again. Left unhandled, either sheet pops open over the
+// post-tour menu as though the player had just tapped it, when the last thing
+// they actually touched was Next.
+if (!tourEnded) fail('the tour never finished — cannot check what happens when it does');
+await sleep(500);
+const afterTour = await look();
+if (afterTour.sheet) fail('the pre-match sheet banked mid-tour reopened the instant the tour itself ended');
+if (afterTour.quickmatch) fail('the Quick Match sheet banked mid-tour reopened the instant the tour itself ended');
+ok('and neither sheet reopens the instant the tour ends, either');
 await meddler.context().close();
 
 // ---------------------------------------------------------------------------
@@ -320,12 +335,13 @@ const locker = await onboard('Lck');
 await locker.waitForSelector('#onboarding-tour-card', { timeout: 10000 });
 
 let lockPoked = false;
+let lockTourEnded = false;
 for (let i = 0; i < 60; i++) {
   const here = await locker.evaluate(() => ({
     open: !!document.querySelector('#onboarding-tour-card'),
     lock: !!document.querySelector('#menu-diff-pro-lock'),
   }));
-  if (!here.open) break;
+  if (!here.open) { lockTourEnded = true; break; }
   if (here.lock && !lockPoked) {
     lockPoked = true;
     await locker.evaluate(() => document.querySelector('#menu-diff-pro-lock')?.click());
@@ -339,6 +355,16 @@ for (let i = 0; i < 60; i++) {
 }
 if (!lockPoked) fail('the tour never showed a locked difficulty to meddle with');
 ok('and a locked difficulty never opens its unlock hint while the tour is running');
+
+// And the same post-tour check as the Quick Match sheet: gateHint is still
+// sitting at the Achievement object from the poke above, and the instant
+// tourActive goes false MainMenu's override reads it again.
+if (!lockTourEnded) fail('the tour never finished — cannot check what happens when it does');
+await sleep(500);
+if (await locker.$('#unlock-hint-sheet')) {
+  fail('the unlock hint banked mid-tour reopened the instant the tour itself ended');
+}
+ok('and the unlock hint does not reopen the instant the tour ends, either');
 await locker.context().close();
 
 // ---------------------------------------------------------------------------

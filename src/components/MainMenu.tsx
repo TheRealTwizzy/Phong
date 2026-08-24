@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Achievement,
   DailyMission,
@@ -161,6 +161,24 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // long as the tour is running.
   const openGateHint = tourActive ? null : gateHint;
   const openQueueInfo = tourActive ? false : queueInfoOpen;
+  // All three overrides above only stop a stray tap from MATTERING while the
+  // tour runs — nothing clears the tap itself. The tour ENDING is also a
+  // transition, and an unclear one: the moment tourActive goes false, every
+  // override above reads the raw state again, and a tap banked minutes
+  // earlier — the Solo row during the modes step, a locked pill during the
+  // tour's own prematch step — pops its sheet open over the post-tour menu,
+  // as though the player had just tapped it. This is the missing mirror
+  // image: during the tour a stray tap is overridden or forced shut: the
+  // instant it stops owning the screen, it must not un-happen retroactively.
+  // Runs on the true start/end transition only (the dependency is tourActive
+  // itself, not any of the three states), so it never fights the overrides
+  // above while the tour is actually running.
+  useEffect(() => {
+    if (tourActive) return;
+    setPrematchMode(null);
+    setGateHint(null);
+    setQueueInfoOpen(false);
+  }, [tourActive]);
   const quickMatch = useQuickMatch();
 
   const modes: {
