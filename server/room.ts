@@ -244,13 +244,16 @@ export function applyMatchSync(
   }
   if (room.matchOver) return { decided: false };
   // At or behind one already applied. Equal used to be kept, on the grounds
-  // that the two peers report the same revision for the same event and the
-  // second copy says the same thing — true while the link is up, and wrong at
-  // the moment it goes down. After a fallback the relay counts crossings
-  // itself and advances syncRev with them, so a duplicate snapshot still in
-  // flight carries a revision the relay has already passed and would undo the
-  // return it has since counted. A duplicate that really is identical loses
-  // nothing by being dropped, so rejecting it costs nothing either way.
+  // that both peers report the same revision for the same event — they run the
+  // same replica over the same events in the same order — so the second copy
+  // says the same thing. True while the link is up, and wrong at the moment it
+  // goes down: after a fallback the relay counts crossings itself with
+  // countReturn, which moves room.streaks and room.crossingsThisPoint without
+  // touching this clock (it is the PEERS' clock, and the relay must not share
+  // it — see the note beside countReturn in server.ts). A duplicate arriving
+  // after one of those would ASSIGN both fields back to the moment before it.
+  // A duplicate that really is identical loses nothing by being dropped, so
+  // rejecting it costs nothing either way.
   // A snapshot that names no revision says nothing about when it happened, so
   // it is taken as current and moves the mark for nobody — the same rule a
   // result with no age gets. That keeps the relay's contract honest for any

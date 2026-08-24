@@ -626,24 +626,44 @@ describe('what a match earned, on the relay', () => {
   });
 
   it('does not let a snapshot in flight undo what the relay has since counted', () => {
-    // The handover itself. The link dies, the rest of the point goes over the
-    // relay, and a snapshot describing the moment BEFORE the relay's crossing
-    // is still on the wire. The relay counts its own events into the same
-    // clock, so that snapshot arrives at or behind the mark and is refused —
-    // without which it would put the streak back to before the return.
+    // The handover. The link dies, the rest of the point goes over the relay,
+    // and the OTHER peer's copy of the last P2P event is still on the wire.
+    // It carries the revision already applied, so it is refused — without
+    // which it would put the streak back to before the relay's return.
     const r = room({ syncRev: 0, servingPlayer: 0 });
     applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
     expect(r.streaks).toEqual([3, 0]);
 
-    // Fallback: the relay counts the next crossing itself, as server.ts does.
+    // Fallback: the relay counts the next crossing itself, as server.ts does —
+    // and deliberately does NOT touch syncRev while doing it (see below).
     countReturn(r, 0);
-    r.syncRev += 1;
     expect(r.streaks).toEqual([4, 0]);
 
-    // The duplicate lands, still describing the state one crossing ago.
-    applyMatchSync(r, sync({ rev: 5, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    // The duplicate of event 4 lands, describing the state one crossing ago.
+    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
     expect(r.streaks).toEqual([4, 0]);
     expect(r.crossingsThisPoint).toBe(5);
+  });
+
+  it('still takes a peer that has not noticed the link is down', () => {
+    // A DataChannel does not fail for both peers at the same instant. The one
+    // that notices first relays its next crossing; the one that has not
+    // noticed keeps playing P2P and reports normally, and its snapshot is a
+    // legitimate later event rather than a stale duplicate.
+    //
+    // This is why the relay must not count its own crossings into syncRev.
+    // Sharing that number between two independently advancing clocks made the
+    // second peer's next revision collide with the one the relay had just
+    // taken, and its report — carrying the streak and possibly the final
+    // score — was refused as stale.
+    const r = room({ syncRev: 0, servingPlayer: 0 });
+    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    countReturn(r, 0); // the relay handles one itself for the peer that fell back
+
+    const late = applyMatchSync(r, sync({ rev: 5, p1Score: 0, bestStreaks: [3, 2], streaks: [3, 2], earnedBests: [3, 2], crossingsThisPoint: 5 }));
+    expect(late.decided).toBe(false);
+    expect(r.streaks).toEqual([3, 2]);
+    expect(r.syncRev).toBe(5);
   });
 
   it('takes a snapshot that names no revision, and lets it move nothing', () => {

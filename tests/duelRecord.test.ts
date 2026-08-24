@@ -276,6 +276,55 @@ describe('recording a duel', () => {
     p2.close();
   });
 
+  it('takes a peer’s snapshot after the relay counted a crossing for the other', async () => {
+    // A DataChannel does not fail for both peers at the same instant. The one
+    // that notices first falls back and relays its next crossing; the one that
+    // has not noticed keeps playing P2P and keeps reporting. The relay used to
+    // count its own crossings into the PEERS' revision clock, so that report
+    // arrived carrying a revision the relay had just taken and was refused as
+    // stale — and a P2P match is decided by nothing else, so the match that
+    // report was announcing went unrecorded for both players.
+    //
+    // This has to run through the real relay: what must not advance the clock
+    // is server.ts's ball_cross_net handler, and the unit suite reaches
+    // countReturn directly, so it cannot see it either way.
+    const host = await newDevice('RevHost');
+    const guest = await newDevice('RevGuest');
+    const { p1, p2, roomId, matchSeq } = await seatDuel(host, guest, 3);
+
+    p1.send({
+      type: 'match_sync', matchSeq, rev: 1,
+      p1Score: 1, p2Score: 0,
+      bestStreaks: [4, 0], streaks: [4, 0], earnedBests: [4, 0],
+      servingPlayer: 0, crossingsThisPoint: 0,
+    });
+
+    // p2 sees the link die and relays its next crossing. The relay counts it.
+    await cross(p2, p1, 1);
+
+    // p1 has not noticed yet, and its next snapshot is the one that ends the
+    // match. With the clocks shared it lands at the mark and is dropped.
+    p1.send({
+      type: 'match_sync', matchSeq, rev: 2,
+      p1Score: 3, p2Score: 0,
+      bestStreaks: [7, 1], streaks: [7, 1], earnedBests: [7, 1],
+      servingPlayer: 0, crossingsThisPoint: 0,
+    });
+
+    const record = await p1.await('match_recorded');
+    expect(record.matchKey).toBe(`duel:${roomId}:${matchSeq}`);
+    await p2.await('match_recorded');
+
+    const hostProfile = await getProfile(host);
+    expect(hostProfile.matchesWon).toBe(1);
+    expect((await getProfile(guest)).matchesLost).toBe(1);
+
+    p1.close();
+    p2.close();
+    // Longer than the awaits inside it, so a regression fails naming the
+    // message that never arrived rather than as a bare test timeout.
+  }, 20000);
+
   it("advances the winner's 'win a match' mission from a P2P duel", async () => {
     // The mission that started this: "win a match against an AI or human
     // opponent" could not be finished by winning a duel, because the relay

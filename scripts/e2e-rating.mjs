@@ -246,8 +246,20 @@ if (!start.missions?.length) fail('no missions served');
 if (start.missions.some((m) => m.current > 0 || m.claimed)) fail('a fresh day started dirty');
 ok(`server serves ${start.missions.length} missions, all at zero`);
 
-// Rookie: the only difficulty a fresh player has open.
-await record(questPlayer, { ...base, difficulty: 'rookie', playerScore: 5, bestStreak: 9, earnedStreak: 9 });
+// Rookie: the only difficulty a fresh player has open. The payload is the
+// wide one for the same reason the completion loop below uses it — see the
+// note there. `base` alone leaves four of the twelve regular missions unable
+// to move (aces, shutout, multi, pro_win), and a hand drawn from those four
+// advances nothing; a shutout at rally 15 with aces cuts that to two, and two
+// missions cannot fill three slots.
+await record(questPlayer, {
+  ...base,
+  difficulty: 'rookie',
+  playerScore: 5,
+  opponentScore: 0,
+  bestStreak: 15, earnedStreak: 15,
+  aces: 3,
+});
 const advanced = (await missionsOf(questPlayer)).missions;
 if (!advanced.some((m) => m.current > 0)) {
   fail(`a recorded win advanced nothing: ${JSON.stringify(advanced.map((m) => [m.id, m.current]))}`);

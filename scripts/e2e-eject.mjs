@@ -144,11 +144,31 @@ ok('both dropped players are told they were ejected and returned to the menu');
 // The lone host is the same close and a different sentence: there was no
 // match, so "you were removed from the match" would be describing one that
 // never existed.
+// Longer than the other two, and deliberately: this is the only one of the
+// three pages with nothing driving it. The host and guest are mid-duel, so
+// their tabs render every frame; the loner has sat idle in a lobby, and
+// Chromium throttles an idle tab's rAF — which is what the screen swap
+// animates on. Reaching the menu is what is being asserted, not how fast the
+// transition paints, and this failed here once in nine runs at 10s.
 const lonerHome = await loner
-  .waitForSelector('#main-menu-screen', { timeout: 10000 })
+  .waitForSelector('#main-menu-screen', { timeout: 20000 })
   .then(() => true)
   .catch(() => false);
-if (!lonerHome) fail('the lone host was left in a lobby holding a room that no longer exists');
+if (!lonerHome) {
+  // Say what state they were actually left in. This one has failed
+  // intermittently and "did not reach the menu" narrows it to nothing: the
+  // close may never have arrived, or it arrived and was swallowed.
+  const state = await loner
+    .evaluate(() => ({
+      lobby: !!document.querySelector('#multiplayer-lobby-modal'),
+      court: !!document.querySelector('#half-court-canvas'),
+      code: document.querySelector('#lobby-room-code')?.textContent?.trim() || null,
+      expired: !!document.querySelector('#toast-room-expired'),
+      ejected: !!document.querySelector('#toast-ejected'),
+    }))
+    .catch((e) => ({ unreadable: String(e) }));
+  fail(`the lone host was left in a lobby holding a room that no longer exists: ${JSON.stringify(state)}`);
+}
 if (!(await loner.$('#toast-room-expired'))) fail('the lone host was not told their room had gone');
 if (await loner.$('#toast-ejected')) fail('the lone host was told they were removed from a match they never had');
 if (await loner.$('#multiplayer-lobby-modal')) fail('the lobby stayed open over the menu');

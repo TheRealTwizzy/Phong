@@ -1314,12 +1314,17 @@ async function startServer() {
           // it belongs to their streak alone. The serve is not one, which is
           // the only thing crossingsThisPoint is consulted for.
           countReturn(room, playerIndex);
-          // The relay is counting this itself, so the shared event clock moves
-          // with it. A P2P link that died mid-rally can still have a snapshot
-          // in flight describing the moment before this crossing; without the
-          // advance it would arrive looking current and undo the return just
-          // counted here.
-          room.syncRev += 1;
+          // Deliberately NOT touching room.syncRev. That counter means one
+          // thing — how far the PEERS' replica had got when it last reported —
+          // and the relay counting its own crossings into it made two
+          // independently advancing clocks share a number. A DataChannel does
+          // not fail for both peers at the same instant: the one that notices
+          // first relays its next crossing here, and the one that has not
+          // noticed then sends a legitimate snapshot carrying the revision the
+          // relay just took, which was refused as stale. It was not needed
+          // either: a snapshot describing the moment BEFORE this crossing
+          // carries the revision already applied, which the `<=` check in
+          // applyMatchSync rejects on its own.
 
           const oppIdx = playerIndex === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
@@ -1351,7 +1356,6 @@ async function startServer() {
           // is the only streak that ends here. The scorer's runs on into the
           // next point — a rally streak is never decided by the other player.
           breakStreakOnPoint(room, scorerIndex, nextServer);
-          room.syncRev += 1; // see the note beside countReturn above
           // Both phones end the match on this same number, so neither is left
           // playing on alone. Votes from before the final point are dropped:
           // a rematch is agreed about a match that is actually finished.
