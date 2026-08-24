@@ -39,78 +39,6 @@ function writeQueue(items: Queued[]): void {
   }
 }
 
-// Bumped only by clearPendingMatches, when this browser's identity changes
-// out from under whatever is currently queued (startFreshIdentity in App.tsx,
-// which swaps the device cookie via /api/session/reset). postMatchRecord and
-// runFlush each capture the generation in force when THEY started, and check
-// it again at two distinct points, because a stale generation invalidates two
-// different things:
-//
-//   - Before every WRITE that re-queues a payload after a failure. A write
-//     already in flight when the identity changes (a slow fetch, a retry's
-//     own delay) can still resolve afterward and call writeQueue with the OLD
-//     identity's payload, resurrecting it into a queue that now belongs to the
-//     fresh one — clearPendingMatches only ever touched the CURRENT value, not
-//     writes still on their way.
-//
-//   - Before every network ATTEMPT. This is the sharper one, and refusing only
-//     the write is not enough: both loops sleep (postMatchRecord's 900ms retry
-//     delay, an openSession round trip) or iterate over further items, and the
-//     attempt that follows carries whatever device cookie the browser holds by
-//     then. /api/match/record discards the payload's own playerId and stamps
-//     `req.deviceId` — so an attempt issued after the reset reports the OLD
-//     account's match under the NEW identity, which is the whole failure this
-//     file's `evicted` rule exists to prevent, reached from the other side.
-//
-// It stays narrower than cancelling an in-flight request: one already on the
-// wire is left to succeed or fail on its own, since it went out under the old
-// cookie and correctly records onto the old account if it still can. What is
-// refused is starting a NEW attempt, or re-queueing, once the identity is gone.
-//
-// Kept in localStorage rather than in a module variable, because the thing it
-// tracks is not per-tab. The device cookie and the queue are both per-ORIGIN,
-// so two tabs share them, and only the tab that ran Start Fresh would bump a
-// module-local counter — the other one's pending retry or flush would carry
-// straight on under the new cookie and hand the old identity's match to the
-// new profile, which is the exact failure this counter exists to stop. A
-// stored number crosses tabs for free and synchronously, with none of the
-// delivery caveats a BroadcastChannel brings. `localGeneration` mirrors it so
-// the guard still works within one tab when storage is unavailable, and so a
-// read can never go backwards if a write was the part that failed.
-const GENERATION_KEY = 'phong_queue_generation';
-let localGeneration = 0;
-
-function currentGeneration(): number {
-  try {
-    const raw = localStorage.getItem(GENERATION_KEY);
-    const stored = raw === null ? NaN : Number(raw);
-    if (Number.isFinite(stored)) return Math.max(stored, localGeneration);
-  } catch {
-    /* unavailable — the module-local mirror is the whole answer */
-  }
-  return localGeneration;
-}
-
-function bumpGeneration(): void {
-  localGeneration = currentGeneration() + 1;
-  try {
-    localStorage.setItem(GENERATION_KEY, String(localGeneration));
-  } catch {
-    /* this tab still honours it; another tab cannot be told */
-  }
-}
-
-/** Has this browser's identity moved on since `gen` was captured — in ANY tab? */
-function identityMovedOn(gen: number): boolean {
-  return gen !== currentGeneration();
-}
-
-/** As writeQueue, but a no-op if the identity has moved on since `gen` was captured. */
-function writeQueueFor(gen: number, items: Queued[]): void {
-  if (identityMovedOn(gen)) return;
-  writeQueue(items);
-}
-
 /** One attempt. Throws with a classification the caller can act on. */
 async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null> {
   const res = await fetch('/api/match/record', {
@@ -199,29 +127,14 @@ export interface RecordOutcome {
  * payload for replay if it still doesn't land.
  */
 export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordOutcome> {
-  // Captured once, at the moment this match's recording began — the identity
-  // it was actually played and reported under. Every write below checks it
-  // again at write time; see writeQueueFor.
-  const gen = currentGeneration();
   for (let tryIndex = 0; tryIndex < 2; tryIndex++) {
-    // Re-checked per attempt, not just captured once: the second pass is
-    // reached after a 900ms sleep or an openSession round trip, and the
-    // identity can change inside either. The attempt would carry the NEW
-    // device cookie, and the server stamps the payload with whatever that
-    // cookie resolves to — so this match would be filed against an account
-    // that never played it. Reported as `evicted`, which is exactly what it
-    // is and which the caller already handles without promising a retry.
-    if (identityMovedOn(gen)) {
-      console.warn('Match discarded — this browser changed identity mid-record.');
-      return { ok: false, reason: 'evicted' };
-    }
     try {
       const result = await attempt(payload);
       if (result) return { ok: true, result };
     } catch (e: any) {
       if (e?.unidentified) {
         // Keep the match: once the player re-onboards it can still be paid.
-        writeQueueFor(gen, [...readQueue(), { payload, queuedAt: Date.now() }]);
+        writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
         return { ok: false, reason: 'unidentified' };
       }
       if (e?.evicted) {
@@ -232,7 +145,7 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
       if (e?.staleBuild) {
         // Park it first: the reload replays the queue under the new build, so
         // the match is paid rather than lost to the refresh.
-        writeQueueFor(gen, [...readQueue(), { payload, queuedAt: Date.now() }]);
+        writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
         refreshForBuild(e.build);
         return { ok: false, reason: 'stale_build' };
       }
@@ -248,7 +161,7 @@ export async function postMatchRecord(payload: MatchEndPayload): Promise<RecordO
       if (tryIndex === 0) await sleep(RETRY_DELAY_MS);
     }
   }
-  writeQueueFor(gen, [...readQueue(), { payload, queuedAt: Date.now() }]);
+  writeQueue([...readQueue(), { payload, queuedAt: Date.now() }]);
   return { ok: false, reason: 'queued' };
 }
 
@@ -274,11 +187,6 @@ export function flushPendingMatches(): Promise<number> {
 async function runFlush(): Promise<number> {
   const queue = readQueue();
   if (!queue.length) return 0;
-  // Captured once, before this flush's own async work begins — see
-  // postMatchRecord and writeQueueFor. Every item this loop keeps was read
-  // BEFORE this call started, so if the identity moves on mid-flush, none of
-  // them belong to it; the whole batch is dropped rather than written back.
-  const gen = currentGeneration();
 
   // What this flush has FINISHED with — reported successfully, or dropped as
   // unreplayable. Tracked instead of the inverse ("what is still pending"),
@@ -287,16 +195,6 @@ async function runFlush(): Promise<number> {
   const resolved = new Set<string>();
   let recovered = 0;
   for (const item of queue) {
-    // Same rule, per item. A flush is a sequence of round trips (plus an
-    // openSession of its own on a missing session), so the identity can
-    // change several items in — and every item still to come was read from
-    // the OLD identity's queue. None of them belong to whoever holds this
-    // browser now, so the loop stops rather than reporting them under a
-    // cookie that would have the server file them against the new account.
-    // Nothing is written back either: writeQueueFor below refuses a stale
-    // generation, so the batch is dropped exactly as clearPendingMatches
-    // intended.
-    if (identityMovedOn(gen)) break;
     try {
       // Sent as originally built, chainId and runSeq included: those are this
       // BROWSER's persisted ordering (src/net/runChain.ts), assigned when the
@@ -335,10 +233,7 @@ async function runFlush(): Promise<number> {
   // one promise this file makes is that no result is ever lost. So the write
   // is expressed as "the queue as it stands now, minus what I actually
   // finished with", which leaves anything appended in the meantime untouched.
-  writeQueueFor(
-    gen,
-    readQueue().filter((q) => !resolved.has(queueKey(q)))
-  );
+  writeQueue(readQueue().filter((q) => !resolved.has(queueKey(q))));
   return recovered;
 }
 
@@ -359,15 +254,5 @@ export const pendingMatchCount = (): number => readQueue().length;
  * later would credit whatever identity this browser ends up with — applied
  * one step earlier, to a result that was queued before the identity moved
  * on rather than discovered after.
- *
- * Clearing the CURRENT value is not the whole fix: a write already in
- * flight when this runs (a slow fetch, a retry's own delay) can still
- * resolve afterward and re-queue the very payload just cleared. Bumping
- * `generation` is what closes that — every in-flight write captured the
- * generation in force when IT started, and writeQueueFor refuses to apply a
- * write whose captured generation no longer matches.
  */
-export const clearPendingMatches = (): void => {
-  bumpGeneration();
-  writeQueue([]);
-};
+export const clearPendingMatches = (): void => writeQueue([]);

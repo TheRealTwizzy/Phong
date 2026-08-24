@@ -178,17 +178,17 @@ describe('applyMatchSync — a score reported by a peer', () => {
     expect(r.rematchVotes).toEqual([false, false]);
   });
 
-  it('does not start play on a snapshot that only announces a rematch', () => {
-    // A peer sends an all-zero snapshot the instant both rematch votes land,
-    // purely so the relay learns the match NUMBER changed (it is what the
-    // pre-match rating snapshot keys on). It describes no gameplay — so
-    // taking it as "a ball is in play" makes a player who leaves during the
-    // countdown, or before the first serve, an abandon: a ranked rating
-    // penalty for a match nobody played.
+  it('does not start play on a snapshot describing a match that has not begun', () => {
+    // applyMatchSync is the untrusted-peer boundary, and a snapshot is a
+    // claim rather than an observation. One naming a new match with a 0-0
+    // score and no crossings describes no gameplay at all — so taking it as
+    // "a ball is in play" makes a player who leaves during the countdown, or
+    // before the first serve, an abandon: a ranked rating penalty for a match
+    // nobody played.
     const r = room({ matchOver: true, inPlay: true, scores: [5, 3] });
     applyMatchSync(r, sync({ matchSeq: 2, p1Score: 0, p2Score: 0, crossingsThisPoint: 0 }));
 
-    expect(r.matchSeq).toBe(2); // the announcement did its actual job
+    expect(r.matchSeq).toBe(2); // the snapshot still did its actual job
     expect(r.scores).toEqual([0, 0]);
     expect(r.matchOver).toBe(false);
     // ...and the new match has had no ball in it. Both halves matter: the
@@ -197,7 +197,7 @@ describe('applyMatchSync — a score reported by a peer', () => {
     expect(r.inPlay).toBe(false);
   });
 
-  it('starts play on the first crossing after that announcement', () => {
+  it('starts play on the first crossing of that new match', () => {
     // The other side of the same rule — this must not become "a P2P duel is
     // never in play", which would take abandon detection away entirely.
     const r = room({ matchOver: true, inPlay: true, scores: [5, 3] });

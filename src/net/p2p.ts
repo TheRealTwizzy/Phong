@@ -411,29 +411,6 @@ export class P2PGameLink {
         matchSeq: this.matchSeq,
         streaks: [this.streaks.streaks[0], this.streaks.streaks[1]],
       });
-      // Tell the relay NOW, not at the new match's first crossing or point.
-      // The two peers agree a rematch entirely between themselves — the relay
-      // learns its matchSeq changed only from a later syncToRelay() call, and
-      // until then room.matchSeq still names the match that just ended. The
-      // room's pre-match rating snapshot is sampled the instant matchSeq is
-      // seen to change (server.ts, duelStartRatings), so a gap here is a gap
-      // there: an unrelated write to either player's rating — a queued solo
-      // result replaying mid-duel, say — landing inside that window is not
-      // "before the rematch" from the players' own point of view, but the
-      // snapshot would read it as such because the relay had not yet been
-      // told the rematch had happened. A zero-score sync sent the moment both
-      // votes land closes the gap to one network round trip instead of
-      // however long the next rally takes to produce a crossing.
-      //
-      // AFTER the game_start above, not before it. That message is dispatched
-      // synchronously into App.tsx, whose own handler calls
-      // resetMatchState(...) on this very replica — which zeroes syncRev
-      // again. Announcing first meant the announcement claimed rev 1, App
-      // then reset the counter, and the first real crossing claimed rev 1 a
-      // second time; the relay reads that as already applied and drops it, so
-      // a fallback landing before the next snapshot resumes a crossing short
-      // and reads the next return as a serve.
-      this.syncToRelay();
     } else {
       this.opts.onMessage({ type: 'rematch_state', votes: [...this.rematchVotes] });
     }
