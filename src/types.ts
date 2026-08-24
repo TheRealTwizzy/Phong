@@ -594,6 +594,13 @@ export type WSServerMessage =
   // load, or minted under a previous deployment). Sent immediately before the
   // close, so the client can act on the reason rather than on a bare 1006.
   | { type: 'session_invalid'; status: SessionStatus; build: string }
+  // The relay has started counting this match's gameplay itself, so both
+  // phones must come off their DataChannel and play through it. A link does
+  // not die for both peers at the same instant: the one that notices falls
+  // back on its own, and without this the other keeps playing P2P against an
+  // opponent who is no longer there — and keeps reporting a replica the relay
+  // has already overtaken. One transport, one authority.
+  | { type: 'p2p_fallback' }
   | { type: 'pong'; timestamp: number }
   | { type: 'error'; message: string };
 

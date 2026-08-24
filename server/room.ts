@@ -323,14 +323,25 @@ export function applyMatchSync(
   }
 
   const cap = room.config.winningScore;
+  // The SCORE is taken whatever has happened to the transports. It only ever
+  // goes up, and a peer still scoring over its own link knows points the relay
+  // does not — refusing them would leave a half-fallen-back match undecidable.
   room.scores = [
     Math.max(room.scores[0], clampInt(sync.p1Score, 0, cap)),
     Math.max(room.scores[1], clampInt(sync.p2Score, 0, cap)),
   ];
-  room.bestStreaks = [
-    Math.max(room.bestStreaks[0], clampInt(sync.bestStreaks?.[0], 0, 100000)),
-    Math.max(room.bestStreaks[1], clampInt(sync.bestStreaks?.[1], 0, 100000)),
-  ];
+  // The peaks are NOT, once the relay has taken over. A maximum looks safe
+  // because it cannot go down, and that is exactly the problem: a diverged
+  // replica reading a real serve as a return (its servingPlayer and
+  // crossingsThisPoint are stale by then) reports one return too many, and a
+  // maximum makes that permanent — into the career best, the XP, the daily
+  // tasks and the performance weight.
+  if (!room.relayCounted) {
+    room.bestStreaks = [
+      Math.max(room.bestStreaks[0], clampInt(sync.bestStreaks?.[0], 0, 100000)),
+      Math.max(room.bestStreaks[1], clampInt(sync.bestStreaks?.[1], 0, 100000)),
+    ];
+  }
   // ASSIGNED, not maxed. A P2P match sends the relay no crossings and no
   // points, so room.streaks would otherwise sit at whatever each seat was
   // seeded with — and that is what gets recorded as the run to carry into the
@@ -351,10 +362,12 @@ export function applyMatchSync(
   // What was actually built in this match, which is what it is paid on.
   // Bounded by the peak for the same reason as everything else here: a client
   // reports these, and a match cannot have earned more than it reached.
-  room.earnedBests = [
-    Math.max(room.earnedBests[0], Math.min(clampInt(sync.earnedBests?.[0], 0, 100000), room.bestStreaks[0])),
-    Math.max(room.earnedBests[1], Math.min(clampInt(sync.earnedBests?.[1], 0, 100000), room.bestStreaks[1])),
-  ];
+  if (!room.relayCounted) {
+    room.earnedBests = [
+      Math.max(room.earnedBests[0], Math.min(clampInt(sync.earnedBests?.[0], 0, 100000), room.bestStreaks[0])),
+      Math.max(room.earnedBests[1], Math.min(clampInt(sync.earnedBests?.[1], 0, 100000), room.bestStreaks[1])),
+    ];
+  }
   // Where the POINT is, not just where the score is. A P2P match can hand
   // gameplay back to the relay mid-rally — the DataChannel dies and sendGame
   // starts returning false — and from that moment the relay judges crossings

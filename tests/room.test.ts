@@ -676,10 +676,33 @@ describe('what a match earned, on the relay', () => {
     expect(r.crossingsThisPoint).toBe(5);
     expect(r.servingPlayer).toBe(0);
     // The score still lands: it only ever goes up, and that peer saw a point
-    // the relay did not.
+    // the relay did not. Refusing it would leave a half-fallen-back match
+    // undecidable, which is worse than every problem it would solve.
     expect(r.scores[0]).toBe(1);
     // And the revision still moves, so the pair stays ordered.
     expect(r.syncRev).toBe(5);
+  });
+
+  it('stops merging peaks from a diverged replica too', () => {
+    // A maximum looks safe because it cannot go down, and that is the problem.
+    // Once the relay has taken over, the surviving peer's servingPlayer and
+    // crossingsThisPoint are stale, so it can read a real SERVE as a return
+    // and report one hit too many — and a maximum makes that permanent, into
+    // the career best, the XP, the daily tasks and the performance weight.
+    const r = room({ syncRev: 0, servingPlayer: 0 });
+    applyMatchSync(r, sync({ rev: 1, bestStreaks: [2, 2], streaks: [2, 2], earnedBests: [2, 2], crossingsThisPoint: 3 }));
+    expect(r.bestStreaks).toEqual([2, 2]);
+
+    countReturn(r, 0);
+    r.relayCounted = true;
+    expect(r.bestStreaks).toEqual([3, 2]);
+
+    // The diverged peer claims a peak the relay never saw it earn.
+    applyMatchSync(r, sync({ rev: 2, bestStreaks: [9, 9], streaks: [9, 9], earnedBests: [9, 9], crossingsThisPoint: 3 }));
+    expect(r.bestStreaks).toEqual([3, 2]);
+    // Held where the last trustworthy snapshot and the relay's own count left
+    // them — the claimed 9 lands nowhere.
+    expect(r.earnedBests).toEqual([2, 2]);
   });
 
   it('hands authority back to the peers when a new match starts', () => {

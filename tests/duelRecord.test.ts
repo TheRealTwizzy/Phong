@@ -276,6 +276,43 @@ describe('recording a duel', () => {
     p2.close();
   });
 
+  it('tells both phones to come off P2P the moment it starts counting', async () => {
+    // The fix for the divergence rather than a rule for living with it. Every
+    // way of reconciling two peers' accounts after they split trades one wrong
+    // answer for another — discard the return the relay counted, or discard
+    // the point the still-open peer scored. So they are not reconciled: the
+    // relay says "everyone onto me", and it is then the only thing keeping
+    // score. The guard on the assigned fields stays behind it, because a
+    // broadcast is a request and a client takes a moment to act on one.
+    const host = await newDevice('FallbackH');
+    const guest = await newDevice('FallbackG');
+    const { p1, p2 } = await seatDuel(host, guest, 3);
+
+    // Nothing yet: the peers are on their own link and the relay has counted
+    // nothing, so it has no business ending their P2P session.
+    await sleep(150);
+    expect(p1.all('p2p_fallback').length).toBe(0);
+    expect(p2.all('p2p_fallback').length).toBe(0);
+
+    // One peer falls back and relays a crossing.
+    await cross(p2, p1, 1);
+
+    // BOTH are told — including the one that reported it, whose own link may
+    // be the half that is still up.
+    await p1.await('p2p_fallback');
+    await p2.await('p2p_fallback');
+
+    // And only once, however many events follow: it is a state change, not a
+    // per-crossing broadcast.
+    await cross(p1, p2, 1);
+    await cross(p2, p1, 2);
+    await sleep(150);
+    expect(p1.all('p2p_fallback').length).toBe(1);
+
+    p1.close();
+    p2.close();
+  }, 20000);
+
   it('keeps a relay-counted return when the other peer has not noticed the link is down', async () => {
     // The second half of a one-sided fallback. p2 notices first and relays its
     // crossing, which the relay counts. p1 has not noticed, so it is told about

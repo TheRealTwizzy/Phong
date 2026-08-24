@@ -1473,6 +1473,19 @@ export default function App() {
         }
         break;
 
+      case 'p2p_fallback':
+        // The relay has started counting this match itself, which means the
+        // other phone's DataChannel is gone. Ours may still look open — a link
+        // does not die for both peers at the same instant — and playing on
+        // over it means playing against somebody who is no longer receiving
+        // us, while reporting a replica the relay has already overtaken. Drop
+        // to the relay; gameplay continues there, which is what the fallback
+        // has always been for.
+        p2pRef.current?.close();
+        p2pRef.current = null;
+        setLinkStatus('relay');
+        break;
+
       case 'opponent_left': {
         setMatchPrediction(null);
         setOpponentName(null);
@@ -1866,28 +1879,41 @@ export default function App() {
     setIsLeaderboardOpen(tourStage === 'leaderboard');
     setIsMissionsOpen(tourStage === 'tasks');
     if (tourStage === 'match') {
-      // A real Solo match on the shipped default rung, which is open to
-      // everybody from the first match — the tour must never be the thing
-      // that asks a new player for an unlock they do not have.
+      // A real Solo match on the tour's own terms (see activeConfig) — Rookie
+      // is open to everybody from the first match, so the tour is never the
+      // thing that asks a new player for an unlock they do not have.
       //
-      // Marked and reset UNCONDITIONALLY, not only when a match has to be
-      // created. Skipping it for a match already in progress left that match
-      // unflagged, so it banked XP, missions, rating and achievements while
-      // the tour claimed to grant nothing — and it kept whatever score it had
-      // reached, which is not the frame the steps after this describe.
-      // startMatch refuses while the tour runs, so nothing should be here to
-      // adopt; this is the half that does not depend on remembering that.
-      tourMatchRef.current = true;
-      setMode('solo');
-      setScreen('game');
-      resetMatchRef.current();
+      // Placed when it is NOT already placed, which covers two different
+      // things. Entering the stage: nothing is running, so this creates it,
+      // and it marks and resets rather than adopting — a match already in
+      // progress used to be adopted unflagged, so it banked XP, missions,
+      // rating and achievements from a tour that grants nothing, and kept
+      // whatever score it had reached, which is not the frame these steps
+      // describe. Mid-stage: the scrim is deliberately pointer-events-none, so
+      // the court's own Home and Reset stay live underneath it — tapping Home
+      // returned to the menu while the stage stayed `match`, and because this
+      // effect only watched the stage it never put the court back. Every
+      // remaining match step then pointed at elements that were not there.
+      //
+      // Checking placement rather than resetting on every step is what keeps
+      // the frozen ball where it is: the serve step leaves it mid-flight, and
+      // the two steps after it are about that frame.
+      const placed = tourMatchRef.current && screenRef.current === 'game' && modeRef.current === 'solo';
+      if (!placed) {
+        tourMatchRef.current = true;
+        setMode('solo');
+        setScreen('game');
+        resetMatchRef.current();
+      }
     } else if (tourMatchRef.current) {
       tourMatchRef.current = false;
       setScreen('menu');
       setMode('solo');
       resetMatchRef.current();
     }
-  }, [tourActive, tourStage]);
+    // The step id, not just the stage: a step change is the moment to notice
+    // that the player has navigated out from under the tour.
+  }, [tourActive, tourStage, tourStepDef?.id]);
 
   /**
    * Show it once, to a player who has an account and has never seen it.

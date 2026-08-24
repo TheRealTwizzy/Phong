@@ -248,6 +248,30 @@ function duelStartRatings(room: Room): Array<SeatRating | null> {
   return room.startRatings;
 }
 
+/**
+ * The relay has counted a gameplay event for this match, so it owns the match
+ * from here — and both phones have to be on the relay for that to mean
+ * anything.
+ *
+ * A DataChannel does not die for both peers at the same instant. The one that
+ * notices falls back on its own; the other keeps playing peer-to-peer against
+ * somebody who is no longer receiving it, and keeps sending the relay
+ * snapshots of a replica that is now missing whatever the relay counted. Every
+ * way of reconciling those two accounts after the fact trades one wrong answer
+ * for another — the relay either discards a return it counted, or discards the
+ * point the still-open peer scored. So they are not reconciled: the peers are
+ * put back on one transport, and the relay is the only thing keeping score.
+ *
+ * `relayCounted` stays as the guard behind it, because a broadcast is a
+ * request and a client takes a moment to act on one (or is an older bundle
+ * that does not know the message at all).
+ */
+function takeOverFromP2P(room: Room): void {
+  if (room.relayCounted) return;
+  room.relayCounted = true;
+  broadcast(room, { type: 'p2p_fallback' });
+}
+
 function recordRoomMatch(room: Room): void {
   const seats: Array<0 | 1> = [0, 1];
   // Both seats must still be occupied. A match decided after one player left
@@ -1348,11 +1372,10 @@ async function startServer() {
           // the only thing crossingsThisPoint is consulted for.
           countReturn(room, playerIndex);
           // The relay is counting this match now, so it owns where the run and
-          // the point are from here on. This crossing reaches the other phone
-          // as a ball_incoming, which its P2P replica never sees — so that
-          // replica is now missing a return, and the snapshots it keeps sending
-          // would ASSIGN the relay back to a match without it.
-          room.relayCounted = true;
+          // the point are — and both phones are told to come off P2P, because
+          // this crossing reaches the other one as a ball_incoming that its
+          // replica never sees.
+          takeOverFromP2P(room);
           // Deliberately NOT touching room.syncRev. That counter means one
           // thing — how far the PEERS' replica had got when it last reported —
           // and the relay counting its own crossings into it made two
@@ -1395,7 +1418,7 @@ async function startServer() {
           // is the only streak that ends here. The scorer's runs on into the
           // next point — a rally streak is never decided by the other player.
           breakStreakOnPoint(room, scorerIndex, nextServer);
-          room.relayCounted = true; // see the note beside countReturn above
+          takeOverFromP2P(room); // see the note beside countReturn above
           // Both phones end the match on this same number, so neither is left
           // playing on alone. Votes from before the final point are dropped:
           // a rematch is agreed about a match that is actually finished.

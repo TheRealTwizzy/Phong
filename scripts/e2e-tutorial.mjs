@@ -162,6 +162,33 @@ if (await page.$('#onboarding-tour-card')) fail('the tour reopened after a reloa
 ok('and does not come back');
 
 // ---------------------------------------------------------------------------
+// 4b. The scrim is pointer-events-none by design, so the court's own Home and
+//     Reset stay live underneath the tour. Tapping Home used to leave the tour
+//     on its match steps with no match behind them — every remaining spotlight
+//     pointing at an element that was not on the page.
+// ---------------------------------------------------------------------------
+const wanderer = await onboard('Wnd');
+await wanderer.waitForSelector('#onboarding-tour-card', { timeout: 10000 });
+// Step 1 is the welcome; step 2 is the first match step.
+await wanderer.click('#btn-tour-next');
+await wanderer.waitForSelector('#half-court-canvas', { timeout: 8000 });
+
+// Out from under it, the way a curious player would.
+await wanderer.click('#btn-quit-to-menu');
+await wanderer.waitForSelector('#main-menu-screen', { timeout: 8000 });
+if (!(await wanderer.$('#onboarding-tour-card'))) fail('leaving the court ended the tour');
+
+// The next step is still a match step, so the court has to come back.
+await wanderer.click('#btn-tour-next');
+const recovered = await wanderer
+  .waitForSelector('#half-court-canvas', { timeout: 8000 })
+  .then(() => true)
+  .catch(() => false);
+if (!recovered) fail('the tour carried on through its match steps with no match behind them');
+ok('and it puts the court back if the player wanders off it');
+await wanderer.context().close();
+
+// ---------------------------------------------------------------------------
 // 5. Skipping counts as seen. A player who waves it away has decided about it.
 // ---------------------------------------------------------------------------
 const skipper = await onboard('Skp');
