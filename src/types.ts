@@ -461,25 +461,31 @@ export interface MatchEndPayload {
    */
   clientNow?: number;
   /**
-   * Where this write sits in the client's serialized run-write chain.
+   * This browser's position in ITS OWN run-write chain, assigned once per
+   * event at the same moment as `endedAt` (see `src/net/runChain.ts`) and
+   * PERSISTED, so a payload parked and replayed after a reload keeps the
+   * number it was actually decided at.
    *
-   * The age cannot order two writes from one page: it stops when a request is
-   * SENT, so it never includes that request's own time on the wire — while the
-   * next write in the chain waits for the first one's response and therefore
-   * carries that whole round trip in its own age. A stall inverts them. The
-   * chain already knows the order, so it says so; the session cookie says
-   * which chain, and the server compares the pair (see bumpModeStats).
+   * The age alone cannot order two writes from one browser: it never counts
+   * a request's own time on the wire, so whichever of two writes happens to
+   * have the faster round trip can reach the server "later" in stamped time
+   * even though it was decided first. Comparing this instead — paired with
+   * `chainId`, so it is only ever compared against another write from the
+   * SAME browser — sidesteps network timing entirely: whichever carries the
+   * higher number was decided later, however long either one took to arrive.
    *
-   * Absent for anything not chained: a replay off the on-device queue, which
-   * flushes outside the chain deliberately, and the relay's own writes.
+   * Absent for a caller with no chain (an older bundle, or the relay's own
+   * writes), which falls back to the age alone.
    */
   runSeq?: number;
   /**
-   * Which client chain that seq belongs to. Set SERVER-side from the verified
-   * session cookie, never from the body — a client that could name its own
-   * chain could name somebody else's.
+   * Which browser's chain that seq belongs to. Purely a self-reported ordering
+   * hint, like `runSeq` itself — not a credential, and not verified against
+   * anything. A modified client could already misreport any field a match
+   * payload carries (see the trust model in CLAUDE.md §5); this adds no reach
+   * beyond that.
    */
-  sessionId?: string | null;
+  chainId?: string | null;
   /**
    * The streak this player finished the match ON. Zero if the last thing they
    * did was miss. A streak carries into the next match, so this is what the

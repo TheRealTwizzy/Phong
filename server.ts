@@ -130,6 +130,19 @@ function clientAgeMs(body: { endedAt?: unknown; clientNow?: unknown } | undefine
   return age > 0 ? age : undefined;
 }
 
+/**
+ * `chainId`, sanitized to a plain string or null.
+ *
+ * Purely a self-reported ordering hint — see the note on `MatchEndPayload`
+ * in src/types.ts — so this is not a trust boundary, just a type guard: a
+ * malformed value (the wrong JSON type, or an implausibly long string) must
+ * not reach a SQL bind parameter, which is the only thing that could throw.
+ */
+function chainIdOf(body: { chainId?: unknown } | undefined): string | null {
+  const v = body?.chainId;
+  return typeof v === 'string' && v.length > 0 && v.length <= 100 ? v : null;
+}
+
 function seatStillHoldsAccount(seat: { deviceId: string | null; sessionId: string | null }): boolean {
   if (!seat.deviceId) return false;
   if (db.releasedDevice(seat.deviceId)) return false;
@@ -849,10 +862,11 @@ async function startServer() {
         ...req.body,
         playerId: req.deviceId!,
         username: me.username,
-        // From the verified cookie, never the body. `runSeq` says where in a
-        // chain this write sits; the session says whose chain, and a client
-        // that could name that could reorder somebody else's writes.
-        sessionId: req.session?.sessionId ?? null,
+        // Sanitized rather than trusted: chainId/runSeq are a self-reported
+        // ordering hint (see MatchEndPayload), not a credential, so there is
+        // nothing here to verify against — only a type to enforce so a
+        // malformed value cannot reach a SQL bind.
+        chainId: chainIdOf(req.body),
       };
 
       // The achievement tree gates the ladder, so the gate is enforced here
@@ -954,7 +968,7 @@ async function startServer() {
       // not when it arrives: stamped on arrival, a report that stalled for a
       // second would outrank the match result that overtook it in flight.
       const out = db.reportStreak(req.deviceId!, mode, endStreak, clientAgeMs(req.body), {
-        sessionId: req.session?.sessionId ?? null,
+        chainId: chainIdOf(req.body),
         runSeq: Number(req.body?.runSeq),
       });
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
@@ -982,7 +996,7 @@ async function startServer() {
           earnedStreak: Number(req.body?.earnedStreak),
           endStreak: Number(req.body?.endStreak),
           ageMs: clientAgeMs(req.body),
-          sessionId: req.session?.sessionId ?? null,
+          chainId: chainIdOf(req.body),
           runSeq: Number(req.body?.runSeq),
         })
       );

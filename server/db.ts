@@ -403,7 +403,7 @@ class GameDatabase {
         -- on-device queue through a whole replay and land after it, restoring
         -- a run the replay had already broken.
         streakAt INTEGER NOT NULL DEFAULT 0,
-        streakSession TEXT,
+        streakChainId TEXT,
         streakSeq INTEGER NOT NULL DEFAULT 0,
         winStreak INTEGER NOT NULL DEFAULT 0,
         bestWinStreak INTEGER NOT NULL DEFAULT 0,
@@ -619,8 +619,8 @@ class GameDatabase {
     if (modeCols.length && !modeCols.some((c) => c.name === 'streakAt')) {
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakAt INTEGER NOT NULL DEFAULT 0');
     }
-    if (modeCols.length && !modeCols.some((c) => c.name === 'streakSession')) {
-      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakSession TEXT');
+    if (modeCols.length && !modeCols.some((c) => c.name === 'streakChainId')) {
+      this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakChainId TEXT');
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakSeq INTEGER NOT NULL DEFAULT 0');
     }
 
@@ -1105,18 +1105,19 @@ class GameDatabase {
        */
       ageMs?: number;
       /**
-       * Which client-side chain this write came from, and where in it. The
-       * client serializes every write that assigns the run, so within one page
-       * the order is known and does not have to be inferred from a stamp the
-       * network can reorder. Absent for anything not chained — the relay's own
-       * writes, and a replay off the on-device queue.
+       * This browser's own position in its run-write chain (see
+       * `src/net/runChain.ts`), assigned once per event and PERSISTED — so it
+       * survives a reload and orders a replayed write against whatever this
+       * same browser assigns after it, with no regard to how long either
+       * request's own round trip takes. Absent for anything with no chain —
+       * an older bundle, or the relay's own writes.
        */
-      sessionId?: string | null;
+      chainId?: string | null;
       runSeq?: number;
     }
   ): void {
     const row = this.stmt(
-        `SELECT winStreak, currentStreak, streakAt, streakSession, streakSeq
+        `SELECT winStreak, currentStreak, streakAt, streakChainId, streakSeq
            FROM player_mode_stats WHERE playerId = ? AND mode = ?`
       )
       .get(playerId, mode) as
@@ -1124,7 +1125,7 @@ class GameDatabase {
           winStreak: number;
           currentStreak: number;
           streakAt: number;
-          streakSession: string | null;
+          streakChainId: string | null;
           streakSeq: number;
         }
       | undefined;
@@ -1154,23 +1155,25 @@ class GameDatabase {
     const stamp = now - age;
     const prevStamp = row?.streakAt ?? 0;
     // A stamp is `event + time on the wire`, and the wire is not constant, so
-    // two writes from ONE page can invert. The client serializes every write
-    // that assigns the run, which means the later one waits for the earlier
-    // one's RESPONSE — so its age includes that whole round trip, while the
-    // earlier one's age stopped when it was sent and never counted its own.
-    // Stamped `now - age`, the stalled first write lands late and the second
-    // lands early, and the newer run is refused as stale.
+    // two writes from the SAME browser can still invert: whichever of them
+    // happens to have the faster round trip can reach the server "later" in
+    // stamped time even though it was decided first — a stall does this to a
+    // serialized chain, and an ordinary difference in per-request latency does
+    // it even without one, which the chain alone cannot fix once a queued
+    // write is replayed from a page that no longer exists.
     //
-    // Inside one chain the order is already known, so it is sent rather than
-    // inferred: `runSeq` rises with each queued write and the session says
-    // which chain it belongs to. Same session, higher seq — later, whatever
-    // the wire did. A different session is a different page (or device), and
-    // there the age is the only thing that can order them; so is a write with
-    // no seq at all, which is what a replay off the on-device queue is, since
-    // that flush is deliberately not chained.
+    // A `runSeq` sidesteps network timing rather than reasoning about it: it
+    // is assigned once, at the moment the event happens, before any request is
+    // sent, and PERSISTED on the browser — so it means the same thing whether
+    // this write lands in a second or resurfaces from the on-device queue
+    // after a reload. `chainId` says which browser assigned it, so two numbers
+    // are only ever compared when they came from the same one. Same chain,
+    // higher seq — later, however long either request's own trip took. A
+    // different chain, or no seq at all, has nothing in common to compare and
+    // falls back to the age.
     const seq = Number.isFinite(Number(d.runSeq)) ? Math.floor(Number(d.runSeq)) : null;
     const sameChain =
-      seq !== null && !!d.sessionId && !!row?.streakSession && d.sessionId === row.streakSession;
+      seq !== null && !!d.chainId && !!row?.streakChainId && d.chainId === row.streakChainId;
     const isNewer = sameChain ? seq > (row?.streakSeq ?? 0) : stamp >= prevStamp;
     const describesRun = d.endStreak !== undefined || d.won !== undefined;
 
@@ -1203,13 +1206,13 @@ class GameDatabase {
         : Math.max(0, Math.round(d.endStreak));
     const nextStamp = describesRun && isNewer ? stamp : prevStamp;
     // The chain this run was last assigned by, so the next write from the same
-    // page can be ordered against it without the wire getting a vote.
-    const nextSession = describesRun && isNewer ? (d.sessionId ?? null) : (row?.streakSession ?? null);
+    // browser can be ordered against it without the wire getting a vote.
+    const nextChainId = describesRun && isNewer ? (d.chainId ?? null) : (row?.streakChainId ?? null);
     const nextSeq = describesRun && isNewer ? (seq ?? 0) : (row?.streakSeq ?? 0);
     this.stmt(
         `INSERT INTO player_mode_stats
            (playerId, mode, matchesPlayed, matchesWon, matchesLost,
-            pointsScored, aces, bestStreak, currentStreak, streakAt, streakSession,
+            pointsScored, aces, bestStreak, currentStreak, streakAt, streakChainId,
             streakSeq, winStreak, bestWinStreak)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(playerId, mode) DO UPDATE SET
@@ -1221,7 +1224,7 @@ class GameDatabase {
            bestStreak    = MAX(bestStreak, excluded.bestStreak),
            currentStreak = excluded.currentStreak,
            streakAt      = excluded.streakAt,
-           streakSession = excluded.streakSession,
+           streakChainId = excluded.streakChainId,
            streakSeq     = excluded.streakSeq,
            winStreak     = excluded.winStreak,
            bestWinStreak = MAX(bestWinStreak, excluded.winStreak)`
@@ -1237,7 +1240,7 @@ class GameDatabase {
         Math.max(0, Math.round(d.bestStreak ?? 0)),
         nextCurrent,
         nextStamp,
-        nextSession,
+        nextChainId,
         nextSeq,
         nextWinStreak,
         nextWinStreak
@@ -1270,8 +1273,8 @@ class GameDatabase {
      * without it, which makes it newer than the match result that overtook it.
      */
     ageMs?: number,
-    /** The client chain this report belongs to; see bumpModeStats. */
-    chain?: { sessionId?: string | null; runSeq?: number }
+    /** This report's position in the browser's run-write chain; see bumpModeStats. */
+    chain?: { chainId?: string | null; runSeq?: number }
   ): { ok: boolean; modeStats: Record<string, ModeStats> } {
     if (mode !== 'solo' && mode !== 'practice') return { ok: false, modeStats: {} };
     const profile = this.getProfile(playerId);
@@ -1282,7 +1285,7 @@ class GameDatabase {
     this.bumpModeStats(playerId, mode, {
       endStreak: Math.min(100000, n),
       ageMs: Number(ageMs) || undefined,
-      sessionId: chain?.sessionId,
+      chainId: chain?.chainId,
       runSeq: chain?.runSeq,
     });
     return { ok: true, modeStats: this.getModeStats(playerId) };
@@ -1358,7 +1361,7 @@ class GameDatabase {
       earnedStreak?: number;
       endStreak?: number;
       ageMs?: number;
-      sessionId?: string | null;
+      chainId?: string | null;
       runSeq?: number;
     },
     now: Date = new Date()
@@ -1392,7 +1395,7 @@ class GameDatabase {
       // one ending at 8 landing after a newer one that broke to 0 would put
       // the broken run back for anyone who reloads.
       ageMs: session.ageMs,
-      sessionId: session.sessionId,
+      chainId: session.chainId,
       runSeq: session.runSeq,
     });
 
@@ -2184,9 +2187,9 @@ class GameDatabase {
       // land back on top of a newer one. Absent (an older client, or a payload
       // the relay built itself) means "just now".
       ageMs: resultAgeMs(payload),
-      // Where this sits in the client's chain, for the writes the age cannot
+      // This browser's own chain position, for the writes the age cannot
       // order — see the note beside `stamp` in bumpModeStats.
-      sessionId: payload.sessionId,
+      chainId: payload.chainId,
       runSeq: payload.runSeq,
     };
     // Streaks, shutouts and per-difficulty wins are derived here and only

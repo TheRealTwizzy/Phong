@@ -281,75 +281,50 @@ describe('replaying what an earlier session parked', () => {
   });
 });
 
-describe('a replay carries no page-local ordering', () => {
-  it('strips runSeq before replaying a parked match', async () => {
-    // `runSeq` orders a write against the other writes of ONE page's chain.
-    // A parked payload keeps whatever number it had, and a replay happens on a
-    // different page: new session, counter restarted at 1. Sent, the server
-    // staples THIS session to a number from the last one — and if the replay
-    // wins on age, the next few genuinely newer writes carry lower numbers and
-    // are refused as not-newer. A replay is ordered by its age instead.
+describe('a replay keeps its chain position', () => {
+  it('sends chainId and runSeq unchanged when replaying a parked match', async () => {
+    // Earlier design: runSeq was assigned per PAGE and stripped before a
+    // replay, because a parked payload's number meant nothing once the page
+    // that assigned it was gone. It is now assigned once, at event time, from
+    // a counter PERSISTED in localStorage (src/net/runChain.ts) — so a parked
+    // payload's chainId/runSeq are exactly as meaningful after a reload as
+    // they were the moment the match ended, and a replay must send them
+    // exactly as parked rather than stripping them.
     localStore.set(
       QUEUE_KEY,
-      JSON.stringify([{ payload: { ...match('stale'), runSeq: 5 }, queuedAt: 1 }])
+      JSON.stringify([
+        { payload: { ...match('stale'), chainId: 'chain_a', runSeq: 5 }, queuedAt: 1 },
+      ])
     );
     const server = installServer(ok);
 
     expect(await flushPendingMatches()).toBe(1);
     expect(server.bodies).toHaveLength(1);
     expect(server.bodies[0].matchKey).toBe('stale');
-    expect('runSeq' in server.bodies[0]).toBe(false);
-    // The age still travels: it is what orders a replay.
+    expect(server.bodies[0].chainId).toBe('chain_a');
+    expect(server.bodies[0].runSeq).toBe(5);
+    // The age still travels too; the two are independent signals.
     expect(server.bodies[0].clientNow).toBeTypeOf('number');
   });
 
-  it('keeps runSeq on a live attempt and its retry', async () => {
-    // The strip is about REPLAYS, not about the chain. A live write and its
-    // immediate retry are the same write from the same chain and must keep
-    // their place in it.
+  it('keeps chainId and runSeq on a live attempt and its retry', async () => {
+    // A live write and its retry are the same write, decided once; both
+    // attempts must report the same position in the chain.
     const server = installServer([() => json(500, {}), ok]);
-    await postMatchRecord({ ...match('live'), runSeq: 3 } as any);
+    await postMatchRecord({ ...match('live'), chainId: 'chain_b', runSeq: 3 } as any);
     expect(server.bodies).toHaveLength(2);
-    for (const body of server.bodies) expect(body.runSeq).toBe(3);
-  });
-});
-
-describe('a replay shares the caller\u2019s write queue', () => {
-  it('runs every replay through the gate it is given', async () => {
-    // The gate is what stops a stalled replay being overtaken. Ordered by age
-    // alone, a replay that hangs is stamped as though it landed when it was
-    // sent, so a live write made later and arriving first can be overwritten.
-    // Through one queue that cannot happen — the live write is not sent until
-    // the replay resolves.
-    localStore.set(
-      QUEUE_KEY,
-      JSON.stringify(
-        ['a', 'b'].map((k) => ({ payload: match(k), queuedAt: 1 }))
-      )
-    );
-    installServer(ok);
-
-    const order: string[] = [];
-    let depth = 0;
-    const gate = async <T,>(work: () => Promise<T>): Promise<T> => {
-      // Serialized, not merely wrapped: the real chain admits one at a time.
-      expect(depth).toBe(0);
-      depth++;
-      order.push('enter');
-      try {
-        return await work();
-      } finally {
-        depth--;
-        order.push('leave');
-      }
-    };
-
-    expect(await flushPendingMatches(gate)).toBe(2);
-    expect(order).toEqual(['enter', 'leave', 'enter', 'leave']);
+    for (const body of server.bodies) {
+      expect(body.chainId).toBe('chain_b');
+      expect(body.runSeq).toBe(3);
+    }
   });
 
-  it('still flushes when no gate is given', async () => {
-    // The parameter is optional so a caller without a chain keeps working.
+  it('flushes with no gate parameter at all', async () => {
+    // The gate this suite tested earlier is gone: ordering a replay against a
+    // live write no longer needs to serialize them through one queue, because
+    // a persisted, event-time seq compares correctly regardless of which
+    // request's own round trip finishes first. flushPendingMatches takes
+    // nothing now.
     park('solo');
     const server = installServer(ok);
     expect(await flushPendingMatches()).toBe(1);

@@ -824,9 +824,10 @@ describe('per-mode stats', () => {
           playerScore: 5, opponentScore: 1,
           bestStreak: 12, endStreak, earnedStreak: 4,
           endedAt: 1_000_000, clientNow: 1_000_000 + ageMs, matchKey: key,
-          // The route sets this from the verified cookie; here it stands for
-          // "both of these came from one page's chain".
-          sessionId: 'ses_queueorder', runSeq: seq,
+          // Purely a client-side ordering hint now (src/net/runChain.ts) — not
+          // set by the route. Here it stands for "both of these came from the
+          // same browser's chain".
+          chainId: 'chain_queueorder', runSeq: seq,
         })
       );
 
@@ -835,6 +836,45 @@ describe('per-mode stats', () => {
 
     // B is the later event and the run is broken. Reading 7 here means the
     // stall reordered them.
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+  });
+
+  it('orders by chain position when a slower request arrives out of turn', () => {
+    // The gap the previous case does not close: two writes need not be queued
+    // behind one another at all to have their OWN round trips finish out of
+    // causal order. Event A happens, then event B happens two seconds later
+    // (a genuinely LATER event, not a queued retry of the same one) — but A's
+    // own request takes ten seconds to arrive and B's takes a few
+    // milliseconds, so B reaches the database first and A reaches it after.
+    //
+    // Age cannot fix this: A's age is small (it was sent promptly) and so is
+    // B's, so both stamp near "now" at their own arrival times, and whichever
+    // arrives LAST simply wins by stamp — which here is the STALE one, A.
+    // runSeq does not have this problem, because it is assigned once, before
+    // either request exists, and never revised by how the request went.
+    const id = 'dev_modeoutoforder01';
+    init(id, 'ModeOutOfOrder');
+
+    const write = (endStreak: number, key: string, seq: number) =>
+      db.recordMatch(
+        match(id, {
+          mode: 'solo', difficulty: 'rookie', isWinner: true,
+          playerScore: 5, opponentScore: 1,
+          bestStreak: 9, endStreak, earnedStreak: 4,
+          // Small, ordinary ages for both — this is not about staleness.
+          endedAt: 1_000_000, clientNow: 1_000_100, matchKey: key,
+          chainId: 'chain_outoforder', runSeq: seq,
+        })
+      );
+
+    // B (the LATER event, seq 2) reaches the database first.
+    write(0, 'ooo-b', 2);
+    expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
+
+    // A (the EARLIER event, seq 1) arrives after, carrying a stale run.
+    write(11, 'ooo-a', 1);
+    // Still 0: A's lower seq loses to B's higher one, regardless of arrival
+    // order. Reading 11 here means arrival order won instead of causal order.
     expect(db.getModeStats(id).solo?.currentStreak).toBe(0);
   });
 
