@@ -8,13 +8,39 @@
 //
 // This one walks the real product. Each step names a `stage` — what the app
 // has to be showing for the step to make sense — and App.tsx puts it there.
-// The match stages open a REAL Solo Rookie match and freeze it mid-frame, so
-// the ball, the net, the radar and the scoreboard being described are the ones
-// the player is about to use.
+// The match stages open a REAL Solo Rookie match, first to three, and freeze
+// it mid-frame, so the ball, the net, the radar and the scoreboard being
+// described are the ones the player is about to use.
+//
+// It is in two halves, and the ORDER is the design. Play comes first: the
+// rudiments, taught on a court. Only then the menu — what is on it and how to
+// reach it. A player who has never hit a ball has nothing to hang a rank ring
+// or a task list on, so a menu tour before a first rally is a tour of nouns.
+//
+// Duel is named on the menu half and not walked. It is the game's headline
+// mode and a player should know it exists, but it needs a second phone and a
+// second person, so a walkthrough of it is a walkthrough of something the
+// player cannot do while holding this tour open.
 //
 // It grants nothing. The match it plays is not recorded, and finishing pays no
 // XP, no missions and no achievements: the reward for learning the game is
 // being able to play it.
+
+/**
+ * The terms the tour's own match is played on, and the reason they are here
+ * rather than taken from the player's settings.
+ *
+ * Rookie because it is the only rung open from the first match, so the tour
+ * can never be the thing that asks a new player for an unlock they do not
+ * have — and because a REPLAY from Settings would otherwise drop a veteran's
+ * stored Cyber difficulty into a walkthrough of the basics. First to three
+ * because the match is a teaching aid: long enough to be a real match, short
+ * enough that a player who carries on from the last step finishes it.
+ *
+ * Nothing here is recorded, so these terms never reach a profile.
+ */
+export const TOUR_DIFFICULTY = 'rookie' as const;
+export const TOUR_WINNING_SCORE = 3;
 
 export type TourStage =
   | 'menu'
@@ -49,12 +75,84 @@ export interface TourStep {
 // a key nothing can prove is alive.
 
 export const TOUR_STEPS: readonly TourStep[] = [
-  // Where you are.
+  // ---------------------------------------------------------------------
+  // Part one: play. A real Solo Rookie match, first to three, frozen between
+  // steps so the thing being explained is on screen while it is explained.
+  //
+  // The match comes FIRST on purpose. A player who has never hit a ball has
+  // no use for a rank ring or a task list — those only mean something once
+  // there is a game behind them. So the rudiments come first, and the tour of
+  // the menu comes after, when the player has something to hang it on.
+  // ---------------------------------------------------------------------
   {
     id: 'welcome',
     stage: 'menu',
     titleKey: 'tour_welcome_title',
     bodyKey: 'tour_welcome_body',
+  },
+  {
+    id: 'court',
+    stage: 'match',
+    anchor: 'half-court-container',
+    titleKey: 'tour_court_title',
+    bodyKey: 'tour_court_body',
+  },
+  {
+    id: 'net',
+    stage: 'match',
+    anchor: 'half-court-canvas',
+    titleKey: 'tour_net_title',
+    bodyKey: 'tour_net_body',
+  },
+  {
+    id: 'serve',
+    stage: 'match',
+    anchor: 'half-court-canvas',
+    // Long enough for the ball to leave the paddle and be somewhere worth
+    // looking at. A court with the ball parked on the paddle explains nothing.
+    live: 620,
+    titleKey: 'tour_serve_title',
+    bodyKey: 'tour_serve_body',
+  },
+  {
+    id: 'spin',
+    stage: 'match',
+    anchor: 'half-court-canvas',
+    titleKey: 'tour_spin_title',
+    bodyKey: 'tour_spin_body',
+  },
+  {
+    id: 'radar',
+    stage: 'match',
+    anchor: 'radar-preview-container',
+    titleKey: 'tour_radar_title',
+    bodyKey: 'tour_radar_body',
+  },
+  {
+    id: 'streak',
+    stage: 'match',
+    anchor: 'scoreboard-header',
+    titleKey: 'tour_streak_title',
+    bodyKey: 'tour_streak_body',
+  },
+  {
+    id: 'score_hud',
+    stage: 'match',
+    anchor: 'scoreboard-header',
+    titleKey: 'tour_score_hud_title',
+    bodyKey: 'tour_score_hud_body',
+  },
+
+  // ---------------------------------------------------------------------
+  // Part two: the menu. What is here and how to reach it — no more than that.
+  // Leaving the match stage quits the tour's match on its own (App.tsx), so
+  // this half opens on the menu without a step having to say so.
+  // ---------------------------------------------------------------------
+  {
+    id: 'menu_intro',
+    stage: 'menu',
+    titleKey: 'tour_menu_intro_title',
+    bodyKey: 'tour_menu_intro_body',
   },
   {
     id: 'rank',
@@ -78,18 +176,11 @@ export const TOUR_STEPS: readonly TourStep[] = [
     bodyKey: 'tour_modes_body',
   },
   {
-    id: 'duel',
-    stage: 'menu',
-    anchor: 'menu-mode-multiplayer',
-    titleKey: 'tour_duel_title',
-    bodyKey: 'tour_duel_body',
-  },
-  {
-    id: 'tasks_rail',
-    stage: 'menu',
-    anchor: 'menu-nav-missions',
-    titleKey: 'tour_tasks_rail_title',
-    bodyKey: 'tour_tasks_rail_body',
+    id: 'prematch',
+    stage: 'prematch',
+    anchor: 'prematch-match-settings',
+    titleKey: 'tour_prematch_title',
+    bodyKey: 'tour_prematch_body',
   },
   {
     id: 'tabs',
@@ -98,111 +189,19 @@ export const TOUR_STEPS: readonly TourStep[] = [
     titleKey: 'tour_tabs_title',
     bodyKey: 'tour_tabs_body',
   },
-
-  // What you decide before a match.
   {
-    id: 'prematch',
-    stage: 'prematch',
-    anchor: 'prematch-match-settings',
-    titleKey: 'tour_prematch_title',
-    bodyKey: 'tour_prematch_body',
+    id: 'tasks',
+    stage: 'tasks',
+    anchor: 'missions-modal-container',
+    titleKey: 'tour_tasks_title',
+    bodyKey: 'tour_tasks_body',
   },
   {
-    id: 'difficulty',
-    stage: 'prematch',
-    anchor: 'menu-diff-rookie',
-    titleKey: 'tour_difficulty_title',
-    bodyKey: 'tour_difficulty_body',
-  },
-  {
-    id: 'odds',
-    stage: 'prematch',
-    anchor: 'menu-diff-rookie-odds',
-    titleKey: 'tour_odds_title',
-    bodyKey: 'tour_odds_body',
-  },
-  {
-    id: 'score',
-    stage: 'prematch',
-    anchor: 'menu-pts-5',
-    titleKey: 'tour_score_title',
-    bodyKey: 'tour_score_body',
-  },
-  {
-    id: 'rules',
-    stage: 'prematch',
-    anchor: 'prematch-match-settings',
-    titleKey: 'tour_rules_title',
-    bodyKey: 'tour_rules_body',
-  },
-
-  // The court, frozen.
-  {
-    id: 'court',
-    stage: 'match',
-    anchor: 'half-court-container',
-    titleKey: 'tour_court_title',
-    bodyKey: 'tour_court_body',
-  },
-  {
-    id: 'net',
-    stage: 'match',
-    anchor: 'half-court-canvas',
-    titleKey: 'tour_net_title',
-    bodyKey: 'tour_net_body',
-  },
-  {
-    id: 'radar',
-    stage: 'match',
-    anchor: 'radar-preview-container',
-    titleKey: 'tour_radar_title',
-    bodyKey: 'tour_radar_body',
-  },
-  {
-    id: 'score_hud',
-    stage: 'match',
-    anchor: 'scoreboard-header',
-    titleKey: 'tour_score_hud_title',
-    bodyKey: 'tour_score_hud_body',
-  },
-  {
-    id: 'serve',
-    stage: 'match',
-    anchor: 'half-court-canvas',
-    titleKey: 'tour_serve_title',
-    bodyKey: 'tour_serve_body',
-    // Long enough for the ball to leave the paddle and still be on this half.
-    live: 620,
-  },
-  {
-    id: 'spin',
-    stage: 'match',
-    anchor: 'half-court-canvas',
-    titleKey: 'tour_spin_title',
-    bodyKey: 'tour_spin_body',
-  },
-  {
-    id: 'streak',
-    stage: 'match',
-    anchor: 'scoreboard-header',
-    titleKey: 'tour_streak_title',
-    bodyKey: 'tour_streak_body',
-  },
-  {
-    id: 'hud',
-    stage: 'match',
-    anchor: 'btn-open-settings',
-    titleKey: 'tour_hud_title',
-    bodyKey: 'tour_hud_body',
-  },
-
-  // The rest of the app.
-  {
-    id: 'settings',
-    stage: 'settings',
-    anchor: 'settings-modal-overlay',
-    titleKey: 'tour_settings_title',
-    bodyKey: 'tour_settings_body',
+    id: 'leaderboard',
+    stage: 'leaderboard',
+    anchor: 'leaderboard-modal-container',
+    titleKey: 'tour_leaderboard_title',
+    bodyKey: 'tour_leaderboard_body',
   },
   {
     id: 'profile',
@@ -219,18 +218,11 @@ export const TOUR_STEPS: readonly TourStep[] = [
     bodyKey: 'tour_recovery_body',
   },
   {
-    id: 'leaderboard',
-    stage: 'leaderboard',
-    anchor: 'leaderboard-modal-container',
-    titleKey: 'tour_leaderboard_title',
-    bodyKey: 'tour_leaderboard_body',
-  },
-  {
-    id: 'tasks',
-    stage: 'tasks',
-    anchor: 'missions-modal-container',
-    titleKey: 'tour_tasks_title',
-    bodyKey: 'tour_tasks_body',
+    id: 'settings',
+    stage: 'settings',
+    anchor: 'settings-modal-overlay',
+    titleKey: 'tour_settings_title',
+    bodyKey: 'tour_settings_body',
   },
   {
     id: 'done',

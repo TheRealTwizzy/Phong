@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BallState,
+  AIDifficulty,
   GameMode,
   GameSettings,
   PlayerStats,
@@ -75,7 +76,7 @@ import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
 import { SessionGuard } from './components/SessionGuard';
 import { OnboardingTour } from './components/OnboardingTour';
-import { TOUR_STEPS } from './game/tour';
+import { TOUR_DIFFICULTY, TOUR_STEPS, TOUR_WINNING_SCORE } from './game/tour';
 import {
   CarryStore,
   carriedStreak as carried,
@@ -348,9 +349,17 @@ export default function App() {
   // The terms the CURRENT match is played on. A duel takes them from the room
   // so both sides agree; every other mode takes them from the menu.
   const activeConfig: RoomMatchConfig =
-    mode === 'multiplayer' && roomConfig
-      ? roomConfig
-      : { winningScore: settings.winningScore, rules: settings.rules };
+    // The tour's match is played on the tour's terms, not the player's. It is
+    // a teaching aid on a rung everybody has open, and a replay from Settings
+    // would otherwise walk a veteran through the basics of the game against
+    // their own stored Cyber difficulty at first-to-15.
+    tourStage === 'match'
+      ? { winningScore: TOUR_WINNING_SCORE, rules: settings.rules }
+      : mode === 'multiplayer' && roomConfig
+        ? roomConfig
+        : { winningScore: settings.winningScore, rules: settings.rules };
+  /** Who the AI is playing as — see activeConfig for why the tour overrides. */
+  const activeDifficulty: AIDifficulty = tourStage === 'match' ? TOUR_DIFFICULTY : settings.difficulty;
 
   // Refs for high-speed 60fps physics loop without stale closures
   const ballRef = useRef<BallState>(ball);
@@ -865,7 +874,7 @@ export default function App() {
         const aiMsg: ChatMessage = {
           id: `ai_chat_${Date.now()}`,
           text: randomReply,
-          senderName: `AI (${settings.difficulty})`,
+          senderName: `AI (${activeDifficulty})`,
           isSelf: false,
           timestamp: Date.now(),
         };
@@ -911,8 +920,8 @@ export default function App() {
     sound.setEnabled(settings.soundEnabled);
     sound.setSfxVolume((settings.sfxVolume ?? 80) / 100);
     sound.setBgmVolume((settings.bgmVolume ?? 50) / 100);
-    aiRef.current.setDifficulty(settings.difficulty);
-  }, [settings]);
+    aiRef.current.setDifficulty(activeDifficulty);
+  }, [settings, activeDifficulty]);
 
   // Feed the AI the player's hidden rating so each difficulty slides part-way
   // toward them — Pro stays a real contest at any skill instead of a wall.
@@ -2811,7 +2820,7 @@ export default function App() {
           canResetMatch={mode !== 'multiplayer'}
           onQuitToMenu={quitToMenu}
           winningScore={activeConfig.winningScore}
-          opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${settings.difficulty})`}
+          opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${activeDifficulty})`}
           onViewOpponent={
             mode === 'multiplayer' && isLinkableId(opponentId)
               ? () => openPublicProfile(opponentId)

@@ -64,6 +64,13 @@ ok('it opens by itself for a new player');
 //    tour of screenshots would pass a step count and nothing else.
 // ---------------------------------------------------------------------------
 const seen = { court: false, prematch: false, settings: false, profile: false, leaderboard: false, tasks: false, ball: false };
+// Play first, then the menu. A player who has never hit a ball has no use for
+// a rank ring or a task list, so the rudiments come first and the tour of the
+// menu comes after — which means the ORDER is part of what ships, not an
+// accident of the list. These record when each half was reached.
+let firstCourtStep = -1;
+let firstMenuOverviewStep = -1;
+let matchTerms = null;
 let steps = 0;
 const LIMIT = 60;
 for (; steps < LIMIT; steps++) {
@@ -72,6 +79,7 @@ for (; steps < LIMIT; steps++) {
     title: document.querySelector('#onboarding-tour-card h2')?.textContent || '',
     hole: !!document.querySelector('#onboarding-tour-overlay mask rect:nth-child(2)'),
     court: !!document.querySelector('#half-court-canvas'),
+    scoreboard: document.querySelector('#scoreboard-header')?.textContent || '',
     prematch: !!document.querySelector('#prematch-modal'),
     settings: !!document.querySelector('#settings-modal-overlay'),
     profile: !!document.querySelector('#profile-modal-container'),
@@ -83,14 +91,39 @@ for (; steps < LIMIT; steps++) {
   for (const k of ['court', 'prematch', 'settings', 'profile', 'leaderboard', 'tasks']) {
     if (here[k]) seen[k] = true;
   }
+  if (here.court && firstCourtStep < 0) firstCourtStep = steps;
+  if (here.court && !matchTerms) matchTerms = here.scoreboard;
+  // The menu half is the modals: they are only reachable from the menu, so the
+  // first one to open is where the second half begins.
+  const inMenuOverview = here.prematch || here.settings || here.profile || here.leaderboard || here.tasks;
+  if (inMenuOverview && firstMenuOverviewStep < 0) firstMenuOverviewStep = steps;
   // A step that names an anchor must have found it: a spotlight with no hole
   // is a step pointing at an element id that no longer exists.
   await page.click('#btn-tour-next');
   await sleep(420);
 }
 if (steps >= LIMIT) fail('the tour never ended');
-if (steps < 15) fail(`the tour was only ${steps} steps — it is meant to cover the whole game`);
+if (steps < 12) fail(`the tour was only ${steps} steps — it is meant to cover the whole game`);
 ok(`it walks ${steps} steps`);
+
+if (firstCourtStep < 0) fail('the tour never opened a court');
+if (firstMenuOverviewStep < 0) fail('the tour never opened the menu overview');
+if (firstCourtStep > firstMenuOverviewStep) {
+  fail(
+    `the menu overview came before the match (court at step ${firstCourtStep + 1}, menu at ${firstMenuOverviewStep + 1})`
+  );
+}
+ok(`the match comes first (step ${firstCourtStep + 1}), then the menu (step ${firstMenuOverviewStep + 1})`);
+
+// A short match on the one rung every player has open, whatever their own
+// stored settings say — a replay from Settings must not walk a veteran
+// through the basics against their own Cyber difficulty at first-to-15.
+if (!/rookie/i.test(matchTerms)) fail(`the tour's match was not against Rookie: ${JSON.stringify(matchTerms)}`);
+// textContent runs the scoreboard together ("…0:to 3You0"), so the digit is
+// followed by a letter and \b does not fire there. Guard against a longer
+// number instead, which is the thing actually worth ruling out.
+if (!/to\s*3(?!\d)/.test(matchTerms)) fail(`the tour's match was not first to 3: ${JSON.stringify(matchTerms)}`);
+ok('and it is a Rookie match, first to 3');
 
 for (const [k, v] of Object.entries(seen)) {
   if (k === 'ball') continue;
