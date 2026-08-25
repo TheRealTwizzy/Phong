@@ -15,8 +15,12 @@ import {
   MAX_AI_COMPETENCE,
   competenceForMu,
   aimFromPush,
+  serveVelocity,
+  SERVE_BALL_Y,
+  PADDLE_HEIGHT,
   AIM_FULL_PUSH,
   AIM_DEADZONE,
+  SERVE_MAX_ANGLE_DEG,
 } from '../src/game/physics';
 import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
@@ -357,36 +361,133 @@ describe('AI serving', () => {
 // The serving joystick's contract. This mapping used to live inside the canvas
 // component, where the only thing that could observe it was a browser driving
 // a real drag; it is a rule, so it is stated here instead.
+//
+// It is a POLAR joystick: the direction of the drag is the direction the ball
+// leaves in and its length is the power. What it replaced decomposed the drag
+// into independent axes — sideways for angle, upward for power — and threw
+// downward travel away, so a pull did nothing at all.
+const degOf = (aim: { angle: number }, limitDeg = SERVE_MAX_ANGLE_DEG) => aim.angle * limitDeg;
+
+describe('the ball waiting to be served', () => {
+  it('rests clear of the paddle face and inside the court', () => {
+    // Held ON the paddle, not inside it: the drawn ball and the launched one
+    // are the same ball, so a hold point under the face would serve from
+    // inside the paddle it just left.
+    expect(SERVE_BALL_Y).toBeLessThan(PADDLE_Y - PADDLE_HEIGHT / 2);
+    // And close enough to read as held rather than as a ball already in play.
+    expect(PADDLE_Y - PADDLE_HEIGHT / 2 - SERVE_BALL_Y).toBeLessThan(0.05);
+    expect(SERVE_BALL_Y).toBeGreaterThan(0);
+  });
+});
+
 describe('aimFromPush', () => {
   it('returns nothing inside the deadzone, which is what keeps tap-to-serve', () => {
     expect(aimFromPush(0, 0)).toBeNull();
     expect(aimFromPush(AIM_DEADZONE * 0.5, 0)).toBeNull();
     expect(aimFromPush(0, -AIM_DEADZONE * 0.9)).toBeNull();
-    // And is an aim the moment the push clears it.
+    // A pull is inside the same circle: the deadzone is a radius, not a half.
+    expect(aimFromPush(0, AIM_DEADZONE * 0.9)).toBeNull();
+    // And is an aim the moment the drag clears it, either way.
     expect(aimFromPush(0, -AIM_DEADZONE * 1.5)).not.toBeNull();
+    expect(aimFromPush(0, AIM_DEADZONE * 1.5)).not.toBeNull();
   });
 
-  it('reads power off UPWARD travel alone', () => {
-    // dy is negative when the thumb has moved up the screen: the gesture
-    // pushes the serve up the court rather than pulling it back, because the
-    // paddle sits at 90% of the height and a pull-back cannot reach full power.
+  it('reads power off the DISTANCE dragged, whichever way it went', () => {
     expect(aimFromPush(0, -AIM_FULL_PUSH)!.power).toBeCloseTo(1, 10);
     expect(aimFromPush(0, -AIM_FULL_PUSH / 2)!.power).toBeCloseTo(0.5, 10);
-    // Pulling DOWN is the softest serve, never a negative one.
-    expect(aimFromPush(0, AIM_FULL_PUSH)!.power).toBe(0);
+    // A pull reaches full power exactly as a push does. It used to be pinned
+    // at zero, which is what made pulling a no-op.
+    expect(aimFromPush(0, AIM_FULL_PUSH)!.power).toBeCloseTo(1, 10);
+    expect(aimFromPush(0, AIM_FULL_PUSH / 2)!.power).toBeCloseTo(0.5, 10);
+    // Diagonally too: it is the hypotenuse, not either axis on its own.
+    const diag = AIM_FULL_PUSH / Math.SQRT2;
+    expect(aimFromPush(diag, -diag)!.power).toBeCloseTo(1, 10);
   });
 
-  it('reads angle off sideways travel, signed toward the finger', () => {
-    expect(aimFromPush(AIM_FULL_PUSH, -AIM_FULL_PUSH)!.angle).toBeCloseTo(1, 10);
-    expect(aimFromPush(-AIM_FULL_PUSH, -AIM_FULL_PUSH)!.angle).toBeCloseTo(-1, 10);
-    expect(aimFromPush(0, -AIM_FULL_PUSH)!.angle).toBe(0);
+  it('serves along the direction dragged, in degrees off straight up', () => {
+    expect(degOf(aimFromPush(0, -AIM_FULL_PUSH)!)).toBeCloseTo(0, 10);
+    const diag = AIM_FULL_PUSH / Math.SQRT2;
+    expect(degOf(aimFromPush(diag, -diag)!)).toBeCloseTo(45, 10);
+    expect(degOf(aimFromPush(-diag, -diag)!)).toBeCloseTo(-45, 10);
+    // A 30° push is a 30° serve, not a fraction of the sideways reach.
+    const rad = (30 * Math.PI) / 180;
+    const push = aimFromPush(Math.sin(rad) * 0.2, -Math.cos(rad) * 0.2)!;
+    expect(degOf(push)).toBeCloseTo(30, 10);
   });
 
-  it('clamps past full push, so the knob stopping at the ring is the truth', () => {
+  it('reads a drag BELOW the anchor as a slingshot, inverted through it', () => {
+    // Pull down-right, serve up-left: the ball goes where the player aimed it,
+    // not where their thumb ended up.
+    for (const [dx, dy] of [
+      [0.1, -0.15],
+      [-0.05, -0.3],
+      [0.22, -0.02],
+    ]) {
+      const push = aimFromPush(dx, dy)!;
+      const pull = aimFromPush(-dx, -dy)!;
+      expect(pull.angle).toBeCloseTo(push.angle, 10);
+      expect(pull.power).toBeCloseTo(push.power, 10);
+    }
+    // Concretely, with the anchor down-right of the thumb's destination.
+    expect(degOf(aimFromPush(0, AIM_FULL_PUSH)!)).toBeCloseTo(0, 10);
+    const diag = AIM_FULL_PUSH / Math.SQRT2;
+    expect(degOf(aimFromPush(diag, diag)!)).toBeCloseTo(-45, 10);
+  });
+
+  it('treats a flat sideways drag as a push, and clamps it to the limit', () => {
+    expect(aimFromPush(AIM_FULL_PUSH, 0)!.angle).toBe(1);
+    expect(aimFromPush(-AIM_FULL_PUSH, 0)!.angle).toBe(-1);
+  });
+
+  it('clamps power past full reach, so the ring being the edge is the truth', () => {
     const far = aimFromPush(AIM_FULL_PUSH * 4, -AIM_FULL_PUSH * 4)!;
-    expect(far.angle).toBe(1);
     expect(far.power).toBe(1);
+    // Dragging FURTHER does not swing the aim: 45° is 45°, at any distance.
+    expect(degOf(far)).toBeCloseTo(45, 10);
+    expect(degOf(aimFromPush(AIM_FULL_PUSH / 8, -AIM_FULL_PUSH / 8)!)).toBeCloseTo(45, 10);
+  });
+
+  it('clamps the angle only past the limit, not past full reach', () => {
+    // Just inside the limit is reported exactly; beyond it pins to the edge.
+    const nearRad = ((SERVE_MAX_ANGLE_DEG - 5) * Math.PI) / 180;
+    const near = aimFromPush(Math.sin(nearRad) * 0.3, -Math.cos(nearRad) * 0.3)!;
+    expect(degOf(near)).toBeCloseTo(SERVE_MAX_ANGLE_DEG - 5, 10);
+    const pastRad = ((SERVE_MAX_ANGLE_DEG + 20) * Math.PI) / 180;
+    expect(aimFromPush(Math.sin(pastRad) * 0.3, -Math.cos(pastRad) * 0.3)!.angle).toBe(1);
     expect(aimFromPush(-AIM_FULL_PUSH * 4, 0)!.angle).toBe(-1);
+  });
+
+  // The angle is measured against what THIS match allows, not the stock 55°,
+  // so the line the player follows is the line the ball takes at every rule
+  // setting. Clamping against the constant would compress or stretch the aim
+  // the moment `serveAngleMax` was not 1.
+  it('round-trips through serveVelocity at any serve-angle rule', () => {
+    const rad = (25 * Math.PI) / 180;
+    const drag: [number, number] = [Math.sin(rad) * 0.2, -Math.cos(rad) * 0.2];
+    for (const serveAngleMax of [0.8, 1, 1.2]) {
+      const limit = SERVE_MAX_ANGLE_DEG * serveAngleMax;
+      const aim = aimFromPush(drag[0], drag[1], limit)!;
+      const v = serveVelocity(aim, { serveAngleMax });
+      expect((Math.atan2(v.vx, -v.vy) * 180) / Math.PI).toBeCloseTo(25, 6);
+    }
+  });
+
+  it('serves straight up when the rules forbid any deflection at all', () => {
+    // `serveAngleMax` floors at 0, and that is a serve up the middle rather
+    // than a division by zero.
+    const aim = aimFromPush(AIM_FULL_PUSH, -AIM_FULL_PUSH, 0)!;
+    expect(aim.angle).toBe(0);
+    expect(aim.power).toBe(1);
+  });
+
+  it('never serves anywhere but into the opponent\'s half', () => {
+    for (let i = 0; i < 200; i++) {
+      const dx = (Math.random() - 0.5) * 2;
+      const dy = (Math.random() - 0.5) * 2;
+      const aim = aimFromPush(dx, dy);
+      if (!aim) continue;
+      expect(serveVelocity(aim).vy).toBeLessThan(0);
+    }
   });
 });
 

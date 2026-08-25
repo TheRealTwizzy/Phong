@@ -160,10 +160,10 @@ async function startDuel(host, guest) {
   }
 }
 
-async function tapServe(page) {
-  const box = await (await page.$('#half-court-canvas')).boundingBox();
-  if (!box) fail('canvas has no bounding box');
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height * 0.9);
+// Space rather than a tap: the first pointer down is the paddle now, always,
+// so a lone click only moves it. A no-op when it is not this player's serve.
+async function pressServe(page) {
+  await page.keyboard.press('Space');
 }
 
 const totalPoints = (page) =>
@@ -176,8 +176,8 @@ const totalPoints = (page) =>
 const overlayUp = (page) => page.$('#btn-play-again').then((el) => !!el);
 
 /**
- * Park both paddles hard left and keep tapping serve on both phones until
- * someone wins. Whichever side holds the serve, one of the two taps lands;
+ * Park both paddles hard left and keep asking to serve on both phones until
+ * someone wins. Whichever side holds the serve, one of the two asks lands;
  * with both paddles parked the point resolves in a couple of seconds.
  */
 async function playToWinner(host, guest, label) {
@@ -186,8 +186,8 @@ async function playToWinner(host, guest, label) {
   const deadline = Date.now() + 90000;
   while (Date.now() < deadline) {
     if (await overlayUp(host)) break;
-    await tapServe(host).catch(() => {});
-    await tapServe(guest).catch(() => {});
+    await pressServe(host).catch(() => {});
+    await pressServe(guest).catch(() => {});
     await host.waitForTimeout(1200);
   }
   await host.keyboard.up('KeyA');
@@ -441,9 +441,9 @@ for (const transport of ['relay', 'p2p']) {
   await guest.waitForSelector('#match-countdown', { timeout: 3000 });
   ok('both phones count down together from the moment the host starts');
 
-  // The host holds the first serve: a tap during the countdown must not put
+  // The host holds the first serve: a serve during the countdown must not put
   // a ball in play.
-  await tapServe(host).catch(() => {});
+  await pressServe(host).catch(() => {});
   const early = await host.evaluate(async (c) => (await fetch(`/api/room/${c}`)).json(), code);
   if (early.inPlay) fail('a serve landed during the start countdown');
   ok('serves are refused while the countdown runs');
