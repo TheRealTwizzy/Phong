@@ -7,6 +7,17 @@ export const PADDLE_HEIGHT = 0.024;
 // Fixed for every player and mode — fairness rule: paddle width and ball
 // speed are never exposed as user settings.
 export const PADDLE_WIDTH_RATIO = 0.22;
+
+/**
+ * Where a serve is held, and launched from: resting on the paddle's face,
+ * dead centre.
+ *
+ * The ball sits here and tracks the paddle until the serve fires, so the ball
+ * the player is aiming IS the ball that leaves. Nothing was drawn here at all
+ * before — the court had no ball on it while the player lined a serve up, and
+ * one simply appeared, a visible distance above the paddle, once they let go.
+ */
+export const SERVE_BALL_Y = PADDLE_Y - PADDLE_HEIGHT / 2 - 0.012;
 export const BALL_BASE_RADIUS = 0.022;
 export const BASE_BALL_SPEED = 0.85; // units per second
 export const MAX_BALL_SPEED = 2.4;
@@ -50,32 +61,65 @@ export interface ServeAim {
 }
 
 /**
- * The serving joystick's geometry, in normalized court units.
+ * The serving joystick's geometry, as a fraction of the canvas WIDTH.
  *
- * A push UP from wherever the thumb landed sets the serve: sideways is angle,
- * upward reach is power. It pushes rather than pulls because the paddle sits
- * at 90% of the court height — a pull-back has ~10% of the screen below it and
- * full power would be unreachable.
+ * Width on BOTH axes, deliberately. These were a fraction of the width
+ * horizontally and of the height vertically, which makes a circle in these
+ * units an ellipse on a tall phone: the direction the thumb pushed and the
+ * direction the ball left were then simply different angles, and the drawn
+ * stick lied about where the serve was going. One unit on both axes is what
+ * lets the overlay promise "the ball travels along this line" and mean it.
  *
  * These live here rather than in the canvas component so the mapping is a rule
  * the fast test layer can state, instead of something only a browser can
  * observe. The component draws the ring; this decides what the ring means.
  */
 export const AIM_FULL_PUSH = 0.35;
-export const AIM_DEADZONE = 0.02;
+export const AIM_DEADZONE = 0.03;
 
 /**
- * A push from the joystick's origin as an aim, or null inside the deadzone —
+ * A drag from the joystick's anchor as an aim, or null inside the deadzone —
  * which is what makes a plain tap still a plain serve.
  *
- * `dx`/`dy` are current-minus-origin in normalized court units, so `dy` is
- * NEGATIVE when the thumb has moved up the screen.
+ * `dx`/`dy` are current-minus-anchor in canvas-width units, so `dy` is NEGATIVE
+ * when the thumb has moved UP the screen.
+ *
+ * It is a true joystick: the DIRECTION of the drag is the direction the ball
+ * leaves in, and its LENGTH is the power. A drag below the anchor is read as a
+ * slingshot — pulled back through the anchor and inverted — because the paddle
+ * sits at 90% of the court height, so a player who wants to aim by pulling has
+ * the whole screen above them to pull away from rather than the ~10% below.
+ * Pushing and pulling therefore reach full power equally, and neither is the
+ * privileged gesture.
+ *
+ * `angleLimitDeg` is how far this match's rules let a serve swing
+ * (`SERVE_MAX_ANGLE_DEG * serveAngleMax`). It is a parameter rather than the
+ * bare constant so the fraction returned here, multiplied back out by
+ * `serveVelocity`, reproduces the aimed angle degree-for-degree under ANY rule
+ * setting — clamping against the stock 55° would silently compress or stretch
+ * the aim whenever the rule was not 1, and the line the player is following
+ * would stop being the line the ball takes.
  */
-export function aimFromPush(dx: number, dy: number): ServeAim | null {
-  if (Math.hypot(dx, dy) < AIM_DEADZONE) return null;
+export function aimFromPush(
+  dx: number,
+  dy: number,
+  angleLimitDeg: number = SERVE_MAX_ANGLE_DEG
+): ServeAim | null {
+  const len = Math.hypot(dx, dy);
+  if (len < AIM_DEADZONE) return null;
+  // Below the anchor is a pull: invert it, so what the player aimed away from
+  // is what the ball is aimed at. `dy === 0` counts as a push, so a flat drag
+  // right serves right.
+  const pull = dy > 0;
+  const ux = pull ? -dx : dx;
+  const uy = pull ? -dy : dy; // never positive from here on
+  // Measured from straight up, positive to the right.
+  const deg = (Math.atan2(ux, -uy) * 180) / Math.PI;
   return {
-    angle: clamp(dx / AIM_FULL_PUSH, -1, 1),
-    power: clamp(-dy / AIM_FULL_PUSH, 0, 1),
+    // A match may forbid any deflection at all (`serveAngleMax` floors at 0),
+    // and that is a serve straight up rather than a division by zero.
+    angle: angleLimitDeg > 0 ? clamp(deg / angleLimitDeg, -1, 1) : 0,
+    power: clamp(len / AIM_FULL_PUSH, 0, 1),
   };
 }
 

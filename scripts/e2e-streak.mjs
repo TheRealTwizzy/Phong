@@ -251,12 +251,11 @@ ok('the HUD reports both players’ streaks as separate numbers');
 // Hold the paddle aside and serve until the match resolves. Keyboard rather
 // than a pointer drag: the window-level handler works in every state, where a
 // pointerdown races the serve state machine (see scripts/e2e-gameplay.mjs).
-const box = await (await page.$('#half-court-canvas')).boundingBox();
 const over = () => page.evaluate(() => !!document.querySelector('#btn-play-again'));
 await page.keyboard.down('KeyA');
 const deadline = Date.now() + 90000;
 while (Date.now() < deadline && !(await over())) {
-  await page.mouse.click(box.x + box.width * 0.12, box.y + box.height * 0.9);
+  await page.keyboard.press('Space');
   await sleep(600);
 }
 await page.keyboard.up('KeyA');

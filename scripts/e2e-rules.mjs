@@ -301,36 +301,53 @@ if (farmProfile.modeStats?.practice?.currentStreak !== 400) {
 }
 ok('a session that returned nothing pays nothing, and the run carries on');
 
-// ---- 5. The serve prompt now offers aiming ------------------------------
+// ---- 5. One finger is the paddle, and only ever the paddle -------------
 await page.click('#menu-rules-toggle');
 await page.click('#menu-start-solo');
 await page.waitForTimeout(1200);
 const canvasText = await page.evaluate(() => !!document.querySelector('#half-court-canvas'));
 if (!canvasText) fail('court did not open');
+// The serve prompt and the joystick are drawn to canvas, so the court
+// container's own flag is what says whether a serve is still pending. This
+// used to be read out of `document.body.textContent`, which canvas text never
+// reaches — the check passed no matter what the app did.
+const serving = (p) => p.$eval('#half-court-container', (el) => el.dataset.serving === '1');
+// The paddle is drawn to canvas too; telemetry is the one place it is legible.
+await page.click('#btn-show-stats-overlay');
+await page.waitForSelector('#telemetry-paddle-pos', { timeout: 5000 });
+const paddleAt = (p) => p.$eval('#telemetry-paddle-pos', (el) => parseInt(el.textContent, 10));
 const box = await (await page.$('#half-court-canvas')).boundingBox();
-// Push UP from the paddle to aim, then release to serve. The gesture must
-// reach FULL power without leaving the screen: the paddle sits at 90% of the
-// court height, so a pull-back gesture had only ~10% of travel below it and
-// maximum power was unreachable on a phone.
-const startY = box.y + box.height * 0.9;
-await page.mouse.move(box.x + box.width * 0.5, startY);
+// A lone pointer drags the PADDLE, serve or no serve. It used to be captured
+// as the aim joystick, which took the paddle away from the very thumb the
+// player was already holding it with when the point ended.
+await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.9);
 await page.mouse.down();
-const fullPowerY = startY - box.height * 0.35;
-if (fullPowerY < box.y) fail('a full-power serve gesture runs off the top of the court');
-await page.mouse.move(box.x + box.width * 0.62, fullPowerY, { steps: 10 });
-await page.waitForTimeout(250);
+await page.mouse.move(box.x + box.width * 0.25, box.y + box.height * 0.62, { steps: 10 });
+await page.waitForTimeout(200);
+const dragged = await paddleAt(page);
+if (Math.abs(dragged - 25) > 4) {
+  fail(`a lone pointer did not drive the paddle (${dragged}%, wanted ~25)`);
+}
 await page.mouse.up();
-await page.waitForTimeout(700);
-const served = await page.evaluate(() => !/PUSH UP TO AIM/.test(document.body.textContent));
-if (!served) fail('a push-release did not serve the ball');
-ok('push-up-to-aim reaches full power on screen and serves');
+await page.waitForTimeout(400);
+if (!(await serving(page))) fail('a one-finger drag served — the first pointer is the paddle');
+ok('a lone pointer drives the paddle and never serves');
 
-// ---- 5b. Two thumbs: one aims, the other steers --------------------------
-// The serve gesture kept ONE aim origin, so a second finger silently
-// overwrote the first one's anchor and the aim jumped. Roles are per pointer
-// now: during your own serve the first fresh finger takes the joystick and any
-// other drives the paddle, so you can line up a serve without giving up the
-// paddle you are about to rally with.
+// Space is the desktop serve, and none of this touches it.
+await page.keyboard.press('Space');
+await page.waitForTimeout(600);
+if (await serving(page)) fail('space did not serve the ball');
+ok('space still serves');
+
+// ---- 5b. Two thumbs: the first holds the paddle, the second aims --------
+// A player comes into a serve already holding the paddle from the point they
+// just lost. A role is the pointer's AGE RANK among the fingers currently
+// down: the oldest drives the paddle, always, and the second — while this
+// player is serving — is the aim joystick.
+//
+// It used to be the reverse. The first finger down took the joystick and any
+// later one drove the paddle, so the thumb already playing was conscripted
+// into aiming and steering was handed to the thumb that came to aim.
 //
 // Only a browser can say this — and only through CDP, because
 // setPointerCapture throws on a synthetic pointer id, so dispatched
@@ -340,8 +357,6 @@ ok('push-up-to-aim reaches full power on screen and serves');
   await two.click('#menu-mode-solo');
   await two.click('#menu-start-solo');
   await two.waitForSelector('#half-court-canvas', { timeout: 5000 });
-  // The paddle is drawn to canvas and is nowhere in the DOM; the telemetry
-  // panel is the one place that reports where it is. It starts hidden.
   await two.click('#btn-show-stats-overlay');
   await two.waitForSelector('#telemetry-paddle-pos', { timeout: 5000 });
 
@@ -359,46 +374,69 @@ ok('push-up-to-aim reaches full power on screen and serves');
         force: 1,
       })),
     });
-  const paddlePct = () =>
-    two.$eval('#telemetry-paddle-pos', (el) => parseInt(el.textContent, 10));
   const settle = () =>
     two.evaluate(
       () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
     );
 
   await settle();
-  const before = await paddlePct();
+  if (!(await serving(two))) fail('the second court did not open on a serve');
 
-  // Thumb one lands during the serve: it takes the joystick, not the paddle.
+  // Thumb one is down when the serve starts: it is the paddle, and it steers.
   await touch('touchStart', [{ x: 0.5, y: 0.9, id: 1 }]);
-  await touch('touchMove', [{ x: 0.62, y: 0.58, id: 1 }]);
+  await touch('touchMove', [{ x: 0.35, y: 0.9, id: 1 }]);
   await settle();
-  const aiming = await paddlePct();
-  if (aiming !== before) fail(`the aiming thumb dragged the paddle (${before} -> ${aiming})`);
-  ok('the first thumb down during a serve aims, and leaves the paddle where it was');
+  const held = await paddleAt(two);
+  if (Math.abs(held - 35) > 4) {
+    fail(`the first thumb did not hold the paddle (${held}%, wanted ~35)`);
+  }
+  ok('the first thumb down holds the paddle, serving or not');
 
-  // Thumb two steers while the first keeps aiming.
+  // Thumb two lands and aims. The paddle must not follow it anywhere.
   await touch('touchStart', [
-    { x: 0.62, y: 0.58, id: 1 },
-    { x: 0.22, y: 0.9, id: 2 },
+    { x: 0.35, y: 0.9, id: 1 },
+    { x: 0.7, y: 0.7, id: 2 },
   ]);
   await touch('touchMove', [
-    { x: 0.62, y: 0.58, id: 1 },
-    { x: 0.3, y: 0.9, id: 2 },
+    { x: 0.35, y: 0.9, id: 1 },
+    { x: 0.78, y: 0.45, id: 2 },
   ]);
   await settle();
-  const steered = await paddlePct();
-  if (Math.abs(steered - 30) > 4) {
-    fail(`the second thumb did not steer the paddle (${before} -> ${steered}, wanted ~30)`);
+  const whileAiming = await paddleAt(two);
+  if (Math.abs(whileAiming - 35) > 4) {
+    fail(`the aiming thumb dragged the paddle (${held}% -> ${whileAiming}%)`);
   }
-  ok('a second thumb steers the paddle while the first is still aiming');
+  if (!(await serving(two))) fail('aiming served the ball before the thumb was lifted');
+  ok('a second thumb aims without taking the paddle');
 
-  // Lifting the aiming thumb is the serve.
-  await touch('touchEnd', []);
+  // And the first thumb keeps steering while the second is still aiming.
+  await touch('touchMove', [
+    { x: 0.2, y: 0.9, id: 1 },
+    { x: 0.78, y: 0.45, id: 2 },
+  ]);
+  await settle();
+  const steered = await paddleAt(two);
+  if (Math.abs(steered - 20) > 4) {
+    fail(`the paddle thumb stopped steering while aiming (${steered}%, wanted ~20)`);
+  }
+  ok('the paddle thumb keeps steering while the second aims');
+
+  // Lifting the AIMING thumb is the serve; the paddle thumb stays down.
+  //
+  // `touchEnd` takes the points being RELEASED, not the ones left active —
+  // the opposite of what the protocol's own wording ("Active touch points on
+  // the touch device") suggests, and verified against a real Chromium. This
+  // suite used to end with `touchEnd([])`, which releases nothing at all; the
+  // serve it then asserted was read out of `document.body.textContent`, which
+  // canvas text never reaches, so both halves passed no matter what happened.
+  await touch('touchEnd', [{ x: 0.78, y: 0.45, id: 2 }]);
   await two.waitForTimeout(700);
-  const served = await two.evaluate(() => !/PUSH UP TO AIM/.test(document.body.textContent));
-  if (!served) fail('releasing the joystick did not serve');
-  ok('releasing the aiming thumb serves');
+  if (await serving(two)) fail('releasing the aiming thumb did not serve');
+  const after = await paddleAt(two);
+  if (Math.abs(after - 20) > 4) {
+    fail(`the paddle jumped when the serve fired (${steered}% -> ${after}%)`);
+  }
+  ok('releasing the aiming thumb serves, and the paddle never moves for it');
   await two.context().close();
 }
 
@@ -434,8 +472,7 @@ if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
 
   // Serve, then watch a few seconds of real rally: the sonar must appear
   // while the ball is on the opponent's half and vanish when it comes back.
-  const box = await (await solo.$('#half-court-canvas')).boundingBox();
-  await solo.mouse.click(box.x + box.width / 2, box.y + box.height * 0.9);
+  await solo.keyboard.press('Space');
   let sawVisible = false;
   let sawHidden = false;
   let lastBallLeft = null;

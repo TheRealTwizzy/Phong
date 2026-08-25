@@ -2,7 +2,7 @@
 //  1. Host creates a room via the real UI, guest joins by ?room= link,
 //     the WebRTC DataChannel link comes up (badge P2P on both).
 //  2. GAMEPLAY over P2P: host serves, guest (paddle moved aside) misses →
-//     1-0 on BOTH scoreboards; the misser then serves — guest taps serve,
+//     1-0 on BOTH scoreboards; the misser then serves — guest asks to serve,
 //     host (paddle aside) misses → 1-1 on both. Proves the serve handoff
 //     in both directions (this scenario hangs on the pre-fix freeze bug).
 //  3. Second room with the P2P toggle off — badge stays RELAY.
@@ -135,16 +135,12 @@ async function startDuel(host, guest) {
   }
 }
 
-async function canvasBox(page) {
-  const box = await (await page.$('#half-court-canvas')).boundingBox();
-  if (!box) fail('canvas has no bounding box');
-  return box;
-}
-
-// Single tap near the bottom center: serves when it's this player's serve
-async function tapServe(page) {
-  const box = await canvasBox(page);
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height * 0.9);
+// Ask for the serve. Space rather than a tap: the first pointer down is the
+// paddle now, always, so a lone click only moves it — serving takes a second
+// finger, which a mouse does not have. A no-op when it is not this player's
+// serve, exactly as the tap was.
+async function pressServe(page) {
+  await page.keyboard.press('Space');
 }
 
 // Keyboard paddle parking (the window-level A/D handler works in every
@@ -196,8 +192,9 @@ const guest = await newPage();
 // The serve's horizontal drift is random, so which side eventually misses
 // is not deterministic (a parked corner can still return a lucky serve).
 // What IS invariant, and what this scenario proves: play starts from the
-// server's tap, the point resolves, BOTH scoreboards agree exactly, and the
-// misser holds the next serve (their tap — and only theirs — starts point 2;
+// server's request, the point resolves, BOTH scoreboards agree exactly, and
+// the misser holds the next serve (their request — and only theirs — starts
+// point 2;
 // the pre-fix freeze bug times out here).
 {
   await startDuel(host, guest);
@@ -207,7 +204,7 @@ const guest = await newPage();
   // Point 1: park the guest, host serves, then park the host too so the
   // rally must end.
   await parkLeft(guest);
-  await tapServe(host);
+  await pressServe(host);
   await parkLeft(host);
   await waitTotalPoints(host, 1, 20000, 'point 1 (host view)');
   await waitTotalPoints(guest, 1, 4000, 'point 1 (guest view)');
@@ -221,11 +218,11 @@ const guest = await newPage();
   await unpark(host);
   await unpark(guest);
 
-  // Point 2: the misser now holds the serve — their tap must start play.
+  // Point 2: the misser now holds the serve — their request must start play.
   const misser = guestMissed ? guest : host;
   const other = guestMissed ? host : guest;
   await parkLeft(other);
-  await tapServe(misser);
+  await pressServe(misser);
   await parkLeft(misser);
   await waitTotalPoints(host, 2, 20000, 'point 2 (host view)');
   await waitTotalPoints(guest, 2, 4000, 'point 2 (guest view)');

@@ -26,6 +26,7 @@ import { nextRunSeq } from './net/runChain';
 import { THEMES, ThemeConfig } from './game/themes';
 import {
   PADDLE_Y,
+  SERVE_BALL_Y,
   PADDLE_HEIGHT,
   PADDLE_WIDTH_RATIO,
   BALL_BASE_RADIUS,
@@ -305,13 +306,18 @@ export default function App() {
   });
 
   // Active Player Half Court Ball State
+  // A match opens on a serve, so the ball opens in the player's hand: held at
+  // the paddle, still, and inactive. It used to start active at mid-court with
+  // a velocity, which only the serve-gated physics loop stopped from being a
+  // ball loose on the court — and which drew a second, stray ball beside the
+  // one waiting on the paddle.
   const [ball, setBall] = useState<BallState>({
     x: 0.5,
-    y: 0.82,
-    vx: 0.3,
-    vy: -BASE_BALL_SPEED,
+    y: SERVE_BALL_Y,
+    vx: 0,
+    vy: 0,
     radius: BALL_BASE_RADIUS,
-    active: true,
+    active: false,
   });
 
   // Simulated Opponent Court Ball State (for AI solo mode & radar preview)
@@ -1167,7 +1173,7 @@ export default function App() {
         // Serve starts from player's paddle heading UP towards net
         setBall({
           x: paddleXRef.current,
-          y: PADDLE_Y - 0.05,
+          y: SERVE_BALL_Y,
           vx: launch.vx,
           vy: launch.vy,
           radius: ballRadiusRef.current,
@@ -1189,7 +1195,7 @@ export default function App() {
             // serve obeys — it used to launch from a hardcoded centre no
             // matter where the AI was actually standing.
             x: aiRef.current.paddleX,
-            y: PADDLE_Y - 0.05,
+            y: SERVE_BALL_Y,
             vx: aiLaunch.vx,
             vy: aiLaunch.vy,
             radius: ballRadiusRef.current,
@@ -2462,13 +2468,14 @@ export default function App() {
     matchKeyRef.current = '';
     shownMatchKeyRef.current = '';
     aiRef.current.reset();
+    // Back into the server's hand, exactly as a fresh match opens.
     setBall({
-      x: 0.5,
-      y: 0.82,
-      vx: 0.3,
-      vy: -BASE_BALL_SPEED,
+      x: paddleXRef.current,
+      y: SERVE_BALL_Y,
+      vx: 0,
+      vy: 0,
       radius: ballRadiusRef.current,
-      active: true,
+      active: false,
     });
     setOppBall(null);
   };
