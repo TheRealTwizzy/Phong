@@ -920,6 +920,57 @@ async function startServer() {
     }
   });
 
+  /** The one page size history is served in, own and public alike. */
+  const HISTORY_PAGE_SIZE = 10;
+
+  /**
+   * The history filters as the UI speaks them, coerced leniently the way the
+   * leaderboard's params are: an unknown tab is 'all', an unknown ranked
+   * filter is no filter, a bad page is page 1. `tab` maps to the stored mode
+   * ('pvp' is the multiplayer mode's UI name); practice rows are ranked 0 by
+   * construction, so a ranked filter on that tab is harmless rather than an
+   * error.
+   */
+  const parseHistoryQuery = (
+    q: Record<string, unknown>
+  ): { mode?: 'multiplayer' | 'solo' | 'practice'; ranked?: 'ranked' | 'unranked'; page: number } => {
+    const tab = String(q.tab ?? 'all');
+    const mode =
+      tab === 'pvp' ? ('multiplayer' as const)
+      : tab === 'solo' ? ('solo' as const)
+      : tab === 'practice' ? ('practice' as const)
+      : undefined;
+    const ranked = q.ranked === 'ranked' || q.ranked === 'unranked' ? q.ranked : undefined;
+    const claimed = Math.floor(Number(q.page));
+    const page = Number.isFinite(claimed) ? Math.min(Math.max(claimed, 1), 1000) : 1;
+    return { mode, ranked, page };
+  };
+
+  // Public match history — the same rows the player's own history shows,
+  // already free of anything private (usernames and scores are match facts,
+  // and a deleted opponent arrives pre-scrubbed). Refuses ids that resolve to
+  // no public profile, exactly as /api/profile/:id does — including 'me',
+  // which is never a stored id. Registered before /api/profile/:id for the
+  // same reason that route stays last among its literal siblings; the
+  // two-segment pattern cannot shadow the one-segment ones either way.
+  app.get('/api/profile/:id/matches', (req, res) => {
+    try {
+      if (!db.getPublicProfile(req.params.id)) {
+        return res.status(404).json({ error: 'NOT_FOUND' });
+      }
+      const { mode, ranked, page } = parseHistoryQuery(req.query);
+      const { matches, total } = db.getMatchHistoryPage(req.params.id, {
+        mode,
+        ranked,
+        limit: HISTORY_PAGE_SIZE,
+        offset: (page - 1) * HISTORY_PAGE_SIZE,
+      });
+      res.json({ matches, total, page, pageSize: HISTORY_PAGE_SIZE });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Public profile view — anyone can look up any player by id (tapping a
   // username in the UI). Sanitized server-side: no recovery code, no
   // activity timestamps. MUST stay registered after every literal
@@ -1172,11 +1223,21 @@ async function startServer() {
     }
   });
 
-  // Match History API
+  // Match History API. Filters and paging are shared with the public
+  // per-player route above — one parser, so the two views of a history can
+  // never disagree about what a tab means.
   app.get('/api/matches/me', blockReleasedDevice, (req, res) => {
     try {
-      const history = db.getMatchHistory(req.deviceId!);
-      res.json({ matches: history });
+      const { mode, ranked, page } = parseHistoryQuery(req.query);
+      const { matches, total } = db.getMatchHistoryPage(req.deviceId!, {
+        mode,
+        ranked,
+        limit: HISTORY_PAGE_SIZE,
+        offset: (page - 1) * HISTORY_PAGE_SIZE,
+      });
+      // `matches` keeps its name and shape: a stale bundle still open across
+      // the deploy reads data.matches and slices ten for itself.
+      res.json({ matches, total, page, pageSize: HISTORY_PAGE_SIZE });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

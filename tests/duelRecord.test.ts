@@ -794,6 +794,57 @@ describe('recording a duel', () => {
     expect(profile.xp).toBe(0);
   });
 
+  it('serves each player one paged history row per match, publicly too', async () => {
+    const host = await newDevice('PubHistHost');
+    const guest = await newDevice('PubHistGuest');
+    const { p1, p2 } = await seatDuel(host, guest, 3);
+    for (let i = 0; i < 3; i++) p1.send({ type: 'point_scored', scorer: 'p1' });
+    await p1.await('match_recorded');
+    await p2.await('match_recorded');
+
+    // Own history: one row for the one duel, own perspective, and the paging
+    // envelope alongside the back-compatible `matches` field.
+    const mine = await (
+      await fetch(`${base}/api/matches/me`, { headers: { cookie: host.cookie } })
+    ).json();
+    expect(mine.matches).toHaveLength(1);
+    expect(mine.total).toBe(1);
+    expect(mine.page).toBe(1);
+    expect(mine.pageSize).toBe(10);
+    expect(mine.matches[0].winnerId).toBe(host.id);
+    expect(mine.matches[0].ranked).toBe(1);
+
+    // The loser's history is one LOSS — not their row plus the winner's copy.
+    const theirs = await (
+      await fetch(`${base}/api/matches/me`, { headers: { cookie: guest.cookie } })
+    ).json();
+    expect(theirs.matches).toHaveLength(1);
+    expect(theirs.matches[0].player1Id).toBe(guest.id);
+    expect(theirs.matches[0].winnerId).toBe(host.id);
+
+    // The same rows are public, cookie or no cookie, with the same filters.
+    const pub = await fetch(`${base}/api/profile/${host.id}/matches`);
+    expect(pub.status).toBe(200);
+    const pubBody = await pub.json();
+    expect(pubBody.total).toBe(1);
+    expect(pubBody.matches[0].player1Id).toBe(host.id);
+    const pvp = await (
+      await fetch(`${base}/api/profile/${host.id}/matches?tab=pvp&ranked=ranked`)
+    ).json();
+    expect(pvp.total).toBe(1);
+    const solo = await (await fetch(`${base}/api/profile/${host.id}/matches?tab=solo`)).json();
+    expect(solo.total).toBe(0);
+
+    // 'me' is never a stored id, and an uninitialized profile has no public
+    // history — both are the same 404 the public profile route answers.
+    expect((await fetch(`${base}/api/profile/me/matches`)).status).toBe(404);
+    const stranger = await newUnclaimedDevice();
+    expect((await fetch(`${base}/api/profile/${stranger.id}/matches`)).status).toBe(404);
+
+    p1.close();
+    p2.close();
+  });
+
   it('keeps a solo match that only the device can report', async () => {
     const player = await newDevice('SoloOnly');
     const body = {

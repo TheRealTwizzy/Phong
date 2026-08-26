@@ -2983,6 +2983,49 @@ class GameDatabase {
       )
       .all(playerId, limit) as unknown as MatchRecord[];
   }
+
+  /**
+   * One page of a player's history, filtered the way the history UI filters:
+   * by mode, and inside a mode by whether the match counted for rank.
+   *
+   * Same ownership rule as getMatchHistory — player1 only, the rows this
+   * player filed themselves. `total` counts the SAME filter, so the caller
+   * can page without a second query shape to keep in agreement. A NULL
+   * `ranked` (a row from before the column existed) is deliberately folded
+   * into 'unranked': ranked-ness cannot be reconstructed for those rows, and
+   * a filter that hid them from both sub-tabs would make matches vanish the
+   * moment a filter is touched.
+   */
+  public getMatchHistoryPage(
+    playerId: string,
+    opts: {
+      mode?: 'multiplayer' | 'solo' | 'practice';
+      ranked?: 'ranked' | 'unranked';
+      limit?: number;
+      offset?: number;
+    } = {}
+  ): { matches: MatchRecord[]; total: number } {
+    const where: string[] = ['player1Id = ?'];
+    const binds: Array<string | number> = [playerId];
+    if (opts.mode) {
+      where.push('mode = ?');
+      binds.push(opts.mode);
+    }
+    if (opts.ranked === 'ranked') where.push('ranked = 1');
+    else if (opts.ranked === 'unranked') where.push('(ranked IS NULL OR ranked = 0)');
+    const cond = where.join(' AND ');
+
+    const total = (
+      this.stmt(`SELECT COUNT(*) AS n FROM matches WHERE ${cond}`).get(...binds) as { n: number }
+    ).n;
+    const limit = Math.max(1, Math.min(50, Math.floor(opts.limit ?? 10)));
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    const matches = this.stmt(
+        `SELECT * FROM matches WHERE ${cond} ORDER BY rowid DESC LIMIT ? OFFSET ?`
+      )
+      .all(...binds, limit, offset) as unknown as MatchRecord[];
+    return { matches, total };
+  }
 }
 
 export const db = new GameDatabase();
