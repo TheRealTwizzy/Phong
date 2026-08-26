@@ -253,6 +253,75 @@ const practiceCard = await host.$eval('[id^="history-record-"]', (el) => el.text
 if (/VICTORY|DEFEAT/.test(practiceCard)) fail('a practice session renders a W/L verdict');
 ok('practice session listed under its tab, with no W/L verdict');
 
+// ---- 4b. Quitting a live solo match records the loss ---------------------
+// Quitting a match you are losing used to record nothing at all, so a player
+// who quit every losing solo match kept a 100% win rate. A match a point has
+// been scored in is a match that happened.
+await host.click('#btn-close-match-history');
+await host.waitForSelector('#main-menu-screen', { timeout: 5000 });
+const lossesBefore = (await api(host, '/api/profile/me')).matchesLost;
+
+await host.click('#menu-mode-solo');
+await host.waitForSelector('#menu-start-solo', { timeout: 5000 });
+await host.click('#menu-start-solo');
+await host.waitForSelector('#half-court-canvas', { timeout: 8000 });
+// Park the paddle in a corner and keep asking to serve until the AI takes a
+// point — the ball comes back to an empty half and goes past.
+const opponentScore = () =>
+  host.evaluate(() => {
+    const opp = parseInt(document.querySelector('#score-opponent')?.textContent || '', 10);
+    return Number.isFinite(opp) ? opp : 0;
+  });
+await host.keyboard.down('KeyA');
+let conceded = false;
+const concedeDeadline = Date.now() + 60000;
+while (Date.now() < concedeDeadline) {
+  if ((await opponentScore()) >= 1) {
+    conceded = true;
+    break;
+  }
+  await host.keyboard.press('Space').catch(() => {});
+  await host.waitForTimeout(800);
+}
+await host.keyboard.up('KeyA');
+if (!conceded) fail('the solo AI never took a point, so the quit-loss case never ran');
+
+await host.click('#btn-quit-to-menu');
+await host.waitForSelector('#main-menu-screen', { timeout: 5000 });
+let afterQuit = null;
+for (let i = 0; i < 40; i++) {
+  afterQuit = await api(host, '/api/profile/me');
+  if (afterQuit.matchesLost > lossesBefore) break;
+  await host.waitForTimeout(250);
+}
+if (afterQuit.matchesLost !== lossesBefore + 1) {
+  fail(`quitting a live solo match recorded ${afterQuit.matchesLost - lossesBefore} losses, expected 1`);
+}
+const soloHistory = await api(host, '/api/matches/me?tab=solo');
+const quitRow = soloHistory.matches[0];
+if (quitRow.winnerId === (await api(host, '/api/profile/me')).id) {
+  fail('the quit match was recorded as a win');
+}
+ok('quitting a live solo match records it as a loss');
+
+// A match nobody has scored in is not a match: quitting at 0-0 records
+// nothing, so backing out of one that never started costs nothing.
+const beforeIdle = (await api(host, '/api/matches/me')).total;
+await host.click('#menu-mode-solo');
+await host.waitForSelector('#menu-start-solo', { timeout: 5000 });
+await host.click('#menu-start-solo');
+await host.waitForSelector('#half-court-canvas', { timeout: 8000 });
+await host.click('#btn-quit-to-menu');
+await host.waitForSelector('#main-menu-screen', { timeout: 5000 });
+await host.waitForTimeout(1000);
+const afterIdle = (await api(host, '/api/matches/me')).total;
+if (afterIdle !== beforeIdle) fail(`quitting at 0-0 recorded ${afterIdle - beforeIdle} match(es)`);
+ok('quitting at 0-0 records nothing');
+
+// Re-open history for the public-profile leg below.
+await host.click('#menu-nav-history');
+await host.waitForSelector('#match-history-container', { timeout: 5000 });
+
 // ---- 5. Public history on the opponent's profile -------------------------
 await host.click('#history-tab-pvp');
 await host.waitForSelector('[id^="history-opponent-"]', { timeout: 5000 });

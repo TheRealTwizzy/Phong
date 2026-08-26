@@ -2619,6 +2619,25 @@ export default function App() {
     [queueRunWrite]
   );
 
+  /**
+   * Whether leaving right now walks out of a solo match that is genuinely
+   * under way — the case that has to be recorded as a loss.
+   *
+   * A duel's walkout is judged by the relay (see vacateSeat); this is the
+   * solo half, and it is the client's to judge because a solo match exists
+   * only here. Quitting a match a point has been scored in is losing it: a
+   * player who quits every solo match they are behind in otherwise records
+   * only their wins, which is half of the reported 100% win rate. At 0-0
+   * nothing has happened yet — backing out of a match that never really
+   * started costs nothing, and neither the tour's match (which banks nothing)
+   * nor an already-decided one is ours to record.
+   */
+  const abandoningLiveSoloMatch = (): boolean =>
+    modeRef.current === 'solo' &&
+    !tourMatchRef.current &&
+    !winner &&
+    statsRef.current.score + statsRef.current.opponentScore >= 1;
+
   const quitToMenu = () => {
     if (mode === 'multiplayer') {
       // A live duel is worth a second look before walking out: leaving
@@ -2651,7 +2670,8 @@ export default function App() {
       // reload: the stored run is what a fresh page reads, and it would still
       // hold whatever the last COMPLETED match left there.
       rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
-      void reportStreak(modeRef.current, statsRef.current.streak);
+      if (abandoningLiveSoloMatch()) void recordMatchCompletion(false);
+      else void reportStreak(modeRef.current, statsRef.current.streak);
     }
     setScreen('menu');
     resetMatch();
@@ -2682,7 +2702,14 @@ export default function App() {
     // the match it plays never happened.
     if (!tourMatchRef.current) {
       rememberCarry(carryRef.current, modeRef.current, run);
-      void reportStreak(modeRef.current, run);
+      // Restarting a solo match a point has been scored in abandons it, the
+      // same as walking out to the menu — so it is recorded the same way.
+      // Without this Reset is simply the free version of the walkout: quit
+      // the ones you are losing, press Reset instead of Home, and only your
+      // wins are ever recorded. The run still carries (a restart is not a
+      // miss); it is the MATCH that ends here, as a loss.
+      if (abandoningLiveSoloMatch()) void recordMatchCompletion(false);
+      else void reportStreak(modeRef.current, run);
     }
     resetMatch(modeRef.current, run);
   };
