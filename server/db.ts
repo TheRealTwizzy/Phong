@@ -2904,10 +2904,17 @@ class GameDatabase {
   }
 
   public getMatchHistory(playerId: string, limit = 15): MatchRecord[] {
+    // player1 only, deliberately. Every seat of a duel files its OWN row with
+    // itself as player1 (see recordMatch), so the player's own filed row is
+    // the complete, correctly-oriented record of that match — reading the
+    // player2 column as well matched the OPPONENT's copy too, and every duel
+    // showed up twice: two WIN cards for the winner, two LOSS cards for the
+    // loser. player2Id still matters to deleteAccount's pointer scrub and
+    // moveAccount's re-key; it just isn't a history membership test.
     return this.stmt(
-        'SELECT * FROM matches WHERE player1Id = ? OR player2Id = ? ORDER BY rowid DESC LIMIT ?'
+        'SELECT * FROM matches WHERE player1Id = ? ORDER BY rowid DESC LIMIT ?'
       )
-      .all(playerId, playerId, limit) as unknown as MatchRecord[];
+      .all(playerId, limit) as unknown as MatchRecord[];
   }
 }
 

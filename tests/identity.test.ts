@@ -394,12 +394,12 @@ describe('deleting an account', () => {
       playerScore: 5, opponentScore: 3, bestStreak: 6, endStreak: 6, earnedStreak: 6,
       mode: 'multiplayer', isWinner: true, matchKey: 'delete:duel:1',
     } as never);
-    // Two rows, and each player's history matches both of them — a duel is
-    // filed once per seat and getMatchHistory looks at both id columns. That
-    // is the product as it stands and not what this test is about; what
-    // matters below is which of the two survives whom.
-    expect(db.getMatchHistory(leaver).length).toBe(2);
-    expect(db.getMatchHistory(stayer).length).toBe(2);
+    // Two rows in the table, ONE in each player's history: a duel is filed
+    // once per seat, and getMatchHistory reads only the row the player filed
+    // themselves (player1) — reading both id columns is how every duel used
+    // to show up twice. What matters below is which row survives whom.
+    expect(db.getMatchHistory(leaver).length).toBe(1);
+    expect(db.getMatchHistory(stayer).length).toBe(1);
 
     db.deleteAccount(leaver);
 
