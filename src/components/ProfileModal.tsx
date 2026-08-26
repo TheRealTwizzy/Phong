@@ -339,7 +339,11 @@ export const ProfileModal: React.FC<Props> = ({
                   {profile.tier === 'unranked' && (
                     <span className="text-[10px] text-slate-400 font-mono">
                       {t('placement_progress', language, {
-                        played: String(profile.rankedGames),
+                        // Clamped like RankBadge's meter: placement counts
+                        // games AND needs sigma to settle, so an unplaced
+                        // player can legitimately hold more ranked games than
+                        // the placement number — "12/5" reads as a bug.
+                        played: String(Math.min(profile.rankedGames, PLACEMENT_GAMES)),
                         total: String(PLACEMENT_GAMES),
                       })}
                     </span>

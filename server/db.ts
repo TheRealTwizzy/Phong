@@ -2842,7 +2842,10 @@ class GameDatabase {
       level: 'xp DESC',
       rally: 'highestRally DESC',
       wins: 'matchesWon DESC',
-      elo: '(rankedGames >= 5 AND rankSigma <= 4.0) DESC, rankMu DESC',
+      // Placed players first, then by visible rating. The placement test is
+      // the same pair of conditions tierFor applies — from the constants, so
+      // a rebalance of either cannot leave this ORDER BY sorting stale rules.
+      elo: `(rankedGames >= ${PLACEMENT_GAMES} AND rankSigma <= ${PLACEMENT_SIGMA}) DESC, rankMu DESC`,
     }[sortBy];
 
     // A board only lists players with progress on the thing IT measures.
