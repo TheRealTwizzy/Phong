@@ -286,8 +286,27 @@ while (Date.now() < concedeDeadline) {
 await host.keyboard.up('KeyA');
 if (!conceded) fail('the solo AI never took a point, so the quit-loss case never ran');
 
+// Reset ends the match just as surely as walking out, so it asks the same
+// question — and "keep playing" leaves the match exactly where it was.
+await host.click('#btn-reset-match');
+await host.waitForSelector('#quit-confirm-modal', { timeout: 4000 });
+const resetWarning = await host.textContent('#quit-confirm-consequence');
+if (!/loss/i.test(resetWarning || '')) fail(`the reset confirmation does not mention the loss: ${resetWarning}`);
+await host.click('#btn-quit-cancel');
+await host.waitForSelector('#quit-confirm-modal', { state: 'detached', timeout: 4000 });
+if (!(await host.$('#half-court-canvas'))) fail('cancelling the confirmation left the court');
+if ((await opponentScore()) < 1) fail('cancelling the confirmation reset the match anyway');
+ok('Reset asks before it ends the match, and cancelling keeps it running');
+
+// Leaving a live match asks first, and says what it costs — that is the
+// feature, not an obstacle, so the suite reads the warning before answering.
 await host.click('#btn-quit-to-menu');
+await host.waitForSelector('#quit-confirm-modal', { timeout: 4000 });
+const warning = await host.textContent('#quit-confirm-consequence');
+if (!/loss/i.test(warning || '')) fail(`the leave confirmation does not mention the loss: ${warning}`);
+await host.click('#btn-quit-confirm');
 await host.waitForSelector('#main-menu-screen', { timeout: 5000 });
+ok('leaving a live solo match warns that it records a loss');
 let afterQuit = null;
 for (let i = 0; i < 40; i++) {
   afterQuit = await api(host, '/api/profile/me');
@@ -312,11 +331,14 @@ await host.waitForSelector('#menu-start-solo', { timeout: 5000 });
 await host.click('#menu-start-solo');
 await host.waitForSelector('#half-court-canvas', { timeout: 8000 });
 await host.click('#btn-quit-to-menu');
+// Nothing is at stake at 0-0, so nothing is asked: the confirmation exists
+// for exits that cost the match, and would be noise on one that does not.
+if (await host.$('#quit-confirm-modal')) fail('quitting at 0-0 asked for confirmation');
 await host.waitForSelector('#main-menu-screen', { timeout: 5000 });
 await host.waitForTimeout(1000);
 const afterIdle = (await api(host, '/api/matches/me')).total;
 if (afterIdle !== beforeIdle) fail(`quitting at 0-0 recorded ${afterIdle - beforeIdle} match(es)`);
-ok('quitting at 0-0 records nothing');
+ok('quitting at 0-0 asks nothing and records nothing');
 
 // Re-open history for the public-profile leg below.
 await host.click('#menu-nav-history');
