@@ -954,6 +954,16 @@ async function startServer() {
         chainId: chainIdOf(req.body),
       };
 
+      // Only the two modes that ARE matches record here. Practice and Split
+      // Screen never call this route (practice reports through its own
+      // /api/practice/record; split writes nothing) — but a hand-rolled
+      // payload naming them used to walk straight into recordMatch, where
+      // normalizeDifficulty defaults 'pro' and ranksThisMatch never checked
+      // the mode, so a "practice" result could move rankedGames and rating.
+      if (payload.mode !== 'solo' && payload.mode !== 'multiplayer') {
+        return res.status(400).json({ error: 'BAD_REQUEST' });
+      }
+
       // The achievement tree gates the ladder, so the gate is enforced here
       // too — the menu hides a locked difficulty, but the menu is the client.
       if (payload.mode === 'solo') {

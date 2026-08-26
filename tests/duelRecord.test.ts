@@ -765,6 +765,35 @@ describe('recording a duel', () => {
     p2.close();
   });
 
+  it('refuses a record whose mode is not a match', async () => {
+    // Practice and Split Screen never call this route — practice reports
+    // through /api/practice/record and split records nothing — but a
+    // hand-rolled payload naming them used to reach recordMatch, where
+    // normalizeDifficulty defaults 'pro' and the ranking rule never checked
+    // the mode: a "practice" result could move rankedGames and rating.
+    const player = await newDevice('WallPoster');
+    for (const mode of ['practice', 'split', 'garbage']) {
+      const res = await fetch(`${base}/api/match/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: player.cookie },
+        body: JSON.stringify({
+          playerScore: 5,
+          opponentScore: 0,
+          bestStreak: 3, endStreak: 0, earnedStreak: 3,
+          mode,
+          isWinner: true,
+          matchKey: `bad:${mode}:1`,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('BAD_REQUEST');
+    }
+    const profile = await getProfile(player);
+    expect(profile.matchesPlayed).toBe(0);
+    expect(profile.rankedGames).toBe(0);
+    expect(profile.xp).toBe(0);
+  });
+
   it('keeps a solo match that only the device can report', async () => {
     const player = await newDevice('SoloOnly');
     const body = {
