@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { LanguageCode, PublicProfile } from '../types';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
+import { MatchHistoryList } from './MatchHistoryList';
 import { TierBadge } from './TierBadge';
 import { Sheet, Panel, StatTile } from './ui';
 import { Trophy, Flame, Activity, Target, Award, Bot, Loader2 } from 'lucide-react';
@@ -13,12 +14,19 @@ interface PublicProfileModalProps {
   playerId: string | null;
   onClose: () => void;
   language: LanguageCode;
+  /**
+   * Tapping a username inside this profile's match history swaps the modal
+   * to that player in place — same sheet, new id — rather than stacking a
+   * third layer.
+   */
+  onViewProfile?: (id: string) => void;
 }
 
 export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
   playerId,
   onClose,
   language,
+  onViewProfile,
 }) => {
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'missing'>('loading');
@@ -79,7 +87,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
       id="public-profile-modal-overlay"
       isOpen={Boolean(playerId)}
       onClose={onClose}
-      size="sm"
+      size="md"
       layer="over"
       accent="accent"
       closeId="btn-close-public-profile"
@@ -178,6 +186,24 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
               t('achievements', language)
             )}
           </div>
+
+          {/* Match history, public. Hidden for bots: the roster plays no
+              matches, and an empty tabbed list on every bot profile is
+              noise, not information. */}
+          {!profile.isBot && (
+            <div className="flex flex-col gap-2">
+              <span className="text-kicker text-ink-dim uppercase">
+                {t('public_history_section', language)}
+              </span>
+              <MatchHistoryList
+                language={language}
+                perspectiveId={profile.id}
+                source={{ kind: 'public', playerId: profile.id }}
+                onViewProfile={onViewProfile}
+                idPrefix="public-history"
+              />
+            </div>
+          )}
         </>
       )}
     </Sheet>

@@ -283,6 +283,103 @@ function playerKeyedTablesInSchema(): string[] {
   }
 }
 
+describe('moving an account', () => {
+  it('carries every playerId-keyed table to the new device', () => {
+    // moveAccount walks PLAYER_KEYED_TABLES now, but this test is what makes
+    // that stick: it populates every table in the list under the old device
+    // and asserts the whole set arrives under the new one, so a table added
+    // to the schema (and, via the invariant test below, to the list) is
+    // automatically part of the contract. The bug this pins down: the move
+    // used to carry only avatars and player_mode_stats, and the orphaned
+    // recorded_matches stamps meant every match the account had already been
+    // paid for could be paid AGAIN after a sign-in — while elite_completions
+    // (permanent theme unlocks) and the daily tables were silently lost.
+    const from = 'dev_aaaaaaaaaaaaaaaa31';
+    const to = 'dev_aaaaaaaaaaaaaaaa32';
+    init(from, 'Carrier');
+    db.setAvatar(from, new Uint8Array([1, 2, 3, 4]));
+    const hand = db.getMissions(from); // deals: slots + recent_missions
+    expect(db.rerollMission(from, hand[0].id).ok).toBe(true); // daily_rerolls
+    db.recordMatch({ ...win(from), matchKey: 'move:duel:1' } as never); // mode stats + recorded_matches
+    db.recordAbandon(from, { ranked: false }); // daily_abandons
+    db.recordPractice(from, { bestStreak: 4, earnedStreak: 4, endStreak: 4 }); // daily_practice
+    // The two tables nothing above reaches deterministically (mission
+    // progress only advances for tasks the dealt hand happens to hold, and an
+    // elite completion needs a finished elite task) get their rows by hand.
+    const seed = new DatabaseSync(DB_FILE);
+    try {
+      seed.prepare(
+          'INSERT INTO daily_missions (playerId, dayKey, missionId, progress) VALUES (?, ?, ?, ?)'
+        )
+        .run(from, '2020-01-01', 'seed_mission', 1);
+      seed.prepare(
+          'INSERT INTO elite_completions (playerId, missionId, unlockId, completedAt) VALUES (?, ?, ?, ?)'
+        )
+        .run(from, 'seed_elite', 'void-runner', new Date().toISOString());
+    } finally {
+      seed.close();
+    }
+
+    // Precondition: every table in the list actually holds rows under the old
+    // id — otherwise the assertions below would pass vacuously.
+    const countRows = (raw: DatabaseSync, table: string, id: string): number =>
+      (raw.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE playerId = ?`).get(id) as { n: number }).n;
+    const before = new Map<string, number>();
+    {
+      const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+      try {
+        for (const table of PLAYER_KEYED_TABLES) {
+          const n = countRows(raw, table, from);
+          expect({ table, populated: n > 0 }).toEqual({ table, populated: true });
+          before.set(table, n);
+        }
+      } finally {
+        raw.close();
+      }
+    }
+
+    const code = db.getProfile(from).recoveryCode!;
+    expect(db.signInWithCode(code, to)).not.toBeNull();
+
+    const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      for (const table of PLAYER_KEYED_TABLES) {
+        expect({ table, left: countRows(raw, table, from) }).toEqual({ table, left: 0 });
+        expect({ table, moved: countRows(raw, table, to) }).toEqual({
+          table,
+          moved: before.get(table),
+        });
+      }
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('still pays a moved account exactly once per match', () => {
+    // The concrete cost of an orphaned stamp: a queued or retried copy of a
+    // match the account was already paid for, replayed after a sign-in, was
+    // paid in full a second time — XP, matchesPlayed, wins, rankedGames.
+    const from = 'dev_aaaaaaaaaaaaaaaa33';
+    const to = 'dev_aaaaaaaaaaaaaaaa34';
+    init(from, 'PaidOnce');
+    const first = db.recordMatch({ ...win(from), matchKey: 'move:dup:1' } as never);
+    const code = db.getProfile(from).recoveryCode!;
+    expect(db.signInWithCode(code, to)).not.toBeNull();
+
+    const moved = db.getProfile(to);
+    expect(moved.matchesPlayed).toBe(1);
+
+    const replay = db.recordMatch({ ...win(from), playerId: to, matchKey: 'move:dup:1' } as never);
+    expect(replay.alreadyRecorded).toBe(true);
+    // A replay reports what the match paid the first time — and pays nothing.
+    expect(replay.earnedXp).toBe(first.earnedXp);
+    const after = db.getProfile(to);
+    expect(after.matchesPlayed).toBe(1);
+    expect(after.matchesWon).toBe(1);
+    expect(after.xp).toBe(moved.xp);
+  });
+});
+
 describe('deleting an account', () => {
   it('names every playerId-keyed table the schema actually has', () => {
     // The list deleteAccount walks is hand-written, so this is the thing that
@@ -394,12 +491,12 @@ describe('deleting an account', () => {
       playerScore: 5, opponentScore: 3, bestStreak: 6, endStreak: 6, earnedStreak: 6,
       mode: 'multiplayer', isWinner: true, matchKey: 'delete:duel:1',
     } as never);
-    // Two rows, and each player's history matches both of them — a duel is
-    // filed once per seat and getMatchHistory looks at both id columns. That
-    // is the product as it stands and not what this test is about; what
-    // matters below is which of the two survives whom.
-    expect(db.getMatchHistory(leaver).length).toBe(2);
-    expect(db.getMatchHistory(stayer).length).toBe(2);
+    // Two rows in the table, ONE in each player's history: a duel is filed
+    // once per seat, and getMatchHistory reads only the row the player filed
+    // themselves (player1) — reading both id columns is how every duel used
+    // to show up twice. What matters below is which row survives whom.
+    expect(db.getMatchHistory(leaver).length).toBe(1);
+    expect(db.getMatchHistory(stayer).length).toBe(1);
 
     db.deleteAccount(leaver);
 

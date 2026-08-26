@@ -404,7 +404,13 @@ class GameDatabase {
         maxRally INTEGER NOT NULL,
         mode TEXT NOT NULL,
         difficulty TEXT,
-        timestamp TEXT NOT NULL
+        timestamp TEXT NOT NULL,
+        -- 1 = this match actually moved the visible ladder (ranksThisMatch at
+        -- record time), 0 = it did not. NULL marks a row from before the
+        -- column existed: the inputs that decided ranked-ness (the rules, the
+        -- sonar, the seat pairing) were discarded at record time, so a
+        -- backfill would be a guess — legacy rows read as un-ranked instead.
+        ranked INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
       CREATE INDEX IF NOT EXISTS idx_matches_p2 ON matches(player2Id);
@@ -657,6 +663,16 @@ class GameDatabase {
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakChainId TEXT');
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakSeq INTEGER NOT NULL DEFAULT 0');
     }
+    // And for matches: whether the match counted for the visible ladder,
+    // recorded so history can filter Ranked from Un-Ranked. Nullable on
+    // purpose — see the CREATE TABLE comment: a row from before the column
+    // cannot be backfilled honestly and reads as un-ranked.
+    const matchCols = this.sql
+      .prepare('PRAGMA table_info(matches)')
+      .all() as unknown as Array<{ name: string }>;
+    if (matchCols.length && !matchCols.some((c) => c.name === 'ranked')) {
+      this.sql.exec('ALTER TABLE matches ADD COLUMN ranked INTEGER');
+    }
 
     addColumn('recoveryCode', 'recoveryCode TEXT');
     // TrueSkill-style ratings replaced the old fixed-delta ELO.
@@ -892,8 +908,8 @@ class GameDatabase {
   private insertMatch(m: MatchRecord): void {
     this.stmt(
         `INSERT INTO matches (id, player1Id, player1Name, player2Id, player2Name, winnerId, winnerName,
-           scoreP1, scoreP2, maxRally, mode, difficulty, timestamp)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           scoreP1, scoreP2, maxRally, mode, difficulty, timestamp, ranked)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         m.id,
@@ -908,8 +924,20 @@ class GameDatabase {
         m.maxRally,
         m.mode,
         m.difficulty ?? null,
-        m.timestamp
+        m.timestamp,
+        m.ranked ?? null
       );
+    // Keep the newest 500 rows PER PLAYER — history is "an accurate timeline
+    // of every match played on this profile", and the global cap this
+    // replaced meant one busy server's players silently trimmed each other's
+    // histories. Per filer, here in the one insert path, so every writer
+    // (recordMatch and the practice session row alike) pays for its own
+    // retention. Cheap via idx_matches_p1.
+    this.stmt(
+        `DELETE FROM matches WHERE player1Id = ? AND rowid NOT IN
+           (SELECT rowid FROM matches WHERE player1Id = ? ORDER BY rowid DESC LIMIT 500)`
+      )
+      .run(m.player1Id, m.player1Id);
   }
 
   private readProfile(id: string): PlayerProfile | null {
@@ -1446,6 +1474,34 @@ class GameDatabase {
       chainId: session.chainId,
       runSeq: session.runSeq,
     });
+
+    // A history-only session row, so the Practice Wall has a timeline like
+    // every other mode. Deliberately NOT recordMatch — that path pays XP,
+    // missions and rating, and practice pays through the capped math below
+    // and moves neither. 'wall' is a synthetic opponent id in the mould of
+    // AI-<difficulty>: it fails isLinkableId so it is never a tap target,
+    // and the client renders practice rows from the mode, not these names.
+    // winnerId is NOT NULL filler — a wall session has no winner and the UI
+    // never renders W/L for practice. Sessions where no ball was returned
+    // (earned 0 — including one that only broke a carried run) record
+    // nothing: there is no session to remember.
+    if (earned >= 1) {
+      this.insertMatch({
+        id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        player1Id: playerId,
+        player1Name: profile.username,
+        player2Id: 'wall',
+        player2Name: 'Practice Wall',
+        winnerId: playerId,
+        winnerName: profile.username,
+        scoreP1: 0,
+        scoreP2: 0,
+        maxRally: peak,
+        mode: 'practice',
+        timestamp: now.toISOString(),
+        ranked: 0,
+      });
+    }
 
     const dayKey = missionDayKey(now);
     const row = this.stmt(`SELECT xpAwarded FROM daily_practice WHERE playerId = ? AND dayKey = ?`)
@@ -2427,6 +2483,11 @@ class GameDatabase {
       mode: payload.mode,
       difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
       timestamp: new Date().toISOString(),
+      // Persisted so history can tell Ranked from Un-Ranked later: this is
+      // ranksThisMatch — the match actually moved the visible ladder — not
+      // merely "the rules sat in the ranked bands". A stock-rules Rookie solo
+      // stores 0, because it rated nothing, whatever its rules were.
+      ranked: ranksThisMatch ? 1 : 0,
     };
 
     const result: MatchEndResult = {
@@ -2455,11 +2516,7 @@ class GameDatabase {
       // object, so the stamp below records the fresh rows too.
       profile.modeStats = this.getModeStats(profile.id);
       this.upsertProfile(profile);
-      this.insertMatch(matchRecord);
-      // Keep only the most recent 500 matches (parity with the JSON store)
-      this.sql.exec(
-        'DELETE FROM matches WHERE rowid NOT IN (SELECT rowid FROM matches ORDER BY rowid DESC LIMIT 500)'
-      );
+      this.insertMatch(matchRecord); // carries its own per-player retention trim
       // Same transaction as the payout: a match is either paid and marked, or
       // neither. Marked outside it, a crash between the two would leave the
       // key claimed and the XP never awarded.
@@ -2663,18 +2720,25 @@ class GameDatabase {
       this.stmt('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, fromId);
       this.stmt('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, fromId);
       this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, fromId);
-      this.stmt('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
-      this.stmt('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
-      // Per-mode history and, with it, the run each mode is still on. Left
-      // behind, the account arrived on the new browser having played nothing
-      // and every carried streak reset to zero — and the next match recorded
-      // there wrote that zero back over the run the player actually had.
-      // The DELETE is load-bearing, not tidiness: the primary key is
-      // (playerId, mode), so a placeholder profile that had played on this
-      // browser would collide with the rows moving in.
-      this.stmt('DELETE FROM player_mode_stats WHERE playerId = ?').run(newDeviceId);
-      this.stmt('UPDATE player_mode_stats SET playerId = ? WHERE playerId = ?')
-        .run(newDeviceId, fromId);
+      // Every playerId-keyed table follows the account — the same list
+      // deleteAccount walks, for the same reason: a rename is a statement
+      // about every table that keys off the id, and each one left behind is
+      // its own bug. This used to move only avatars and player_mode_stats,
+      // and the orphans were not litter: `recorded_matches` left behind meant
+      // every idempotency stamp was lost on a sign-in, so a queued, retried
+      // or relay-vs-POST duplicate of a match the account already played was
+      // paid a SECOND time — XP, matchesPlayed, wins and rankedGames all
+      // double-counted. `elite_completions` left behind silently took back
+      // permanent theme unlocks; the daily tables reset mission progress,
+      // reroll spend, the abandon forgiveness and the practice XP cap.
+      // The DELETE is load-bearing, not tidiness: several of these have
+      // composite primary keys on playerId, so rows a placeholder profile
+      // wrote on this browser would collide with the rows moving in.
+      // (Identifiers come from the exported `as const` list, not from input.)
+      for (const table of PLAYER_KEYED_TABLES) {
+        this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(newDeviceId);
+        this.stmt(`UPDATE ${table} SET playerId = ? WHERE playerId = ?`).run(newDeviceId, fromId);
+      }
       // Everything already pointed at the account follows it, and both ends of
       // the move are members from here on.
       this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
@@ -2835,7 +2899,10 @@ class GameDatabase {
       level: 'xp DESC',
       rally: 'highestRally DESC',
       wins: 'matchesWon DESC',
-      elo: '(rankedGames >= 5 AND rankSigma <= 4.0) DESC, rankMu DESC',
+      // Placed players first, then by visible rating. The placement test is
+      // the same pair of conditions tierFor applies — from the constants, so
+      // a rebalance of either cannot leave this ORDER BY sorting stale rules.
+      elo: `(rankedGames >= ${PLACEMENT_GAMES} AND rankSigma <= ${PLACEMENT_SIGMA}) DESC, rankMu DESC`,
     }[sortBy];
 
     // A board only lists players with progress on the thing IT measures.
@@ -2904,10 +2971,60 @@ class GameDatabase {
   }
 
   public getMatchHistory(playerId: string, limit = 15): MatchRecord[] {
+    // player1 only, deliberately. Every seat of a duel files its OWN row with
+    // itself as player1 (see recordMatch), so the player's own filed row is
+    // the complete, correctly-oriented record of that match — reading the
+    // player2 column as well matched the OPPONENT's copy too, and every duel
+    // showed up twice: two WIN cards for the winner, two LOSS cards for the
+    // loser. player2Id still matters to deleteAccount's pointer scrub and
+    // moveAccount's re-key; it just isn't a history membership test.
     return this.stmt(
-        'SELECT * FROM matches WHERE player1Id = ? OR player2Id = ? ORDER BY rowid DESC LIMIT ?'
+        'SELECT * FROM matches WHERE player1Id = ? ORDER BY rowid DESC LIMIT ?'
       )
-      .all(playerId, playerId, limit) as unknown as MatchRecord[];
+      .all(playerId, limit) as unknown as MatchRecord[];
+  }
+
+  /**
+   * One page of a player's history, filtered the way the history UI filters:
+   * by mode, and inside a mode by whether the match counted for rank.
+   *
+   * Same ownership rule as getMatchHistory — player1 only, the rows this
+   * player filed themselves. `total` counts the SAME filter, so the caller
+   * can page without a second query shape to keep in agreement. A NULL
+   * `ranked` (a row from before the column existed) is deliberately folded
+   * into 'unranked': ranked-ness cannot be reconstructed for those rows, and
+   * a filter that hid them from both sub-tabs would make matches vanish the
+   * moment a filter is touched.
+   */
+  public getMatchHistoryPage(
+    playerId: string,
+    opts: {
+      mode?: 'multiplayer' | 'solo' | 'practice';
+      ranked?: 'ranked' | 'unranked';
+      limit?: number;
+      offset?: number;
+    } = {}
+  ): { matches: MatchRecord[]; total: number } {
+    const where: string[] = ['player1Id = ?'];
+    const binds: Array<string | number> = [playerId];
+    if (opts.mode) {
+      where.push('mode = ?');
+      binds.push(opts.mode);
+    }
+    if (opts.ranked === 'ranked') where.push('ranked = 1');
+    else if (opts.ranked === 'unranked') where.push('(ranked IS NULL OR ranked = 0)');
+    const cond = where.join(' AND ');
+
+    const total = (
+      this.stmt(`SELECT COUNT(*) AS n FROM matches WHERE ${cond}`).get(...binds) as { n: number }
+    ).n;
+    const limit = Math.max(1, Math.min(50, Math.floor(opts.limit ?? 10)));
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    const matches = this.stmt(
+        `SELECT * FROM matches WHERE ${cond} ORDER BY rowid DESC LIMIT ? OFFSET ?`
+      )
+      .all(...binds, limit, offset) as unknown as MatchRecord[];
+    return { matches, total };
   }
 }
 

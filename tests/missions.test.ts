@@ -282,7 +282,7 @@ describe('Practice Wall XP', () => {
     expect(db.recordPractice('p_drill', { bestStreak: 500, earnedStreak: 500 }).earnedXp).toBe(0);
   });
 
-  it('records no match, moves no rating, and feeds no missions', () => {
+  it('counts no match, moves no rating, and feeds no missions', () => {
     init('p_drill2', 'Driller2');
     const before = db.getProfile('p_drill2');
     db.recordPractice('p_drill2', { bestStreak: 30, earnedStreak: 30 });
@@ -292,7 +292,23 @@ describe('Practice Wall XP', () => {
     expect(after.mmrMu).toBe(before.mmrMu);
     expect(after.rankMu).toBe(before.rankMu);
     expect(db.getMissions('p_drill2').every((m) => m.current === 0)).toBe(true);
-    expect(db.getMatchHistory('p_drill2')).toHaveLength(0);
+    // What a session DOES leave is a history-only row, so the Practice Wall
+    // has a timeline like every other mode — unranked, no scores, the peak on
+    // the rally column, and a synthetic opponent that is never a tap target.
+    const history = db.getMatchHistory('p_drill2');
+    expect(history).toHaveLength(1);
+    expect(history[0].mode).toBe('practice');
+    expect(history[0].ranked).toBe(0);
+    expect(history[0].maxRally).toBe(30);
+    expect(history[0].player2Id).toBe('wall');
+  });
+
+  it('records no session row when no ball was returned', () => {
+    init('p_drill4', 'Driller4');
+    // A carried run walked in and straight back out — including one the visit
+    // only broke — is not a session: nothing was returned here.
+    db.recordPractice('p_drill4', { bestStreak: 12, earnedStreak: 0, endStreak: 0 });
+    expect(db.getMatchHistory('p_drill4')).toHaveLength(0);
   });
 
   it('refills the allowance on the next UTC day', () => {

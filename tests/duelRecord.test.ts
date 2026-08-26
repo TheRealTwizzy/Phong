@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { findMission } from '../src/game/missions';
+import { duelMatchKey } from '../src/matchRules';
 import { Device, Phone as PhoneSocket, Relay, sleep, startRelay } from './helpers/relay';
 
 // A duel end-to-end through the REAL relay and the REAL record route, because
@@ -726,6 +727,119 @@ describe('recording a duel', () => {
     });
     expect((await res.json()).alreadyRecorded).toBe(true);
     expect((await getProfile(host)).matchesPlayed).toBe(1);
+
+    p1.close();
+    p2.close();
+  });
+
+  it('deduplicates a duel POST that carries the key but not the room', async () => {
+    // A leave or ejection racing the final point can null the client's room
+    // state before the recording effect runs — so the payload arrives with no
+    // roomId for the server to re-derive the key from. The client mints and
+    // caches the duel key at game_start for exactly this case; the ledger
+    // must recognise it on the key alone, or the relay's record and this POST
+    // are both paid.
+    const host = await newDevice('KeyOnlyHost');
+    const guest = await newDevice('KeyOnlyGuest');
+    const { p1, p2, roomId, matchSeq } = await seatDuel(host, guest, 3);
+
+    for (let i = 0; i < 3; i++) p1.send({ type: 'point_scored', scorer: 'p1' });
+    await p1.await('match_recorded');
+
+    const res = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        playerScore: 3,
+        opponentScore: 0,
+        bestStreak: 4, endStreak: 0, earnedStreak: 4,
+        mode: 'multiplayer',
+        isWinner: true,
+        matchKey: duelMatchKey(roomId, matchSeq),
+      }),
+    });
+    expect((await res.json()).alreadyRecorded).toBe(true);
+    expect((await getProfile(host)).matchesPlayed).toBe(1);
+
+    p1.close();
+    p2.close();
+  });
+
+  it('refuses a record whose mode is not a match', async () => {
+    // Practice and Split Screen never call this route — practice reports
+    // through /api/practice/record and split records nothing — but a
+    // hand-rolled payload naming them used to reach recordMatch, where
+    // normalizeDifficulty defaults 'pro' and the ranking rule never checked
+    // the mode: a "practice" result could move rankedGames and rating.
+    const player = await newDevice('WallPoster');
+    for (const mode of ['practice', 'split', 'garbage']) {
+      const res = await fetch(`${base}/api/match/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: player.cookie },
+        body: JSON.stringify({
+          playerScore: 5,
+          opponentScore: 0,
+          bestStreak: 3, endStreak: 0, earnedStreak: 3,
+          mode,
+          isWinner: true,
+          matchKey: `bad:${mode}:1`,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('BAD_REQUEST');
+    }
+    const profile = await getProfile(player);
+    expect(profile.matchesPlayed).toBe(0);
+    expect(profile.rankedGames).toBe(0);
+    expect(profile.xp).toBe(0);
+  });
+
+  it('serves each player one paged history row per match, publicly too', async () => {
+    const host = await newDevice('PubHistHost');
+    const guest = await newDevice('PubHistGuest');
+    const { p1, p2 } = await seatDuel(host, guest, 3);
+    for (let i = 0; i < 3; i++) p1.send({ type: 'point_scored', scorer: 'p1' });
+    await p1.await('match_recorded');
+    await p2.await('match_recorded');
+
+    // Own history: one row for the one duel, own perspective, and the paging
+    // envelope alongside the back-compatible `matches` field.
+    const mine = await (
+      await fetch(`${base}/api/matches/me`, { headers: { cookie: host.cookie } })
+    ).json();
+    expect(mine.matches).toHaveLength(1);
+    expect(mine.total).toBe(1);
+    expect(mine.page).toBe(1);
+    expect(mine.pageSize).toBe(10);
+    expect(mine.matches[0].winnerId).toBe(host.id);
+    expect(mine.matches[0].ranked).toBe(1);
+
+    // The loser's history is one LOSS — not their row plus the winner's copy.
+    const theirs = await (
+      await fetch(`${base}/api/matches/me`, { headers: { cookie: guest.cookie } })
+    ).json();
+    expect(theirs.matches).toHaveLength(1);
+    expect(theirs.matches[0].player1Id).toBe(guest.id);
+    expect(theirs.matches[0].winnerId).toBe(host.id);
+
+    // The same rows are public, cookie or no cookie, with the same filters.
+    const pub = await fetch(`${base}/api/profile/${host.id}/matches`);
+    expect(pub.status).toBe(200);
+    const pubBody = await pub.json();
+    expect(pubBody.total).toBe(1);
+    expect(pubBody.matches[0].player1Id).toBe(host.id);
+    const pvp = await (
+      await fetch(`${base}/api/profile/${host.id}/matches?tab=pvp&ranked=ranked`)
+    ).json();
+    expect(pvp.total).toBe(1);
+    const solo = await (await fetch(`${base}/api/profile/${host.id}/matches?tab=solo`)).json();
+    expect(solo.total).toBe(0);
+
+    // 'me' is never a stored id, and an uninitialized profile has no public
+    // history — both are the same 404 the public profile route answers.
+    expect((await fetch(`${base}/api/profile/me/matches`)).status).toBe(404);
+    const stranger = await newUnclaimedDevice();
+    expect((await fetch(`${base}/api/profile/${stranger.id}/matches`)).status).toBe(404);
 
     p1.close();
     p2.close();
