@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { MatchEndPayload } from '../src/types';
+import type { MatchEndPayload, MatchRules } from '../src/types';
 import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, soloMuCap } from '../src/rating';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
@@ -312,6 +312,60 @@ describe('GameDatabase', () => {
     expect(after.rankSigma).toBe(before.rankSigma);
     expect(after.rankedGames).toBe(0);
     expect(after.tier).toBe('unranked');
+  });
+
+  // "Un-Ranked must never move MMR or TrueSkill." The visible ladder half is
+  // covered above; this is the hidden one, which is the half nothing renders
+  // and so the half that could drift unnoticed. A match whose RULES unrank it
+  // must move neither estimator — it was not played on the game the ratings
+  // describe. (An earned-difficulty solo is a different thing: it displays as
+  // un-ranked because it does not move the visible TIER, and it deliberately
+  // does feed hidden MMR, which is what keeps the AI adapting and the
+  // pre-match odds honest. That is the case directly above.)
+  const RULE_BREAKERS: Array<[string, Partial<MatchRules>]> = [
+    ['a paddle past its ranked band', { paddleScale: 1.6 }],
+    ['a ball past its ranked band', { ballScale: 1.6 }],
+    ['a speed band past its own', { ballSpeedMax: 1.6 }],
+    ['the opponent sonar', { opponentSonar: true }],
+  ];
+  for (const [label, rules] of RULE_BREAKERS) {
+    it(`moves no rating at all for a match unranked by ${label}`, () => {
+      const id = `p_unranked_${label.replace(/\W/g, '')}`;
+      init(id, `Unranked${label.replace(/\W/g, '').slice(0, 8)}`);
+      const before = db.getProfile(id);
+      const result = db.recordMatch(
+        match(id, { rules, matchKey: `unranked:${label}` } as Partial<MatchEndPayload>)
+      );
+
+      const after = db.getProfile(id);
+      // Neither the hidden estimator...
+      expect(after.mmrMu).toBeCloseTo(before.mmrMu, 10);
+      expect(after.mmrSigma).toBeCloseTo(before.mmrSigma, 10);
+      // ...nor the visible ladder, nor the count that places it.
+      expect(after.rankMu).toBeCloseTo(before.rankMu, 10);
+      expect(after.rankSigma).toBeCloseTo(before.rankSigma, 10);
+      expect(after.rankedGames).toBe(before.rankedGames);
+      expect(result.ranked).toBe(false);
+      expect(result.rankDirection).toBe('none');
+      // It is still a match that happened: it pays XP and is on the record.
+      expect(after.xp).toBeGreaterThan(before.xp);
+      expect(after.matchesPlayed).toBe(before.matchesPlayed + 1);
+      // And it is filed as un-ranked, so the history filters agree with the
+      // rating that never moved.
+      expect(db.getMatchHistory(id)[0].ranked).toBe(0);
+    });
+  }
+
+  it('moves both estimators for a stock duel, so the checks above are not vacuous', () => {
+    init('p_ranked_ctrl', 'RankedControl');
+    const before = db.getProfile('p_ranked_ctrl');
+    const result = db.recordMatch(match('p_ranked_ctrl', { matchKey: 'ranked:control' }));
+    const after = db.getProfile('p_ranked_ctrl');
+    expect(after.mmrMu).not.toBeCloseTo(before.mmrMu, 6);
+    expect(after.rankMu).not.toBeCloseTo(before.rankMu, 6);
+    expect(after.rankedGames).toBe(before.rankedGames + 1);
+    expect(result.ranked).toBe(true);
+    expect(db.getMatchHistory('p_ranked_ctrl')[0].ranked).toBe(1);
   });
 
   it('lets solo losses move hidden MMR down, and solo wins bring it back', () => {
