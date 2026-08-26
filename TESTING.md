@@ -38,6 +38,7 @@ coverage number.
 |---|---|
 | `rating` `xp` `achievements` | TrueSkill, tiers, XP curve, the achievement tree and the unlocks it gates |
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
+| `matchHistory` | History reads: one row per player per match, the `ranked` column, mode/ranked filters, paging, per-player retention |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
 | `physics` `spin` `transform` | Ball, collisions, spin, AI competence, the cross-net mirror |
 | `streaks` | A rally streak: whose it is, what ends it, and what it carries into |
@@ -53,7 +54,7 @@ coverage number.
 ### Browser layer
 
 `profiles` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `split` · `streak` · `tutorial` · `delete` · `eject` · `build-id`
+`lobby` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
