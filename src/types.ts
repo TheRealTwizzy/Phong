@@ -415,6 +415,13 @@ export interface MatchRecord {
   mode: GameMode;
   difficulty?: AIDifficulty;
   timestamp: string;
+  /**
+   * 1 = this match counted for the visible ladder (ranksThisMatch at record
+   * time), 0 = it did not. null/undefined marks a row from before the column
+   * existed — ranked-ness cannot be reconstructed for those, so they filter
+   * and render as un-ranked.
+   */
+  ranked?: number | null;
 }
 
 export interface LeaderboardEntry {
