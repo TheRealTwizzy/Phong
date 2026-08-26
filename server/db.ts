@@ -2663,18 +2663,25 @@ class GameDatabase {
       this.stmt('UPDATE matches SET player1Id = ? WHERE player1Id = ?').run(newDeviceId, fromId);
       this.stmt('UPDATE matches SET player2Id = ? WHERE player2Id = ?').run(newDeviceId, fromId);
       this.stmt('UPDATE matches SET winnerId = ? WHERE winnerId = ?').run(newDeviceId, fromId);
-      this.stmt('DELETE FROM avatars WHERE playerId = ?').run(newDeviceId);
-      this.stmt('UPDATE avatars SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
-      // Per-mode history and, with it, the run each mode is still on. Left
-      // behind, the account arrived on the new browser having played nothing
-      // and every carried streak reset to zero — and the next match recorded
-      // there wrote that zero back over the run the player actually had.
-      // The DELETE is load-bearing, not tidiness: the primary key is
-      // (playerId, mode), so a placeholder profile that had played on this
-      // browser would collide with the rows moving in.
-      this.stmt('DELETE FROM player_mode_stats WHERE playerId = ?').run(newDeviceId);
-      this.stmt('UPDATE player_mode_stats SET playerId = ? WHERE playerId = ?')
-        .run(newDeviceId, fromId);
+      // Every playerId-keyed table follows the account — the same list
+      // deleteAccount walks, for the same reason: a rename is a statement
+      // about every table that keys off the id, and each one left behind is
+      // its own bug. This used to move only avatars and player_mode_stats,
+      // and the orphans were not litter: `recorded_matches` left behind meant
+      // every idempotency stamp was lost on a sign-in, so a queued, retried
+      // or relay-vs-POST duplicate of a match the account already played was
+      // paid a SECOND time — XP, matchesPlayed, wins and rankedGames all
+      // double-counted. `elite_completions` left behind silently took back
+      // permanent theme unlocks; the daily tables reset mission progress,
+      // reroll spend, the abandon forgiveness and the practice XP cap.
+      // The DELETE is load-bearing, not tidiness: several of these have
+      // composite primary keys on playerId, so rows a placeholder profile
+      // wrote on this browser would collide with the rows moving in.
+      // (Identifiers come from the exported `as const` list, not from input.)
+      for (const table of PLAYER_KEYED_TABLES) {
+        this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(newDeviceId);
+        this.stmt(`UPDATE ${table} SET playerId = ? WHERE playerId = ?`).run(newDeviceId, fromId);
+      }
       // Everything already pointed at the account follows it, and both ends of
       // the move are members from here on.
       this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
