@@ -40,7 +40,7 @@ import {
 } from './server/room';
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig } from './src/types';
-import { DEFAULT_ROOM_CONFIG, duelMatchKey, isRankedRules, normalizeRoomConfig } from './src/matchRules';
+import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { validateUsername } from './src/profileRules';
 import { Rating, winProbability } from './src/rating';
 
@@ -342,11 +342,18 @@ function takeOverFromP2P(room: Room): void {
   broadcast(room, { type: 'p2p_fallback' });
 }
 
-function recordRoomMatch(room: Room): void {
+/**
+ * Options for a match the score did not decide. `winnerSeat` names the seat
+ * the match is awarded to — the survivor of an abandon — whatever the score
+ * stands at; `forgivenLoss` records the OTHER seat's loss un-ranked, which is
+ * how the day's first disconnect spares the leaver's ladder without erasing
+ * the loss (or the survivor's win, which always rates on its own merits).
+ */
+function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: boolean } = {}): void {
   const seats: Array<0 | 1> = [0, 1];
-  // Both seats must still be occupied. A match decided after one player left
-  // is their abandon, already judged on the socket close; recording a result
-  // on top of it would charge the same departure twice.
+  // Both seats must still be occupied — the abandon path calls this BEFORE
+  // vacating the leaver's seat, so a decided match and an abandoned one are
+  // both recorded off the same complete room.
   if (!room.players[0] || !room.players[1]) return;
 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
@@ -367,6 +374,7 @@ function recordRoomMatch(room: Room): void {
 
     const mine = room.scores[seat];
     const theirs = room.scores[seat === 0 ? 1 : 0];
+    const isWinner = opts.winnerSeat !== undefined ? seat === opts.winnerSeat : mine > theirs;
     const payload: MatchEndPayload = {
       playerId: me.deviceId,
       username: me.playerName,
@@ -378,7 +386,7 @@ function recordRoomMatch(room: Room): void {
       endStreak: room.streaks[seat],
       earnedStreak: room.earnedBests[seat],
       mode: 'multiplayer',
-      isWinner: mine > theirs,
+      isWinner,
       rules,
       roomId: room.id,
       matchSeq: room.matchSeq,
@@ -390,6 +398,9 @@ function recordRoomMatch(room: Room): void {
     };
     const oppRating = ratingBefore[seat === 0 ? 1 : 0];
     if (oppRating) context.opponentRating = oppRating;
+    // Only the LEAVER's copy is spared the ladder by a forgiven abandon; the
+    // survivor's win rates on its own merits either way.
+    if (opts.forgivenLoss && !isWinner) context.forceUnranked = true;
 
     try {
       const result = db.recordMatch(payload, context);
@@ -1829,23 +1840,45 @@ async function startServer() {
       // never report one, and the second player's departure from an
       // already-abandoned room records nothing.
       const bothSeated = !!(room.players[0] && room.players[1]);
-      // A duel that is abandoned still HAPPENED, and both players' runs stand
-      // wherever the last crossing left them — recordRoomMatch writes those
-      // only when a score decides a match. Written for the leaver AND the
-      // survivor, who is about to be bounced to the menu just as abruptly.
-      persistDuelStreaks(room);
-      if (bothSeated && room.inPlay && !room.matchOver && currentPlayerId) {
+      const abandoned = bothSeated && room.inPlay && !room.matchOver && !!currentPlayerId;
+      if (abandoned) {
         try {
           // Same rule as recordRoomMatch: a seat that no longer holds
           // its account has no profile to charge — and when the relay
           // itself closed that socket to displace it, charging the
           // player an abandon for our own eviction would be perverse.
-          if (seatStillHoldsAccount({ deviceId: currentPlayerId, sessionId: cookieSessionId })) {
-            db.recordAbandon(currentPlayerId, { ranked: isRankedRules(room.config.rules) });
-          }
+          const verdict = seatStillHoldsAccount({
+            deviceId: currentPlayerId!,
+            sessionId: cookieSessionId,
+          })
+            ? db.recordAbandon(currentPlayerId!)
+            : null;
+          // An abandoned duel is a match both players PLAYED, and walking out
+          // of it is losing it: the leaver takes a real loss and the survivor
+          // a real win, at the standing score, before the seat empties so the
+          // room is still whole. The old shape — a flat rating penalty and no
+          // match anywhere — let a player quit every losing duel and keep a
+          // 100% win rate while their opponents' wins evaporated with them.
+          // The day's first abandon is forgiven ON THE RATING ONLY: the
+          // leaver's copy records un-ranked, the facts record regardless, and
+          // the survivor's win rates on its own merits either way. Streaks
+          // ride the same records (persistDuelStreaks is for endings that
+          // record no match), and the shared matchKey keeps any racing client
+          // POST a no-op.
+          recordRoomMatch(room, {
+            winnerSeat: playerIndex === 0 ? 1 : 0,
+            forgivenLoss: verdict?.forgiven ?? false,
+          });
+          room.matchOver = true;
         } catch (e) {
           console.error('abandon record failed:', e);
         }
+      } else {
+        // No match to record from this departure (lobby leave, a finished
+        // match, an already-abandoned room) — but both players' runs still
+        // stand wherever the last crossing left them, and this is the one
+        // moment to keep them. Internally guarded to the live-match case.
+        persistDuelStreaks(room);
       }
       room.players[playerIndex] = null;
       room.rematchVotes[playerIndex] = false;

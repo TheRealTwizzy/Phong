@@ -75,6 +75,13 @@ export interface RecordMatchContext {
   opponentRating?: Rating;
   /** 0.5..1.5 weight from margin of victory / rally quality. */
   performanceWeight?: number;
+  /**
+   * Record the match as un-ranked whatever its rules say: no MMR, no rank,
+   * `ranked: 0` on the history row. The one caller is the relay recording a
+   * FORGIVEN abandon's loss — the day's first disconnect spares the leaver's
+   * ladder, never the loss itself.
+   */
+  forceUnranked?: boolean;
 }
 
 // Overridable so production can point at a persistent volume (e.g. /data on
@@ -306,12 +313,13 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
   };
 }
 
-// Mid-match abandons: the first of a UTC day is forgiven, ranked repeats pay
-// in visible rating. Sized to sting across a session of rage-quits (three in
-// a day is a full mu point, a third of a tier) without one bad wifi evening
-// costing a rank.
+// Mid-match abandons: the first of a UTC day is forgiven — forgiveness spares
+// the RATING on the loss the relay records (the leaver's copy of the match
+// goes down unranked), never the loss itself. Repeats pay the genuine
+// TrueSkill loss, which replaced the flat mu penalty this constant's sibling
+// used to size: one bad wifi evening still cannot cost a rank, while a
+// session of rage-quits now costs exactly what losing those matches costs.
 const ABANDONS_FORGIVEN_PER_DAY = 1;
-const ABANDON_RANKED_MU_PENALTY = 0.5;
 
 class GameDatabase {
   private sql: DatabaseSync;
@@ -1130,21 +1138,27 @@ class GameDatabase {
    * live ball. Recorded by the relay from its own room state; a client can
    * never report one.
    *
-   * The FIRST abandon of a UTC day is forgiven outright: connections drop,
-   * phones ring, life happens, and punishing an accident teaches nothing.
-   * Every further one that day marks a pattern, and when the abandoned match
-   * was RANKED it costs visible rating — the ladder is what rage-quitting
-   * corrupts, since a quitter denies their opponent the win they were about
-   * to take. XP is untouched either way: levels never regress.
+   * This is the abandon's BOOKKEEPING half: the day-keyed count and the
+   * career counter, plus the verdict on whether today's forgiveness covers
+   * it. The match itself is recorded separately by the relay as a real LOSS
+   * for the leaver and a real WIN for the survivor (recordRoomMatch with the
+   * leaver named), because the old shape — a flat rating penalty and no match
+   * anywhere — meant a player could quit every losing duel and keep a 100%
+   * win rate while their opponents' wins evaporated with them.
+   *
+   * The FIRST abandon of a UTC day is forgiven: connections drop, phones
+   * ring, life happens. Forgiveness spares only the RATING — the leaver's
+   * copy of the match records unranked — never the facts: the loss, the win
+   * and both history rows land either way. There is no flat mu penalty any
+   * more; the unforgiven cost is the genuine TrueSkill loss.
    */
   public recordAbandon(
     playerId: string,
-    opts: { ranked: boolean },
     now: Date = new Date()
-  ): { counted: boolean; penalized: boolean; abandonsToday: number } {
+  ): { counted: boolean; forgiven: boolean; abandonsToday: number } {
     const profile = this.readProfile(playerId);
     if (!profile || !profile.initialized) {
-      return { counted: false, penalized: false, abandonsToday: 0 };
+      return { counted: false, forgiven: false, abandonsToday: 0 };
     }
     const dayKey = missionDayKey(now);
     this.stmt(
@@ -1156,15 +1170,13 @@ class GameDatabase {
       .get(playerId, dayKey) as { count: number };
 
     profile.abandons += 1;
-    let penalized = false;
-    if (opts.ranked && row.count > ABANDONS_FORGIVEN_PER_DAY) {
-      profile.rankMu -= ABANDON_RANKED_MU_PENALTY;
-      profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma);
-      penalized = true;
-    }
     profile.lastActive = now.toISOString();
     this.upsertProfile(profile);
-    return { counted: true, penalized, abandonsToday: row.count };
+    return {
+      counted: true,
+      forgiven: row.count <= ABANDONS_FORGIVEN_PER_DAY,
+      abandonsToday: row.count,
+    };
   }
 
   /**
@@ -2236,7 +2248,9 @@ class GameDatabase {
     // different speed band) still pays XP but must not move the rating: the
     // tier ladder only means something if every ranked match used one ruleset.
     // Re-derived from the rules themselves, never from a client-set flag.
-    const ranked = isRankedRules(payload.rules);
+    // `forceUnranked` is the relay's own override for a forgiven abandon's
+    // loss — trusted because it comes from server code, never a request.
+    const ranked = !context.forceUnranked && isRankedRules(payload.rules);
     const previousTier = profile.tier;
     const soloOpts = {
       ...SOLO_UPDATE,

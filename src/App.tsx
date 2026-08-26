@@ -277,7 +277,9 @@ export default function App() {
   const [toastPracticeXp, setToastPracticeXp] = useState<number | null>(null);
   // A permanent unlock banked from an elite mission — worth announcing.
   const [toastUnlock, setToastUnlock] = useState<string | null>(null);
-  const [toastOpponentLeft, setToastOpponentLeft] = useState<boolean>(false);
+  // 'won' when the relay recorded the abandoned match as this player's win,
+  // 'plain' when there was no match to win (a stranded guest in a lobby).
+  const [toastOpponentLeft, setToastOpponentLeft] = useState<'won' | 'plain' | null>(null);
   // Telemetry is per-match and starts HIDDEN: enabling the rule makes the
   // panel available, and the player opens it from the court when they want
   // it. Resets with every match so it never lingers from the last one.
@@ -1670,7 +1672,13 @@ export default function App() {
         const strandedGuest = isMultiplayerOpen && playerIndexRef.current === 1;
         const midMatch = !winner && !isMultiplayerOpen && screenRef.current === 'game';
         if (midMatch || strandedGuest) {
-          setToastOpponentLeft(true);
+          // The relay records an abandoned duel as this player's WIN and
+          // pushes it just before this message, so say so rather than
+          // reporting only the disconnection: the match they were in the
+          // middle of is on their record, not lost with the opponent.
+          const wonByAbandon =
+            midMatch && !!matchKeyRef.current && shownMatchKeyRef.current === matchKeyRef.current;
+          setToastOpponentLeft(wonByAbandon ? 'won' : 'plain');
           handleLeaveRoom();
         }
         break;
@@ -2813,10 +2821,13 @@ export default function App() {
             },
             toastOpponentLeft && {
               id: 'toast-opponent-left',
-              tone: 'loss' as const,
+              tone: toastOpponentLeft === 'won' ? ('win' as const) : ('loss' as const),
               ttlMs: TOAST_TTL.reward,
-              content: t('opponent_left_notice', currentLanguage),
-              onDismiss: () => setToastOpponentLeft(false),
+              content: t(
+                toastOpponentLeft === 'won' ? 'opponent_left_win_notice' : 'opponent_left_notice',
+                currentLanguage
+              ),
+              onDismiss: () => setToastOpponentLeft(null),
             },
             // Deliberately no ttlMs: this one reports a state that is still
             // unresolved, and it is cleared by applyMatchResult the moment the

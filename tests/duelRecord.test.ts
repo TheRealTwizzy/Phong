@@ -45,6 +45,9 @@ const getProfile = async (device: Device) =>
 const getMissions = async (device: Device) =>
   (await fetch(`${base}/api/missions`, { headers: { cookie: device.cookie } })).json();
 
+const matchHistory = async (device: Device) =>
+  (await fetch(`${base}/api/matches/me`, { headers: { cookie: device.cookie } })).json();
+
 /**
  * A device dealt a mission that a duel win actually satisfies.
  *
@@ -920,12 +923,12 @@ describe('recording a duel', () => {
     p2.close();
   });
 
-  it('keeps both seats’ runs when a duel is abandoned', async () => {
-    // A decided duel is written by recordRoomMatch; an abandoned one is
-    // written by nobody, so both seats went back to whatever their last
-    // COMPLETED match had stored — a miss during it undone, and a run built
-    // during it thrown away. The survivor counts too: they are bounced to the
-    // menu just as abruptly, and their run is just as real.
+  it('records an abandoned duel as a loss for the leaver and a win for the survivor', async () => {
+    // Walking out of a live duel used to be written by nobody: no loss for
+    // the leaver, and the survivor's win evaporated with them. That is how a
+    // profile reaches a 100% win rate with no tracked losses — quit every
+    // duel you are losing. An abandoned duel is a match both of them PLAYED,
+    // and leaving it is losing it.
     const host = await newDevice('AbandonHost');
     const guest = await newDevice('AbandonGuest');
     const { p1, p2 } = await seatDuel(host, guest, 3);
@@ -936,18 +939,89 @@ describe('recording a duel', () => {
     await cross(p2, p1, 2); // p2: 2
     await cross(p2, p1, 3); // p2: 3
 
-    // The host walks out mid-rally. Nothing decides the match.
+    // The host walks out mid-rally. Nothing decides the match on the score.
     p1.close();
     await sleep(400);
 
     const hostProfile = await getProfile(host);
     const guestProfile = await getProfile(guest);
-    // Each seat's own run, stored where the next duel will read it.
+    // Each seat's own run, stored where the next duel will read it — the
+    // records the relay writes carry them, so a run is not lost to a walkout.
     expect(hostProfile.modeStats?.multiplayer?.currentStreak).toBe(1);
     expect(guestProfile.modeStats?.multiplayer?.currentStreak).toBe(3);
-    // And nothing else: an abandoned duel is not a match either of them played.
+    // The match is on both records, once each, pointing the same way.
+    expect(hostProfile.matchesPlayed).toBe(1);
+    expect(hostProfile.matchesLost).toBe(1);
+    expect(hostProfile.matchesWon).toBe(0);
+    expect(guestProfile.matchesPlayed).toBe(1);
+    expect(guestProfile.matchesWon).toBe(1);
+    expect(guestProfile.abandons ?? 0).toBe(0); // the survivor did not abandon
+    expect(hostProfile.abandons).toBe(1);
+
+    const hostHistory = await matchHistory(host);
+    const guestHistory = await matchHistory(guest);
+    expect(hostHistory.total).toBe(1);
+    expect(guestHistory.total).toBe(1);
+    expect(hostHistory.matches[0].winnerId).toBe(guest.id);
+    expect(guestHistory.matches[0].winnerId).toBe(guest.id);
+    // The day's FIRST abandon is forgiven on the rating only: the leaver's
+    // copy goes down un-ranked, while the survivor's win rates normally.
+    expect(hostHistory.matches[0].ranked).toBe(0);
+    expect(guestHistory.matches[0].ranked).toBe(1);
+    expect(hostProfile.rankedGames).toBe(0);
+    expect(guestProfile.rankedGames).toBe(1);
+    p2.close();
+  });
+
+  it('rates the loss once the day’s forgiveness is spent', async () => {
+    const host = await newDevice('RageQuitHost');
+    const guest = await newDevice('RageQuitGuest');
+
+    // First abandon of the day — forgiven, so it costs the record but not the
+    // ladder.
+    {
+      const { p1, p2 } = await seatDuel(host, guest, 3);
+      await cross(p1, p2, 1);
+      await cross(p2, p1, 1);
+      p1.close();
+      await sleep(400);
+      p2.close();
+    }
+    const afterFirst = await getProfile(host);
+    expect(afterFirst.matchesLost).toBe(1);
+    expect(afterFirst.rankedGames).toBe(0);
+
+    // Second the same day: the pattern is not forgiven, so this loss rates
+    // like any other — the real cost of walking out, and no flat penalty.
+    {
+      const { p1, p2 } = await seatDuel(host, guest, 3);
+      await cross(p1, p2, 1);
+      await cross(p2, p1, 1);
+      p1.close();
+      await sleep(400);
+      p2.close();
+    }
+    const afterSecond = await getProfile(host);
+    expect(afterSecond.matchesLost).toBe(2);
+    expect(afterSecond.rankedGames).toBe(1);
+    expect(afterSecond.rankMu).toBeLessThan(afterFirst.rankMu);
+    const history = await matchHistory(host);
+    expect(history.matches.map((m: any) => m.ranked)).toEqual([1, 0]); // newest first
+  });
+
+  it('records no match when a lobby seat is left before any ball crosses', async () => {
+    // Only a LIVE match is one you can walk out of. Leaving a lobby, or a
+    // room whose match already ended, is not an abandon and not a loss.
+    const host = await newDevice('LobbyLeaveHost');
+    const guest = await newDevice('LobbyLeaveGuest');
+    const { p1, p2 } = await seatDuel(host, guest, 3);
+    p1.close();
+    await sleep(400);
+
+    const hostProfile = await getProfile(host);
     expect(hostProfile.matchesPlayed).toBe(0);
-    expect(guestProfile.matchesPlayed).toBe(0);
+    expect(hostProfile.abandons ?? 0).toBe(0);
+    expect((await getProfile(guest)).matchesPlayed).toBe(0);
     p2.close();
   });
 });
