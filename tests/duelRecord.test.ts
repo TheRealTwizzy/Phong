@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { findMission } from '../src/game/missions';
+import { duelMatchKey } from '../src/matchRules';
 import { Device, Phone as PhoneSocket, Relay, sleep, startRelay } from './helpers/relay';
 
 // A duel end-to-end through the REAL relay and the REAL record route, because
@@ -722,6 +723,39 @@ describe('recording a duel', () => {
         mode: 'multiplayer',
         isWinner: true,
         roomId,
+      }),
+    });
+    expect((await res.json()).alreadyRecorded).toBe(true);
+    expect((await getProfile(host)).matchesPlayed).toBe(1);
+
+    p1.close();
+    p2.close();
+  });
+
+  it('deduplicates a duel POST that carries the key but not the room', async () => {
+    // A leave or ejection racing the final point can null the client's room
+    // state before the recording effect runs — so the payload arrives with no
+    // roomId for the server to re-derive the key from. The client mints and
+    // caches the duel key at game_start for exactly this case; the ledger
+    // must recognise it on the key alone, or the relay's record and this POST
+    // are both paid.
+    const host = await newDevice('KeyOnlyHost');
+    const guest = await newDevice('KeyOnlyGuest');
+    const { p1, p2, roomId, matchSeq } = await seatDuel(host, guest, 3);
+
+    for (let i = 0; i < 3; i++) p1.send({ type: 'point_scored', scorer: 'p1' });
+    await p1.await('match_recorded');
+
+    const res = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        playerScore: 3,
+        opponentScore: 0,
+        bestStreak: 4, endStreak: 0, earnedStreak: 4,
+        mode: 'multiplayer',
+        isWinner: true,
+        matchKey: duelMatchKey(roomId, matchSeq),
       }),
     });
     expect((await res.json()).alreadyRecorded).toBe(true);

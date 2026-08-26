@@ -781,10 +781,16 @@ export default function App() {
       rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
 
       // A duel's key is derived so the relay lands on the same one; a solo
-      // match has only this device to report it, so it mints its own.
+      // match has only this device to report it, so it mints its own. The
+      // duel key was already minted at game_start (the moment the room is
+      // certainly known) and cached — preferred here over a re-derivation
+      // from live state, because `roomId` can be nulled by a leave racing
+      // the final point, and a whistle-time mint then produced a solo-shaped
+      // key the server could not match to the relay's record.
       const matchKey =
-        modeRef.current === 'multiplayer' && roomId
-          ? duelMatchKey(roomId, matchSeqRef.current)
+        modeRef.current === 'multiplayer'
+          ? matchKeyRef.current ||
+            (roomId ? duelMatchKey(roomId, matchSeqRef.current) : newSoloMatchKey())
           : matchKeyRef.current || newSoloMatchKey();
       matchKeyRef.current = matchKey;
 
@@ -1434,7 +1440,14 @@ export default function App() {
         // number: it is how the result this match produces is filed against
         // THIS match and not the rematch that follows it.
         matchSeqRef.current = msg.matchSeq ?? matchSeqRef.current + 1;
-        matchKeyRef.current = '';
+        // Mint the duel's matchKey HERE, while the room is certainly known,
+        // rather than at the whistle: a leave or ejection racing the final
+        // point can null `roomId` before the recording effect runs, and a
+        // whistle-time mint then produced a solo-shaped key the server could
+        // not re-derive — a second record of the same seat, paid twice. The
+        // P2P replica synthesizes this same message for a peer-agreed
+        // rematch, so its locally counted matchSeq lands here too.
+        matchKeyRef.current = roomId ? duelMatchKey(roomId, matchSeqRef.current) : '';
         shownMatchKeyRef.current = '';
         setRoomConfig(msg.config);
         p2pRef.current?.setConfig(msg.config);
