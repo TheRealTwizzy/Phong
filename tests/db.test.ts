@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { MatchEndPayload } from '../src/types';
+import type { MatchEndPayload, MatchRules } from '../src/types';
 import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, soloMuCap } from '../src/rating';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
@@ -314,6 +314,60 @@ describe('GameDatabase', () => {
     expect(after.tier).toBe('unranked');
   });
 
+  // "Un-Ranked must never move MMR or TrueSkill." The visible ladder half is
+  // covered above; this is the hidden one, which is the half nothing renders
+  // and so the half that could drift unnoticed. A match whose RULES unrank it
+  // must move neither estimator — it was not played on the game the ratings
+  // describe. (An earned-difficulty solo is a different thing: it displays as
+  // un-ranked because it does not move the visible TIER, and it deliberately
+  // does feed hidden MMR, which is what keeps the AI adapting and the
+  // pre-match odds honest. That is the case directly above.)
+  const RULE_BREAKERS: Array<[string, Partial<MatchRules>]> = [
+    ['a paddle past its ranked band', { paddleScale: 1.6 }],
+    ['a ball past its ranked band', { ballScale: 1.6 }],
+    ['a speed band past its own', { ballSpeedMax: 1.6 }],
+    ['the opponent sonar', { opponentSonar: true }],
+  ];
+  for (const [label, rules] of RULE_BREAKERS) {
+    it(`moves no rating at all for a match unranked by ${label}`, () => {
+      const id = `p_unranked_${label.replace(/\W/g, '')}`;
+      init(id, `Unranked${label.replace(/\W/g, '').slice(0, 8)}`);
+      const before = db.getProfile(id);
+      const result = db.recordMatch(
+        match(id, { rules, matchKey: `unranked:${label}` } as Partial<MatchEndPayload>)
+      );
+
+      const after = db.getProfile(id);
+      // Neither the hidden estimator...
+      expect(after.mmrMu).toBeCloseTo(before.mmrMu, 10);
+      expect(after.mmrSigma).toBeCloseTo(before.mmrSigma, 10);
+      // ...nor the visible ladder, nor the count that places it.
+      expect(after.rankMu).toBeCloseTo(before.rankMu, 10);
+      expect(after.rankSigma).toBeCloseTo(before.rankSigma, 10);
+      expect(after.rankedGames).toBe(before.rankedGames);
+      expect(result.ranked).toBe(false);
+      expect(result.rankDirection).toBe('none');
+      // It is still a match that happened: it pays XP and is on the record.
+      expect(after.xp).toBeGreaterThan(before.xp);
+      expect(after.matchesPlayed).toBe(before.matchesPlayed + 1);
+      // And it is filed as un-ranked, so the history filters agree with the
+      // rating that never moved.
+      expect(db.getMatchHistory(id)[0].ranked).toBe(0);
+    });
+  }
+
+  it('moves both estimators for a stock duel, so the checks above are not vacuous', () => {
+    init('p_ranked_ctrl', 'RankedControl');
+    const before = db.getProfile('p_ranked_ctrl');
+    const result = db.recordMatch(match('p_ranked_ctrl', { matchKey: 'ranked:control' }));
+    const after = db.getProfile('p_ranked_ctrl');
+    expect(after.mmrMu).not.toBeCloseTo(before.mmrMu, 6);
+    expect(after.rankMu).not.toBeCloseTo(before.rankMu, 6);
+    expect(after.rankedGames).toBe(before.rankedGames + 1);
+    expect(result.ranked).toBe(true);
+    expect(db.getMatchHistory('p_ranked_ctrl')[0].ranked).toBe(1);
+  });
+
   it('lets solo losses move hidden MMR down, and solo wins bring it back', () => {
     init('p_solo_swing', 'SoloSwing');
     const start = db.getProfile('p_solo_swing').mmrMu;
@@ -510,55 +564,63 @@ describe('mid-match abandons', () => {
   const laterSameDay = new Date('2026-09-01T21:00:00Z');
   const nextDay = new Date('2026-09-02T10:00:00Z');
 
+  // recordAbandon is the BOOKKEEPING half — the day-keyed count, the career
+  // counter and the verdict on today's forgiveness. The match itself (the
+  // leaver's loss, the survivor's win) is the relay's recordRoomMatch, pinned
+  // over a real socket in tests/duelRecord.test.ts.
+
   it('records nothing for a profile that never onboarded', () => {
     db.getProfile('p_ab_ghost');
-    const res = db.recordAbandon('p_ab_ghost', { ranked: true }, day);
+    const res = db.recordAbandon('p_ab_ghost', day);
     expect(res.counted).toBe(false);
-    expect(res.penalized).toBe(false);
+    expect(res.forgiven).toBe(false);
   });
 
-  it('forgives the first abandon of a day, penalizes ranked repeats', () => {
+  it('forgives the first abandon of a day and no more', () => {
     init('p_ab_rage', 'RageOne');
     const before = db.getProfile('p_ab_rage');
 
-    // First of the day: counted, never penalized — connections drop.
-    const first = db.recordAbandon('p_ab_rage', { ranked: true }, day);
-    expect(first).toEqual({ counted: true, penalized: false, abandonsToday: 1 });
+    // First of the day: counted and forgiven — connections drop. Forgiveness
+    // spares the RATING on the loss the relay records, never the loss.
+    const first = db.recordAbandon('p_ab_rage', day);
+    expect(first).toEqual({ counted: true, forgiven: true, abandonsToday: 1 });
     const afterFirst = db.getProfile('p_ab_rage');
     expect(afterFirst.abandons).toBe(1);
-    expect(afterFirst.rankMu).toBeCloseTo(before.rankMu, 10);
 
-    // Second the same day, ranked: the pattern costs visible rating.
-    const second = db.recordAbandon('p_ab_rage', { ranked: true }, laterSameDay);
-    expect(second.penalized).toBe(true);
-    const afterSecond = db.getProfile('p_ab_rage');
-    expect(afterSecond.abandons).toBe(2);
-    expect(afterSecond.rankMu).toBeLessThan(before.rankMu);
-    // XP is untouched either way: levels never regress.
-    expect(afterSecond.xp).toBe(before.xp);
-    expect(afterSecond.level).toBe(before.level);
+    // Second the same day: the pattern is no longer forgiven, so the loss the
+    // relay records for it rates like any other.
+    const second = db.recordAbandon('p_ab_rage', laterSameDay);
+    expect(second).toEqual({ counted: true, forgiven: false, abandonsToday: 2 });
+    expect(db.getProfile('p_ab_rage').abandons).toBe(2);
   });
 
-  it('never takes rating for abandoning an unranked party match', () => {
+  it('never moves rating or XP by itself', () => {
+    // The flat mu penalty this function used to apply is gone: the cost of
+    // walking out is the genuine TrueSkill loss the relay now records, so
+    // this call must leave every rating field exactly where it found it.
     init('p_ab_party', 'PartyQuit');
     const before = db.getProfile('p_ab_party');
-    db.recordAbandon('p_ab_party', { ranked: false }, day);
-    const res = db.recordAbandon('p_ab_party', { ranked: false }, laterSameDay);
-    expect(res.counted).toBe(true);
-    expect(res.penalized).toBe(false);
+    db.recordAbandon('p_ab_party', day);
+    db.recordAbandon('p_ab_party', laterSameDay);
     const after = db.getProfile('p_ab_party');
     expect(after.abandons).toBe(2);
     expect(after.rankMu).toBeCloseTo(before.rankMu, 10);
+    expect(after.rankSigma).toBeCloseTo(before.rankSigma, 10);
+    expect(after.mmrMu).toBeCloseTo(before.mmrMu, 10);
+    expect(after.rankedGames).toBe(before.rankedGames);
+    // XP is untouched either way: levels never regress.
+    expect(after.xp).toBe(before.xp);
+    expect(after.level).toBe(before.level);
   });
 
   it('resets the forgiveness with the UTC day, not a rolling window', () => {
     init('p_ab_days', 'DayQuit');
-    db.recordAbandon('p_ab_days', { ranked: true }, day);
-    db.recordAbandon('p_ab_days', { ranked: true }, laterSameDay); // penalized
+    db.recordAbandon('p_ab_days', day);
+    db.recordAbandon('p_ab_days', laterSameDay); // not forgiven
     // A new day is a new row: the first one is forgiven again, however many
     // yesterday held — while the career total keeps climbing.
-    const fresh = db.recordAbandon('p_ab_days', { ranked: true }, nextDay);
-    expect(fresh).toEqual({ counted: true, penalized: false, abandonsToday: 1 });
+    const fresh = db.recordAbandon('p_ab_days', nextDay);
+    expect(fresh).toEqual({ counted: true, forgiven: true, abandonsToday: 1 });
     expect(db.getProfile('p_ab_days').abandons).toBe(3);
   });
 });
@@ -645,12 +707,14 @@ describe('counters the server derives, and the client cannot report', () => {
   });
 
   it('leaves the streak alone when a match is abandoned rather than lost', () => {
-    // An abandon costs rankMu and is its own counter; it is not a played
-    // match, so it neither breaks a streak nor extends one.
+    // recordAbandon is its own counter and nothing else: it moves no streak
+    // by itself. The loss that DOES break the streak is the one the relay
+    // records for the abandoned match (recordRoomMatch), which is an ordinary
+    // recordMatch and breaks it exactly as any other loss would.
     init('c_ab', 'AbandonStreak');
     played('c_ab', { isWinner: true }, 1);
     played('c_ab', { isWinner: true }, 2);
-    db.recordAbandon('c_ab', { ranked: true });
+    db.recordAbandon('c_ab');
 
     const p = db.getProfile('c_ab');
     expect(p.winStreak).toBe(2);

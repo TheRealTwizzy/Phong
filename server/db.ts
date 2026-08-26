@@ -75,6 +75,13 @@ export interface RecordMatchContext {
   opponentRating?: Rating;
   /** 0.5..1.5 weight from margin of victory / rally quality. */
   performanceWeight?: number;
+  /**
+   * Record the match as un-ranked whatever its rules say: no MMR, no rank,
+   * `ranked: 0` on the history row. The one caller is the relay recording a
+   * FORGIVEN abandon's loss — the day's first disconnect spares the leaver's
+   * ladder, never the loss itself.
+   */
+  forceUnranked?: boolean;
 }
 
 // Overridable so production can point at a persistent volume (e.g. /data on
@@ -306,12 +313,13 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
   };
 }
 
-// Mid-match abandons: the first of a UTC day is forgiven, ranked repeats pay
-// in visible rating. Sized to sting across a session of rage-quits (three in
-// a day is a full mu point, a third of a tier) without one bad wifi evening
-// costing a rank.
+// Mid-match abandons: the first of a UTC day is forgiven — forgiveness spares
+// the RATING on the loss the relay records (the leaver's copy of the match
+// goes down unranked), never the loss itself. Repeats pay the genuine
+// TrueSkill loss, which replaced the flat mu penalty this constant's sibling
+// used to size: one bad wifi evening still cannot cost a rank, while a
+// session of rage-quits now costs exactly what losing those matches costs.
 const ABANDONS_FORGIVEN_PER_DAY = 1;
-const ABANDON_RANKED_MU_PENALTY = 0.5;
 
 class GameDatabase {
   private sql: DatabaseSync;
@@ -406,10 +414,10 @@ class GameDatabase {
         difficulty TEXT,
         timestamp TEXT NOT NULL,
         -- 1 = this match actually moved the visible ladder (ranksThisMatch at
-        -- record time), 0 = it did not. NULL marks a row from before the
-        -- column existed: the inputs that decided ranked-ness (the rules, the
-        -- sonar, the seat pairing) were discarded at record time, so a
-        -- backfill would be a guess — legacy rows read as un-ranked instead.
+        -- record time), 0 = it did not. Rows from before the column existed
+        -- were classified once by ranked_backfill_v1 from mode + difficulty
+        -- (rules assumed stock — see backfillMatchRanked); a NULL still reads
+        -- as un-ranked everywhere, as the safety net for any straggler.
         ranked INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
@@ -713,6 +721,7 @@ class GameDatabase {
 
     this.releaseStrandedPlacements();
     this.resetActiveTasks();
+    this.backfillMatchRanked();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -751,6 +760,39 @@ class GameDatabase {
     this.setMeta(KEY, new Date().toISOString());
     if (stranded.changes) {
       console.log(`placement_sigma_v1: placed ${stranded.changes} player(s) stranded by the old placement rule`);
+    }
+  }
+
+  /**
+   * Classify the match rows recorded before the `ranked` column existed.
+   *
+   * Shipping the column with no backfill read as correct caution and was a
+   * bug in practice: on a live database the ENTIRE history predated it, so
+   * every match rendered Un-Ranked and both Ranked sub-tabs were empty. The
+   * per-match rules and sonar flag were discarded at record time, but the two
+   * inputs that dominate the verdict — mode and difficulty — survive in every
+   * row, and rules are stock in the overwhelming case. So: a duel counted for
+   * the ladder, a solo at an earned difficulty (pro/cyber) counted, and
+   * everything else did not. Post-wipe_v4 databases hold only
+   * rookie/pro/cyber difficulties, so the IN list is complete.
+   *
+   * One-shot and heuristic, deliberately: rows written after the column
+   * always carry the exact verdict, and NULL still reads as un-ranked
+   * everywhere as the safety net for any straggler.
+   */
+  private backfillMatchRanked(): void {
+    const KEY = 'ranked_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rankedRows = this.stmt(
+        `UPDATE matches SET ranked = 1 WHERE ranked IS NULL
+          AND (mode = 'multiplayer' OR (mode = 'solo' AND difficulty IN ('pro','cyber')))`
+      ).run();
+    const unrankedRows = this.stmt('UPDATE matches SET ranked = 0 WHERE ranked IS NULL').run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rankedRows.changes || unrankedRows.changes) {
+      console.log(
+        `ranked_backfill_v1: classified ${rankedRows.changes} ranked and ${unrankedRows.changes} un-ranked legacy match row(s)`
+      );
     }
   }
 
@@ -1096,21 +1138,27 @@ class GameDatabase {
    * live ball. Recorded by the relay from its own room state; a client can
    * never report one.
    *
-   * The FIRST abandon of a UTC day is forgiven outright: connections drop,
-   * phones ring, life happens, and punishing an accident teaches nothing.
-   * Every further one that day marks a pattern, and when the abandoned match
-   * was RANKED it costs visible rating — the ladder is what rage-quitting
-   * corrupts, since a quitter denies their opponent the win they were about
-   * to take. XP is untouched either way: levels never regress.
+   * This is the abandon's BOOKKEEPING half: the day-keyed count and the
+   * career counter, plus the verdict on whether today's forgiveness covers
+   * it. The match itself is recorded separately by the relay as a real LOSS
+   * for the leaver and a real WIN for the survivor (recordRoomMatch with the
+   * leaver named), because the old shape — a flat rating penalty and no match
+   * anywhere — meant a player could quit every losing duel and keep a 100%
+   * win rate while their opponents' wins evaporated with them.
+   *
+   * The FIRST abandon of a UTC day is forgiven: connections drop, phones
+   * ring, life happens. Forgiveness spares only the RATING — the leaver's
+   * copy of the match records unranked — never the facts: the loss, the win
+   * and both history rows land either way. There is no flat mu penalty any
+   * more; the unforgiven cost is the genuine TrueSkill loss.
    */
   public recordAbandon(
     playerId: string,
-    opts: { ranked: boolean },
     now: Date = new Date()
-  ): { counted: boolean; penalized: boolean; abandonsToday: number } {
+  ): { counted: boolean; forgiven: boolean; abandonsToday: number } {
     const profile = this.readProfile(playerId);
     if (!profile || !profile.initialized) {
-      return { counted: false, penalized: false, abandonsToday: 0 };
+      return { counted: false, forgiven: false, abandonsToday: 0 };
     }
     const dayKey = missionDayKey(now);
     this.stmt(
@@ -1122,15 +1170,13 @@ class GameDatabase {
       .get(playerId, dayKey) as { count: number };
 
     profile.abandons += 1;
-    let penalized = false;
-    if (opts.ranked && row.count > ABANDONS_FORGIVEN_PER_DAY) {
-      profile.rankMu -= ABANDON_RANKED_MU_PENALTY;
-      profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma);
-      penalized = true;
-    }
     profile.lastActive = now.toISOString();
     this.upsertProfile(profile);
-    return { counted: true, penalized, abandonsToday: row.count };
+    return {
+      counted: true,
+      forgiven: row.count <= ABANDONS_FORGIVEN_PER_DAY,
+      abandonsToday: row.count,
+    };
   }
 
   /**
@@ -2202,7 +2248,9 @@ class GameDatabase {
     // different speed band) still pays XP but must not move the rating: the
     // tier ladder only means something if every ranked match used one ruleset.
     // Re-derived from the rules themselves, never from a client-set flag.
-    const ranked = isRankedRules(payload.rules);
+    // `forceUnranked` is the relay's own override for a forgiven abandon's
+    // loss — trusted because it comes from server code, never a request.
+    const ranked = !context.forceUnranked && isRankedRules(payload.rules);
     const previousTier = profile.tier;
     const soloOpts = {
       ...SOLO_UPDATE,

@@ -54,6 +54,7 @@ import {
   normalizeRoomConfig,
   normalizeRules,
   isRankedRules,
+  unrankedReasons,
 } from './matchRules';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
@@ -277,7 +278,9 @@ export default function App() {
   const [toastPracticeXp, setToastPracticeXp] = useState<number | null>(null);
   // A permanent unlock banked from an elite mission — worth announcing.
   const [toastUnlock, setToastUnlock] = useState<string | null>(null);
-  const [toastOpponentLeft, setToastOpponentLeft] = useState<boolean>(false);
+  // 'won' when the relay recorded the abandoned match as this player's win,
+  // 'plain' when there was no match to win (a stranded guest in a lobby).
+  const [toastOpponentLeft, setToastOpponentLeft] = useState<'won' | 'plain' | null>(null);
   // Telemetry is per-match and starts HIDDEN: enabling the rule makes the
   // panel available, and the player opens it from the court when they want
   // it. Resets with every match so it never lingers from the last one.
@@ -357,7 +360,17 @@ export default function App() {
   const [lobbyReady, setLobbyReady] = useState<[boolean, boolean]>([false, false]);
   // "Are you sure?" gate for quitting a live duel — walking out mid-match is
   // an abandon, so it should never happen off a single mis-tap.
-  const [quitConfirmOpen, setQuitConfirmOpen] = useState<boolean>(false);
+  /**
+   * The match-exit confirmation, and which exit raised it.
+   *
+   * Every route out of a LIVE match goes through this, because every one of
+   * them now costs the match: 'duel' hands the win to the opponent, and both
+   * solo routes record the loss (quitting to the menu, and Reset, which ends
+   * this match just as surely as walking out of it). The routes that cost
+   * nothing never raise it — a finished match's Main Menu, the Practice Wall,
+   * a lobby with no match in it, and a solo match still at 0-0.
+   */
+  const [exitConfirm, setExitConfirm] = useState<'duel' | 'solo-quit' | 'solo-reset' | null>(null);
   // The same gate for walking out of a LOBBY. Dismissing that sheet used to
   // only hide it, which left the player alone on the live court underneath —
   // paddle working, serve refused, and the relay's room still open behind
@@ -1670,7 +1683,13 @@ export default function App() {
         const strandedGuest = isMultiplayerOpen && playerIndexRef.current === 1;
         const midMatch = !winner && !isMultiplayerOpen && screenRef.current === 'game';
         if (midMatch || strandedGuest) {
-          setToastOpponentLeft(true);
+          // The relay records an abandoned duel as this player's WIN and
+          // pushes it just before this message, so say so rather than
+          // reporting only the disconnection: the match they were in the
+          // middle of is on their record, not lost with the opponent.
+          const wonByAbandon =
+            midMatch && !!matchKeyRef.current && shownMatchKeyRef.current === matchKeyRef.current;
+          setToastOpponentLeft(wonByAbandon ? 'won' : 'plain');
           handleLeaveRoom();
         }
         break;
@@ -1954,7 +1973,7 @@ export default function App() {
     setMatchCountdown(null);
     setCountdownArmed(false);
     setLobbyReady([false, false]);
-    setQuitConfirmOpen(false);
+    setExitConfirm(null);
     setLeaveLobbyConfirmOpen(false);
     // The lobby is a sheet over the court, not a screen. Leaving without
     // closing it dropped the player back on the menu with it still floating.
@@ -2611,19 +2630,27 @@ export default function App() {
     [queueRunWrite]
   );
 
-  const quitToMenu = () => {
-    if (mode === 'multiplayer') {
-      // A live duel is worth a second look before walking out: leaving
-      // mid-match is an abandon, and ranked repeats cost rating. A finished
-      // match, or a lobby with no opponent, leaves without ceremony.
-      const liveMatch = !winner && opponentId !== null && !isMultiplayerOpen;
-      if (liveMatch) {
-        setQuitConfirmOpen(true);
-        return;
-      }
-      handleLeaveRoom();
-      return;
-    }
+  /**
+   * Whether leaving right now walks out of a solo match that is genuinely
+   * under way — the case that has to be recorded as a loss.
+   *
+   * A duel's walkout is judged by the relay (see vacateSeat); this is the
+   * solo half, and it is the client's to judge because a solo match exists
+   * only here. Quitting a match a point has been scored in is losing it: a
+   * player who quits every solo match they are behind in otherwise records
+   * only their wins, which is half of the reported 100% win rate. At 0-0
+   * nothing has happened yet — backing out of a match that never really
+   * started costs nothing, and neither the tour's match (which banks nothing)
+   * nor an already-decided one is ours to record.
+   */
+  const abandoningLiveSoloMatch = (): boolean =>
+    modeRef.current === 'solo' &&
+    !tourMatchRef.current &&
+    !winner &&
+    statsRef.current.score + statsRef.current.opponentScore >= 1;
+
+  /** Walk out of the current match. Past every confirmation by this point. */
+  const commitQuitToMenu = () => {
     if (mode === 'practice') {
       void submitPracticeSession(
         statsRef.current.bestStreak,
@@ -2643,10 +2670,34 @@ export default function App() {
       // reload: the stored run is what a fresh page reads, and it would still
       // hold whatever the last COMPLETED match left there.
       rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
-      void reportStreak(modeRef.current, statsRef.current.streak);
+      if (abandoningLiveSoloMatch()) void recordMatchCompletion(false);
+      else void reportStreak(modeRef.current, statsRef.current.streak);
     }
     setScreen('menu');
     resetMatch();
+  };
+
+  const quitToMenu = () => {
+    if (mode === 'multiplayer') {
+      // A live duel is worth a second look before walking out: leaving
+      // mid-match is an abandon, and ranked repeats cost rating. A finished
+      // match, or a lobby with no opponent, leaves without ceremony.
+      const liveMatch = !winner && opponentId !== null && !isMultiplayerOpen;
+      if (liveMatch) {
+        setExitConfirm('duel');
+        return;
+      }
+      handleLeaveRoom();
+      return;
+    }
+    // A solo match with a point on the board is one that will be RECORDED as
+    // a loss when it is left, so it is worth a second look — the same second
+    // look a duel gets, for the same reason.
+    if (abandoningLiveSoloMatch()) {
+      setExitConfirm('solo-quit');
+      return;
+    }
+    commitQuitToMenu();
   };
 
   /**
@@ -2664,6 +2715,18 @@ export default function App() {
    * typechecked (no @types/react), so this is the guard.
    */
   const handleResetMatch = () => {
+    // Restarting a match a point has been scored in ENDS that match as a
+    // loss, so it asks first — the same confirmation walking out gets,
+    // because it is the same consequence.
+    if (abandoningLiveSoloMatch()) {
+      setExitConfirm('solo-reset');
+      return;
+    }
+    commitResetMatch();
+  };
+
+  /** Restart the current match. Past every confirmation by this point. */
+  const commitResetMatch = () => {
     const run = statsRef.current.streak;
     // Carrying the run into the restarted match is only half of it. The other
     // half is saying so — a player who missed and then pressed Reset has a run
@@ -2674,7 +2737,14 @@ export default function App() {
     // the match it plays never happened.
     if (!tourMatchRef.current) {
       rememberCarry(carryRef.current, modeRef.current, run);
-      void reportStreak(modeRef.current, run);
+      // Restarting a solo match a point has been scored in abandons it, the
+      // same as walking out to the menu — so it is recorded the same way.
+      // Without this Reset is simply the free version of the walkout: quit
+      // the ones you are losing, press Reset instead of Home, and only your
+      // wins are ever recorded. The run still carries (a restart is not a
+      // miss); it is the MATCH that ends here, as a loss.
+      if (abandoningLiveSoloMatch()) void recordMatchCompletion(false);
+      else void reportStreak(modeRef.current, run);
     }
     resetMatch(modeRef.current, run);
   };
@@ -2813,10 +2883,13 @@ export default function App() {
             },
             toastOpponentLeft && {
               id: 'toast-opponent-left',
-              tone: 'loss' as const,
+              tone: toastOpponentLeft === 'won' ? ('win' as const) : ('loss' as const),
               ttlMs: TOAST_TTL.reward,
-              content: t('opponent_left_notice', currentLanguage),
-              onDismiss: () => setToastOpponentLeft(false),
+              content: t(
+                toastOpponentLeft === 'won' ? 'opponent_left_win_notice' : 'opponent_left_notice',
+                currentLanguage
+              ),
+              onDismiss: () => setToastOpponentLeft(null),
             },
             // Deliberately no ttlMs: this one reports a state that is still
             // unresolved, and it is cleared by applyMatchResult the moment the
@@ -2837,21 +2910,29 @@ export default function App() {
           ].filter(Boolean) as ToastSpec[]}
         />
 
+        {/* One confirmation for every route out of a live match, because they
+            all cost the same thing: the match, recorded as a loss. It names
+            that consequence and the ones that follow from it — the opponent's
+            win in a duel, and whether the ladder is on the line — rather than
+            asking "are you sure" and leaving the player to find out. */}
         <Sheet
           id="quit-confirm-modal"
-          isOpen={quitConfirmOpen}
-          onClose={() => setQuitConfirmOpen(false)}
+          isOpen={exitConfirm !== null}
+          onClose={() => setExitConfirm(null)}
           size="xs"
           layer="over"
           accent="loss"
-          title={t('quit_confirm_title', currentLanguage)}
+          title={t(
+            exitConfirm === 'solo-reset' ? 'reset_confirm_title' : 'quit_confirm_title',
+            currentLanguage
+          )}
           footer={
             <>
               <Button
                 id="btn-quit-cancel"
                 variant="secondary"
                 block
-                onClick={() => setQuitConfirmOpen(false)}
+                onClick={() => setExitConfirm(null)}
               >
                 {t('quit_confirm_no', currentLanguage)}
               </Button>
@@ -2860,18 +2941,52 @@ export default function App() {
                 variant="danger"
                 block
                 onClick={() => {
-                  setQuitConfirmOpen(false);
-                  handleLeaveRoom();
+                  const intent = exitConfirm;
+                  setExitConfirm(null);
+                  if (intent === 'duel') handleLeaveRoom();
+                  else if (intent === 'solo-reset') commitResetMatch();
+                  else commitQuitToMenu();
                 }}
               >
-                {t('quit_confirm_yes', currentLanguage)}
+                {t(
+                  exitConfirm === 'solo-reset' ? 'reset_confirm_yes' : 'quit_confirm_yes',
+                  currentLanguage
+                )}
               </Button>
             </>
           }
         >
-          <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
-            {t('quit_confirm_body', currentLanguage)}
-          </p>
+          <div className="space-y-2">
+            <p
+              id="quit-confirm-consequence"
+              className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted"
+            >
+              {t(
+                exitConfirm === 'duel'
+                  ? 'quit_confirm_body'
+                  : exitConfirm === 'solo-reset'
+                    ? 'reset_confirm_body'
+                    : 'quit_confirm_body_solo',
+                currentLanguage
+              )}
+            </p>
+            {/* Whether the ladder is actually on the line, from the same
+                verdict the pre-match sheet shows — a Rookie match and a
+                sonar match cost the record but not the rank, and saying so
+                is the difference between a warning and a scare. */}
+            <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-dim">
+              {t(
+                unrankedReasons({
+                  rules: activeConfig.rules,
+                  mode,
+                  difficulty: settings.difficulty,
+                }).length === 0
+                  ? 'quit_confirm_ranked'
+                  : 'quit_confirm_unranked',
+                currentLanguage
+              )}
+            </p>
+          </div>
         </Sheet>
 
         <Sheet
