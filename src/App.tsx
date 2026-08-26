@@ -2988,6 +2988,7 @@ export default function App() {
           playerId={publicProfileId}
           onClose={() => setPublicProfileId(null)}
           language={currentLanguage}
+          onViewProfile={openPublicProfile}
         />
 
         {/* Screen swap.

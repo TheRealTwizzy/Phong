@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { PlayerProfile, MatchRecord, PlayerStatus, LanguageCode } from '../types';
-import { USERNAME_MAX, isLinkableId } from '../profileRules';
+import { PlayerProfile, PlayerStatus, LanguageCode } from '../types';
+import { USERNAME_MAX } from '../profileRules';
 import { PLACEMENT_GAMES, xpForLevel } from '../rating';
 import { processAvatarFile, uploadAvatar, deleteAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
+import { MatchHistoryList } from './MatchHistoryList';
 import { TierBadge } from './TierBadge';
 import { t } from '../i18n/translations';
 import { Sheet, ProgressBar } from './ui';
@@ -133,27 +134,12 @@ export const ProfileModal: React.FC<Props> = ({
   const [tempName, setTempName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<'stats' | 'history'>('stats');
-  const [matches, setMatches] = useState<MatchRecord[]>([]);
-  const [isLoadingMatches, setIsLoadingMatches] = useState(false);
 
   useEffect(() => {
     if (profile) {
       setTempName(profile.username);
     }
   }, [profile]);
-
-  useEffect(() => {
-    if (isOpen && profile && activeTab === 'history') {
-      setIsLoadingMatches(true);
-      fetch('/api/matches/me')
-        .then((res) => res.json())
-        .then((data) => {
-          setMatches(data.matches || []);
-        })
-        .catch(console.error)
-        .finally(() => setIsLoadingMatches(false));
-    }
-  }, [isOpen, profile, activeTab]);
 
   if (!profile) return null;
 
@@ -387,7 +373,7 @@ export const ProfileModal: React.FC<Props> = ({
                   : 'border-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
-              Career Statistics
+              {t('profile_tab_stats', language)}
             </button>
             <button
               id="profile-tab-history"
@@ -398,7 +384,7 @@ export const ProfileModal: React.FC<Props> = ({
                   : 'border-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
-              Recent Matches
+              {t('public_history_section', language)}
             </button>
           </div>
 
@@ -602,68 +588,18 @@ export const ProfileModal: React.FC<Props> = ({
                 )}
               </div>
             ) : (
-              <div className="space-y-2.5">
-                {isLoadingMatches ? (
-                  <div className="text-center py-8 text-slate-400 text-sm">Loading match history...</div>
-                ) : matches.length === 0 ? (
-                  <div className="text-center py-8 text-slate-500 text-sm">
-                    No matches recorded yet. Play a solo or multiplayer game to build your record!
-                  </div>
-                ) : (
-                  matches.map((m) => {
-                    const isWin = m.winnerId === profile.id;
-                    const opponentIsP2 = m.player1Id === profile.id;
-                    const oppName = opponentIsP2 ? m.player2Name : m.player1Name;
-                    const oppId = opponentIsP2 ? m.player2Id : m.player1Id;
-                    const oppLinkable = onViewProfile && isLinkableId(oppId);
-                    return (
-                      <div
-                        key={m.id}
-                        className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 flex items-center justify-between"
-                      >
-                        <div className="flex items-center gap-3">
-                          <div
-                            className={`w-9 h-9 rounded-lg font-black text-xs flex items-center justify-center ${
-                              isWin
-                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                                : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                            }`}
-                          >
-                            {isWin ? 'WIN' : 'LOSS'}
-                          </div>
-                          <div>
-                            <div className="text-sm font-bold text-white">
-                              vs{' '}
-                              {oppLinkable ? (
-                                <button
-                                  onClick={() => onViewProfile!(oppId)}
-                                  className="text-cyan-300 hover:text-cyan-200 underline decoration-dotted underline-offset-2 transition"
-                                  title={t('view_profile', language)}
-                                >
-                                  {oppName}
-                                </button>
-                              ) : (
-                                oppName
-                              )}
-                            </div>
-                            <div className="text-[11px] text-slate-400 flex items-center gap-2">
-                              <span>Score: {m.scoreP1} - {m.scoreP2}</span>
-                              <span>•</span>
-                              <span>Max Rally: {m.maxRally}</span>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="text-right text-[11px] text-slate-500">
-                          {new Date(m.timestamp).toLocaleDateString(undefined, {
-                            month: 'short',
-                            day: 'numeric',
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
+              // The shared list — the same tabs, filters, pagination and row
+              // renderer as the history modal and the public profile view.
+              // The ad-hoc renderer this replaces printed the raw stored
+              // scoreP1-scoreP2, which read reversed on any row the opponent
+              // had authored, and shipped its strings in English only.
+              <MatchHistoryList
+                language={language}
+                perspectiveId={profile.id}
+                source={{ kind: 'me' }}
+                onViewProfile={onViewProfile}
+                idPrefix="profile-history"
+              />
             )}
     </Sheet>
   );

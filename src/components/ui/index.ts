@@ -15,6 +15,7 @@ export {
   type SegmentedControlProps,
 } from './SegmentedControl';
 export { RankBadge, type RankBadgeProps } from './RankBadge';
+export { Pagination, type PaginationProps } from './Pagination';
 export { QrBlock, type QrBlockProps } from './QrBlock';
 export { ToastHost, TOAST_TTL, type ToastSpec } from './Toast';
 export {
