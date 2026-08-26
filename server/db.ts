@@ -406,10 +406,10 @@ class GameDatabase {
         difficulty TEXT,
         timestamp TEXT NOT NULL,
         -- 1 = this match actually moved the visible ladder (ranksThisMatch at
-        -- record time), 0 = it did not. NULL marks a row from before the
-        -- column existed: the inputs that decided ranked-ness (the rules, the
-        -- sonar, the seat pairing) were discarded at record time, so a
-        -- backfill would be a guess — legacy rows read as un-ranked instead.
+        -- record time), 0 = it did not. Rows from before the column existed
+        -- were classified once by ranked_backfill_v1 from mode + difficulty
+        -- (rules assumed stock — see backfillMatchRanked); a NULL still reads
+        -- as un-ranked everywhere, as the safety net for any straggler.
         ranked INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
@@ -713,6 +713,7 @@ class GameDatabase {
 
     this.releaseStrandedPlacements();
     this.resetActiveTasks();
+    this.backfillMatchRanked();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -751,6 +752,39 @@ class GameDatabase {
     this.setMeta(KEY, new Date().toISOString());
     if (stranded.changes) {
       console.log(`placement_sigma_v1: placed ${stranded.changes} player(s) stranded by the old placement rule`);
+    }
+  }
+
+  /**
+   * Classify the match rows recorded before the `ranked` column existed.
+   *
+   * Shipping the column with no backfill read as correct caution and was a
+   * bug in practice: on a live database the ENTIRE history predated it, so
+   * every match rendered Un-Ranked and both Ranked sub-tabs were empty. The
+   * per-match rules and sonar flag were discarded at record time, but the two
+   * inputs that dominate the verdict — mode and difficulty — survive in every
+   * row, and rules are stock in the overwhelming case. So: a duel counted for
+   * the ladder, a solo at an earned difficulty (pro/cyber) counted, and
+   * everything else did not. Post-wipe_v4 databases hold only
+   * rookie/pro/cyber difficulties, so the IN list is complete.
+   *
+   * One-shot and heuristic, deliberately: rows written after the column
+   * always carry the exact verdict, and NULL still reads as un-ranked
+   * everywhere as the safety net for any straggler.
+   */
+  private backfillMatchRanked(): void {
+    const KEY = 'ranked_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rankedRows = this.stmt(
+        `UPDATE matches SET ranked = 1 WHERE ranked IS NULL
+          AND (mode = 'multiplayer' OR (mode = 'solo' AND difficulty IN ('pro','cyber')))`
+      ).run();
+    const unrankedRows = this.stmt('UPDATE matches SET ranked = 0 WHERE ranked IS NULL').run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rankedRows.changes || unrankedRows.changes) {
+      console.log(
+        `ranked_backfill_v1: classified ${rankedRows.changes} ranked and ${unrankedRows.changes} un-ranked legacy match row(s)`
+      );
     }
   }
 
