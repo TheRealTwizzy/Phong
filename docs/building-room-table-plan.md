@@ -34,12 +34,15 @@ independently green (`npm run lint && npm test && npm run test:e2e`).
 | AI anchors | Re-anchored to hit the tier targets; Cyber gets meaningfully harder |
 | Skill ceiling | `MAX_AI_COMPETENCE` `0.66 → 0.78` (~90% returns); the hard rule becomes **< 93%** |
 | `chaos` | Name reused at the top, with a one-shot migration relabelling legacy rows |
-| Ranked solo | Pro/Elite/Cyber/Chaos rate; capped just below the Overlord floor |
+| Ranked solo | Pro/Elite/Cyber/Chaos rate; **explicit per-rung caps** (see Phase 1) — solo can reach Legend at most, never Overlord |
+| Solo XP | **Momentum + fatigue** (new): consecutive solo wins ramp XP non-linearly toward a hard per-match cap; same-day solo grinding decays the multiplier; harder difficulty always pays more |
 | Practice + Split | A third TRAINING building; SOLO AI rooms have no tables |
+| Private duels | No dedicated PRIVATE room — **every PVP room's browser offers "create private table"**, the join-by-code box lives at the building level, and invite links bypass navigation entirely |
 | Spectators + P2P | Spectator tables are relay-only, enforced **server-side** |
 | Spectators + rank | No spectator seats in ADVANCE/ELITE/PRO; elsewhere matches rate normally |
 | Spectating | Ungated — anyone may watch any room that has seats |
 | SBMM band | 45-55% → 40-60% at 30s → widening past 90s |
+| Queue seating | **Auto-place AND auto-ready**: found → seated → server-side `startMatch` → 3s countdown. Queueing is the consent (see Phase 5) |
 
 **Two things the brief and the repo disagree about, flagged rather than buried.**
 
@@ -116,22 +119,114 @@ the top would silently promote every legacy row.
 - `tests/physics.test.ts:494-497` ("the retired difficulty") asserts the old behaviour and is
   **deleted**, replaced by a `tests/rankedBackfill.test.ts`-shaped suite for the migration.
 
-### Ranked solo track and the cap
+### Ranked solo track and the caps
+
+Solo must never be an easy route up the ladder — a player should land where TrueSkill puts
+them, and only PvP can prove the top. The `anchor + AI_ADAPT_BAND` formula cannot deliver that
+with the new anchors: it hands Elite, Cyber and Chaos an identical cap at the Overlord clamp,
+making the three top rungs interchangeable for rank farming. So **the cap stops being a formula
+and becomes data** — each rung converges roughly one tier above the band it simulates and
+stops, always short of the tier above:
 
 ```ts
 export const RANKED_SOLO_DIFFICULTIES = ['pro', 'elite', 'cyber', 'chaos'];
-/** Just under the Overlord floor: the apex stays a PvP achievement. */
-export const SOLO_MU_CEILING = 36.9;
-export const soloMuCap = (d) => Math.min(AI_RATINGS[d].mu + AI_ADAPT_BAND, SOLO_MU_CEILING);
+/**
+ * The most a solo win may lift μ to, per difficulty. Explicit, not derived:
+ * anchor + AI_ADAPT_BAND collides the three top rungs at the Overlord clamp.
+ * Each value sits 0.1 under a tier floor, so farming a rung converges one
+ * tier above what it simulates and stops. Overlord (37) is PvP-only.
+ */
+export const SOLO_MU_CAPS: Record<AIDifficulty, number> = {
+  rookie: 25,   // START_MU exactly — farming the open rung from a standing start moves nothing
+  pro:    30.9, // under the Grandmaster floor (31): Pro farming tops out at Master
+  elite:  33.9, // under the Legend floor (34): Elite farming tops out at Grandmaster
+  cyber:  36.9, // under the Overlord floor (37): tops out at Legend
+  chaos:  36.9, // same — Legend is the solo ceiling, the apex stays a PvP achievement
+};
+export const soloMuCap = (d: AIDifficulty): number => SOLO_MU_CAPS[d];
 ```
 
-Rookie stays off the ranked track (open from the first match). Note one documented property
-does change: Rookie's cap was `18 + 7 = 25`, exactly `START_MU`, "so farming the easiest rung
-from a standing start still moves nothing". At μ20 it becomes 27. That is deliberate — Rookie
-at μ20 with the raised floor is a genuinely competent opponent, and the pathology the old note
-guarded against (Pro's base sitting *exactly* on `START_MU`, so beating Pro moved μ by nothing)
-is gone now that Pro anchors at 24. Update the note in `rating.ts` and CLAUDE.md §7 in the same
-commit rather than special-casing the formula.
+This reconciles the two halves of the requirement without touching `AI_ADAPT_BAND`: the band
+(still 7) is now purely a *gameplay adaptation* range — how far a rung slides toward a strong
+player — and no longer sets what farming it is worth, so difficulty keeps its full upward
+tracking (the "AI too easy" complaint) while the rank ceiling is pinned per rung. It also
+restores a documented property the formula version would have silently broken: Rookie's cap is
+`START_MU` again, so "farming the easiest rung from a standing start still moves nothing" stays
+true, at μ20 as it was at μ18. One cap table serves both estimators (hidden MMR and rank),
+exactly as `soloMuCap` does today. Pinned value-by-value in `tests/rating.test.ts`, with the
+property test that every cap is strictly below the tier floor above the one its rung simulates.
+
+### Solo XP momentum and fatigue (new requirement)
+
+Two forces, multiplied into solo match XP, both computed **server-side only** inside
+`recordMatch` — "XP is never accepted from the client" is untouched, and PvP XP is untouched:
+
+```
+soloXp = clamp( matchXp(...) × momentum(w) × fatigue(n), XP_FLOOR, SOLO_XP_MATCH_CAP )
+```
+
+- **Momentum** rewards consecutive solo wins, ramping non-linearly with diminishing increments
+  toward a saturation point. `w` is the solo win streak the player **carries into** the match —
+  read from `player_mode_stats.winStreak` for `solo` *before* this match's bump — the same
+  walked-in-on convention the rally carry uses. Reading the incoming streak is what makes a
+  loss that *ends* a long run still pay more than an early loss (the user's G9-vs-G2 example):
+  the multiplier applies to losses too, on the streak they arrived holding, and the loss then
+  resets the streak as `bumpModeStats` already does.
+- **Fatigue** decays the multiplier with the number of solo matches already recorded today
+  (`n`, UTC day), flooring well above zero — so same-day solo grinding trends toward reduced
+  efficiency but never toward nothing, and "players must not find full-efficiency farming only
+  Solo AI" becomes arithmetic rather than a rule someone has to remember.
+- **The cap is a constant** — `SOLO_XP_MATCH_CAP`, deliberately not scaled by anything
+  ("ramping toward a *non-diminishing* cap"): however long the streak, no solo match ever pays
+  more than it. `XP_FLOOR` (45) survives unchanged underneath, so "every match is progression,
+  levels never regress" — a documented invariant with its own tests — keeps holding; fatigue
+  attacks the multiplier, never the floor.
+
+Seed shapes, to be **calibrated by simulation** exactly as the competence knots are (the
+user's worked example fixes the *relationships*, not the numbers):
+
+```ts
+export const SOLO_MOMENTUM_MAX = 1.8;                        // saturation of the win-streak ramp
+export const momentum = (w: number) => 1 + (SOLO_MOMENTUM_MAX - 1) * (w / (w + 4)); // concave, saturating
+export const SOLO_FATIGUE_FLOOR = 0.55;
+export const fatigue = (n: number) => Math.max(SOLO_FATIGUE_FLOOR, 1 - 0.06 * Math.max(0, n - 2));
+export const SOLO_XP_MATCH_CAP = 450;                        // ≈ a strong win × full momentum
+```
+
+The relationships the user's example fixes, pinned as property tests in `tests/xp.test.ts`
+(reproducing the example's *shape* through the real `recordMatch`, not its arbitrary numbers):
+
+1. Same incoming streak, more games today → less XP (their G3 win < G1 win).
+2. A growing streak strictly increases per-match XP even as fatigue also grows, with
+   **diminishing increments** (their +5, +5, +4, +3, +2 across games 3–8).
+3. No solo match, ever, exceeds `SOLO_XP_MATCH_CAP` — including an unbroken streak simulated
+   hundreds of matches long ("continues to win theoretically forever").
+4. A loss ending a long streak pays more than a loss ending a short one, and any loss pays far
+   less than the neighbouring wins.
+5. **Harder difficulty always pays more**: identical match stats against a harder rung yield
+   strictly more XP, win or loss. This needs no per-difficulty XP table — the anchors are
+   monotone and adaptation preserves their spread, so `effectiveAiMu` is monotone in
+   difficulty, `winProbability` is strictly lower against the harder rung, and both surprise
+   multipliers rise as it falls. The documented principle "no per-difficulty XP table exists
+   anywhere" survives; the test pins the monotonicity the anchors imply.
+
+**Storage.** Momentum needs nothing new (`player_mode_stats.winStreak`, already ordered by the
+`(chainId, runSeq)` machinery). Fatigue needs a same-day solo match count: one new day-keyed
+table `daily_solo (playerId, dayKey, gamesPlayed)`, the `daily_practice` shape exactly.
+Incremented inside `recordMatch`'s single transaction, **only on the stamped path** — a
+replayed `matchKey` must not double-count a day's games any more than it double-pays.
+A new `playerId`-keyed table means three claims in the same commit: `PLAYER_KEYED_TABLES`,
+`applyWipe`'s DROP list, and `tests/identity.test.ts` (which reads the live schema and fails on
+an unclaimed table — that is the suite where the table is claimed, per TESTING.md §5).
+
+### Interim UI note
+
+Phase 1 lands five rungs while the menu still shows the pre-match difficulty
+`SegmentedControl` (`columns={3}`, `MainMenu.tsx:543-581`). Five options in a 3-column grid
+wrap 3+2 — acceptable for the one release window before Phase 2 replaces the picker with SOLO
+AI rooms (a room *is* a difficulty), at which point the picker rows and their `#menu-diff-*`
+ids move to `#room-*`, and `scripts/e2e-rating.mjs` / `scripts/e2e-achievements.mjs` (which
+drive those ids) are updated in the same Phase 2 commit.
 
 ### Unlock chain and achievements
 
@@ -249,11 +344,47 @@ match in a room that permits spectators rates exactly as it does today.
 **Spectating itself is ungated.** Within a room that has spectator seats, anyone may take one
 regardless of their own level or tier. The bracket gates who may *play*.
 
-**Residual hole, named rather than hidden.** A *private* invite-code table has no bracket, may
-enable spectators, and rates. That is the side channel again, at a much smaller scale: it
-requires two people who already know each other and have swapped a 4-letter code. Accepting it
+**Where the private invite-code flow lives.** There is no dedicated PRIVATE room. Every PVP
+room's table browser offers **Create Table** (public, listed) and **Create Private Table**
+(today's lobby exactly: code, QR, share link, P2P toggle where the room permits it), and the
+**join-by-code box sits at the building level** — one box for the whole PVP building, since a
+4-letter code names its table wherever that table lives. The gates split cleanly:
+
+- **Creating** any table — public or private — requires being *in* the room, so it inherits the
+  room's PLAY gate, enforced server-side (Phase 3).
+- **Joining a private table by code is ungated.** An invite is an invite: two friends in
+  different brackets are exactly who the code flow exists for, the e2e-invite suite's guest is
+  a brand-new level-1 player, and TrueSkill absorbs a mismatched friendly the same way it
+  absorbs one today. The private table records its venue but the venue does not gate its door.
+- A private table in a no-spectator room (ADVANCE/ELITE/PRO) still has `config.spectators`
+  forced false — the room's property applies to every table in it, listed or not.
+- The invite link (`?room=CODE`) and QR continue to **bypass navigation entirely**, landing in
+  the lobby exactly as today — that flow is "the one way into Phong that gets tapped from
+  another app" and does not change.
+
+**Residual hole, named rather than hidden.** A *private* table in casual/beginner/intermediate
+may enable spectators and still rates. That is the sonar side channel again, at a much smaller
+scale: it requires two people who already know each other and have swapped a code. Accepting it
 keeps today's invite flow byte-identical; closing it would mean the per-match `forceUnranked`
 route this decision rejected. Worth revisiting only if the ladder is ever seen to be abused.
+
+### The onboarding tour crosses this phase
+
+The tour walks the real menu, so restructuring the PLAY section is a tour change, not just a
+menu change (`src/game/tour.ts`, `scripts/e2e-tutorial.mjs`):
+
+- The `modes` step's anchor is `menu-mode-solo` (`tour.ts:174`); it becomes `building-solo`,
+  and `tour_modes_title`/`tour_modes_body` are rewritten to describe the three buildings —
+  ×7 locales, same commit. Duel stays named-not-walked: the PVP building is pointed at, never
+  entered.
+- Every `stage: 'menu'` step needs the buildings list on screen, and the `prematch` stage needs
+  the SOLO building's ROOKIE room's sheet open. So the tour's override channel widens from a
+  sheet to a destination: MainMenu's nav joins the existing overrides —
+  `tourActive ? TOUR_NAV[stage] : nav` — where menu stages map to `{building: null}` and the
+  prematch stage to `{building: 'solo', room: 'rookie'}` plus the open sheet. `nav` also joins
+  the tourActive-keyed clearing effect (`MainMenu.tsx:176-181`), for the same
+  banked-tap-popping-a-sheet-after-the-tour reason all three existing overrides are there.
+- `scripts/e2e-tutorial.mjs` follows the new anchors in the same commit.
 
 ### `MainMenu` restructure
 
@@ -312,6 +443,18 @@ The relay's `Room` **is** a table. It gains a venue and a visibility, and become
   are both empty (`server.ts:1891-1893`).
 - The hidden matchmaking venue is excluded by **data, not a special case in the route**:
   `RoomDef` carries `listable: boolean`, false for `MATCHMAKING_ROOM`.
+- **Bracket gates are enforced by the relay, not the menu** — the menu is the client. On
+  `create_room` naming a bracketed venue, the relay checks the HOST's profile against the
+  room's `RoomGate` (level + tier bracket, both ends) and refuses with an `error` naming the
+  gate; on a `join_room` that resolves to a **public** table it checks the JOINER the same way.
+  A join to a **private** table is never bracket-checked (the invite-code decision above), and
+  a seat, once held, is never re-checked — a tier that moves mid-lobby does not eject anyone.
+  `roomEntryVerdict` in `src/venues.ts` is the one shared predicate, so the menu's lock and the
+  relay's refusal cannot drift; new cases in `tests/tableBrowser.test.ts` cover both ends of a
+  bracket and the private exemption.
+- Legacy `create_room` with no venue (old bundles, `seatDuel`, the invite flow) defaults to
+  `venueRoomId: 'casual'`, `visibility: 'private'` — the ungated venue, so the default can
+  never be refused and today's flows stay byte-identical.
 - Register the route **before** anything `/api/room/:roomId`-shaped — the same ordering trap
   CLAUDE.md §5 records for `/api/profile/:id`.
 - A room with zero tables shows a **Create Table** CTA, which is `handleCreateRoom` with the
@@ -592,6 +735,27 @@ Teardown needs a **third** message: `App.tsx` currently says two different thing
 unexpected close depending on whether a match was live. A spectator needs "the table you were
 watching has ended", or they get an abandon notice about a match they were never in.
 
+### The spectator client — what "view-only" means in App.tsx
+
+The spectator reuses `screen: 'game'` and the real `CourtCanvas`, driven by a new
+`spectating: { roomId, side } | null` App state (mutually exclusive with holding a player
+seat), with four subtractions and one addition:
+
+- **No physics.** The game loop's simulation, serve logic and AI are skipped while spectating;
+  the ball ref is written from `watched_ball` samples, dead-reckoned between them with the
+  velocity `ball_incoming` carries, and the paddle ref from `watched_paddle`. `CourtCanvas`
+  gets a `readOnly` flag that drops its pointer handlers entirely — no paddle drive, no serve
+  joystick, no pointer capture.
+- **No progression surfaces.** The winner overlay renders a spectator variant: result and
+  scores, but no Play Again/Rematch (a spectator has no vote) and no XP/rank tiles (no result
+  of their own — they never receive `match_recorded`). Watching the next match of the same
+  table needs nothing: `game_start` resets the court exactly as it does for players.
+- **No exit confirmation.** Standing up costs nothing — no match, no abandon, no run — so the
+  `exitConfirm` machinery is bypassed; leaving sends `leave_room` and returns to the **table
+  browser of the room they came from** (held in `spectating`), not the menu.
+- **Sonar forced on** via the `activeConfig` spectating arm (above), and the HUD trimmed to
+  sound/home plus a "watching {name}" chip — no reset, no settings that touch a match.
+
 ### Also
 
 - `GET /api/room/:roomId`'s `playerCount`/`isFull` keep meaning **players** — existing clients
@@ -633,11 +797,11 @@ client can forge it, and forging it buys nothing but a slightly better-connected
 **No geolocation** — there is no IP handling anywhere in the repo and adding one is a privacy
 surface this does not need.
 
-Four new WS messages, exactly as `useQuickMatch.ts:12` predicted:
+Three new WS messages (the stub predicted four; auto-place retires `queue_accept` unsent):
 
-- client: `queue_join`, `queue_cancel`, `queue_accept`
-- server: `queue_state` (searching / found / cancelled), plus the existing `room_joined` once
-  the pair is seated
+- client: `queue_join { rttMs? }`, `queue_cancel`
+- server: `queue_state` (searching / found / cancelled), followed by the existing seating and
+  `game_start` flow once the pair is placed
 
 Each union member in `src/types.ts` must stay on **one line** —
 `tests/protocolParity.test.ts` parses the union to the first line-ending semicolon and a
@@ -648,15 +812,48 @@ assertion enforces that direction, and `sendGame` already returns `false` for ro
 Every new *server* message needs a real `case` in `App.tsx` in the **same commit** as the union
 member, or CI is red in between.
 
-On a pair: the relay creates a table in `MATCHMAKING_ROOM` with `visibility: 'private'` and
-spectator seats **disabled**, seats both players, and sends each `queue_state { status:
-'found' }` followed by the ordinary `room_joined` / `room_config` / `ready_state` flow. From
-that moment it is an ordinary table and every existing rule applies unchanged.
+**On a pair: auto-place AND auto-ready.** The relay creates a table in `MATCHMAKING_ROOM`
+(`visibility: 'private'`, spectators disabled), seats both players, sends each
+`queue_state { status: 'found', opponent }` plus the ordinary `room_created` / `room_joined` /
+`room_config` — and then calls `startMatch(room, 0)` itself, server-side, with **no lobby, no
+ready handshake and no `start_match` message**. `game_start` closes both lobbies as it always
+does, and the ordinary per-phone 3-second countdown arms and runs when each player reaches the
+court. From the first serve it is an ordinary table under every existing rule.
 
-`useQuickMatch` is rewired to send those messages and flips `available: true`. Its `QueueState`
-union and `join`/`cancel`/`accept` signatures do not change — the stub's whole point.
+**Why skipping the handshake is sound here and nowhere else.** The guest-ready handshake exists
+because a room's terms are the host's to change — "a yes to old rules is not a yes to new
+ones". A queue match has no host and no editable terms: **every queue table plays one fixed,
+disclosed config** — `DEFAULT_ROOM_CONFIG` (stock physics, sonar off, first-to-5), spectators
+off, and the ranked auto-serve floor `normalizeRoomConfig` already forces. The searching UI
+states those terms before the player joins the queue, so **queueing is the yes** — consent
+given to terms that cannot change is consent that does not need re-asking. `set_room_config` is
+refused outright on a `MATCHMAKING_ROOM` table so the premise stays true by construction.
+
+Consequences, deliberate:
+
+- **A no-show loses on the serve clock.** Both players consented to a ranked match by
+  queueing; the 5s auto-serve means an absent player bleeds points and takes a real loss,
+  exactly the stall rule ranked duels already carry. A socket that dies before the countdown
+  ends is the ordinary case: `inPlay` is false, so no abandon — the survivor is bounced with
+  the standard notice and the table dies.
+- `accept()` in `useQuickMatch` becomes a documented no-op and `acceptBy` is never populated —
+  the frozen `QueueState` union survives unchanged (its `found` arm simply displays for the
+  beat before `game_start` lands), which was the stub's whole point. The
+  `declined` status is unreachable in v1; note that in the hook rather than removing it.
+- The client suppresses the lobby sheet flash: `room_created`/`room_joined` normally re-open
+  the lobby, so a `queueSeatingRef` set by `queue_state: found` keeps it shut for the
+  one round-trip until `game_start` closes everything anyway.
+
+**Queue membership lifecycle**: `queue_join` is refused for a socket already holding any seat
+(and vice versa — taking a seat while queued silently leaves the queue), refused for an
+uninitialized profile via the same `seatRefusal()` gate seats use, and a socket's close handler
+removes it from the queue exactly as `vacateSeat` empties seats. The queue itself is an
+in-process array on the relay, swept every ~2 seconds by `findPair`; single-instance by design,
+like the room map beside it.
+
+`useQuickMatch` is rewired to send `queue_join`/`queue_cancel` and flips `available: true`.
 `MainMenu.tsx:362-381` drops `data-stub`, `aria-disabled` and the SOON chip; the
-`#quickmatch-info-sheet` becomes the searching UI.
+`#quickmatch-info-sheet` becomes the searching UI, opening with the fixed terms above.
 
 After 45 seconds with no candidate the searching UI additionally offers "open a public table
 instead", which drops the player into the PVP room browser for their bracket. The search keeps
@@ -675,6 +872,17 @@ running underneath.
 `vite.config.ts`'s `FLOORS`, following the `server/room.ts` precedent (95/92). Note also that
 `coverage.include` already covers `src/*.ts` and `server/**/*.ts`, so both land in the report
 whether or not they are gated.
+
+New tables and their claims (all in the same commit as the table, per TESTING.md §5):
+`daily_solo` (Phase 1, the XP fatigue counter) → `PLAYER_KEYED_TABLES`, `applyWipe`'s DROP
+list, `tests/identity.test.ts`.
+
+Also new: `scripts/e2e-queue.mjs` — two phone contexts join the queue and both land on a court
+under the countdown with no lobby and no ready tap.
+
+**The final commit before this PR merges deletes `docs/building-room-table-plan.md`** — the
+plan is scaffolding, its own header says so, and `main` never carries it; by then CLAUDE.md §§
+1/3/5/7 and TESTING.md hold the durable record.
 
 **Heavily touched:** `src/rating.ts`, `src/game/physics.ts`, `src/achievements.ts`,
 `src/types.ts`, `server/room.ts`, `server.ts`, `server/db.ts`, `src/App.tsx`,
@@ -704,7 +912,11 @@ Targeted checks:
 - **Phase 1.** `npx vitest run tests/physics.test.ts tests/rating.test.ts` repeatedly (≥10×) —
   return rates are samples and the ladder-spread assertion is the one made on a *difference*.
   Confirm the measured rates match the table above before fixing the bounds.
-  `node scripts/e2e-run.mjs rating achievements`.
+  `tests/xp.test.ts` gains the five momentum/fatigue property tests (§Solo XP), driven through
+  the real `recordMatch` against a throwaway db, including the hundreds-long unbroken-streak
+  simulation against `SOLO_XP_MATCH_CAP` and the harder-pays-more monotonicity across all five
+  rungs. `tests/rating.test.ts` pins `SOLO_MU_CAPS` value-by-value plus the below-next-tier
+  property. `node scripts/e2e-run.mjs rating achievements`.
 - **Phase 2.** `node scripts/e2e-run.mjs tutorial` — the tour walks the real menu, and the new
   `nav` state is the fourth thing its scrim can leak into. New `scripts/e2e-venues.mjs`: a
   gated room shows locked with a readable reason, an open one reaches the pre-match sheet.
@@ -735,6 +947,8 @@ Targeted checks:
 - **Phase 5.** `tests/matchmaking.test.ts` pins `bandFor` at each boundary and `findPair`'s
   preference order, plus the property that two queuers who are inside the band are always
   paired. A relay-booting test that two devices calling `queue_join` end up seated in the same
-  table. `node scripts/e2e-run.mjs` in full.
+  table, receive `game_start` with **no** ready handshake, on exactly the fixed queue config —
+  and that `set_room_config` against that table is refused. `scripts/e2e-queue.mjs` drives the
+  same flow through two real browsers. `node scripts/e2e-run.mjs` in full.
 
 Manual: `npm run dev`, two phone contexts plus a third for the spectator seat.
