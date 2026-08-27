@@ -15,18 +15,6 @@ import { chromium, devices } from 'playwright-core';
 // it is part of onboarding now, not a menu row. Every suite past this point
 // wants the menu, so it is waved away here. Tolerant: a suite that reaches
 // this another way is not broken by its absence.
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return false;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-  return true;
-}
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
 const EXEC = process.env.CHROMIUM_PATH;
 if (!EXEC) {
@@ -70,7 +58,6 @@ async function onboard(page, prefix = 'E2E') {
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(page);
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
 }
 
@@ -330,7 +317,6 @@ const guest = await newPage();
   await a.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(a);
   await a.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
   const profA1 = await me(a);
   if (!/^dev_[0-9a-f]{18}$/.test(profA1.id)) fail(`server-issued id malformed: ${profA1.id}`);

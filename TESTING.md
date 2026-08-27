@@ -59,8 +59,7 @@ coverage number.
 ### Browser layer
 
 `profiles` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `spectate` · `queue` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` ·
-`build-id`
+`lobby` · `spectate` · `queue` · `split` · `streak` · `history` · `delete` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -153,13 +152,6 @@ presses the only thing offered. `tests/accountRecovery.test.ts` pins the way bac
 device may restore with the account's own recovery code, and the release row survives a reset
 so an abandoned account stays traceable. The matching browser assertions are in
 `scripts/e2e-invite.mjs`.
-
-**The onboarding tour opens by itself, and grants nothing.** It is part of onboarding, not
-a menu row, so every browser suite's onboarding helper has to wave it away (`skipTour`)
-before it can touch the menu. `scripts/e2e-tutorial.mjs` pins the rest: it opens for a new
-player, it actually reaches every stage it claims to (the real pre-match sheet, a real
-frozen court, the real Settings/Profile/Leaderboard/Tasks), it pays no XP and records no
-match for the one it plays, skipping counts as seen, and it does not come back.
 
 **Onboarding ends on the sign-in code.** It is the only way back into an account from a
 browser the current one cannot reach, so a player who was never shown it does not have it.

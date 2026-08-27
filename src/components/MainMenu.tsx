@@ -121,25 +121,7 @@ interface MainMenuProps {
   onOpenHistory: () => void;
   onOpenMissions: () => void;
   onOpenSettings: () => void;
-  /**
-   * The pre-match sheet the onboarding tour wants open. The sheet is MainMenu's
-   * own state — a duel's lives in App, because a lobby owns a room — so the
-   * tour, which does live in App, has to be able to reach in and open it.
-   */
-  tourPrematch?: GameMode | null;
-  /** Whether the tour is running at all — see openPrematch. */
-  tourActive?: boolean;
 }
-
-/**
- * Where the tour parks the navigation while it runs. Its menu steps want the
- * buildings list; its prematch step wants the Solo building's ROOKIE room, so
- * the sheet it is describing has a room behind it.
- */
-const TOUR_NAV: { building: BuildingId; room: string | null } = {
-  building: 'solo',
-  room: 'rookie',
-};
 
 /** Buildings name their icon; the component owns the drawing. */
 const BUILDING_ICONS: Record<BuildingId, React.ReactNode> = {
@@ -171,39 +153,18 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onOpenHistory,
   onOpenMissions,
   onOpenSettings,
-  tourPrematch = null,
-  tourActive = false,
 }) => {
   const lang = settings.language || 'en';
   // Which mode's pre-match sheet is open. A duel's lives in App (the lobby
   // owns a room, not just a form), so this only ever holds the other three.
   const [prematchMode, setPrematchMode] = useState<GameMode | null>(null);
-  // The tour's choice is the ONLY one while it is running, so a step that is
-  // ABOUT the pre-match sheet always has one on screen to point at — and every
-  // other step has none.
-  //
-  // A nullish fallback was wrong in the second half: the scrim is
-  // pointer-events-none, so a player can tap the highlighted Solo row during
-  // the modes step and set prematchMode themselves. Once the tour's own
-  // pre-match step passed and tourPrematch went back to null, that private
-  // value came back and left the sheet covering the tab bar and every modal
-  // stage after it.
-  const openPrematch = tourActive ? tourPrematch : prematchMode;
+  const openPrematch = prematchMode;
   // Which gate the player tapped, so the reason a rung is shut is something
   // they can read rather than a tooltip no touch device will ever show.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
   const [queueInfoOpen, setQueueInfoOpen] = useState(false);
-  // Same bug as openPrematch, on two more sheets the tour never asks for: the
-  // scrim leaves the locked-difficulty hint and the Quick Match stub tappable
-  // on every menu and pre-match step, and neither state lives in App, so the
-  // per-step cleanup there can't reach in and close them. Left open past the
-  // step that opened them, a layer-60 sheet sits above the layer-50 modal a
-  // later stage opens and hides its spotlight target for the rest of the
-  // tour. No step ever wants either one, so — unlike openPrematch — there is
-  // no tour-owned value to fall back to: both are simply forced shut for as
-  // long as the tour is running.
-  const openGateHint = tourActive ? null : gateHint;
-  const openQueueInfo = tourActive ? false : queueInfoOpen;
+  const openGateHint = gateHint;
+  const openQueueInfo = queueInfoOpen;
   const searching = quickMatch.state.status === 'searching';
   const since = quickMatch.state.status === 'searching' ? quickMatch.state.since : 0;
   // One second of state per second of searching, and only while searching:
@@ -219,26 +180,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
   }, [searching, since]);
-  // All three overrides above only stop a stray tap from MATTERING while the
-  // tour runs — nothing clears the tap itself. The tour ENDING is also a
-  // transition, and an unclear one: the moment tourActive goes false, every
-  // override above reads the raw state again, and a tap banked minutes
-  // earlier — the Solo row during the modes step, a locked pill during the
-  // tour's own prematch step — pops its sheet open over the post-tour menu,
-  // as though the player had just tapped it. This is the missing mirror
-  // image: during the tour a stray tap is overridden or forced shut: the
-  // instant it stops owning the screen, it must not un-happen retroactively.
-  // Runs on the true start/end transition only (the dependency is tourActive
-  // itself, not any of the three states), so it never fights the overrides
-  // above while the tour is actually running.
-  useEffect(() => {
-    if (tourActive) return;
-    setPrematchMode(null);
-    setGateHint(null);
-    setQueueInfoOpen(false);
-    setNav({ building: DEFAULT_BUILDING, room: null });
-    setRevealLocked(false);
-  }, [tourActive]);
   // Where in the building -> room walk this player is. MainMenu's own state,
   // like prematchMode: App owns a duel's lobby because a lobby owns a ROOM on
   // the relay, but navigating to one is just navigating.
@@ -246,13 +187,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     building: DEFAULT_BUILDING,
     room: null,
   });
-  // The fourth thing the tour has to be able to override. The scrim is
-  // pointer-events-none, so a player can walk into a building mid-tour and
-  // leave a later menu step pointing at a list that is no longer on screen.
-  // The tour's own destination is the only one while it runs: its menu steps
-  // want the buildings list, and its prematch step wants the Solo building's
-  // ROOKIE room open behind the sheet.
-  const openNav = tourActive ? TOUR_NAV : nav;
+  const openNav = nav;
   /**
    * Whether the current building is also showing the rooms this player cannot
    * enter yet.
@@ -267,11 +202,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
    * it anyway: there is only ever one list on screen.
    */
   const [revealLocked, setRevealLocked] = useState(false);
-  // Deliberately NOT overridden under the tour, unlike the three states above
-  // it. Those each open a SURFACE that would mount under the scrim and cover a
-  // later step's anchor; this one only makes a list longer, and the tour
-  // re-measures its anchor every step. It is still cleared on the tour's true
-  // start/end transition below, for the same banked-tap reason.
   const revealed = revealLocked;
 
   const MODE_META: {
@@ -898,11 +828,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               id="btn-quickmatch-join"
               variant="primary"
               block
-              // Not from under the tour's scrim, which is pointer-events-none
-              // so the app underneath stays usable — the same refusal
-              // handleCreateRoom carries, for the same reason: a pairing that
-              // lands under a running tour is a seat the tour walks away from.
-              disabled={tourActive}
               onClick={quickMatch.join}
             >
               {t('menu_quickmatch_cta', lang)}

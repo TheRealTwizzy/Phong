@@ -84,8 +84,6 @@ import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
 import { MobileGatekeeper } from './components/MobileGatekeeper';
 import { SessionGuard } from './components/SessionGuard';
-import { OnboardingTour } from './components/OnboardingTour';
-import { TOUR_DIFFICULTY, TOUR_STEPS, TOUR_WINNING_SCORE } from './game/tour';
 import {
   CarryStore,
   carriedStreak as carried,
@@ -221,39 +219,6 @@ export default function App() {
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [isAchievementsOpen, setIsAchievementsOpen] = useState<boolean>(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
-  /**
-   * The onboarding tour. `null` when it is not running; otherwise the step.
-   *
-   * It walks the REAL product — the real menu, the real pre-match sheet, a
-   * real Solo Rookie match frozen mid-frame, the real Settings, Profile,
-   * Leaderboard and Active Tasks — because what it replaced was a deck of
-   * static dioramas that taught none of the actual game and was never shown to
-   * a new player anyway. It grants nothing: the match it plays is not
-   * recorded, and finishing pays no XP, no missions and no achievements.
-   */
-  const [tourStep, setTourStep] = useState<number | null>(null);
-  const [tourSkipOpen, setTourSkipOpen] = useState<boolean>(false);
-  /** Set for the whole time the tour owns the court, so nothing is banked. */
-  const tourMatchRef = useRef<boolean>(false);
-  /** Physics is held mid-frame while a step is talking about it. */
-  const tourFreezeRef = useRef<boolean>(false);
-  /** Reached by the tour so a step can put a ball in the air. */
-  const tourServeRef = useRef<() => void>(() => {});
-  const tourActive = tourStep !== null;
-  // Read from the socket handlers, which are built once and never see state.
-  const tourActiveRef = useRef<boolean>(false);
-  tourActiveRef.current = tourActive;
-  const tourStepDef = tourStep === null ? null : (TOUR_STEPS[tourStep] ?? null);
-  const tourStage = tourStepDef?.stage ?? null;
-  /**
-   * Held mid-frame for every match step, so the ball, the net, the radar and
-   * the scoreboard a step describes are the real ones and are still there when
-   * the player looks up from the card. Declared here rather than beside the
-   * driver because the serve timers below have to depend on it.
-   */
-  const [tourLive, setTourLive] = useState<boolean>(false);
-  const tourFreeze = tourStage === 'match' && !tourLive;
-  tourFreezeRef.current = tourFreeze;
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
   // Any tapped username opens this player's public profile (z-[60], above
   // whichever modal spawned it). null = closed.
@@ -413,32 +378,20 @@ export default function App() {
   // The terms the CURRENT match is played on. A duel takes them from the room
   // so both sides agree; every other mode takes them from the menu.
   const activeConfig: RoomMatchConfig =
-    // The tour's match is played on the tour's terms, not the player's. It is
-    // a teaching aid on a rung everybody has open, and a replay from Settings
-    // would otherwise walk a veteran through the basics of the game against
-    // their own stored Cyber difficulty at first-to-15.
-    // Stock rules too, not just the difficulty and the score. A replay after
-    // the player has tuned their own would demonstrate a serve at their serve
-    // power, a paddle at their paddle size — and, if they have turned the
-    // sonar off, a radar step pointing at an element that is not rendered.
-    // `spectators: false` in both non-duel arms: a watching seat is a seat at
-    // a relay TABLE, and a solo, practice or split match has no room to sit in.
-    tourStage === 'match'
-      ? { winningScore: TOUR_WINNING_SCORE, rules: DEFAULT_MATCH_RULES, spectators: false }
-      : mode === 'multiplayer' && roomConfig
-        ? spectating
-          ? // A watcher sees the whole table, sonar and all — that is what
-            // watching IS, and it is why the rooms where rating is on the
-            // line have no watching seats at all. Applied HERE, to this
-            // page's own view, and never written back to room.config: that
-            // field unranks the match for the PLAYERS, so writing it would
-            // let a losing player unrank a match on demand by asking a
-            // friend to sit down.
-            { ...roomConfig, rules: { ...roomConfig.rules, opponentSonar: true } }
-          : roomConfig
-        : { winningScore: settings.winningScore, rules: settings.rules, spectators: false };
-  /** Who the AI is playing as — see activeConfig for why the tour overrides. */
-  const activeDifficulty: AIDifficulty = tourStage === 'match' ? TOUR_DIFFICULTY : settings.difficulty;
+    // `spectators: false` in the non-duel arm: a watching seat is a seat at a
+    // relay TABLE, and a solo, practice or split match has no room to sit in.
+    mode === 'multiplayer' && roomConfig
+      ? spectating
+        ? // A watcher sees the whole table, sonar and all — that is what
+          // watching IS, and it is why the rooms where rating is on the line
+          // have no watching seats at all. Applied HERE, to this page's own
+          // view, and never written back to room.config: that field unranks
+          // the match for the PLAYERS, so writing it would let a losing player
+          // unrank a match on demand by asking a friend to sit down.
+          { ...roomConfig, rules: { ...roomConfig.rules, opponentSonar: true } }
+        : roomConfig
+      : { winningScore: settings.winningScore, rules: settings.rules, spectators: false };
+  const activeDifficulty: AIDifficulty = settings.difficulty;
 
   /**
    * The two net indicators are suppressed for any match played WITH the
@@ -827,17 +780,6 @@ export default function App() {
       // Practice Wall and Split Screen are unranked: no winner is ever set
       // for them, and even if one were, nothing gets recorded.
       if (modeRef.current === 'practice' || modeRef.current === 'split') return;
-      // The onboarding tour plays a real match and banks none of it. XP,
-      // missions, achievements and rating all advance only inside the
-      // server's recordMatch, which nothing but this POST reaches.
-      //
-      // Defence in depth rather than the thing doing the work: the tour's
-      // match never reaches a winner, because a step that leaves the court
-      // tears it down, so today nothing calls this for it at all. It is here
-      // for the change that lets the tour play a match out — removing it
-      // passes every test in the suite, which is exactly why it needs saying.
-      if (tourMatchRef.current) return;
-
       // Where this player's run stands now, before anything is awaited. Play
       // Again is a synchronous button and the POST below is not, so a replay
       // that read the profile would open on the run from before this match.
@@ -1225,8 +1167,6 @@ export default function App() {
       // court. The last line of three: the canvas is readOnly, so its pointer
       // and keyboard handlers are gone, and the timer above is gated too.
       if (spectatingRef.current) return;
-      // Nothing is served under a frozen court.
-      if (tourFreezeRef.current) return;
       // A duel's serve needs someone on the other end. A host waiting in the
       // lobby is already on the court underneath it, so without this a serve
       // (auto or tapped) would fire the ball into an empty room, where it
@@ -1332,7 +1272,7 @@ export default function App() {
     // not own, spawning a phantom ball the relay then refuses.
     const active =
       !spectating &&
-      isServing && isPlayerServer && screen === 'game' && !winner && duelReady && !tourFreeze;
+      isServing && isPlayerServer && screen === 'game' && !winner && duelReady;
     if (!active || seconds <= 0) {
       setServeCountdown(null);
       return;
@@ -1359,7 +1299,6 @@ export default function App() {
     countdownArmed,
     matchCountdown,
     activeConfig.rules.autoServeSeconds,
-    tourFreeze,
     spectating,
     handleServe,
   ]);
@@ -1370,7 +1309,7 @@ export default function App() {
   // (Practice Wall has no opponent at all: the player always serves.)
   useEffect(() => {
     if (mode !== 'solo' || screen !== 'game') return;
-    if (!isServing || isPlayerServer || winner || tourFreeze) return;
+    if (!isServing || isPlayerServer || winner) return;
     const delayMs =
       aiServeDelay(
         aiRef.current.competence(),
@@ -1382,7 +1321,7 @@ export default function App() {
       ) * 1000;
     const timer = setTimeout(() => handleServe(), delayMs);
     return () => clearTimeout(timer);
-  }, [mode, screen, isServing, isPlayerServer, winner, tourFreeze, handleServe]);
+  }, [mode, screen, isServing, isPlayerServer, winner, handleServe]);
 
   // Build (or rebuild) the P2P link for the current room. The host creates
   // the offer; the guest side is created lazily when the first offer arrives.
@@ -1433,15 +1372,6 @@ export default function App() {
     switch (msg.type) {
       case 'room_created':
         roomRequestRef.current = false;
-        // A seat that arrives while the tour is running is one nobody can
-        // keep: the tour reaches its match stage and switches to Solo, and
-        // the relay would go on holding it. startTour refuses to start over an
-        // outstanding request, so this should be unreachable — it is here
-        // because the guarantee is about the SEAT, not about one entry point.
-        if (tourActiveRef.current) {
-          handleLeaveRoomRef.current();
-          break;
-        }
         // Same rule as room_joined below, and it was missing here: asking for
         // a room and being given one are separate moments, and the lobby can
         // be dismissed in between — before roomId is set, so that dismissal is
@@ -1468,10 +1398,6 @@ export default function App() {
         pendingRoomRef.current = null;
         joinInFlightRef.current = false;
         roomRequestRef.current = false;
-        if (tourActiveRef.current) {
-          handleLeaveRoomRef.current(); // see room_created
-          break;
-        }
         // Holding a seat means the lobby is the right surface until the match
         // starts, so a seat granted while the lobby is shut reopens it. The
         // player can dismiss the lobby in the moment between asking for a seat
@@ -2087,15 +2013,6 @@ export default function App() {
   }, [isMultiplayerOpen, lobbyVenue, roomId, refreshTables]);
 
   const handleCreateRoom = (over?: { visibility?: 'public' | 'private' }) => {
-    // Not from under the tour. Its scrim is deliberately pointer-events-none —
-    // the app underneath is the real app and stays usable, which is the whole
-    // idea — but a room opened during it is one the tour then walks away from:
-    // reaching the match stage switches straight to Solo, and the relay is
-    // left holding the seat with a code somebody may already have been sent.
-    // Refusing here is NOT the whole of it, though it reads that way: the tour
-    // only opens from the menu and a room puts you on the court, but a room
-    // REQUEST leaves you on the menu with a seat on its way. See startTour.
-    if (tourActive) return;
     roomRequestRef.current = true;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -2148,7 +2065,6 @@ export default function App() {
   };
 
   const handleJoinRoom = (code: string) => {
-    if (tourActive) return; // see handleCreateRoom
     if (joinInFlightRef.current) return;
     joinInFlightRef.current = true;
     roomRequestRef.current = true;
@@ -2181,7 +2097,6 @@ export default function App() {
    * refuses only when both are.
    */
   const handleWatchTable = (code: string, seat?: 2 | 3) => {
-    if (tourActive) return; // see handleCreateRoom
     roomRequestRef.current = true;
     let socket = ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -2359,172 +2274,6 @@ export default function App() {
     setIsMultiplayerOpen(false);
   };
 
-  // ---------------------------------------------------------------------
-  // The onboarding tour
-  // ---------------------------------------------------------------------
-  /** The pre-match sheet a `prematch` step needs open, for MainMenu to obey. */
-  const tourPrematchMode: GameMode | null = tourStage === 'prematch' ? 'solo' : null;
-
-  const startTour = useCallback(() => {
-    // The tour starts at the menu and its first steps ARE the menu, so it can
-    // only be opened from there. Replaying it out of a live match used to walk
-    // menu steps over a court nobody had left: anchorless cards over a running
-    // game, and — because the match stage only checks whether it is already in
-    // a Solo match — a duel silently swapped for one, leaving the opponent
-    // alone in a room that was never told anybody had gone. The Settings row
-    // that calls this is hidden off the menu, so this guard is the rule
-    // written where the rule lives, matching the auto-open effect below.
-    if (screenRef.current !== 'menu') return;
-    // Being ON the menu is not the same as having no room coming. Create and
-    // Join both leave a request outstanding while roomId is still null, and in
-    // that window the lobby can be dismissed without a confirmation — which
-    // puts the player back on the menu with a seat on its way. Starting here
-    // then let the answer arrive underneath a running tour, which reaches its
-    // match stage and switches to Solo without ever leaving the room: relay
-    // seat still held, code possibly already sent to somebody.
-    if (roomRequestRef.current) return;
-    setIsSettingsOpen(false);
-    setIsProfileOpen(false);
-    setIsLeaderboardOpen(false);
-    setIsMissionsOpen(false);
-    setIsAchievementsOpen(false);
-    setIsHistoryOpen(false);
-    setTourStep(0);
-  }, []);
-
-  /**
-   * The steps that want the ball actually moving. Reaching the serve step with
-   * it parked on the paddle explains nothing, so the tour serves it, lets it
-   * fly, and freezes on a ball in mid-air — which is the frame the steps after
-   * this one are about.
-   */
-  useEffect(() => {
-    if (!tourActive || tourStage !== 'match' || !tourStepDef?.live) {
-      setTourLive(false);
-      return;
-    }
-    setTourLive(true);
-    // A frame for the freeze to lift before the serve goes out; handleServe
-    // refuses one under a frozen court, and rightly so.
-    const serve = setTimeout(() => tourServeRef.current(), 60);
-    const stop = setTimeout(() => setTourLive(false), tourStepDef.live);
-    return () => {
-      clearTimeout(serve);
-      clearTimeout(stop);
-    };
-  }, [tourActive, tourStage, tourStepDef?.id, tourStepDef?.live]);
-
-  /**
-   * Put the app where the step needs it. One effect rather than a branch per
-   * step: a step declares the stage it belongs to, and this is the only thing
-   * that knows how to reach one.
-   */
-  useEffect(() => {
-    if (!tourActive || !tourStage) return;
-    setIsSettingsOpen(tourStage === 'settings');
-    setIsProfileOpen(tourStage === 'profile');
-    setIsLeaderboardOpen(tourStage === 'leaderboard');
-    setIsMissionsOpen(tourStage === 'tasks');
-    // No stage wants any of these, but the scrim is pointer-events-none, so a
-    // player can open them mid-tour — Achievements and Match History from the
-    // tab bar step the tour points straight at, the Duel lobby from the modes
-    // step, a public profile from a username on the Leaderboard or Profile
-    // step. Left open, the next stage mounts its own surface UNDERNEATH one
-    // still covering the anchor. Every surface the tour can REACH belongs
-    // here, not just the ones it uses; the four it does use are set above.
-    setIsAchievementsOpen(false);
-    setIsHistoryOpen(false);
-    setIsMultiplayerOpen(false);
-    setPublicProfileId(null);
-    if (tourStage === 'match') {
-      // A real Solo match on the tour's own terms (see activeConfig) — Rookie
-      // is open to everybody from the first match, so the tour is never the
-      // thing that asks a new player for an unlock they do not have.
-      //
-      // Placed when it is NOT already placed, which covers two different
-      // things. Entering the stage: nothing is running, so this creates it,
-      // and it marks and resets rather than adopting — a match already in
-      // progress used to be adopted unflagged, so it banked XP, missions,
-      // rating and achievements from a tour that grants nothing, and kept
-      // whatever score it had reached, which is not the frame these steps
-      // describe. Mid-stage: the scrim is deliberately pointer-events-none, so
-      // the court's own Home and Reset stay live underneath it — tapping Home
-      // returned to the menu while the stage stayed `match`, and because this
-      // effect only watched the stage it never put the court back. Every
-      // remaining match step then pointed at elements that were not there.
-      //
-      // Checking placement rather than resetting on every step is what keeps
-      // the frozen ball where it is: the serve step leaves it mid-flight, and
-      // the two steps after it are about that frame.
-      const placed = tourMatchRef.current && screenRef.current === 'game' && modeRef.current === 'solo';
-      if (!placed) {
-        tourMatchRef.current = true;
-        setMode('solo');
-        setScreen('game');
-        resetMatchRef.current();
-      }
-    } else if (tourMatchRef.current) {
-      tourMatchRef.current = false;
-      setScreen('menu');
-      setMode('solo');
-      resetMatchRef.current();
-    }
-    // The step id, not just the stage: a step change is the moment to notice
-    // that the player has navigated out from under the tour.
-  }, [tourActive, tourStage, tourStepDef?.id]);
-
-  /**
-   * Show it once, to a player who has an account and has never seen it.
-   *
-   * NOT while an invitation is pending: that player tapped a link to play with
-   * somebody who is waiting for them right now, and the auto-join takes them
-   * straight into a lobby. They get it on their next load instead, which is
-   * the first moment it is not in the way of something.
-   */
-  const tourOfferedRef = useRef<boolean>(false);
-  useEffect(() => {
-    if (tourOfferedRef.current) return;
-    if (!profile?.initialized || profile.tutorialCompletedAt) return;
-    if (pendingRoomRef.current) return;
-    if (screen !== 'menu') return;
-    tourOfferedRef.current = true;
-    setTourStep(0);
-  }, [profile?.initialized, profile?.tutorialCompletedAt, screen]);
-
-  /** Remember it was seen, whether it was walked or waved away. */
-  const markTourSeen = useCallback(async () => {
-    try {
-      const res = await fetch('/api/profile/tutorial-complete', { method: 'POST' });
-      if (res.ok) setProfile(await res.json());
-    } catch {
-      // A tour the server never heard about simply opens again next time,
-      // which is a far better failure than blocking the player on a POST.
-    }
-  }, []);
-
-  const endTour = useCallback(() => {
-    tourMatchRef.current = false;
-    tourFreezeRef.current = false;
-    setTourStep(null);
-    setTourSkipOpen(false);
-    setIsSettingsOpen(false);
-    setIsProfileOpen(false);
-    setIsLeaderboardOpen(false);
-    setIsMissionsOpen(false);
-    setScreen('menu');
-    setMode('solo');
-    resetMatchRef.current();
-    void markTourSeen();
-  }, [markTourSeen]);
-
-  const advanceTour = useCallback(() => {
-    setTourStep((i) => {
-      if (i === null) return null;
-      if (i + 1 >= TOUR_STEPS.length) return i; // endTour handles the last one
-      return i + 1;
-    });
-  }, []);
-
   // Main 60/120 FPS Physics Engine Loop
   useEffect(() => {
     let animId: number;
@@ -2563,20 +2312,14 @@ export default function App() {
       // otherwise freeze the ball for the whole of the next point.
       if (spectatingRef.current) {
         const watched = ballRef.current;
-        if (watched.active && !tourFreezeRef.current) {
+        if (watched.active) {
           setBall({ ...watched, x: watched.x + watched.vx * dt, y: watched.y + watched.vy * dt });
         }
         animId = requestAnimationFrame(gameLoop);
         return;
       }
 
-      if (
-        isServingRef.current ||
-        // Held mid-frame by the onboarding tour, so the court a step is
-        // describing is still exactly what it was when the card appeared.
-        tourFreezeRef.current ||
-        winner
-      ) {
+      if (isServingRef.current || winner) {
         animId = requestAnimationFrame(gameLoop);
         return;
       }
@@ -2833,7 +2576,6 @@ export default function App() {
   }, [winner, playerIndex]);
 
   const resetMatchRef = useRef<() => void>(() => {});
-  tourServeRef.current = () => handleServe();
   const adoptSessionRef = useRef<() => Promise<ClientSessionStatus>>(async () => 'connecting');
   adoptSessionRef.current = adoptSession;
 
@@ -2893,14 +2635,6 @@ export default function App() {
   // Menu → court. Match settings (difficulty, winning score) are already
   // locked in on the menu before this runs — nothing re-opens them mid-match.
   const startMatch = (newMode: GameMode) => {
-    // Not from under the tour, for the reason handleCreateRoom is not: the
-    // scrim leaves the app usable, so the highlighted Solo controls still
-    // work, and a match started that way is one the tour's match stage would
-    // then ADOPT — it only marks a match as the tour's when it has to create
-    // one, so a match already running was never flagged and could be recorded
-    // for XP, missions, rating and achievements. The tour reaches the court by
-    // its own path below, never through here.
-    if (tourActive) return;
     setMode(newMode);
     setScreen('game');
     // Named explicitly: modeRef still holds the mode being left.
@@ -3018,12 +2752,10 @@ export default function App() {
    * player who quits every solo match they are behind in otherwise records
    * only their wins, which is half of the reported 100% win rate. At 0-0
    * nothing has happened yet — backing out of a match that never really
-   * started costs nothing, and neither the tour's match (which banks nothing)
-   * nor an already-decided one is ours to record.
+   * started costs nothing, and an already-decided one is not ours to record.
    */
   const abandoningLiveSoloMatch = (): boolean =>
     modeRef.current === 'solo' &&
-    !tourMatchRef.current &&
     !winner &&
     statsRef.current.score + statsRef.current.opponentScore >= 1;
 
@@ -3035,14 +2767,13 @@ export default function App() {
         statsRef.current.earnedBest,
         statsRef.current.streak
       );
-    } else if (!tourMatchRef.current) {
+    } else {
       // Walking out of an UNFINISHED match still ends wherever the run ends.
       // Only a finished match reports itself, so without this a player who
       // carried a run in, missed, and quit was seeded from the stale carry on
       // their next match — the miss simply undone, and every return after it
       // extending a run that should have been over. Practice says the same
-      // thing through its own report above; the tour says nothing at all,
-      // because the match it plays never happened.
+      // thing through its own report above.
       //
       // Told to the server as well as remembered here, or the miss survives a
       // reload: the stored run is what a fresh page reads, and it would still
@@ -3123,9 +2854,8 @@ export default function App() {
     // of zero, and neither this page's record nor the server's had heard: a
     // reload before the restarted match finished put the pre-miss run straight
     // back, ready for the next return to extend a streak that had ended. Same
-    // pair as quitting, for the same reason. The tour says nothing, because
-    // the match it plays never happened.
-    if (!tourMatchRef.current) {
+    // pair as quitting, for the same reason.
+    {
       rememberCarry(carryRef.current, modeRef.current, run);
       // Restarting a solo match a point has been scored in abandons it, the
       // same as walking out to the menu — so it is recorded the same way.
@@ -3428,53 +3158,6 @@ export default function App() {
           </p>
         </Sheet>
 
-        {/* The onboarding tour. Mounted OUTSIDE the screen swap below, like
-            the onboarding modal: it walks the player from the menu onto a
-            live court and back, and a child of either branch would be torn
-            down at the transition it exists to narrate. */}
-        <OnboardingTour
-          isOpen={tourActive && !tourSkipOpen}
-          step={tourStepDef}
-          index={tourStep ?? 0}
-          total={TOUR_STEPS.length}
-          language={currentLanguage}
-          onBack={() => setTourStep((i) => (i === null ? null : Math.max(0, i - 1)))}
-          onNext={() => {
-            if (tourStep !== null && tourStep >= TOUR_STEPS.length - 1) endTour();
-            else advanceTour();
-          }}
-          onSkip={() => setTourSkipOpen(true)}
-        />
-
-        <Sheet
-          id="tour-skip-modal"
-          isOpen={tourSkipOpen}
-          onClose={() => setTourSkipOpen(false)}
-          size="xs"
-          layer="gate"
-          accent="warn"
-          title={t('tour_skip_title', currentLanguage)}
-          footer={
-            <>
-              <Button
-                id="btn-tour-skip-cancel"
-                variant="secondary"
-                block
-                onClick={() => setTourSkipOpen(false)}
-              >
-                {t('tour_skip_no', currentLanguage)}
-              </Button>
-              <Button id="btn-tour-skip-confirm" variant="danger" block onClick={endTour}>
-                {t('tour_skip_yes', currentLanguage)}
-              </Button>
-            </>
-          }
-        >
-          <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
-            {t('tour_skip_body', currentLanguage)}
-          </p>
-        </Sheet>
-
         {/* Mandatory first-arrival onboarding: gates EVERYTHING until the
             player locks in their unique username (or restores a profile) */}
         <OnboardingModal
@@ -3543,8 +3226,6 @@ export default function App() {
             onOpenHistory={() => setIsHistoryOpen(true)}
             onOpenMissions={() => setIsMissionsOpen(true)}
             onOpenSettings={() => setIsSettingsOpen(true)}
-            tourPrematch={tourPrematchMode}
-          tourActive={tourActive}
           />
           </motion.div>
         ) : (
@@ -3574,13 +3255,9 @@ export default function App() {
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenProfile={() => setIsProfileOpen(true)}
           onResetMatch={handleResetMatch}
-          // Hidden in a duel because the score belongs to the room, and
-          // hidden under the tour because there is nothing there to restart:
-          // the tour drives its own match, and Reset only ever undoes the
-          // frame a step is in the middle of describing — the serve step
-          // leaves the ball mid-flight and the two steps after it talk about
-          // it. Home stays available, and now puts the court back.
-          canResetMatch={mode !== 'multiplayer' && tourStage !== 'match'}
+          // Hidden in a duel because the score belongs to the room, so a
+          // local reset could only desync this phone from the other one.
+          canResetMatch={mode !== 'multiplayer'}
           // A watcher is told whose court they are looking at. The opponent
           // name beside it is already right: it is the player on the far side
           // of the net from the court being drawn, which is what the whole
@@ -3616,11 +3293,8 @@ export default function App() {
           theme={currentTheme}
           language={currentLanguage}
           active={
-            // The tour has a step about the radar, so the radar exists while
-            // it runs. `showRadar` is a device preference rather than a match
-            // rule, so stock rules alone do not cover it — a player who had
-            // turned it off got a step spotlighting nothing.
-            (tourStage === 'match' || (settings.showRadar && activeConfig.rules.opponentSonar)) &&
+            settings.showRadar &&
+            activeConfig.rules.opponentSonar &&
             (mode === 'solo' || mode === 'multiplayer')
           }
           topClass={mode === 'multiplayer' ? 'top-[5.5rem]' : 'top-14'}
@@ -3956,11 +3630,7 @@ export default function App() {
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
           profile={profile}
-          // Only from the menu: the tour's first steps are the menu itself,
-          // and it must never be the thing that walks a player out of a live
-          // match. In-match Settings is device preferences only anyway.
-          onStartTour={screen === 'menu' ? () => startTour() : undefined}
-          // Menu only, for the same reason the tour is: from a live court it
+          // Menu only: from a live court it
           // would walk the player out of a match — and out of a DUEL, leaving
           // an opponent alone in a room that was never told anybody had gone.
           // The relay would charge the abandon and the account it charged

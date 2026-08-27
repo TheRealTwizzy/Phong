@@ -22,18 +22,6 @@ import zlib from 'node:zlib';
 // it is part of onboarding now, not a menu row. Every suite past this point
 // wants the menu, so it is waved away here. Tolerant: a suite that reaches
 // this another way is not broken by its absence.
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return false;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-  return true;
-}
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
 const EXEC = process.env.CHROMIUM_PATH;
 if (!EXEC) {
@@ -117,7 +105,6 @@ async function onboard(page, username) {
   if (shown !== real) fail(`shown code ${shown} is not the account's (${real})`);
 
   await page.click('#btn-onboarding-code-continue');
-  await skipTour(page);
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
   await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
   return shown;

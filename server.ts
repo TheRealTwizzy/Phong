@@ -1134,16 +1134,6 @@ async function startServer() {
   });
 
   // Live availability probe for the onboarding / rename forms.
-  // The onboarding tour has been seen. Behind requireActiveSession like every
-  // other write, and idempotent — a replay from Settings does not restamp it.
-  app.post('/api/profile/tutorial-complete', requireActiveSession, (req, res) => {
-    try {
-      res.json(db.completeTutorial(req.deviceId!));
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
   app.get('/api/username-check', (req, res) => {
     try {
       const u = typeof req.query.u === 'string' ? req.query.u.trim() : '';

@@ -18,19 +18,6 @@
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs).
 import { chromium, devices } from 'playwright-core';
 
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return false;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-  return true;
-}
-
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
 const EXEC = process.env.CHROMIUM_PATH;
 if (!EXEC) {
@@ -57,7 +44,6 @@ async function newPlayer(prefix) {
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(page);
   await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
   return page;
 }
