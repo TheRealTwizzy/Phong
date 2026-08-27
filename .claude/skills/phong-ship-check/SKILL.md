@@ -68,7 +68,7 @@ The map is a claim about this repo, and a hand-written claim about eighteen suit
 this one drifted three times on its first day, always toward selecting too few, which is the
 direction that lets a targeted run report success while skipping the broken flow.
 
-It derives **two floors** from evidence instead of memory: every `#id` each suite drives,
+It derives **four checks** from evidence instead of memory: every `#id` each suite drives,
 resolved back to the source files that define it; and every `src/` module the **server**
 imports, which must be `'*'`. A rule below either floor is reported and the check exits
 non-zero. Run it whenever you touch `RULES` — CI will anyway.
@@ -80,16 +80,26 @@ runs every one of them inside a single transaction on every match any suite play
 at a time; the check now finds it in one pass — it caught `venues.ts` on its first run, before
 anyone had reported it.
 
+The third is the blanket rule above: every file under `server/` must be `'*'`. Which suites
+play a relayed point is not derivable from anything, and it is exactly the judgment that kept
+being wrong. The fourth catches a suite file that exists but is **not registered** in
+`scripts/e2e-run.mjs` — it never runs in CI, and the id floor cannot notice, because it reads
+that file happily and just counts one suite more than the runner knows about.
+
 It is a floor, not the map. It sees DOM coupling only, so a file a suite depends on
 *behaviourally* never appears — that is what the reasoned `why` on each rule is for. Widening
 past the floor is always fine; falling below it is the bug.
 
 **The shape the map settled into, after being wrong five times in a row:**
 
-- **A shared layer is `'*'`.** `src/App.tsx`, `server.ts`, `server/db.ts`, `server/auth.ts`,
-  `MainMenu.tsx`, `OnboardingModal.tsx`, `src/components/ui/`. Every suite starts at the menu,
-  onboards, holds a device cookie and writes a profile before it does anything interesting, so
-  a subset of suites for any of these is fiction. Every attempt to name one has been wrong.
+- **A shared layer is `'*'`.** Everything under `server/` (bar the support CLI), every `src/`
+  module the server imports, `src/App.tsx`, `MainMenu.tsx`, `OnboardingModal.tsx`,
+  `src/components/ui/`, `index.html`, `index.css`. Every suite starts at the menu, onboards,
+  holds a device cookie and writes a profile before it does anything interesting, so a subset
+  of suites for any of these is fiction. **Every attempt to name one has been wrong** — six
+  review rounds, one file at a time. The last was `transform.ts → gameplay`, which named the
+  single suite whose "relay" scenario asserts the badge reads `RELAY` and never crosses the
+  net: the one suite that could not catch a broken mirror.
 - **A leaf rule module narrows honestly.** `rating.ts`, `matchRules.ts`, `venues.ts`,
   `physics.ts`, `themes.ts`, `transform.ts`, `room.ts`, `matchmaking.ts` — these are where the
   tool earns its keep, and not by accident: they are the modules stated as rules rather than

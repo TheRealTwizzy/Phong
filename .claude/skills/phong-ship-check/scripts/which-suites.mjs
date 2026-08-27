@@ -51,23 +51,22 @@ const RULES = [
   // POST /api/match/record or /api/practice/record. Same reasoning as App.tsx.
   { re: /^server\.ts$/, suites: ['*'],
     why: 'the relay and every REST route in one file — no subset can be right' },
-  { re: /^server\/room\.ts$/, suites: ['duel', 'lobby', 'spectate', 'queue', 'eject'],
-    why: 'room rules, seats and the reaper' },
-  { re: /^server\/matchmaking\.ts$/, suites: ['queue'], why: 'who the ranked queue pairs' },
-  { re: /^server\/transform\.ts$/, suites: ['gameplay'], why: 'the cross-net mirror both phones depend on' },
+  { re: /^server\/room\.ts$/, suites: ['*'], why: 'room rules, seats and the reaper — every relayed point runs through them' },
+  { re: /^server\/matchmaking\.ts$/, suites: ['*'], why: 'the queue sweep every server runs' },
+  { re: /^server\/transform\.ts$/, suites: ['*'], why: 'the cross-net mirror every relayed point depends on' },
   // auth.ts issues the device cookie on the document navigation, so every
   // suite depends on it before it has done anything at all.
   { re: /^server\/auth\.ts$/, suites: ['*'],
     why: 'the device cookie and session every suite holds before it can act' },
-  { re: /^server\/build\.ts$/, suites: ['build-id'], why: 'the deploy-refresh promise' },
+  { re: /^server\/build\.ts$/, suites: ['*'], why: 'the build id every session in every suite is minted under' },
   // The whole store. 17 of 18 suites onboard — that is a profile written — and
   // the ones that look unrelated still lean on it: e2e-profiles drives the
   // avatar BLOBs, e2e-streak asserts a run survives a reload. Same shape as
   // server.ts: a shared layer has no honest subset.
   { re: /^server\/db\.ts$/, suites: ['*'],
     why: 'the whole store — every suite writes a profile before it does anything else' },
-  { re: /^server\/image\.ts$/, suites: ['profiles'], why: 'avatar validation' },
-  { re: /^server\/bots\.ts$/, suites: ['rating'], why: 'the seeded roster the leaderboard shows' },
+  { re: /^server\/image\.ts$/, suites: ['*'], why: 'avatar validation, loaded by the server every suite boots' },
+  { re: /^server\/bots\.ts$/, suites: ['*'], why: 'the roster seeded at the boot of every suite\'s server' },
   { re: /^server\/admin\.ts$/, suites: [], why: 'the read-only support CLI — bundled beside the server, never served to a player' },
 
   // These four are imported BY THE SERVER, so recordMatch runs them on every
@@ -300,6 +299,38 @@ if (argv.includes('--verify')) {
         stale++;
       }
     }
+  }
+
+  // Criterion three. Six review rounds narrowed a server/ file wrongly, the
+  // last one because e2e-gameplay's "relay" scenario only asserts the badge
+  // reads RELAY and never crosses the net — so `transform.ts -> gameplay`
+  // named the one suite that could not catch a broken mirror. Which suites
+  // play a relayed point is exactly the judgment that keeps being wrong, and
+  // it is not derivable from anything. So the whole directory is '*': it is
+  // relay and API infrastructure, and precision here is where every error has
+  // lived. Costs a little over-running on image.ts and matchmaking.ts, which
+  // is the side to be wrong on.
+  const SERVER_EXEMPT = new Map([
+    ['server/admin.ts', 'a read-only support CLI bundled beside the server; no suite runs it'],
+  ]);
+  for (const f of fs.readdirSync(path.join(ROOT, 'server')).filter((f) => f.endsWith('.ts'))) {
+    const rel = `server/${f}`;
+    if (SERVER_EXEMPT.has(rel)) continue;
+    const { suites, unknown } = suitesForFile(rel);
+    if (unknown || suites.includes('*')) continue;
+    console.log(`  ${rel}\n      everything under server/ is shared infrastructure — must be '*', selects ${suites.join(' ')}`);
+    gaps++;
+  }
+
+  // Criterion four: a suite file that exists but is not registered with the
+  // runner never runs in CI at all. The floor above cannot notice — it reads
+  // the suite for ids and finds them, so the count silently reads "against 19
+  // suites" while e2e-run.mjs knows 18.
+  for (const f of suiteFiles) {
+    const name = f.slice('e2e-'.length, -'.mjs'.length);
+    if (ALL.includes(name)) continue;
+    console.log(`  scripts/${f}\n      exists but is not registered in scripts/e2e-run.mjs — it never runs`);
+    stale++;
   }
 
   for (const [file, needed] of [...floor].sort()) {
