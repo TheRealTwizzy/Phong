@@ -53,6 +53,18 @@ import { validateUsername } from './src/profileRules';
 import { Rating, winProbability } from './src/rating';
 
 
+/**
+ * Which seat of a table a socket holds.
+ *
+ * A union rather than a pair of nullable indices: two nullables describe four
+ * states of which only three are legal, and the illegal one — playing and
+ * watching at once — is the orphaned-seat bug class CLAUDE.md §5 records. A
+ * union makes it unrepresentable, and it is what lets every existing
+ * `playerIndex !== null` guard refuse a watching socket without any of them
+ * being rewritten to know the word spectator.
+ */
+type Seat = { role: 'player'; index: 0 | 1 } | { role: 'spectator'; slot: 0 | 1 };
+
 const rooms = new Map<string, Room>();
 
 /**
@@ -1439,8 +1451,27 @@ async function startServer() {
     }
 
     let currentRoomId: string | null = null;
-    let playerIndex: 0 | 1 | null = null;
+    /**
+     * Which seat of `currentRoomId` this socket holds, if any.
+     *
+     * A discriminated union rather than two nullable numbers, because two
+     * nullables give four states of which only three are legal — and the
+     * illegal one, both set at once, is precisely the orphaned-seat bug class
+     * CLAUDE.md §5 already records (a socket that took a second seat while
+     * the first still believed it held one). Here it is unrepresentable.
+     *
+     * Everything downstream asks `playerIndex()`, which is null for a
+     * spectator — so every gameplay handler, every host-only guard and every
+     * seat-indexed write refuses a watching socket through a check that was
+     * already there rather than through a new one somebody has to remember.
+     * `match_sync` matters most: it can decide a match and trigger
+     * recordRoomMatch, and it is closed by that one rename.
+     */
+    let seat: Seat | null = null;
     let currentPlayerId: string = '';
+
+    /** The playing seat this socket holds — null for a spectator or nobody. */
+    const playerIndex = (): 0 | 1 | null => (seat?.role === 'player' ? seat.index : null);
 
     /**
      * Whether this socket may take a seat in a room.
@@ -1514,7 +1545,7 @@ async function startServer() {
             code = generateRoomCode();
           }
           // Taking a seat means giving up the one this socket already holds.
-          // The handlers below just overwrite currentRoomId/playerIndex, so
+          // The handlers below just overwrite currentRoomId and the seat, so
           // without this the old room keeps a PlayerSession whose socket has
           // moved on: when that socket eventually closes, vacateSeat only
           // reaches the newer room, and the older one is left with a seat no
@@ -1586,7 +1617,7 @@ async function startServer() {
 
           rooms.set(code, room);
           currentRoomId = code;
-          playerIndex = 0;
+          seat = { role: 'player', index: 0 };
 
           ws.send(
             JSON.stringify({
@@ -1659,7 +1690,7 @@ async function startServer() {
           // leaves, which is what a room going back to one player IS.
           room.soloSince = null;
           currentRoomId = code;
-          playerIndex = 1;
+          seat = { role: 'player', index: 1 };
 
           // Notify joining player
           ws.send(
@@ -1714,12 +1745,12 @@ async function startServer() {
             });
           }
 
-        } else if (msg.type === 'paddle_move' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'paddle_move' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const oppIdx = playerIndex() === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             // Mirror coordinate for opponent perspective (1 - x)
@@ -1730,7 +1761,7 @@ async function startServer() {
               })
             );
           }
-        } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex() !== null) {
           // The sonar's ball feed: each phone streams its OWN half's ball at
           // ~15Hz so the other side's radar has something real to draw — a
           // duel has no local simulation of the opponent's court. Forwarded
@@ -1738,7 +1769,7 @@ async function startServer() {
           // the solo AI's half), clamped, and never stored: pure telemetry.
           const room = rooms.get(currentRoomId);
           if (!room) return;
-          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const oppIdx = playerIndex() === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             opponent.ws.send(
@@ -1749,7 +1780,7 @@ async function startServer() {
               })
             );
           }
-        } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1758,7 +1789,7 @@ async function startServer() {
           // A ball over the net from this seat is that player's return — and
           // it belongs to their streak alone. The serve is not one, which is
           // the only thing crossingsThisPoint is consulted for.
-          countReturn(room, playerIndex);
+          countReturn(room, playerIndex());
           // The relay is counting this match now, so it owns where the run and
           // the point are — and both phones are told to come off P2P, because
           // this crossing reaches the other one as a ball_incoming that its
@@ -1776,7 +1807,7 @@ async function startServer() {
           // carries the revision already applied, which the `<=` check in
           // applyMatchSync rejects on its own.
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const oppIdx = playerIndex() === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             const incomingBall = transformBallForOpponent(msg.ball);
@@ -1788,7 +1819,7 @@ async function startServer() {
               })
             );
           }
-        } else if (msg.type === 'point_scored' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'point_scored' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1827,7 +1858,7 @@ async function startServer() {
           // The score is out first — the DB write must never delay the point
           // both phones are waiting on — and the result follows it.
           if (decided) recordRoomMatch(room);
-        } else if (msg.type === 'match_sync' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'match_sync' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1844,17 +1875,17 @@ async function startServer() {
           const synced = applyMatchSync(room, msg);
           if (room.matchSeq !== seqBefore) duelStartRatings(room); // see the note there
           if (synced.decided) recordRoomMatch(room);
-        } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const oppIdx = playerIndex() === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
-          const sender = room.players[playerIndex];
+          const sender = room.players[playerIndex()];
           // Sender name from server-side session state only — a client
           // message can't impersonate another username.
-          const senderName = sender?.playerName || `Player ${playerIndex + 1}`;
+          const senderName = sender?.playerName || `Player ${playerIndex() + 1}`;
 
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             opponent.ws.send(
@@ -1862,42 +1893,42 @@ async function startServer() {
                 type: 'quick_chat',
                 text: String(msg.text || '').slice(0, 100),
                 senderName,
-                senderIdx: playerIndex,
+                senderIdx: playerIndex(),
               })
             );
           }
-        } else if (msg.type === 'rtc_signal' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'rtc_signal' && currentRoomId && playerIndex() !== null) {
           // Pure pass-through: the server never inspects SDP or candidates,
           // it only ferries them between the two members of the room.
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
+          const oppIdx = playerIndex() === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             opponent.ws.send(
               JSON.stringify({
                 type: 'rtc_signal',
                 payload: msg.payload,
-                fromIdx: playerIndex,
+                fromIdx: playerIndex(),
               })
             );
           }
-        } else if (msg.type === 'player_ready' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'player_ready' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
-          room.ready[playerIndex] = !!msg.ready;
+          room.ready[playerIndex()] = !!msg.ready;
           broadcast(room, { type: 'ready_state', ready: room.ready });
-        } else if (msg.type === 'start_match' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'start_match' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
           // Host-only, both seated, the guest has readied, and nothing has
           // been played yet — rematches go through the two-vote handshake.
           const canStart =
-            playerIndex === 0 &&
+            playerIndex() === 0 &&
             !!room.players[0] &&
             !!room.players[1] &&
             room.ready[1] &&
@@ -1905,7 +1936,7 @@ async function startServer() {
             !room.matchOver;
           if (!canStart) return;
           startMatch(room, 0);
-        } else if (msg.type === 'set_room_config' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'set_room_config' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1914,7 +1945,7 @@ async function startServer() {
           // out from under a rally. Before the first serve and after the last
           // point, the settings are open.
           const between = !room.inPlay || room.matchOver;
-          if (playerIndex !== 0 || !between) {
+          if (playerIndex() !== 0 || !between) {
             ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
             return;
           }
@@ -1925,13 +1956,13 @@ async function startServer() {
             room.ready = [false, false];
             broadcast(room, { type: 'ready_state', ready: room.ready });
           }
-        } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
           // A vote only means anything once the room agrees the match is done.
           if (!room.matchOver) return;
-          room.rematchVotes[playerIndex] = true;
+          room.rematchVotes[playerIndex()] = true;
 
           if (room.rematchVotes[0] && room.rematchVotes[1] && room.players[0] && room.players[1]) {
             // Both agreed: fresh match, the other side opens this time.
@@ -1965,14 +1996,39 @@ async function startServer() {
      * get a better outcome than one whose phone died.
      */
     const vacateSeat = (): void => {
-      if (!currentRoomId || playerIndex === null) return;
+      if (!currentRoomId || !seat) return;
       const room = rooms.get(currentRoomId);
       if (!room) return;
+
+      // A WATCHING seat leaves before any of the below is even computed, and
+      // the early return is the point rather than an optimisation.
+      //
+      // `abandoned` is bothSeated && inPlay && !matchOver && currentPlayerId,
+      // and every one of those four is true of a spectator closing a tab
+      // mid-rally. Folded in as another `&&` this would call recordRoomMatch
+      // with a watcher's SLOT standing in for a seat index: a real ranked
+      // LOSS written to a player who did nothing, plus an abandon charged to
+      // the watcher's own device. persistDuelStreaks does not save you from
+      // it either — its own guard is `!inPlay || matchOver`, so mid-rally it
+      // runs and writes both players' runs from a non-event.
+      //
+      // Nothing else here applies to a watcher: `ready` and `rematchVotes`
+      // are indexed by PLAYING seat, `opponent_left` is false (the players
+      // lost nobody), `soloSince` must not move (see below), and the table
+      // does not die because somebody stopped watching it.
+      if (seat.role === 'spectator') {
+        if (room.spectators[seat.slot]?.ws === ws) room.spectators[seat.slot] = null;
+        currentRoomId = null;
+        seat = null;
+        return;
+      }
+
+      const mine = seat.index;
       // Guard against running twice: `leave_room` is followed by the client
       // closing its socket, so the close handler arrives moments later. The
       // seat is already empty by then, and re-running would count a second
       // abandon for one departure.
-      if (!room.players[playerIndex]) return;
+      if (!room.players[mine]) return;
 
       // A socket dying with a live, undecided ball is an abandon — the
       // opponent was denied a match they were in the middle of. Judged
@@ -2006,7 +2062,7 @@ async function startServer() {
           // record no match), and the shared matchKey keeps any racing client
           // POST a no-op.
           recordRoomMatch(room, {
-            winnerSeat: playerIndex === 0 ? 1 : 0,
+            winnerSeat: mine === 0 ? 1 : 0,
             forgivenLoss: verdict?.forgiven ?? false,
           });
           room.matchOver = true;
@@ -2020,10 +2076,10 @@ async function startServer() {
         // moment to keep them. Internally guarded to the live-match case.
         persistDuelStreaks(room);
       }
-      room.players[playerIndex] = null;
-      room.rematchVotes[playerIndex] = false;
-      room.ready[playerIndex] = false;
-      const oppIdx = playerIndex === 0 ? 1 : 0;
+      room.players[mine] = null;
+      room.rematchVotes[mine] = false;
+      room.ready[mine] = false;
+      const oppIdx = mine === 0 ? 1 : 0;
       const opp = room.players[oppIdx];
       if (opp?.ws && opp.ws.readyState === WebSocket.OPEN) {
         opp.ws.send(JSON.stringify({ type: 'opponent_left' }));
@@ -2036,7 +2092,7 @@ async function startServer() {
         room.soloSince = Date.now();
       }
       currentRoomId = null;
-      playerIndex = null;
+      seat = null;
     };
 
     ws.on('close', () => vacateSeat());
