@@ -51,13 +51,16 @@ coverage number.
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
+| `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
+| `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` | The one-shot migrations |
 
 ### Browser layer
 
 `profiles` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `spectate` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` · `build-id`
+`lobby` · `spectate` · `queue` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` ·
+`build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -282,6 +285,21 @@ the whole boundary protecting today's invite-code tables, whose 4-letter codes w
 be harvestable by anyone who can call the endpoint. `tests/tableBrowser.test.ts` asserts the
 absence across every venue, and was verified the way TESTING.md §6 asks: by deleting the
 filter and watching it go red.
+
+**The queue's band is a promise AND an expiry, and both halves need pinning.**
+`tests/matchmaking.test.ts` holds the promise — a coin flip for 30 seconds, the brief's own
+40-60 for the minute after — and the fact that it eventually gives, because a symmetric
+`winProbability` means a strict band leaves a lone queuer in a queue nobody ever leaves. The
+one test that matters most is the pair: the same two candidates are REFUSED early and PAIRED
+late, which is the whole trade in one assertion. Two more guard the shape rather than the
+numbers: the band only ever widens as the wait grows (a band that narrowed would strand
+somebody who had already waited), and it never inverts. `findPair` judges on the more-waited
+of the two on purpose — judging on the newcomer's own tight band would let a fresh arrival
+veto the very pairing the wait was widening toward — and `tests/queue.test.ts` proves the rest
+on a real relay: two sockets ask for a game and reach one court with no ready tap and no start
+button, on terms `set_room_config` then refuses to change. That refusal is not a nicety: it is
+what makes skipping the handshake sound, since queueing is the consent and consent given to
+fixed terms does not need re-asking.
 
 **A watcher must never move a player's record, and a symmetric fixture cannot tell.**
 `tests/spectators.test.ts` holds three rules that are each one line away from a real loss on

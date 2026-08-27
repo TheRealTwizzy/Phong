@@ -44,6 +44,9 @@ const FLOORS = {
   // Server-side.
   'server/transform.ts': { statements: 100, branches: 100 },
   'server/room.ts': { statements: 95, branches: 92 },
+  // Pairing rules, pure for the same reason room.ts is: who the queue puts
+  // together is worth arguing about in a test rather than on a live server.
+  'server/matchmaking.ts': { statements: 95, branches: 92 },
   'server/db.ts': { statements: 90, branches: 88 },
   'server/image.ts': { statements: 90, branches: 88 },
   'server/bots.ts': { statements: 100, branches: 100 },

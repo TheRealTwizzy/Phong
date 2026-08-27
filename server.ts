@@ -42,8 +42,10 @@ import {
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
+import { Candidate, findPair } from './server/matchmaking';
 import {
   DEFAULT_VENUE_ROOM,
+  MATCHMAKING_ROOM,
   normalizeVenueRoomId,
   roomAllowsSpectators,
   roomById,
@@ -67,6 +69,39 @@ import { Rating, winProbability } from './src/rating';
 type Seat = { role: 'player'; index: 0 | 1 } | { role: 'spectator'; slot: 0 | 1 };
 
 const rooms = new Map<string, Room>();
+
+/**
+ * The ranked queue: everybody currently looking for a game.
+ *
+ * An in-process array beside the room map, and single-instance by design for
+ * the same reason — the relay is the only participant that can see both
+ * players, so pairing lives where the sockets are (CLAUDE.md §5, §10).
+ *
+ * Each entry carries `take`, a callback minted INSIDE the socket's own
+ * connection scope. A socket's seat is closure state (`currentRoomId`,
+ * `seat`), which nothing outside that closure can write — so the sweep does
+ * not try to: it builds the room and then asks each socket to take its seat.
+ */
+interface QueueEntry {
+  ws: WebSocket;
+  deviceId: string | null;
+  sessionId: string | null;
+  playerId: string;
+  playerName: string;
+  joinedAt: number;
+  rttMs: number | null;
+  take: (roomId: string, index: 0 | 1) => void;
+}
+
+const queue: QueueEntry[] = [];
+
+/** Drop this socket from the queue, however it came to be leaving. */
+function leaveQueue(ws: WebSocket): boolean {
+  const at = queue.findIndex((e) => e.ws === ws);
+  if (at === -1) return false;
+  queue.splice(at, 1);
+  return true;
+}
 
 /**
  * The duel run this device already has going. A rally streak carries between
@@ -258,6 +293,170 @@ function startMatch(room: Room, servingPlayer: 0 | 1): void {
   // note on duelStartRatings.
   duelStartRatings(room);
   broadcast(room, payload);
+}
+
+/**
+ * The terms every queue match is played on, and they are not negotiable.
+ *
+ * Stock physics, sonar off, no watching seats, and the ranked auto-serve floor
+ * `normalizeRoomConfig` forces. That fixity is what makes skipping the ready
+ * handshake sound: the guest-ready step exists because a room's terms are the
+ * host's to change, and "a yes to old rules is not a yes to new ones". A queue
+ * table has no host and no editable terms, the searching UI states them before
+ * anybody joins, so QUEUEING IS THE YES. `set_room_config` is refused outright
+ * on one of these tables, which keeps that premise true by construction rather
+ * than by everyone remembering it.
+ */
+const queueRoomConfig = (): RoomMatchConfig =>
+  roomConfigFor(MATCHMAKING_ROOM, DEFAULT_ROOM_CONFIG);
+
+/** A queue entry as the pure pairing rules see it. */
+function queueCandidate(entry: QueueEntry): Candidate | null {
+  if (!entry.deviceId) return null;
+  const profile = db.getProfile(entry.deviceId);
+  return {
+    deviceId: entry.deviceId,
+    mu: profile.mmrMu,
+    sigma: profile.mmrSigma,
+    joinedAt: entry.joinedAt,
+    rttMs: entry.rttMs,
+  };
+}
+
+/**
+ * Seat a paired-up two and start their match, with no lobby in between.
+ *
+ * Everything a host's `start_match` does, done by the relay: the table is
+ * built in the hidden queue room, both sockets are told they have a seat in
+ * the ordinary `room_created`/`room_joined` shapes so their existing handlers
+ * work unchanged, and `startMatch` broadcasts the `game_start` that closes
+ * both lobbies. From the first serve it is an ordinary table under every rule
+ * in this file — including the per-phone 3-second countdown, which arms on
+ * `game_start` and runs when each player actually reaches the court.
+ */
+function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
+  let code = generateRoomCode();
+  let guard = 0;
+  while (rooms.has(code) && guard++ < 50) code = generateRoomCode();
+  if (rooms.has(code)) return; // absurd, but never overwrite a live table
+
+  const session = (entry: QueueEntry, index: 0 | 1): PlayerSession => ({
+    ws: entry.ws,
+    playerId: entry.playerId,
+    playerName: entry.playerName,
+    playerIndex: index,
+    deviceId: entry.deviceId,
+    sessionId: entry.sessionId,
+  });
+
+  const room: Room = {
+    id: code,
+    players: [session(a, 0), session(b, 1)],
+    scores: [0, 0],
+    streaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
+    bestStreaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
+    earnedStreaks: [0, 0],
+    earnedBests: [0, 0],
+    crossingsThisPoint: 0,
+    syncRev: 0,
+    servingPlayer: 0,
+    rematchVotes: [false, false],
+    config: queueRoomConfig(),
+    matchOver: false,
+    inPlay: false,
+    // Both seats consented by queueing, so the handshake is already done.
+    ready: [true, true],
+    matchSeq: 0,
+    lastActive: Date.now(),
+    // Both seats filled from the first instant: no unpaired clock to run.
+    soloSince: null,
+    startRatings: null,
+    startRatingsSeq: 0,
+    relayCounted: false,
+    venueRoomId: MATCHMAKING_ROOM,
+    // Never listed and never watched: a queue table is not a place, it is a
+    // pairing. `listable: false` on the room def already keeps it out of the
+    // browser; this keeps it out of the seats.
+    visibility: 'private',
+    spectators: [null, null],
+  };
+  rooms.set(code, room);
+
+  a.take(code, 0);
+  b.take(code, 1);
+
+  const publicOf = (entry: QueueEntry) =>
+    entry.deviceId ? db.getPublicProfile(entry.deviceId) : null;
+  const oppOf = [publicOf(b), publicOf(a)];
+
+  ([a, b] as const).forEach((entry, i) => {
+    const idx = i as 0 | 1;
+    const other = room.players[idx === 0 ? 1 : 0]!;
+    if (entry.ws.readyState !== WebSocket.OPEN) return;
+    entry.ws.send(JSON.stringify({ type: 'queue_state', status: 'found', opponent: oppOf[idx] }));
+    entry.ws.send(
+      JSON.stringify(
+        idx === 0
+          ? { type: 'room_created', roomId: code, playerIndex: 0 }
+          : {
+              type: 'room_joined',
+              roomId: code,
+              playerIndex: 1,
+              opponentName: other.playerName,
+              opponentId: other.playerId,
+            }
+      )
+    );
+    // Seat 0 learns who arrived the way a host does; seat 1 was told above.
+    if (idx === 0) {
+      entry.ws.send(
+        JSON.stringify({
+          type: 'opponent_joined',
+          opponentName: other.playerName,
+          opponentId: other.playerId,
+        })
+      );
+    }
+    entry.ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+  });
+
+  broadcastTableState(room);
+  sendMatchPrediction(room);
+  startMatch(room, 0);
+}
+
+/**
+ * One pass of the queue. Pairs as many as it can, then stops.
+ *
+ * A loop rather than one pair per tick: four people joining at once should not
+ * wait two sweeps for the second match. It stops the moment `findPair` says
+ * no, so a queue with nothing legal in it costs one comparison pass.
+ */
+function sweepQueue(now: number): void {
+  // A socket that died without a close event yet is not in the queue for our
+  // purposes: pairing against it would seat a phantom.
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].ws.readyState !== WebSocket.OPEN) queue.splice(i, 1);
+  }
+  for (;;) {
+    const byId = new Map<string, QueueEntry>();
+    const candidates: Candidate[] = [];
+    for (const entry of queue) {
+      const candidate = queueCandidate(entry);
+      // A cookieless socket has no rating to pair on and no profile to record
+      // onto. It can play a private duel; it cannot be matchmade.
+      if (!candidate || byId.has(candidate.deviceId)) continue;
+      byId.set(candidate.deviceId, entry);
+      candidates.push(candidate);
+    }
+    const pair = findPair(candidates, now);
+    if (!pair) return;
+    const a = byId.get(pair[0].deviceId)!;
+    const b = byId.get(pair[1].deviceId)!;
+    leaveQueue(a.ws);
+    leaveQueue(b.ws);
+    seatQueuePair(a, b);
+  }
 }
 
 interface LiveSocket {
@@ -1574,6 +1773,22 @@ async function startServer() {
     }
   }, ROOM_SWEEP_MS).unref?.();
 
+  // The queue's own sweep. Faster than the room reaper because a player is
+  // sitting looking at a spinner: two seconds is the longest anybody waits
+  // past the moment a legal pairing exists, and `queue_join` sweeps
+  // immediately as well, so the timer only matters for a band that has just
+  // widened past a pair already waiting.
+  const QUEUE_SWEEP_MS = 2000;
+  setInterval(() => {
+    try {
+      sweepQueue(Date.now());
+    } catch (e) {
+      // A pairing that throws must not take the interval down with it: the
+      // queue would then be a place players enter and are never called from.
+      console.error('queue sweep failed:', e);
+    }
+  }, QUEUE_SWEEP_MS).unref?.();
+
   /**
    * Liveness, asked for rather than assumed.
    *
@@ -1712,7 +1927,9 @@ async function startServer() {
           msg.type === 'create_room' ||
           msg.type === 'join_room' ||
           msg.type === 'spectate_room' ||
-          msg.type === 'swap_seat'
+          msg.type === 'swap_seat' ||
+          // Queueing IS asking for a seat, just not yet at a named table.
+          msg.type === 'queue_join'
         ) {
           const refusal = seatRefusal();
           if (refusal) {
@@ -1747,6 +1964,9 @@ async function startServer() {
           // checked: a room is always created, but a join can be refused, and
           // a refused join must not cost the seat the player already had —
           // still less charge them an abandon for a match they are still in.
+          // Taking a seat and holding a queue place are the same
+          // commitment, so taking one gives up the other.
+          leaveQueue(ws);
           vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
@@ -1867,6 +2087,9 @@ async function startServer() {
 
           // The destination is real and has room, so the old seat can go. See
           // the note in create_room: nothing above this line may fail.
+          // Taking a seat and holding a queue place are the same
+          // commitment, so taking one gives up the other.
+          leaveQueue(ws);
           vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
@@ -1997,6 +2220,9 @@ async function startServer() {
 
           // Nothing above this line may fail. Same rule as create_room and
           // join_room: a refused seat must never cost the one already held.
+          // Taking a seat and holding a queue place are the same
+          // commitment, so taking one gives up the other.
+          leaveQueue(ws);
           vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
@@ -2032,6 +2258,56 @@ async function startServer() {
           // a frozen court. Again endP2P, not takeOverFromP2P.
           endP2P(room);
 
+        } else if (msg.type === 'queue_join') {
+          // A seat and a queue place are the same commitment, so nobody holds
+          // both: the relay would otherwise seat somebody who is already
+          // mid-duel, and the abandon would be charged to them for a match
+          // they never asked to leave.
+          if (currentRoomId && seat) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Leave your table before queueing.' }));
+            return;
+          }
+          if (!cookieDeviceId) {
+            // No profile means no rating to pair on and nothing to record
+            // onto. A cookieless socket can still play a private duel — that
+            // is the load test's path — but it cannot be matchmade.
+            ws.send(JSON.stringify({ type: 'error', message: 'Pick a username before queueing.' }));
+            return;
+          }
+          // Re-joining is not a reset: keeping the original joinedAt is what
+          // stops a client widening or narrowing its own band by rejoining.
+          const already = queue.find((e) => e.ws === ws);
+          const rttMs =
+            typeof msg.rttMs === 'number' && Number.isFinite(msg.rttMs) && msg.rttMs >= 0
+              ? Math.min(5000, Math.round(msg.rttMs))
+              : null;
+          if (already) {
+            already.rttMs = rttMs;
+          } else {
+            currentPlayerId = cookieDeviceId;
+            queue.push({
+              ws,
+              deviceId: cookieDeviceId,
+              sessionId: cookieSessionId,
+              playerId: cookieDeviceId,
+              playerName: db.getProfile(cookieDeviceId).username,
+              joinedAt: Date.now(),
+              rttMs,
+              // Minted here, inside this socket's own scope, because a seat is
+              // closure state and nothing outside this closure can write it.
+              take: (roomId, index) => {
+                currentRoomId = roomId;
+                seat = { role: 'player', index };
+              },
+            });
+          }
+          ws.send(JSON.stringify({ type: 'queue_state', status: 'searching' }));
+          // Answer immediately when there is already somebody waiting, rather
+          // than making the newcomer sit out a tick of the sweep.
+          sweepQueue(Date.now());
+        } else if (msg.type === 'queue_cancel') {
+          leaveQueue(ws);
+          ws.send(JSON.stringify({ type: 'queue_state', status: 'cancelled' }));
         } else if (msg.type === 'swap_seat' && currentRoomId && seat) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -2365,8 +2641,12 @@ async function startServer() {
           // the guest cannot edit them, and neither side can change the ball
           // out from under a rally. Before the first serve and after the last
           // point, the settings are open.
+          // A queue table's terms are fixed and disclosed BEFORE anybody
+          // joins the queue, which is the whole reason skipping the ready
+          // handshake is sound there. Refusing here keeps that premise true by
+          // construction rather than by everyone remembering it.
           const between = !room.inPlay || room.matchOver;
-          if (playerIndex() !== 0 || !between) {
+          if (room.venueRoomId === MATCHMAKING_ROOM || playerIndex() !== 0 || !between) {
             ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
             return;
           }

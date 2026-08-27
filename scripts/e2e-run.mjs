@@ -38,6 +38,7 @@ const SUITES = [
   { name: 'invite', ownsServer: false },
   { name: 'lobby', ownsServer: false },
   { name: 'spectate', ownsServer: false },
+  { name: 'queue', ownsServer: false },
   { name: 'split', ownsServer: false },
   { name: 'streak', ownsServer: false },
   { name: 'history', ownsServer: false },

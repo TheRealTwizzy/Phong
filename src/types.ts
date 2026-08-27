@@ -669,6 +669,11 @@ export type WSClientMessage =
   | { type: 'set_room_config'; config: RoomMatchConfig }
   | { type: 'spectate_room'; roomId: string; seat?: number }
   | { type: 'swap_seat'; seat: number }
+  // The ranked queue. `rttMs` is the client's own last round-trip reading —
+  // a tiebreak hint and never a gate, so its being self-reported costs
+  // nothing: forging it buys a marginally better-connected opponent.
+  | { type: 'queue_join'; rttMs?: number }
+  | { type: 'queue_cancel' }
   | { type: 'player_ready'; ready: boolean }
   | { type: 'start_match' }
   | { type: 'paddle_move'; x: number }
@@ -720,6 +725,10 @@ export type WSServerMessage =
   | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean }
   // Where the match already stands, for a watcher who has just sat down.
   | { type: 'spectator_sync'; snapshot: SpectatorSnapshot }
+  // Where the search stands. `found` is followed immediately by the ordinary
+  // room_created/room_joined/room_config and then game_start: the relay seats
+  // the pair and starts the match itself, with no lobby and no ready tap.
+  | { type: 'queue_state'; status: 'searching' | 'found' | 'cancelled'; opponent?: PublicProfile }
   // The three frames only a WATCHER receives, all about the court of the
   // player they are sitting beside — which that player never needs, because
   // they are simulating it. RAW, in that player's own coordinates: no mirror

@@ -20,11 +20,12 @@ import {
 import { normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
 import { MatchRulesPanel } from './MatchRulesPanel';
-import { useQuickMatch } from '../net/useQuickMatch';
+import { QuickMatch } from '../net/useQuickMatch';
 import {
   BUILDINGS,
   BuildingId,
   DEFAULT_BUILDING,
+  DEFAULT_VENUE_ROOM,
   EntryVerdict,
   RoomDef,
   roomEntryVerdict,
@@ -88,7 +89,20 @@ import {
 // caps itself against the visible viewport, scrolls its own body, and pins
 // the Start CTA in a footer that cannot be scrolled away. Every child of the
 // scroll region below is `shrink-0` so this class of collapse cannot return.
+/**
+ * How long a search runs before the menu offers a door that does not depend on
+ * anybody else joining the queue. Long enough that a quick pairing never sees
+ * it, short enough that a quiet evening is not a dead end.
+ */
+const QUEUE_BROWSE_AFTER_S = 45;
+
 interface MainMenuProps {
+  /**
+   * The ranked queue. Owned by App, because the state machine is driven by
+   * relay messages and App is where the socket is — the hook keeps the state,
+   * the menu keeps the surface.
+   */
+  quickMatch: QuickMatch;
   theme: ThemeConfig;
   settings: GameSettings;
   onUpdateSettings: (newSettings: Partial<GameSettings>) => void;
@@ -139,6 +153,7 @@ const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 );
 
 export const MainMenu: React.FC<MainMenuProps> = ({
+  quickMatch,
   theme,
   settings,
   onUpdateSettings,
@@ -189,6 +204,21 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // long as the tour is running.
   const openGateHint = tourActive ? null : gateHint;
   const openQueueInfo = tourActive ? false : queueInfoOpen;
+  const searching = quickMatch.state.status === 'searching';
+  const since = quickMatch.state.status === 'searching' ? quickMatch.state.since : 0;
+  // One second of state per second of searching, and only while searching:
+  // a ticker that runs on an idle menu is a render per second for nothing.
+  const [queueElapsed, setQueueElapsed] = useState(0);
+  useEffect(() => {
+    if (!searching) {
+      setQueueElapsed(0);
+      return;
+    }
+    const tick = () => setQueueElapsed(Math.max(0, Math.round((Date.now() - since) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [searching, since]);
   // All three overrides above only stop a stray tap from MATTERING while the
   // tour runs — nothing clears the tap itself. The tour ENDING is also a
   // transition, and an unclear one: the moment tourActive goes false, every
@@ -222,7 +252,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // want the buildings list, and its prematch step wants the Solo building's
   // ROOKIE room open behind the sheet.
   const openNav = tourActive ? TOUR_NAV : nav;
-  const quickMatch = useQuickMatch();
 
   const MODE_META: {
     id: GameMode;
@@ -431,28 +460,42 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 
         <SectionLabel>{t('menu_section_play', lang)}</SectionLabel>
 
-        {/* The ranked queue's slot, held open and honest. It uses aria-disabled
-            rather than disabled: a disabled button swallows the tap and reads
-            as broken, where this can say what it is waiting for. */}
+        {/* The ranked queue. The slot was held open and honest through the
+            build that had no relay behind it — dashed, aria-disabled, and
+            saying what it was waiting for. It is a real row now, and nothing
+            above this component changed to make it one: that was the point of
+            settling the client contract before the server existed. */}
         <button
           id="menu-mode-quickmatch"
-          data-stub="true"
-          aria-disabled={!quickMatch.available}
+          data-searching={searching ? 'true' : 'false'}
           onClick={() => setQueueInfoOpen(true)}
-          className="flex shrink-0 items-center gap-3 rounded-card border border-dashed border-line-strong bg-surface-2/60 p-3 text-left opacity-60 transition-colors"
+          className={`flex shrink-0 items-center gap-3 rounded-card border p-3 text-left transition-colors active:scale-[0.99] motion-reduce:active:scale-100 ${
+            searching ? 'border-accent/50 bg-accent/10' : 'border-line-strong bg-surface-2'
+          }`}
         >
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border border-line-strong text-ink-muted">
+          <div
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border ${
+              searching ? 'border-accent/50 text-accent' : 'border-line-strong text-ink-muted'
+            }`}
+          >
             <Swords className="h-5 w-5" />
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="text-2xs text-ink">{t('menu_quickmatch', lang)}</span>
             <span className="text-2xs leading-tight font-normal tracking-normal text-ink-dim">
-              {t('menu_quickmatch_desc', lang)}
+              {searching
+                ? t('queue_searching', lang, { s: queueElapsed })
+                : t('menu_quickmatch_desc', lang)}
             </span>
           </div>
-          <span className="shrink-0 rounded-chip border border-warn/40 bg-warn/15 px-1.5 py-0.5 text-2xs text-warn uppercase">
-            {t('menu_quickmatch_soon', lang)}
-          </span>
+          {searching && (
+            <span
+              id="quickmatch-searching-chip"
+              className="animate-ready-pulse shrink-0 rounded-chip border border-accent/40 bg-accent/15 px-1.5 py-0.5 text-2xs text-accent uppercase"
+            >
+              {queueElapsed}s
+            </span>
+          )}
         </button>
 
         {/* A PLACE, not a filter — and the buildings are a TAB STRIP rather
@@ -759,32 +802,84 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         closeLabel={t('close', lang)}
       />
 
+      {/* The searching surface. The terms are stated BEFORE the player joins,
+          and that is load-bearing rather than decorative: a queue table has no
+          host and no editable rules, which is the whole reason the relay can
+          skip the guest-ready handshake and start the match itself. Queueing
+          is the yes, so the yes has to be given to something disclosed. */}
       <Sheet
         id="quickmatch-info-sheet"
+        closeId="btn-close-quickmatch"
         isOpen={openQueueInfo}
         onClose={() => setQueueInfoOpen(false)}
         size="xs"
         layer="over"
-        accent="warn"
+        accent={searching ? 'accent' : 'warn'}
         closeLabel={t('close', lang)}
         icon={<Swords className="h-4 w-4" />}
         title={t('menu_quickmatch', lang)}
         footer={
-          <Button
-            variant="primary"
-            block
-            onClick={() => {
-              setQueueInfoOpen(false);
-              onOpenMultiplayer();
-            }}
-          >
-            {t('menu_quickmatch_cta', lang)}
-          </Button>
+          searching ? (
+            <Button
+              id="btn-quickmatch-cancel"
+              variant="secondary"
+              block
+              onClick={quickMatch.cancel}
+            >
+              {t('cancel', lang)}
+            </Button>
+          ) : (
+            <Button
+              id="btn-quickmatch-join"
+              variant="primary"
+              block
+              // Not from under the tour's scrim, which is pointer-events-none
+              // so the app underneath stays usable — the same refusal
+              // handleCreateRoom carries, for the same reason: a pairing that
+              // lands under a running tour is a seat the tour walks away from.
+              disabled={tourActive}
+              onClick={quickMatch.join}
+            >
+              {t('menu_quickmatch_cta', lang)}
+            </Button>
+          )
         }
       >
         <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
           {t('menu_quickmatch_body', lang)}
         </p>
+        {searching && (
+          <div className="mt-3 flex flex-col gap-2">
+            <p id="quickmatch-status" className="text-2xs text-accent">
+              {t('queue_searching', lang, { s: queueElapsed })}
+            </p>
+            <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-dim">
+              {t('queue_hint', lang)}
+            </p>
+            {/* After a long enough wait, a door that does not depend on
+                anybody else being in the queue. The search keeps running
+                underneath — leaving it on is the point. */}
+            {queueElapsed >= QUEUE_BROWSE_AFTER_S && (
+              <Button
+                id="btn-quickmatch-browse"
+                variant="secondary"
+                size="sm"
+                block
+                onClick={() => {
+                  setQueueInfoOpen(false);
+                  onOpenMultiplayer(DEFAULT_VENUE_ROOM);
+                }}
+              >
+                {t('queue_browse', lang)}
+              </Button>
+            )}
+          </div>
+        )}
+        {quickMatch.state.status === 'found' && (
+          <p id="quickmatch-found" className="mt-3 text-2xs text-win">
+            {t('queue_found', lang)} — {quickMatch.state.opponent.username}
+          </p>
+        )}
       </Sheet>
     </div>
   );

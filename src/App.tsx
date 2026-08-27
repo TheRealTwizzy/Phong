@@ -23,6 +23,7 @@ import {
   TableSeatInfo,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
+import { QuickMatch, useQuickMatch } from './net/useQuickMatch';
 import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
 import { nextRunSeq } from './net/runChain';
 import { THEMES, ThemeConfig } from './game/themes';
@@ -548,6 +549,16 @@ export default function App() {
   const spectatingRef = useRef<{ roomId: string; side: 0 | 1 } | null>(null);
   /** The last watched_ball sample, so the next one can be given a velocity. */
   const watchedBallRef = useRef<{ x: number; y: number; t: number } | null>(null);
+  /**
+   * The queue, reachable from the dispatch above where it is declared.
+   *
+   * And `queueSeating`, which suppresses one lobby flash: the relay seats a
+   * found pair with the ordinary room_created/room_joined, and those reopen
+   * the lobby by design — for a queue match that sheet would appear for the
+   * single round trip before `game_start` closes everything anyway.
+   */
+  const quickMatchRef = useRef<QuickMatch | null>(null);
+  const queueSeatingRef = useRef<boolean>(false);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
 
   ballRef.current = ball;
@@ -1438,7 +1449,10 @@ export default function App() {
         // `game` and seats the host behind a shut lobby: alone on a live court
         // with no room code to share and no Leave control, while the relay
         // goes on holding the room they had probably already sent someone.
-        setIsMultiplayerOpen(true);
+        // ...unless the relay seated this player out of the QUEUE, where the
+        // sheet would flash for the one round trip before game_start closes
+        // everything anyway.
+        setIsMultiplayerOpen(!queueSeatingRef.current);
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
@@ -1464,7 +1478,7 @@ export default function App() {
         // and being given one, and this case then put them on a live court
         // with no Ready control — holding the room while the host waited for a
         // readiness they had no way to signal.
-        setIsMultiplayerOpen(true);
+        setIsMultiplayerOpen(!queueSeatingRef.current); // see room_created
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
@@ -1555,8 +1569,12 @@ export default function App() {
         setLobbyReady([false, false]);
         setTelemetryOpen(false);
         // The host starting the match is what closes BOTH lobbies: nobody
-        // walks onto the court until the room says the match exists.
+        // walks onto the court until the room says the match exists. For a
+        // queue match the relay is the host, and this is where the search
+        // ends — the spinner has a court to hand over to.
         setIsMultiplayerOpen(false);
+        queueSeatingRef.current = false;
+        quickMatchRef.current?.reset();
         setIsServing(true);
         p2pRef.current?.resetMatchState(msg.servingPlayer, matchSeqRef.current, msg.streaks);
         break;
@@ -1673,6 +1691,13 @@ export default function App() {
         sound.playBallIncoming();
         break;
       }
+
+      case 'queue_state':
+        // The relay seats a found pair itself, so `found` is a beat rather
+        // than a prompt: the room messages are already on their way behind it.
+        if (msg.status === 'found') queueSeatingRef.current = true;
+        quickMatchRef.current?.apply(msg);
+        break;
 
       case 'table_state': {
         setTableState({
@@ -2159,6 +2184,46 @@ export default function App() {
   };
 
   /**
+   * The ranked queue.
+   *
+   * Placed here rather than in MainMenu because the state machine is driven by
+   * relay messages and this is where the socket is — and because a player on
+   * the menu may have no socket at all yet, so joining has to be able to open
+   * one, exactly as creating a room does.
+   *
+   * Queue messages ride the RELAY, never `sendNetRef`: they are room
+   * management, so a DataChannel must not carry them (and `sendGame` refuses
+   * them anyway — see tests/protocolParity.test.ts).
+   */
+  const sendQueue = useCallback(
+    (msg: WSClientMessage) => {
+      let socket = wsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) socket = connectWebSocket();
+      sendWhenOpen(socket, () => msg);
+    },
+    [connectWebSocket]
+  );
+  const quickMatch = useQuickMatch({ send: sendQueue, rttMs: pingMs || undefined });
+  quickMatchRef.current = quickMatch;
+
+  /**
+   * A search is a seat on its way, so it counts as one for the tour.
+   *
+   * Being on the menu is not the same as having no room coming — the same
+   * reason `startTour` already refuses while a create or join is outstanding.
+   * A queue pairing lands as room_created/game_start, which under a running
+   * tour would put the player on a court the tour then walks away from,
+   * leaving the opponent alone on theirs.
+   */
+  useEffect(() => {
+    if (quickMatch.state.status === 'idle') return;
+    roomRequestRef.current = true;
+    return () => {
+      roomRequestRef.current = false;
+    };
+  }, [quickMatch.state.status]);
+
+  /**
    * Follow an invitation link the moment the player has an identity to follow
    * it with.
    *
@@ -2255,6 +2320,9 @@ export default function App() {
     spectatingRef.current = null;
     setTableState(null);
     watchedBallRef.current = null;
+    // A seating that never reached game_start would otherwise leave the lobby
+    // suppressed for the NEXT room this page opens.
+    queueSeatingRef.current = false;
     setMatchCountdown(null);
     setCountdownArmed(false);
     setLobbyReady([false, false]);
@@ -3443,6 +3511,7 @@ export default function App() {
         {screen === 'menu' ? (
           <motion.div key="menu" className="absolute inset-0 flex flex-col" {...screenMotion}>
           <MainMenu
+            quickMatch={quickMatch}
             theme={currentTheme}
             settings={settings}
             onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
