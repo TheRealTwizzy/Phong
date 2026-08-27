@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { LanguageCode, PlayerProfile, UsernameCheckResponse } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { Sheet } from './ui';
 import { validateUsername, USERNAME_MAX } from '../profileRules';
@@ -15,7 +15,7 @@ import { Check, ExternalLink, ImagePlus, KeyRound, Loader2, Play, ShieldCheck, X
 // initializing or restoring an existing profile with a recovery code.
 interface OnboardingModalProps {
   isOpen: boolean;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   language: LanguageCode;
   /**
    * This player arrived on an invitation link. It matters because that link is

@@ -11,12 +11,12 @@ export type GameMode = 'solo' | 'multiplayer' | 'split' | 'practice';
 // given its new meaning at the top of the ladder.
 export type AIDifficulty = 'rookie' | 'pro' | 'elite' | 'cyber' | 'chaos';
 
-export type CourtTheme =
+export type CosmeticId =
   | 'neon'
   | 'retro-crt'
   | 'midnight'
   | 'cyberpunk'
-  | 'tennis'
+  | 'arena-pro'
   | 'emerald-matrix'
   | 'solar-flare'
   | 'hyper-violet'
@@ -115,7 +115,12 @@ export interface GameSettings {
   // Pre-match only, like difficulty and winningScore: chosen on the menu and
   // never editable once a match is running.
   rules: MatchRules;
-  theme: CourtTheme;
+  /**
+   * The equipped cosmetic, cached on the device so the first paint does not
+   * wait for the profile. The PROFILE is the source of truth — it is what other
+   * players see — and this is overwritten by it whenever the two disagree.
+   */
+  cosmetic: CosmeticId;
   language: LanguageCode;
 }
 
@@ -256,6 +261,12 @@ export interface PlayerProfile {
    */
   eliteUnlocks?: string[];
   /**
+   * The cosmetic this player has equipped. Lives on the profile rather than the
+   * device because it is not a preference about this phone: it is what everyone
+   * else sees when they open this player's profile.
+   */
+  cosmetic?: CosmeticId;
+  /**
    * Stats kept per mode, keyed by GameMode. Only ever sent to the profile's
    * OWN device — PublicProfile is a separate, sanitized shape.
    */
@@ -305,6 +316,8 @@ export interface PublicProfile {
    * good: the mission's XP is a daily reward, this is not.
    */
   eliteUnlocks?: string[];
+  /** Equipped cosmetic — a viewer renders this profile in the OWNER's look. */
+  cosmetic?: CosmeticId;
   dailyStreak: number;
   // Tier only — a public profile never exposes raw mu/sigma numbers.
   tier: Tier;

@@ -30,7 +30,7 @@ const FLOORS = {
   // expensive to get wrong — the same bet as matchRules.ts beside it.
   'src/venues.ts': { statements: 95, branches: 85 },
   'src/game/physics.ts': { statements: 90, branches: 88 },
-  'src/game/themes.ts': { statements: 95, branches: 95 },
+  'src/game/cosmetics.ts': { statements: 95, branches: 95 },
   'src/game/missions.ts': { statements: 80, branches: 80 },
   'src/media/qr.ts': { statements: 95, branches: 95 },
   // The client networking layer: every one of these was under 55% before the

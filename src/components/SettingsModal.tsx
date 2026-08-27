@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CourtTheme, GameSettings, LanguageCode, PlayerProfile, SoundscapeType } from '../types';
-import { THEMES, isThemeUnlocked } from '../game/themes';
+import { GameSettings, LanguageCode, PlayerProfile, SoundscapeType } from '../types';
 import { LANGUAGES, t } from '../i18n/translations';
 import { USERNAME_MAX } from '../profileRules';
 import { sound } from '../audio/soundEffects';
@@ -8,7 +7,6 @@ import { Sheet, Button } from './ui';
 import {
   X,
   Smartphone,
-  Sparkles,
   Sliders,
   Volume2,
   VolumeX,
@@ -20,8 +18,6 @@ import {
   Flame,
   Crosshair,
   Radio,
-  Lock,
-  CheckCircle,
   BookOpen,
   Waves,
   Zap,
@@ -468,80 +464,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               />
             </div>
           )}
-        </div>
-
-        {/* Unlockable Themes & Color Palettes Grid */}
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <label className="text-xs font-mono text-zinc-400 flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              {t('court_theme', lang)}
-            </label>
-            <span className="text-[10px] font-mono text-zinc-400">
-              {profile ? `Level ${profile.level}` : ''}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {(Object.keys(THEMES) as CourtTheme[]).map((themeKey) => {
-              const th = THEMES[themeKey];
-              const isSelected = settings.theme === themeKey;
-              const unlocked = isThemeUnlocked(themeKey, profile);
-
-              return (
-                <button
-                  key={themeKey}
-                  id={`theme-btn-${themeKey}`}
-                  disabled={!unlocked}
-                  onClick={() => {
-                    if (unlocked) {
-                      onUpdateSettings({ theme: themeKey });
-                      sound.playPaddleHit(1.0);
-                    }
-                  }}
-                  className={`p-2.5 rounded-2xl border text-left flex flex-col gap-1.5 transition active:scale-95 relative overflow-hidden ${
-                    isSelected
-                      ? 'border-cyan-400 bg-cyan-950/40 text-white font-bold ring-1 ring-cyan-400/50 shadow-md'
-                      : unlocked
-                      ? 'border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/40 text-zinc-300'
-                      : 'border-zinc-900 bg-zinc-950/80 opacity-60 text-zinc-500 cursor-not-allowed'
-                  }`}
-                >
-                  <div className="flex items-center justify-between w-full">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="w-3.5 h-3.5 rounded-full border border-white/20 shrink-0"
-                        style={{ backgroundColor: th.accentColor }}
-                      />
-                      <span className="text-xs font-mono font-bold truncate">{th.name}</span>
-                    </div>
-
-                    {unlocked ? (
-                      isSelected ? (
-                        <CheckCircle className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                      ) : null
-                    ) : (
-                      <Lock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                    )}
-                  </div>
-
-                  {/* Color preview chips */}
-                  <div className="flex items-center gap-1">
-                    <div className="h-1.5 flex-1 rounded-full" style={{ backgroundColor: th.courtColor }} />
-                    <div className="h-1.5 flex-1 rounded-full" style={{ backgroundColor: th.playerPaddleColor }} />
-                    <div className="h-1.5 flex-1 rounded-full" style={{ backgroundColor: th.ballColor }} />
-                  </div>
-
-                  {/* Unlock requirement description if locked */}
-                  {!unlocked && th.unlockRequirement && (
-                    <span className="text-[9px] font-mono text-amber-400/90 leading-tight">
-                      🔒 {th.unlockRequirement.description}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
         </div>
 
         {/* Toggles: Ball Trails, Gyroscope Tilt, Sonar Radar, the two net markers */}

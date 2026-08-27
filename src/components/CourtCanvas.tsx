@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { BallState, GameSettings, Particle, Ripple, LanguageCode } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import {
   PADDLE_Y,
   PADDLE_HEIGHT,
@@ -26,7 +26,7 @@ interface CourtCanvasProps {
   paddleX: number;
   onPaddleMove: (newX: number) => void;
   settings: GameSettings;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   isServing: boolean;
   onServe: (aim?: ServeAim) => void;
   /** Live paddle width for this match (rules can scale it). */

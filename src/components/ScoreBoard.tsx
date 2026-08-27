@@ -1,6 +1,6 @@
 import React from 'react';
 import { GameMode, PlayerStats, PlayerProfile, PlayerStatus, LanguageCode } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { Volume2, VolumeX, Settings, Flame, RefreshCw, Home, Trophy, Eye } from 'lucide-react';
@@ -21,7 +21,7 @@ import { Volume2, VolumeX, Settings, Flame, RefreshCw, Home, Trophy, Eye } from 
 interface ScoreBoardProps {
   stats: PlayerStats;
   mode: GameMode;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   profile: PlayerProfile | null;
   playerStatus?: PlayerStatus;
   soundEnabled: boolean;

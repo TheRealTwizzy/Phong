@@ -17,7 +17,7 @@ import {
   DailyMission,
   LanguageCode,
   MatchRules,
-  CourtTheme,
+  CosmeticId,
   RoomMatchConfig,
   TableSeat,
   TableSeatInfo,
@@ -26,7 +26,15 @@ import { P2PGameLink, P2PStatus } from './net/p2p';
 import { QuickMatch, useQuickMatch } from './net/useQuickMatch';
 import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
 import { nextRunSeq } from './net/runChain';
-import { THEMES, ThemeConfig } from './game/themes';
+import {
+  COSMETICS,
+  COSMETIC_IDS,
+  Cosmetic,
+  DEFAULT_COSMETIC_ID,
+  cosmeticVars,
+  isCosmeticUnlocked,
+  normalizeCosmeticId,
+} from './game/cosmetics';
 import {
   PADDLE_Y,
   SERVE_BALL_Y,
@@ -154,7 +162,7 @@ const DEFAULT_SETTINGS: GameSettings = {
   difficulty: DIFFICULTY_ORDER[0],
   winningScore: DEFAULT_WINNING_SCORE,
   rules: DEFAULT_MATCH_RULES,
-  theme: 'neon',
+  cosmetic: DEFAULT_COSMETIC_ID,
   language: 'en',
 };
 
@@ -189,6 +197,11 @@ export default function App() {
       // start a match against a difficulty that no longer has an anchor.
       difficulty: normalizeDifficulty(parsed.difficulty),
       rules: normalizeRules(parsed.rules),
+      // Reads `parsed.theme` as well, because that is what this field was
+      // called before a court theme became a whole-app cosmetic. Without the
+      // fallback every existing player silently reverts to the default on the
+      // deploy that renames it — no error, they just find their cosmetic gone.
+      cosmetic: normalizeCosmeticId(parsed.cosmetic ?? parsed.theme),
     };
   });
 
@@ -247,7 +260,14 @@ export default function App() {
   const [toastRecordFailed, setToastRecordFailed] = useState<boolean>(false);
   const [toastPracticeXp, setToastPracticeXp] = useState<number | null>(null);
   // A permanent unlock banked from an elite mission — worth announcing.
-  const [toastUnlock, setToastUnlock] = useState<string | null>(null);
+  /**
+   * Cosmetics unlocked just now, waiting to be announced.
+   *
+   * A list rather than one slot because two can land together — an achievement
+   * and the raw-stat fallback beside it both opening on the same match — and
+   * the single slot this replaced silently dropped whichever arrived second.
+   */
+  const [toastUnlocks, setToastUnlocks] = useState<CosmeticId[]>([]);
   // 'won' when the relay recorded the abandoned match as this player's win,
   // 'plain' when there was no match to win (a stranded guest in a lobby).
   const [toastOpponentLeft, setToastOpponentLeft] = useState<'won' | 'plain' | null>(null);
@@ -693,6 +713,82 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [profile?.id, refreshMissions]);
 
+  /**
+   * Equip a cosmetic.
+   *
+   * Written to the device FIRST so the repaint is instant — the whole shell
+   * changes colour, and waiting a round trip for that reads as a broken tap —
+   * then to the profile, which is the copy other players see. A refusal rolls
+   * the device back rather than leaving the two disagreeing, because
+   * `equippedCosmeticId` prefers the profile and the player would otherwise be
+   * looking at a cosmetic that reverts on their next reload with no explanation.
+   *
+   * An uninitialized profile has nothing to write to and is left on the device
+   * copy alone. That costs nothing: every cosmetic such a player can reach is a
+   * free one.
+   */
+  const handleEquipCosmetic = async (id: CosmeticId): Promise<void> => {
+    const previous = settings.cosmetic;
+    setSettings((s) => ({ ...s, cosmetic: id }));
+    if (!profile?.initialized) return;
+    try {
+      const res = await fetch('/api/profile/me', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cosmetic: id }),
+      });
+      const data = await res.json();
+      if (res.ok && data && data.id) {
+        setProfile(data);
+        return;
+      }
+      setSettings((s) => ({ ...s, cosmetic: previous }));
+    } catch {
+      setSettings((s) => ({ ...s, cosmetic: previous }));
+    }
+  };
+
+  /**
+   * Announce a cosmetic the moment it opens.
+   *
+   * Load-bearing rather than decorative: locked cosmetics are absent from the
+   * picker entirely, so this is the ONLY moment a player learns one exists.
+   * Before cosmetics were hidden only the six elite missions raised this, and
+   * the nine earned by achievements or raw stats arrived in silence — which was
+   * survivable when the picker listed them greyed-out, and is not now.
+   *
+   * The diff is against the previous profile rather than against a stored list,
+   * so it needs no new persistence: the unlock predicate is pure and the profile
+   * already carries everything it reads. The first profile of the session only
+   * establishes the baseline — without that guard, every load would announce all
+   * five free cosmetics.
+   */
+  const knownCosmeticsRef = useRef<Set<CosmeticId> | null>(null);
+  useEffect(() => {
+    if (!profile) return;
+    const owned = new Set(COSMETIC_IDS.filter((id) => isCosmeticUnlocked(id, profile)));
+    const previous = knownCosmeticsRef.current;
+    knownCosmeticsRef.current = owned;
+    if (!previous) return;
+    const fresh = [...owned].filter((id) => !previous.has(id));
+    if (fresh.length) setToastUnlocks((prev) => [...prev, ...fresh.filter((id) => !prev.includes(id))]);
+  }, [profile]);
+
+  /**
+   * Keep the device copy in step with the profile.
+   *
+   * The profile is the truth, and this is only about the NEXT boot: the first
+   * paint happens before any fetch returns, so without this a player who
+   * equipped something on another browser gets one frame of the old cosmetic
+   * before the profile lands and corrects it.
+   */
+  useEffect(() => {
+    const equipped = profile?.cosmetic;
+    if (equipped && equipped !== settings.cosmetic) {
+      setSettings((s) => ({ ...s, cosmetic: equipped }));
+    }
+  }, [profile?.cosmetic, settings.cosmetic]);
+
   // Rename (365-day lock). Returns the typed failure so the Profile modal
   // can tell the player WHY: taken, invalid, or locked until a date.
   const handleUpdateUsername = async (
@@ -939,7 +1035,7 @@ export default function App() {
       if (data.profile) setProfile(data.profile);
       if (data.missions) setMissions(data.missions);
       if (data.rerolls) setRerolls(data.rerolls);
-      if (data.unlocked) setToastUnlock(data.unlocked);
+      if (data.unlocked) setToastUnlocks((prev) => [...prev, normalizeCosmeticId(data.unlocked)]);
     } catch (e) {
       console.error('Failed to claim mission reward', e);
     }
@@ -2930,7 +3026,16 @@ export default function App() {
     [stopPlayOnEviction]
   );
 
-  const currentTheme: ThemeConfig = THEMES[settings.theme] || THEMES.neon;
+  /**
+   * The equipped cosmetic. The PROFILE wins over the device copy, which is the
+   * opposite of the rule `carryRef` follows and for the opposite reason: a
+   * carried rally run is about what this page just watched happen, while a
+   * cosmetic is about what everybody ELSE sees on this player's profile. The
+   * device copy exists only so the first paint does not wait for a round trip,
+   * and it is reconciled below the moment the profile lands.
+   */
+  const equippedCosmeticId = normalizeCosmeticId(profile?.cosmetic ?? settings.cosmetic);
+  const currentTheme: Cosmetic = COSMETICS[equippedCosmeticId];
   const missionsSummary = getMissionsStatusSummary(missions);
   // One motion vocabulary for the whole app; it collapses to zero duration
   // under prefers-reduced-motion without this file knowing about it.
@@ -2948,18 +3053,16 @@ export default function App() {
         onAdopt={() => void adoptSession(true)}
         onStartFresh={() => void startFreshIdentity()}
       >
-      {/* The equipped court theme's accent is published ONCE, here. The shell
-          reads it back as var(--theme-accent) rather than concatenating two
-          hex digits of alpha onto a colour at every call site wanting a tint. */}
+      {/* The equipped cosmetic is published ONCE, here, as the design tokens
+          themselves — so every `bg-surface-2` and `text-ink` in the app follows
+          it with no component knowing a cosmetic exists. The public-profile
+          card makes the only other call, with somebody else's palette; see
+          cosmeticVars for why this cannot be a var() pointing at a var(). */}
       <div
         id="app-root-container"
-        className="relative w-full h-full overflow-hidden flex flex-col font-sans select-none"
-        style={
-          {
-            backgroundColor: currentTheme.background,
-            '--theme-accent': currentTheme.accentColor,
-          } as React.CSSProperties
-        }
+        data-cosmetic={equippedCosmeticId}
+        className="relative w-full h-full overflow-hidden flex flex-col font-sans select-none bg-surface-1"
+        style={cosmeticVars(currentTheme) as React.CSSProperties}
       >
         {/* Every temporary notice, celebrations included, lives in one stack:
             the host owns the timer and the tap target so neither can be
@@ -2986,15 +3089,15 @@ export default function App() {
               onDismiss: () =>
                 setToastAchievements((prev) => prev.filter((x) => x.id !== a.id)),
             })),
-            toastUnlock && {
-              id: 'toast-unlock',
+            ...toastUnlocks.map((id) => ({
+              id: `toast-unlock-${id}`,
               tone: 'xp' as const,
               ttlMs: TOAST_TTL.reward,
               content: t('mission_unlock_earned', currentLanguage, {
-                name: THEMES[toastUnlock as CourtTheme]?.name || toastUnlock,
+                name: t(COSMETICS[id].nameKey, currentLanguage),
               }),
-              onDismiss: () => setToastUnlock(null),
-            },
+              onDismiss: () => setToastUnlocks((prev) => prev.filter((x) => x !== id)),
+            })),
             toastPracticeXp !== null && {
               id: 'toast-practice-xp',
               tone: 'info' as const,
@@ -3417,7 +3520,7 @@ export default function App() {
             <div className="flex flex-col items-center gap-2">
               <span
                 key={matchCountdown}
-                className="animate-count-in text-numeral text-[4.5rem] tnum text-(--theme-accent)"
+                className="animate-count-in text-numeral text-[4.5rem] tnum text-accent"
               >
                 {matchCountdown}
               </span>
@@ -3712,6 +3815,8 @@ export default function App() {
           onUpdateUsername={handleUpdateUsername}
           onRefreshProfile={fetchProfile}
           onViewProfile={openPublicProfile}
+          equippedCosmetic={equippedCosmeticId}
+          onEquipCosmetic={(id) => void handleEquipCosmetic(id)}
           language={currentLanguage}
         />
 

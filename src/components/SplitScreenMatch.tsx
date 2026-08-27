@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameSettings, LanguageCode } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import {
   PADDLE_Y,
   PADDLE_HEIGHT,
@@ -21,7 +21,7 @@ import { RefreshCw, Home } from 'lucide-react';
 // store — this mode is deliberately offline and unranked.
 interface SplitScreenMatchProps {
   settings: GameSettings;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   /**
    * The room-or-menu derived target, per CLAUDE.md §9.7: match code reads
    * activeConfig, never settings. For a split match the two are the same value

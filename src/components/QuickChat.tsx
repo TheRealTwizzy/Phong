@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LanguageCode } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { sound } from '../audio/soundEffects';
 import { MessageSquare, X, Send, Sparkles } from 'lucide-react';
@@ -17,7 +17,7 @@ export interface ChatMessage {
 interface QuickChatProps {
   onSendMessage: (text: string) => void;
   activeMessages: ChatMessage[];
-  theme: ThemeConfig;
+  theme: Cosmetic;
   language: LanguageCode;
   disabled?: boolean;
 }

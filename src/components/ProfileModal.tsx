@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { PlayerProfile, PlayerStatus, LanguageCode } from '../types';
+import { PlayerProfile, PlayerStatus, LanguageCode, CosmeticId } from '../types';
+import { COSMETICS, COSMETIC_IDS, cosmeticVars, isCosmeticUnlocked } from '../game/cosmetics';
+import { sound } from '../audio/soundEffects';
 import { USERNAME_MAX } from '../profileRules';
 import { PLACEMENT_GAMES, xpForLevel } from '../rating';
 import { processAvatarFile, uploadAvatar, deleteAvatar } from '../media/avatar';
@@ -32,8 +34,83 @@ interface Props {
   ) => Promise<{ ok: boolean; error?: string; unlockAt?: string }>;
   onRefreshProfile: () => void;
   onViewProfile?: (id: string) => void;
+  equippedCosmetic: CosmeticId;
+  onEquipCosmetic: (id: CosmeticId) => void;
   language?: LanguageCode;
 }
+
+/**
+ * The cosmetics this player owns, and nothing else.
+ *
+ * A locked cosmetic is not greyed out here, it is ABSENT — no tile, no name, no
+ * swatch, not in the DOM at all. What this replaced listed all twenty with the
+ * fifteen locked ones dimmed, captioned with what they cost, and previewing
+ * their colours in three chips, which gave away the thing the reward is: the
+ * look. A cosmetic you have seen is a cosmetic you have mostly had.
+ *
+ * The consequence is that the UNLOCK MOMENT is the only time a player meets one,
+ * which is why App raises a toast for every route into this list rather than
+ * only for the elite missions that used to have one.
+ *
+ * Each tile previews itself by applying its own `cosmeticVars` and then using
+ * the ordinary token classes inside. The preview is the real thing rather than a
+ * hand-picked trio of swatches, so it cannot drift from what equipping actually
+ * does — and it exercises the same scoping the public-profile card relies on.
+ */
+const CosmeticPicker: React.FC<{
+  profile: PlayerProfile;
+  equipped: CosmeticId;
+  onEquip: (id: CosmeticId) => void;
+  language: LanguageCode;
+}> = ({ profile, equipped, onEquip, language }) => {
+  const owned = COSMETIC_IDS.filter((id) => isCosmeticUnlocked(id, profile));
+  return (
+    <div className="flex flex-col gap-3">
+      <p id="cosmetic-owned-count" className="text-2xs text-ink-dim">
+        {t('cosmetics_owned', language, { n: String(owned.length) })}
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {owned.map((id) => {
+          const cosmetic = COSMETICS[id];
+          const isEquipped = id === equipped;
+          return (
+            <button
+              key={id}
+              id={`cosmetic-btn-${id}`}
+              data-equipped={isEquipped ? 'true' : 'false'}
+              onClick={() => {
+                onEquip(id);
+                sound.playPaddleHit(1.0);
+              }}
+              style={cosmeticVars(cosmetic) as React.CSSProperties}
+              className={`flex flex-col gap-2 rounded-card border p-2.5 text-left transition-colors active:scale-95 motion-reduce:active:scale-100 ${
+                isEquipped ? 'border-accent ring-1 ring-accent/50' : 'border-line'
+              } bg-surface-2`}
+            >
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="h-3 w-3 shrink-0 rounded-full border border-line-strong bg-accent"
+                  aria-hidden
+                />
+                <span className="truncate text-2xs text-ink">{t(cosmetic.nameKey, language)}</span>
+                {isEquipped && <Check className="ml-auto h-3 w-3 shrink-0 text-accent" />}
+              </span>
+              {/* A slice of the actual court, in this cosmetic's own colours. */}
+              <span
+                className="flex h-6 items-end gap-1 rounded-chip px-1.5 pb-1"
+                style={{ backgroundColor: cosmetic.courtColor }}
+              >
+                <span className="h-1 flex-1 rounded-full" style={{ backgroundColor: cosmetic.playerPaddleColor }} />
+                <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: cosmetic.ballColor }} />
+                <span className="h-1 flex-1 rounded-full" style={{ backgroundColor: cosmetic.opponentPaddleColor }} />
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
 
 // Solo before duel before practice: the order a player meets them in.
 const MODE_ORDER = ['solo', 'multiplayer', 'practice'] as const;
@@ -51,6 +128,8 @@ export const ProfileModal: React.FC<Props> = ({
   onUpdateUsername,
   onRefreshProfile,
   onViewProfile,
+  equippedCosmetic,
+  onEquipCosmetic,
   language = 'en',
 }) => {
   const [isEditingName, setIsEditingName] = useState(false);
@@ -133,7 +212,7 @@ export const ProfileModal: React.FC<Props> = ({
   };
   const [tempName, setTempName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<'stats' | 'history'>('stats');
+  const [activeTab, setActiveTab] = useState<'stats' | 'cosmetics' | 'history'>('stats');
 
   useEffect(() => {
     if (profile) {
@@ -376,6 +455,17 @@ export const ProfileModal: React.FC<Props> = ({
               {t('profile_tab_stats', language)}
             </button>
             <button
+              id="profile-tab-cosmetics"
+              onClick={() => setActiveTab('cosmetics')}
+              className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
+                activeTab === 'cosmetics'
+                  ? 'border-cyan-400 text-cyan-400 bg-cyan-500/5'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {t('cosmetics', language)}
+            </button>
+            <button
               id="profile-tab-history"
               onClick={() => setActiveTab('history')}
               className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
@@ -411,7 +501,14 @@ export const ProfileModal: React.FC<Props> = ({
       }
       bodyClassName="p-4 space-y-4"
     >
-            {activeTab === 'stats' ? (
+            {activeTab === 'cosmetics' ? (
+              <CosmeticPicker
+                profile={profile}
+                equipped={equippedCosmetic}
+                onEquip={onEquipCosmetic}
+                language={language}
+              />
+            ) : activeTab === 'stats' ? (
               <div className="space-y-4">
                 {/* Daily Streak Highlight Banner */}
                 <div className="bg-gradient-to-r from-amber-950/40 via-orange-950/30 to-slate-900/60 border border-amber-500/40 rounded-2xl p-4 flex items-center justify-between shadow-lg shadow-amber-500/10">

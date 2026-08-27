@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { LanguageCode, PublicProfile } from '../types';
 import { t } from '../i18n/translations';
+import { COSMETICS, cosmeticVars, normalizeCosmeticId } from '../game/cosmetics';
 import { AvatarImage } from './AvatarImage';
 import { MatchHistoryList } from './MatchHistoryList';
 import { TierBadge } from './TierBadge';
@@ -90,6 +91,8 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
       size="md"
       layer="over"
       accent="accent"
+      cardId="public-profile-card"
+      cardStyle={cosmeticVars(COSMETICS[normalizeCosmeticId(profile?.cosmetic)]) as React.CSSProperties}
       closeId="btn-close-public-profile"
       closeLabel={t('close', language)}
       title={

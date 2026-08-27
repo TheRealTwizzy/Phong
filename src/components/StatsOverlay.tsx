@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { BallState, LanguageCode } from '../types';
 import { t } from '../i18n/translations';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import {
   Activity,
   Gauge,
@@ -23,7 +23,7 @@ interface StatsOverlayProps {
   bestStreak: number;
   oppStreak: number;
   oppBestStreak: number;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   isVisible: boolean;
   onToggleVisible: () => void;
   matchStartTime: number | null;

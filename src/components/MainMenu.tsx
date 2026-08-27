@@ -7,7 +7,7 @@ import {
   PlayerProfile,
   PlayerStatus,
 } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import {
@@ -103,7 +103,7 @@ interface MainMenuProps {
    * the menu keeps the surface.
    */
   quickMatch: QuickMatch;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   settings: GameSettings;
   onUpdateSettings: (newSettings: Partial<GameSettings>) => void;
   profile: PlayerProfile | null;
