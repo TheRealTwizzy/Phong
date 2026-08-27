@@ -146,71 +146,75 @@ function returnRate(difficulty: AIDifficulty, playerMu = 25, n = 240): number {
 
 const LADDER: AIDifficulty[] = ['rookie', 'pro', 'elite', 'cyber', 'chaos'];
 
+/**
+ * The sample every bound below is set from.
+ *
+ * The AI rolls its reads PER RALLY, so a return rate is a sample and every
+ * assertion on one is really an assertion about a distribution. At the
+ * default sample (720 balls) the top rungs range 0.861-0.925 across repeats,
+ * which is wide enough to straddle any bound worth stating — that is how the
+ * ceiling rule below arrived as a CI failure reading `expected 0.9 to be less
+ * than 0.9`. At 2160 balls the same population measures 0.877-0.909.
+ *
+ * So the rates are measured ONCE, at the bigger sample, and shared by every
+ * rule that reads them. That is cheaper than re-sampling per assertion AND
+ * more coherent: the rules are then all talking about the same measurement
+ * rather than about independent draws that can disagree with each other.
+ */
+const BIG = 720;
+const RATE: Record<AIDifficulty, number> = Object.fromEntries(
+  LADDER.map((d) => [d, returnRate(d, 25, BIG)])
+) as Record<AIDifficulty, number>;
+
+/**
+ * The hard ceiling rule, in one place.
+ *
+ * The clamp moved UP with the five-rung ladder (0.66 -> 0.78), a deliberate
+ * reversal of the cut that answered "an adapted Cyber returning 93% makes the
+ * top rung a lottery on its own error". The reversal is kept honest here: the
+ * top of the ladder measures ~0.90 at this sample and may never reach 0.93.
+ * Margin to the observed maximum is ~0.02, roughly three times the spread.
+ */
+const CEILING = 0.93;
+
 describe('OpponentAI is beatable at every difficulty', () => {
   it('never returns every ball, not even at the top of the ladder', () => {
     for (const difficulty of LADDER) {
-      const rate = returnRate(difficulty);
-      // Headroom for a player to actually score. The ceiling moved UP with
-      // the five-rung ladder (0.66 -> 0.78, a deliberate reversal of the 0.9
-      // cut, taken knowingly against the lottery critique it answered) — but
-      // a perfect wall is still not a difficulty setting, and this is the
-      // hard rule that keeps the reversal honest: measured near 89% at the
-      // clamp, bounded below 93%.
-      expect(rate).toBeLessThan(0.93);
+      expect({ difficulty, wall: RATE[difficulty] >= CEILING }).toEqual({ difficulty, wall: false });
     }
   });
 
   it('lets an average player score against the hardest AI', () => {
     // Nothing subtler than this is worth asserting: the shipped bug was that
     // this number was exactly zero.
-    expect(returnRate('chaos')).toBeLessThan(0.93);
+    expect(RATE.chaos).toBeLessThan(CEILING);
+    expect(RATE.chaos).toBeGreaterThan(0.3);
   });
 
   it('orders the ladder: harder difficulties return more balls', () => {
-    // A bigger sample than the other cases use, because this is the one
-    // assertion made on a DIFFERENCE. The AI rolls its reads per rally, so a
-    // measured return rate is a sample, and subtracting two of them adds both
-    // their noise. Measured over 400 repeats: at the default sample size the
-    // spread runs min 0.1875 / mean 0.2545, and lands at or below 0.2 about
-    // three times in four hundred — which is exactly how this arrived, as a
-    // CI failure reading `expected 0.19999999999999996 to be greater than
-    // 0.2` on a docs-only change. Tripling the sample leaves the mean where it
-    // was (0.2537 — same population, less noise) and moves the minimum to
-    // 0.2167.
-    const rates = LADDER.map((d) => returnRate(d, 25, 720));
+    const rates = LADDER.map((d) => RATE[d]);
     // Rookie through Cyber are ordered by raw strength. CHAOS is the one rung
     // NOT asserted into that chain at the same tolerance: at the competence
     // clamp its volatility can only swing downward, so it measures within
-    // noise of Cyber in balls returned (~89% both, difference well inside the
-    // sampling error) — its extra difficulty is aggression, serve pace and
-    // the anchor the ladder rates it at, none of which this metric sees. A
-    // 0.03 tolerance on that pair flaked at roughly 1 run in 40; the looser
-    // bound below still catches a Chaos that has actually collapsed.
+    // noise of Cyber in balls returned (0.877-0.909 against 0.880-0.906 over
+    // 25 repeats) — its extra difficulty is aggression, serve pace and the
+    // anchor the ladder rates it at, none of which this metric sees.
     for (let i = 1; i < rates.length - 1; i++) {
       expect(rates[i]).toBeGreaterThan(rates[i - 1] - 0.03);
     }
     expect(rates[rates.length - 1]).toBeGreaterThan(rates[rates.length - 2] - 0.05);
-    // And the ladder must actually span a range, not three flavours of the
-    // same. The threshold sits well below that minimum rather than beside the
-    // mean: what is being asserted is that the rungs are genuinely far apart,
-    // and a ladder that had actually collapsed would score near zero here, so
-    // the margin costs the test nothing it was buying.
-    //
-    // Lowered from 0.15 when the floor came up. Raising Rookie and Pro while
-    // the ceiling stays where it is NARROWS this by construction — that is
-    // what "raise the floor, not the ceiling" means arithmetically — and the
-    // spread now measures around 0.156, straddling the old bound. Return rate
-    // also saturates near the top, so the compression is worse in this
-    // measure than in the one players feel: Pro and Cyber are four points
-    // apart in balls returned and thirteen apart in matches won.
+    // And the ladder must actually span a range, not five flavours of the
+    // same. Measured spread rookie->chaos is ~0.19; the bound sits well below
+    // that rather than beside it, because what is asserted is that the rungs
+    // are genuinely far apart and a collapsed ladder would score near zero.
     expect(rates[rates.length - 1] - rates[0]).toBeGreaterThan(0.11);
   });
 
   it('keeps Rookie a warm-up: an average player scores freely', () => {
-    // Rookie measures ~0.719 over 2160 balls (SE ~0.010) on the five-rung
-    // curve; both bounds sit ~4 sigma off the mean — see the note on
-    // measuring a distribution before picking a bound in TESTING.md §5.
-    expect(returnRate('rookie')).toBeLessThan(0.76);
+    // Rookie measures 0.711-0.744 over 2160 balls across 25 repeats. Both
+    // bounds sit well outside that range rather than beside the mean — see
+    // the note on measuring a distribution before picking one in TESTING.md.
+    expect(RATE.rookie).toBeLessThan(0.78);
   });
 
   it('will not let Rookie sink back into an empty half-court', () => {
@@ -218,23 +222,26 @@ describe('OpponentAI is beatable at every difficulty', () => {
     // used to return under 60% of balls: an average player took roughly seven
     // matches in eight off it, which is not a warm-up, it is an opponent who
     // is not there. Nothing here may drift back below that.
-    expect(returnRate('rookie')).toBeGreaterThan(0.66);
+    expect(RATE.rookie).toBeGreaterThan(0.66);
   });
 
   it('makes Pro a real step up from Rookie', () => {
-    // Pro measures ~0.793 over 2160 balls (SE ~0.009); the bound sits ~4
-    // sigma below the mean.
-    expect(returnRate('pro')).toBeGreaterThan(0.755);
+    // Pro measures 0.783-0.811 over 2160 balls across 25 repeats.
+    expect(RATE.pro).toBeGreaterThan(0.755);
   });
 
   it('gets harder as the player gets better, without ever becoming a wall', () => {
     for (const difficulty of LADDER) {
+      // The DIFFERENCE here is large by construction — the adaptation band is
+      // 20 mu wide downward — so the default sample carries it. The ceiling
+      // check beside it is the tight one, so it gets the big sample.
       const vsWeak = returnRate(difficulty, 15);
-      const vsStrong = returnRate(difficulty, 40);
+      const vsStrong = returnRate(difficulty, 40, BIG);
       expect(vsStrong).toBeGreaterThan(vsWeak);
       // The ceiling holds no matter how good the player gets: an adapted top
-      // rung plays the competence clamp (~89% measured), never past it.
-      expect(vsStrong).toBeLessThan(0.93);
+      // rung plays the competence clamp and never past it. Measured
+      // 0.879-0.909 for an adapted Chaos against a mu-40 player.
+      expect({ difficulty, wall: vsStrong >= CEILING }).toEqual({ difficulty, wall: false });
     }
   });
 });

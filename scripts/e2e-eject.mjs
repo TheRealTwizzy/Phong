@@ -91,7 +91,8 @@ const guest = await newPlayer('EjG');
 // while the host still believed they were hosting.
 const loner = await newPlayer('EjL');
 
-await host.click('#menu-mode-multiplayer');
+await host.click('#building-pvp');
+await host.click('#room-casual');
 await host.waitForSelector('#btn-create-room', { timeout: 5000 });
 await host.click('#toggle-p2p input, #toggle-p2p'); // relay only: P2P would outlive it
 await host.click('#btn-create-room');
@@ -122,7 +123,8 @@ for (const p of [host, guest]) {
 }
 ok('duel is live on both phones');
 
-await loner.click('#menu-mode-multiplayer');
+await loner.click('#building-pvp');
+await loner.click('#room-casual');
 await loner.waitForSelector('#btn-create-room', { timeout: 5000 });
 await loner.click('#btn-create-room');
 await loner.waitForSelector('#btn-leave-room', { timeout: 8000 });

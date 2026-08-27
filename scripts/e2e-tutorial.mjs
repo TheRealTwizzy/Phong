@@ -247,9 +247,9 @@ for (let i = 0; i < 40; i++) {
 
 // Probe 1: a surface the tour did not open must not survive the stage change.
 // The stages after this open Tasks, the Leaderboard and Profile, any of which
-// would otherwise mount underneath it. Two surfaces, because the rule is
-// "every one the tour can reach", not "the ones we happened to think of" —
-// the tab bar's Achievements, and the Duel lobby from the modes row.
+// would otherwise mount underneath it. Achievements is the one that can still
+// be reached in a single tap from the tab bar, so it is the one that carries
+// this rule.
 if (!(await poke('#menu-nav-achievements'))) fail('no Achievements tab to meddle with');
 await sleep(300);
 if (!(await look()).achievements) fail('could not open Achievements under the tour scrim');
@@ -258,12 +258,21 @@ if ((await look()).achievements) {
   fail('a modal the player opened survived the stage change and covers the next step’s anchor');
 }
 
-if (!(await poke('#menu-mode-multiplayer'))) fail('no Duel row to meddle with');
+// The Duel lobby used to belong to the probe above: one tap on the Duel mode
+// row opened it, so it could be opened under the scrim and had to be swept.
+// The menu is a building -> room walk now, and the tour pins that navigation
+// the same way it pins the pre-match sheet — so a poked building sets the
+// menu's own `nav` and `openNav` ignores it, no room list renders, and there
+// is no room row to tap. The lobby is therefore not reachable from the menu
+// at all while the tour runs, which is a stronger property than sweeping it
+// afterwards: assert the stronger one rather than dropping the case.
+if (!(await poke('#building-pvp'))) fail('no Duel building to meddle with');
 await sleep(300);
-if (!(await look()).lobby) fail('could not open the Duel lobby under the tour scrim');
-await nextStep();
 if ((await look()).lobby) {
-  fail('the Duel lobby the player opened survived the stage change and covers the next step’s anchor');
+  fail('a building tapped under the scrim opened the Duel lobby the tour had not asked for');
+}
+if (await meddler.$('#room-casual')) {
+  fail('a building tapped under the scrim navigated the menu out from under the tour');
 }
 
 // Achievements and the Duel lobby are App-level state, closed by the same
@@ -287,7 +296,7 @@ if ((await look()).quickmatch) {
 // none appears later either. A nullish fallback instead of that rule showed it
 // immediately, and kept showing it once the tour's own pre-match step had
 // passed, over the tab bar and every modal stage after it.
-if (!(await poke('#menu-mode-solo'))) fail('no Solo row to meddle with');
+if (!(await poke('#building-solo'))) fail('no Solo row to meddle with');
 await sleep(300);
 if ((await look()).sheet) {
   fail('a mode row tapped under the scrim opened a sheet the tour had not asked for');
@@ -339,12 +348,12 @@ let lockTourEnded = false;
 for (let i = 0; i < 60; i++) {
   const here = await locker.evaluate(() => ({
     open: !!document.querySelector('#onboarding-tour-card'),
-    lock: !!document.querySelector('#menu-diff-pro-lock'),
+    lock: !!document.querySelector('#room-ai_pro-lock'),
   }));
   if (!here.open) { lockTourEnded = true; break; }
   if (here.lock && !lockPoked) {
     lockPoked = true;
-    await locker.evaluate(() => document.querySelector('#menu-diff-pro-lock')?.click());
+    await locker.evaluate(() => document.querySelector('#room-ai_pro-lock')?.click());
     await sleep(300);
     if (await locker.$('#unlock-hint-sheet')) {
       fail('a locked difficulty opened its unlock hint under the tour scrim, covering a later step’s anchor');
@@ -437,7 +446,8 @@ await racer.waitForSelector('#main-menu-screen', { timeout: 8000 });
 
 // Ask for a room and shut the lobby in the same tick, so the answer cannot
 // have arrived: this is the window itself, not a race against it.
-await racer.click('#menu-mode-multiplayer');
+await racer.click('#building-pvp');
+await racer.click('#room-casual');
 await racer.waitForSelector('#btn-create-room', { timeout: 8000 });
 await racer.evaluate(() => {
   document.querySelector('#btn-create-room').click();
@@ -513,7 +523,8 @@ await skipper.click('#btn-tour-skip');
 await skipper.click('#btn-tour-skip-confirm');
 await skipper.waitForSelector('#main-menu-screen', { timeout: 8000 });
 
-await skipper.click('#menu-mode-solo');
+await skipper.click('#building-solo');
+await skipper.click('#room-rookie');
 await skipper.waitForSelector('#menu-start-solo', { timeout: 8000 });
 await skipper.click('#menu-start-solo');
 await skipper.waitForSelector('#half-court-container', { timeout: 8000 });
@@ -545,9 +556,22 @@ await skipper.waitForSelector('#onboarding-tour-card', { timeout: 8000 });
 const roomsBefore = await skipper.evaluate(() =>
   fetch('/api/health').then((r) => r.json()).then((h) => h.activeRooms)
 );
-await skipper.click('#menu-mode-multiplayer');
+// Dispatched rather than clicked, for the same reason as the Solo probe
+// below: the tour card sits over part of the menu, and what is being asked is
+// "what if the player DOES reach it". The tour pins the building -> room
+// navigation, so the PvP room list never renders and there is no room row to
+// tap — but the lobby is reached through #btn-create-room, so the guard is
+// asserted at the room count regardless of how the player got there.
+await skipper.evaluate(() => {
+  document.querySelector('#building-pvp')?.click();
+});
+await sleep(300);
+await skipper.evaluate(() => {
+  document.querySelector('#room-casual')?.click();
+});
+await sleep(300);
 const createBtn = await skipper
-  .waitForSelector('#btn-create-room', { timeout: 4000 })
+  .waitForSelector('#btn-create-room', { timeout: 2000 })
   .catch(() => null);
 if (createBtn) {
   await createBtn.click();
@@ -575,7 +599,7 @@ await sleep(300);
 // question the guard is actually for ("what if the player does reach it")
 // without depending on that.
 await skipper.evaluate(() => {
-  document.querySelector('#menu-mode-solo')?.click();
+  document.querySelector('#building-solo')?.click();
 });
 await sleep(600);
 await skipper.evaluate(() => {

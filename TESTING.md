@@ -48,12 +48,13 @@ coverage number.
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
+| `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` | The one-shot migrations |
 
 ### Browser layer
 
-`profiles` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
+`profiles` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
 `lobby` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
@@ -258,6 +259,30 @@ cannot be relied on to produce one (a first-to-5 against Rookie goes 5-0 often e
 the suite for a reason that is not the rule), and the fix was to move the rule somewhere it
 could be stated — `src/game/streaks.ts` — rather than to loosen the assertion until it
 passed. `scripts/e2e-streak.mjs` keeps only what a browser can say without luck.
+
+**A test bound on a SAMPLED value is set from the sample, not from the rule.** The AI rolls
+its reads per rally, so every return rate is a draw. `tests/spin.test.ts` carried a `< 0.9`
+bound chosen when the competence clamp was 0.66; raising it to 0.78 moved the population up
+against that bound, and the suite passed locally and failed on CI reading `expected 0.9 to be
+less than 0.9`. Two things came out of that. `tests/physics.test.ts` now measures each rung
+ONCE at the larger sample and shares the result across every rule that reads it — cheaper than
+re-sampling per assertion, and more coherent, since the rules then talk about one measurement
+rather than independent draws that can disagree. And the two suites deliberately carry
+DIFFERENT bounds: `spin` drives an easier geometry (one shallow entry angle, where `physics`
+samples a fast bucket and a sharply angled one), so the same AI returns more balls there —
+0.873-0.968 against 0.880-0.906 at the same mu. The binding ceiling rule lives beside the
+harder sample; the easier one only catches a literal wall. Copying a bound between them would
+be reading one distribution's number off another's.
+
+**A bracket the menu draws is a bracket the server enforces.** The menu is the client, so
+`roomEntryVerdict` in `src/venues.ts` is written once and asked by both — the same reasoning
+that put `DIFFICULTY_LOCKED` behind `/api/match/record` rather than trusting the picker.
+`tests/venues.test.ts` pins the shape of that predicate, including the two cases a bracket
+gets wrong on its own: a ceiling as well as a floor (a Legend must not drop into the
+new-player room), and an UNPLACED player — who is below every floor and must not *also* be
+refused by a ceiling, or they would have nowhere to play. It also asserts the property that
+matters more than any individual bound: over every tier and a spread of levels, **some** PvP
+room is always open. A ladder with a hole in it is unrecoverable.
 
 **Solo must never be the cheap way up.** Two rules hold it, and both are pinned rather than
 remembered. The per-rung `SOLO_MU_CAPS` are DATA, each sitting under a tier floor, because the

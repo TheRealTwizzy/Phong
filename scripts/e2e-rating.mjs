@@ -103,13 +103,17 @@ const openLadder = (page) =>
 
 // ---- 1. Per-difficulty predictions on the menu ---------------------------
 const alice = await newPlayer('Rate');
-await alice.click('#menu-mode-solo');
-await alice.waitForSelector('#menu-diff-rookie-odds', { timeout: 5000 });
+await alice.click('#building-solo');
+await alice.waitForSelector('#room-rookie-odds', { timeout: 5000 });
 
 const odds = {};
+// A rung and the ROOM that plays it are named separately: two solo rooms
+// would otherwise collide with the PvP brackets ('pro' and 'elite' are both
+// a rung and a bracket), so the solo ones carry an `ai_` prefix.
 const RUNGS = ['rookie', 'pro', 'elite', 'cyber', 'chaos'];
+const ROOM_OF = { rookie: 'rookie', pro: 'ai_pro', elite: 'ai_elite', cyber: 'cyber', chaos: 'chaos' };
 for (const d of RUNGS) {
-  const txt = await alice.textContent(`#menu-diff-${d}-odds`);
+  const txt = await alice.textContent(`#room-${ROOM_OF[d]}-odds`);
   odds[d] = parseInt(txt, 10);
 }
 for (let i = 1; i < RUNGS.length; i++) {
@@ -121,14 +125,14 @@ if (!(odds.rookie > odds.chaos)) fail(`the ladder spans no range: ${JSON.stringi
 if (Math.abs(odds.pro - 50) > 8) fail(`Pro should be ~50/50 for a new player, got ${odds.pro}%`);
 ok(`win chance shown per difficulty and correctly ordered: ${JSON.stringify(odds)}`);
 
-if (!(await alice.$('#menu-diff-balanced'))) fail('no BALANCED badge on any difficulty');
+if (!(await alice.$('#room-balanced'))) fail('no BALANCED badge on any difficulty');
 ok('BALANCED badge marks the closest-to-even difficulty');
 
 // Chaos is a revived, TOP rung now — present on the menu and locked for a
 // fresh player, alongside Elite.
-if (!(await alice.$('#menu-diff-chaos'))) fail('the Chaos rung is missing from the menu');
-if (!(await alice.$('#menu-diff-elite-lock'))) fail('Elite is not locked for a fresh player');
-if (!(await alice.$('#menu-diff-chaos-lock'))) fail('Chaos is not locked for a fresh player');
+if (!(await alice.$('#room-chaos'))) fail('the Chaos rung is missing from the menu');
+if (!(await alice.$('#room-ai_elite-lock'))) fail('Elite is not locked for a fresh player');
+if (!(await alice.$('#room-chaos-lock'))) fail('Chaos is not locked for a fresh player');
 ok('five rungs on the menu; Elite and Chaos locked for a fresh player');
 
 // ---- 1b. The ladder slides with the player's hidden rating ---------------
@@ -137,11 +141,11 @@ ok('five rungs on the menu; Elite and Chaos locked for a fresh player');
 const oddsAfterSoloRun = async (page) => {
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-  await page.click('#menu-mode-solo');
-  await page.waitForSelector('#menu-diff-cyber-odds', { timeout: 5000 });
+  await page.click('#building-solo');
+  await page.waitForSelector('#room-cyber-odds', { timeout: 5000 });
   const out = {};
   for (const d of ['rookie', 'pro', 'elite', 'cyber']) {
-    out[d] = parseInt(await page.textContent(`#menu-diff-${d}-odds`), 10);
+    out[d] = parseInt(await page.textContent(`#room-${ROOM_OF[d]}-odds`), 10);
   }
   return out;
 };

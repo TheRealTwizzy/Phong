@@ -11,16 +11,25 @@ import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import {
-  AI_DIFFICULTIES,
   aiRating,
   winProbability,
   recommendedDifficulty,
   xpForLevel,
+  TIER_LABEL_KEY,
 } from '../rating';
 import { normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { useQuickMatch } from '../net/useQuickMatch';
+import {
+  BUILDINGS,
+  BuildingId,
+  DEFAULT_BUILDING,
+  EntryVerdict,
+  RoomDef,
+  roomEntryVerdict,
+  roomsOf,
+} from '../venues';
 import {
   Button,
   Panel,
@@ -46,6 +55,7 @@ import {
   Shield,
   Flame,
   ChevronRight,
+  Lock,
 } from 'lucide-react';
 
 // Out-of-match hub. Reads top-down as WHO YOU ARE → WHAT YOU PLAY → WHAT'S
@@ -105,6 +115,23 @@ interface MainMenuProps {
   /** Whether the tour is running at all — see openPrematch. */
   tourActive?: boolean;
 }
+
+/**
+ * Where the tour parks the navigation while it runs. Its menu steps want the
+ * buildings list; its prematch step wants the Solo building's ROOKIE room, so
+ * the sheet it is describing has a room behind it.
+ */
+const TOUR_NAV: { building: BuildingId; room: string | null } = {
+  building: 'solo',
+  room: 'rookie',
+};
+
+/** Buildings name their icon; the component owns the drawing. */
+const BUILDING_ICONS: Record<BuildingId, React.ReactNode> = {
+  pvp: <Smartphone className="h-5 w-5" />,
+  solo: <Bot className="h-5 w-5" />,
+  training: <Dumbbell className="h-5 w-5" />,
+};
 
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <span className="text-kicker shrink-0 px-0.5 text-ink-dim uppercase">{children}</span>
@@ -178,10 +205,25 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     setPrematchMode(null);
     setGateHint(null);
     setQueueInfoOpen(false);
+    setNav({ building: DEFAULT_BUILDING, room: null });
   }, [tourActive]);
+  // Where in the building -> room walk this player is. MainMenu's own state,
+  // like prematchMode: App owns a duel's lobby because a lobby owns a ROOM on
+  // the relay, but navigating to one is just navigating.
+  const [nav, setNav] = useState<{ building: BuildingId; room: string | null }>({
+    building: DEFAULT_BUILDING,
+    room: null,
+  });
+  // The fourth thing the tour has to be able to override. The scrim is
+  // pointer-events-none, so a player can walk into a building mid-tour and
+  // leave a later menu step pointing at a list that is no longer on screen.
+  // The tour's own destination is the only one while it runs: its menu steps
+  // want the buildings list, and its prematch step wants the Solo building's
+  // ROOKIE room open behind the sheet.
+  const openNav = tourActive ? TOUR_NAV : nav;
   const quickMatch = useQuickMatch();
 
-  const modes: {
+  const MODE_META: {
     id: GameMode;
     icon: React.ReactNode;
     labelKey: string;
@@ -196,13 +238,39 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     { id: 'split', icon: <Users className="h-5 w-5" />, labelKey: 'mode_split', descKey: 'menu_split_desc', kicker: 'LOCAL' },
   ];
 
-  const handleModeTap = (id: GameMode) => {
-    if (id === 'multiplayer') {
-      // The lobby IS this mode's pre-match sheet — same surface, plus a room.
+  /**
+   * A room is where a match begins.
+   *
+   * A SOLO room IS a difficulty, so entering one sets it — the pre-match sheet
+   * no longer asks, because the room already answered. A TRAINING room names
+   * its mode. A PVP room opens the lobby, which is that mode's pre-match
+   * surface plus a relay room.
+   */
+  const handleRoomTap = (room: RoomDef) => {
+    setNav((n) => ({ ...n, room: room.id }));
+    if (room.building === 'pvp') {
       onOpenMultiplayer();
       return;
     }
-    setPrematchMode(id);
+    if (room.difficulty) {
+      onUpdateSettings({ difficulty: room.difficulty });
+      setPrematchMode('solo');
+      return;
+    }
+    if (room.mode) setPrematchMode(room.mode);
+  };
+
+  /** Why a bracketed room is shut, in words the player can act on. */
+  const lockReason = (verdict: EntryVerdict): string => {
+    if (verdict.ok) return '';
+    if (verdict.reason === 'level') return t('room_locked_level', lang, { level: verdict.needLevel });
+    if (verdict.reason === 'tier_low') {
+      return t('room_locked_tier_low', lang, { tier: t(TIER_LABEL_KEY[verdict.needTier], lang) });
+    }
+    if (verdict.reason === 'tier_high') {
+      return t('room_locked_tier_high', lang, { tier: t(TIER_LABEL_KEY[verdict.maxTier], lang) });
+    }
+    return '';
   };
 
   // The sheet closes on the way to the court, exactly as `game_start` closes
@@ -215,12 +283,18 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     else if (id === 'split') onStartSplit();
   };
 
-  const prematch = modes.find((m) => m.id === openPrematch) ?? null;
+  const prematch = MODE_META.find((m) => m.id === openPrematch) ?? null;
 
   // Hidden MMR drives every prediction on this screen (solo play moves it,
   // even though it can never move the visible tier).
   const myRating = { mu: profile?.mmrMu ?? 25, sigma: profile?.mmrSigma ?? 25 / 3 };
   const bestDifficulty = recommendedDifficulty(myRating);
+  // The odds against the rung the room picked — the same number that scales
+  // this match's XP, shown where the player confirms the match rather than
+  // where they chose the room.
+  const soloChance = Math.round(
+    winProbability(myRating, aiRating(settings.difficulty, myRating.mu)) * 100
+  );
   // The achievement tree gates the ladder: a difficulty or a match length is
   // something you earn your way into, so the menu shows what is still shut and
   // what opens it rather than silently offering everything.
@@ -380,43 +454,114 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           </span>
         </button>
 
-        {/* Four rows, one affordance. A chevron pointing INTO a surface is the
-            promise every mode now keeps: the duel opens its lobby, the other
-            three open the pre-match sheet below. Nothing expands in place. */}
-        {modes.map((m) => {
-          const isPrimary = m.id === 'multiplayer';
-          return (
-            <button
-              key={m.id}
-              id={`menu-mode-${m.id}`}
-              onClick={() => handleModeTap(m.id)}
-              className={`flex shrink-0 items-center gap-3 rounded-card border p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
-                isPrimary ? 'border-accent/40 bg-surface-2' : 'border-line bg-surface-2/70'
-              }`}
-            >
-              <div
-                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl border ${
-                  isPrimary
-                    ? 'border-accent/50 bg-accent/15 text-accent'
-                    : 'border-line-strong bg-surface-3 text-ink-muted'
+        {/* A PLACE, not a filter — and the buildings are a TAB STRIP rather
+            than a drill-down, the same shape (and the same markup) as the
+            Match History and Leaderboard filters. A strip means switching
+            buildings is one tap instead of back-then-tap, and it means the
+            menu has no navigation state that a surface opened over it can
+            strand: there is nowhere to be that is not "in a building".
+            Selection is exposed as `data-selected`, never as a class. */}
+        <div
+          id="menu-buildings"
+          role="tablist"
+          aria-label={t('menu_section_play', lang)}
+          className="grid shrink-0 grid-cols-3 gap-1 rounded-card border border-line bg-surface-1 p-1"
+        >
+          {BUILDINGS.map((b) => {
+            const current = openNav.building === b.id;
+            return (
+              <button
+                key={b.id}
+                id={`building-${b.id}`}
+                role="tab"
+                aria-selected={current}
+                data-selected={current ? 'true' : 'false'}
+                onClick={() => setNav({ building: b.id, room: null })}
+                className={`flex items-center justify-center gap-1.5 rounded-ctl px-2 py-2 text-2xs transition-colors ${
+                  current ? 'bg-accent text-ink-on-accent' : 'text-ink-muted'
                 }`}
               >
-                {m.icon}
-              </div>
+                {BUILDING_ICONS[b.id]}
+                <span className="truncate">{t(b.labelKey, lang)}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* The rooms of the selected building. A room is where the match
+            actually begins: Solo and Training rooms open the pre-match sheet
+            directly (no host to wait for, no opponent to seat), a PvP room
+            opens its lobby. Nothing expands in place, and every child of this
+            scroll region is `shrink-0` — see the note above it for what
+            happens when one is not. */}
+        {roomsOf(openNav.building).map((room) => {
+          // Two different gates, deliberately kept apart. A SOLO room is a
+          // rung of the AI ladder, walked through the achievement chain; a
+          // PVP room is a skill bracket, judged from level and tier. A room
+          // answers to one or the other, never both.
+          const ladderLock =
+            room.difficulty && !opened('difficulty', room.difficulty)
+              ? unlockedBy('difficulty', room.difficulty) ?? null
+              : null;
+          const verdict = roomEntryVerdict(room, profile);
+          const locked = !!ladderLock || !verdict.ok;
+          const chance = room.difficulty
+            ? Math.round(winProbability(myRating, aiRating(room.difficulty, myRating.mu)) * 100)
+            : null;
+          return (
+            <button
+              key={room.id}
+              id={`room-${room.id}`}
+              data-locked={locked ? 'true' : 'false'}
+              disabled={locked}
+              onClick={() => {
+                if (locked) return;
+                handleRoomTap(room);
+              }}
+              className={`flex shrink-0 items-center gap-3 rounded-card border p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
+                locked ? 'border-line bg-surface-2/40 opacity-60' : 'border-line bg-surface-2/70'
+              }`}
+            >
               <div className="flex min-w-0 flex-1 flex-col">
                 <span className="flex items-center gap-1.5">
-                  <span className="truncate text-2xs text-ink">{t(m.labelKey, lang)}</span>
-                  <span className="shrink-0 text-2xs font-normal tracking-normal text-ink-dim">
-                    {m.kicker}
-                  </span>
+                  <span className="truncate text-2xs text-ink">{t(room.labelKey, lang)}</span>
+                  {/* Shown even on a LOCKED rung, deliberately: "this is the
+                      fair fight" is most worth saying about a rung the player
+                      has not reached yet, and it reads beside the unlock line
+                      rather than competing with it. */}
+                  {room.difficulty === bestDifficulty && (
+                    <span
+                      id="room-balanced"
+                      className="shrink-0 rounded-chip border border-accent/40 bg-accent/15 px-1.5 py-0.5 text-2xs text-accent uppercase"
+                    >
+                      {t('balanced', lang)}
+                    </span>
+                  )}
                 </span>
                 <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
-                  {t(m.descKey, lang)}
+                  {t(room.descKey, lang)}
                 </span>
+                {locked && (
+                  <span
+                    id={`room-${room.id}-lock`}
+                    className="mt-0.5 flex items-center gap-1 text-2xs font-normal tracking-normal text-warn"
+                  >
+                    <Lock className="h-3 w-3 shrink-0" />
+                    {ladderLock ? ladderLock.title : lockReason(verdict)}
+                  </span>
+                )}
               </div>
-              <ChevronRight
-                className={`h-4 w-4 shrink-0 ${isPrimary ? 'text-accent' : 'text-ink-dim'}`}
-              />
+              {chance !== null && (
+                <span
+                  id={`room-${room.id}-odds`}
+                  className={`shrink-0 text-2xs tnum font-normal tracking-normal ${
+                    chance >= 60 ? 'text-win' : chance >= 40 ? 'text-warn' : 'text-loss'
+                  }`}
+                >
+                  {chance}%
+                </span>
+              )}
+              {!locked && <ChevronRight className="h-4 w-4 shrink-0 text-ink-dim" />}
             </button>
           );
         })}
@@ -540,43 +685,30 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 </span>
               </div>
 
+              {/* The room already chose the rung, so this states it rather
+                  than asking again — one answer, given once, in the place the
+                  player gave it. The picker that used to live here is now the
+                  Solo building's room list. */}
               {prematch.id === 'solo' && (
-                <div className="flex flex-col gap-1.5">
-                  <label className="flex items-center gap-1 text-2xs font-normal tracking-normal text-ink-muted">
-                    <Shield className="h-3 w-3" />
+                <div
+                  id="prematch-difficulty"
+                  className="flex items-center gap-2 rounded-card border border-line bg-surface-1 p-2.5"
+                >
+                  <Shield className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                  <span className="text-2xs font-normal tracking-normal text-ink-muted">
                     {t('ai_difficulty', lang)}
-                    <span className="ml-auto text-2xs text-ink-dim">{t('win_chance', lang)}</span>
-                  </label>
-                  <SegmentedControl
-                    columns={3}
-                    ariaLabel={t('ai_difficulty', lang)}
-                    value={settings.difficulty}
-                    onChange={(diff) => onUpdateSettings({ difficulty: diff })}
-                    onLockTap={setGateHint}
-                    options={AI_DIFFICULTIES.map((diff) => {
-                      // Pre-match prediction from hidden MMR vs this AI
-                      // anchor — the same number that scales match XP.
-                      const chance = Math.round(
-                        winProbability(myRating, aiRating(diff, myRating.mu)) * 100
-                      );
-                      return {
-                        value: diff,
-                        id: `menu-diff-${diff}`,
-                        label: <span className="capitalize">{diff}</span>,
-                        sublabel: `${chance}%`,
-                        sublabelId: `menu-diff-${diff}-odds`,
-                        sublabelTone: chance >= 60 ? 'win' : chance >= 40 ? 'warn' : 'loss',
-                        badge:
-                          diff === bestDifficulty
-                            ? { id: 'menu-diff-balanced', text: t('balanced', lang) }
-                            : undefined,
-                        lock: opened('difficulty', diff)
-                          ? null
-                          : unlockedBy('difficulty', diff) ?? null,
-                        lockId: `menu-diff-${diff}-lock`,
-                      };
-                    })}
-                  />
+                  </span>
+                  <span id="prematch-difficulty-name" className="ml-auto text-2xs text-ink capitalize">
+                    {settings.difficulty}
+                  </span>
+                  <span
+                    id="prematch-difficulty-odds"
+                    className={`shrink-0 text-2xs tnum font-normal tracking-normal ${
+                      soloChance >= 60 ? 'text-win' : soloChance >= 40 ? 'text-warn' : 'text-loss'
+                    }`}
+                  >
+                    {soloChance}%
+                  </span>
                 </div>
               )}
 

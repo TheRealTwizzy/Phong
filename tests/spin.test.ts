@@ -351,11 +351,23 @@ describe('spin reading as a difficulty lever', () => {
       return returned / n;
     };
 
-    for (const playAt of [18, 25, 29]) {
+    // The five anchors of the ladder as it now stands, not the three it had:
+    // driving only up to mu 29 would leave the top two rungs unguarded by the
+    // very rule this test states.
+    //
+    // NOTE the bounds are wider than the ladder simulation's in
+    // physics.test.ts, and deliberately so: this geometry is easier. Every
+    // ball here enters at vy 0.95 on a shallow angle, where that one samples
+    // a fast bucket and a sharply angled one as well, so the same AI returns
+    // more of them (mu 36 measures 0.873-0.968 here against 0.880-0.906
+    // there, over 40 repeats). The binding ceiling rule lives beside the
+    // harder sample; what THIS bound catches is a literal wall — a spin read
+    // that made some difficulty return everything, or nothing.
+    for (const playAt of [20, 24, 30, 33, 36]) {
       for (const spin of [-SPIN_MAX, 0, SPIN_MAX]) {
         const r = rate(playAt, spin);
-        expect(r).toBeGreaterThan(0.3);
-        expect(r).toBeLessThan(0.9);
+        expect({ playAt, spin, pushover: r <= 0.3 }).toEqual({ playAt, spin, pushover: false });
+        expect({ playAt, spin, wall: r >= 0.98 }).toEqual({ playAt, spin, wall: false });
       }
     }
   });

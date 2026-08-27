@@ -79,7 +79,8 @@ await skipTour(page);
 await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
 
 // Every mode opens the same pre-match sheet; Start is pinned in its footer.
-await page.click('#menu-mode-split');
+await page.click('#building-training');
+await page.click('#room-split');
 await page.waitForSelector('#menu-start-split', { timeout: 8000 });
 await page.click('#menu-start-split');
 await page.waitForSelector('#split-screen-match', { timeout: 8000 });

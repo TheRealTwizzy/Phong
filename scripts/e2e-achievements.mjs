@@ -35,8 +35,8 @@ await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
 await skipTour(page);
 await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
 
-await page.click('#menu-mode-solo');
-await page.waitForSelector('#menu-diff-rookie', { timeout: 5000 });
+await page.click('#building-solo');
+await page.waitForSelector('#room-rookie', { timeout: 5000 });
 // The onboarding tour opens by itself for a player who has never seen it —
 // it is part of onboarding now, not a menu row. Every suite past this point
 // wants the menu, so it is waved away here. Tolerant: a suite that reaches
@@ -55,17 +55,24 @@ async function skipTour(page) {
 }
 
 const dis = async (sel) => page.$eval(sel, (el) => el.disabled);
-if (await dis('#menu-diff-rookie')) fail('Rookie should be open from the start');
-if (!(await dis('#menu-diff-pro'))) fail('Pro should be locked for a new player');
-if (!(await dis('#menu-diff-elite'))) fail('Elite should be locked for a new player');
-if (!(await dis('#menu-diff-cyber'))) fail('Cyber should be locked for a new player');
-if (!(await dis('#menu-diff-chaos'))) fail('Chaos should be locked for a new player');
+if (await dis('#room-rookie')) fail('Rookie should be open from the start');
+if (!(await dis('#room-ai_pro'))) fail('Pro should be locked for a new player');
+if (!(await dis('#room-ai_elite'))) fail('Elite should be locked for a new player');
+if (!(await dis('#room-cyber'))) fail('Cyber should be locked for a new player');
+if (!(await dis('#room-chaos'))) fail('Chaos should be locked for a new player');
 ok('new player: Rookie open, Pro and Cyber locked');
-if (!(await page.$('#menu-diff-pro-lock'))) fail('no lock marker on Pro');
+if (!(await page.$('#room-ai_pro-lock'))) fail('no lock marker on Pro');
 ok('locked difficulties show a lock');
+
+// The match-length picker lives in the pre-match sheet, which a ROOM opens —
+// the rungs above are the room list itself, one level up from it.
+await page.click('#room-rookie');
+await page.waitForSelector('#menu-pts-3', { timeout: 5000 });
 if (await dis('#menu-pts-3') || await dis('#menu-pts-5')) fail('short matches should be open');
 if (!(await dis('#menu-pts-10')) || !(await dis('#menu-pts-15'))) fail('long matches should be locked');
 ok('short matches open, long matches locked');
+await page.click('#btn-prematch-back');
+await page.waitForSelector('#prematch-modal', { state: 'detached', timeout: 5000 });
 
 // The server enforces it too, not just the menu.
 const blocked = await page.evaluate(async () => {
@@ -83,10 +90,10 @@ await page.evaluate(async () => {
 });
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-await page.click('#menu-mode-solo');
-await page.waitForSelector('#menu-diff-pro', { timeout: 5000 });
-if (await dis('#menu-diff-pro')) fail('beating Rookie did not open Pro');
-if (!(await dis('#menu-diff-elite'))) fail('beating Rookie should not open Elite');
+await page.click('#building-solo');
+await page.waitForSelector('#room-ai_pro', { timeout: 5000 });
+if (await dis('#room-ai_pro')) fail('beating Rookie did not open Pro');
+if (!(await dis('#room-ai_elite'))) fail('beating Rookie should not open Elite');
 ok('beating Rookie opens Pro, and only Pro');
 
 // A single Pro win used to hand over Cyber in a first session. It now needs
@@ -97,9 +104,9 @@ await page.evaluate(async () => {
 });
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-await page.click('#menu-mode-solo');
-await page.waitForSelector('#menu-diff-elite', { timeout: 5000 });
-if (!(await dis('#menu-diff-elite'))) fail('one Pro win should NOT open Elite');
+await page.click('#building-solo');
+await page.waitForSelector('#room-ai_elite', { timeout: 5000 });
+if (!(await dis('#room-ai_elite'))) fail('one Pro win should NOT open Elite');
 ok('one Pro win does not open Elite');
 
 const proProfile = await page.evaluate(async () => (await fetch('/api/profile/me')).json());
@@ -116,11 +123,15 @@ if (!climbed.achievements.includes('ai_pro_10')) fail('the Elite gate never open
 if (climbed.level < 10) fail(`the level gate was not enforced (level ${climbed.level})`);
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-await page.click('#menu-mode-solo');
-await page.waitForSelector('#menu-diff-elite', { timeout: 5000 });
-if (await dis('#menu-diff-elite')) fail('the full climb did not open Elite');
-if (!(await dis('#menu-diff-cyber'))) fail('the Pro climb must not open Cyber — that is Elite\'s climb');
+await page.click('#building-solo');
+await page.waitForSelector('#room-ai_elite', { timeout: 5000 });
+if (await dis('#room-ai_elite')) fail('the full climb did not open Elite');
+if (!(await dis('#room-cyber'))) fail('the Pro climb must not open Cyber — that is Elite\'s climb');
 ok(`Elite opens after the climb: ${climbed.proWins} Pro wins, level ${climbed.level} (was ${proProfile.level})`);
+
+// Match lengths live in the pre-match sheet, a level down from the rooms.
+await page.click('#room-rookie');
+await page.waitForSelector('#menu-pts-10', { timeout: 5000 });
 if (await dis('#menu-pts-10')) fail('a first win should open first-to-10');
 ok('a first win opens longer matches');
 
@@ -206,7 +217,8 @@ async function freshPlayerInAMatch(label) {
     .catch(() => {});
   await skipTour(p);
   await p.waitForSelector('#main-menu-screen', { timeout: 10000 });
-  await p.click('#menu-mode-solo');
+  await p.click('#building-solo');
+  await p.click('#room-rookie');
   await p.waitForSelector('#menu-pts-3', { timeout: 8000 });
   await p.click('#menu-pts-3');
   await p.click('#menu-start-solo');

@@ -84,13 +84,14 @@ async function passGatekeeper(page) {
  * match.
  *
  * Every mode opens a Sheet now, the duel included, so the sheet is dismissed
- * through its own close control. Tapping #menu-mode-solo a second time used
+ * through its own close control. Tapping #building-solo a second time used
  * to collapse an accordion; it now lands on the sheet's backdrop.
  */
 async function pickShortMatch(page, points = 3) {
   const lobby = await page.$('#multiplayer-lobby-modal');
   if (lobby) await page.click('#btn-close-lobby');
-  await page.click('#menu-mode-solo');
+  await page.click('#building-solo');
+  await page.click('#room-rookie');
   const btn = await page.waitForSelector(`#menu-pts-${points}:not([disabled])`, { timeout: 4000 }).catch(() => null);
   if (!btn) fail(`winning-score button #menu-pts-${points} not available`);
   await btn.click();
@@ -103,7 +104,8 @@ async function hostCreateRoom(page, { p2p, points = 3 }) {
   await passGatekeeper(page);
   await onboard(page, 'RmHost');
   await pickShortMatch(page, points);
-  await page.click('#menu-mode-multiplayer');
+  await page.click('#building-pvp');
+  await page.click('#room-casual');
   await page.waitForSelector('#btn-create-room', { timeout: 5000 });
   if (!p2p) await page.click('#toggle-p2p input, #toggle-p2p');
   await page.click('#btn-create-room');
@@ -125,7 +127,8 @@ async function guestJoin(page, code, points = 3) {
   await passGatekeeper(page);
   await onboard(page, 'RmGuest');
   await pickShortMatch(page, points);
-  await page.click('#menu-mode-multiplayer');
+  await page.click('#building-pvp');
+  await page.click('#room-casual');
   await page.waitForSelector('#btn-join-room-submit', { timeout: 5000 });
   // Regression guard for the "match starts zoomed" bug: iOS Safari zooms the
   // page when an input under 16px is focused and STAYS zoomed afterwards —

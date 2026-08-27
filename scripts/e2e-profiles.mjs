@@ -188,7 +188,8 @@ ok('case-flipped "playerone" reported taken');
 await onboard(bob, 'PlayerTwo');
 
 // ---- 5. Multiplayer under real usernames + public profiles ---------------
-await alice.click('#menu-mode-multiplayer');
+await alice.click('#building-pvp');
+await alice.click('#room-casual');
 await alice.waitForSelector('#lobby-playing-as', { timeout: 5000 });
 const playingAs = await alice.textContent('#lobby-playing-as');
 if (!playingAs.includes('PlayerOne')) fail('lobby identity line missing username');
@@ -205,7 +206,8 @@ const code = await alice
   }, { timeout: 5000 })
   .then((h) => h.jsonValue());
 
-await bob.click('#menu-mode-multiplayer');
+await bob.click('#building-pvp');
+await bob.click('#room-casual');
 await bob.waitForSelector('#input-room-code', { timeout: 5000 });
 await bob.fill('#input-room-code', code);
 await bob.click('#btn-join-room-submit');
