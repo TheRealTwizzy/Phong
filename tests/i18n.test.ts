@@ -38,12 +38,18 @@ describe('translations', () => {
     expect(blank).toEqual([]);
   });
 
-  it.each(OTHERS)('%s keeps every interpolation placeholder English declares', (locale) => {
-    const dropped = Object.entries(EN)
-      .filter(([k, en]) => params(en).length > 0)
+  // Compared unconditionally, in BOTH directions. Filtering to keys where
+  // English declares a placeholder reads as an optimisation and is a hole: a
+  // locale that INVENTS one English does not have was never checked, and
+  // nothing supplies it, so the player is shown a literal `{ghost}`. Dropping
+  // a placeholder and adding one are the same failure — the rendered string
+  // does not match the parameters the call site passes — so one assertion
+  // covers both rather than two that can disagree.
+  it.each(OTHERS)('%s carries exactly the interpolation placeholders English declares', (locale) => {
+    const mismatched = Object.entries(EN)
       .filter(([k, en]) => params(TRANSLATIONS[locale][k]).join() !== params(en).join())
       .map(([k]) => k);
-    expect(dropped).toEqual([]);
+    expect(mismatched).toEqual([]);
   });
 
   it('substitutes params in a non-English locale', () => {

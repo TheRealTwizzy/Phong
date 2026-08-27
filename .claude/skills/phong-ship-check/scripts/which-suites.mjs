@@ -74,13 +74,13 @@ const RULES = [
   { re: /^src\/achievements\.ts$/, suites: ['achievements', 'elite'], why: 'the tree and the unlocks it gates' },
   { re: /^src\/matchRules\.ts$/, suites: ['rules', 'duel'], why: 'ranked bands and the pre-match badge' },
   { re: /^src\/venues\.ts$/, suites: ['venues', 'queue'], why: 'the bracket predicate the menu draws and the relay enforces' },
-  { re: /^src\/profileRules\.ts$/, suites: ['profiles', 'delete'], why: 'username rules, shared both sides' },
-  { re: /^src\/device\.ts$/, suites: ['profiles'], why: 'the smartphone gate every suite has to get past' },
+  { re: /^src\/profileRules\.ts$/, suites: ['*'], why: 'the username rules every suite onboards through' },
+  { re: /^src\/device\.ts$/, suites: ['*'], why: 'the smartphone gate every suite has to get past before anything else' },
   { re: /^src\/game\/physics\.ts$/, suites: ['gameplay', 'rules', 'split'], why: 'ball, collisions, serve aim, AI' },
   { re: /^src\/game\/streaks\.ts$/, suites: ['streak', 'rules'], why: 'the run carried between matches' },
   { re: /^src\/game\/themes\.ts$/, suites: ['elite'], why: 'elite missions bank theme unlocks' },
   { re: /^src\/game\/missions\.ts$/, suites: ['elite'], why: 'the dealt hand and the reroll allowances' },
-  { re: /^src\/net\/session\.ts$/, suites: ['profiles', 'invite', 'build-id'], why: 'the heartbeat and the blocking states' },
+  { re: /^src\/net\/session\.ts$/, suites: ['*'], why: 'the heartbeat every page runs, and the walls it can raise over any flow' },
   { re: /^src\/net\/matchRecord\.ts$/, suites: ['rating', 'history'], why: 'the POST and the on-device replay queue' },
   { re: /^src\/net\/runChain\.ts$/, suites: ['streak'], why: 'run ordering across writes' },
   { re: /^src\/net\/useQuickMatch\.ts$/, suites: ['queue'], why: 'the queue client' },
@@ -112,7 +112,7 @@ const RULES = [
   { re: /^src\/components\/SessionGuard\.tsx$/, suites: ['gameplay', 'invite', 'build-id'], why: 'the released/superseded/stale-build walls' },
   { re: /^src\/components\/MatchHistory/, suites: ['history'], why: 'tabs, filters and paging' },
   { re: /^src\/components\/(Missions|Achievement)/, suites: ['elite', 'achievements'], why: 'the tasks sheet and the tree' },
-  { re: /^src\/components\/MobileGatekeeper\.tsx$/, suites: ['gameplay', 'profiles'], why: 'the gate in front of every suite' },
+  { re: /^src\/components\/MobileGatekeeper\.tsx$/, suites: ['*'], why: 'the gate rendered in front of every suite' },
   { re: /^src\/components\/(Leaderboard|Profile|PublicProfile|TierBadge|AvatarImage)/, suites: ['profiles', 'rating', 'history'], why: 'identity surfaces' },
   { re: /^src\/components\/(ScoreBoard|StatsOverlay|QuickChat|RadarPreview)/,
     suites: ['achievements', 'duel', 'gameplay', 'history', 'lobby', 'profiles', 'queue', 'rules', 'spectate', 'streak'],
@@ -124,8 +124,13 @@ const RULES = [
   { re: /^src\/components\/ui\//, suites: ['*'],
     why: 'shared primitives under every modal and sheet in the app' },
 
-  { re: /^src\/(main\.tsx|index\.css|vite-env\.d\.ts)$/, suites: ['gameplay', 'venues'], why: 'app shell and base styles' },
-  { re: /^index\.html$/, suites: ['build-id', 'profiles'], why: 'the document that sets the device cookie, and the hashed build id' },
+  // index.css is the Tailwind entry: global viewport behaviour plus the shared
+  // utilities (scroll-y, max-h-sheet, the safe-area classes) that every sheet
+  // and modal in the app is laid out with — and a clipped sheet is how a Start
+  // button once ended up 160px below the viewport. main.tsx boots the whole
+  // app; index.html is the document whose navigation sets the device cookie.
+  { re: /^src\/(main\.tsx|index\.css|vite-env\.d\.ts)$/, suites: ['*'], why: 'the app shell and the global styles every screen is laid out with' },
+  { re: /^index\.html$/, suites: ['*'], why: 'the document every suite loads, and where the device cookie is set' },
   { re: /^(vite\.config\.ts|tsconfig\.json|package(-lock)?\.json)$/, suites: ['*'], why: 'build or dependency change — nothing is safely excluded' },
 
   // A browser suite is not shipped to a player, but editing one and running

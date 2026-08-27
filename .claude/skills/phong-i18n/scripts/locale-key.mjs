@@ -134,9 +134,16 @@ function audit() {
       const raw = valueOf(locale, key);
       if (/:\s*(''|""|``|['"`]\s+['"`])\s*,?\s*$/.test(raw)) say(`  ${locale}.${key}: blank value`);
       if (locale === 'en') continue;
+      // Unconditional, both directions: a locale that INVENTS a placeholder
+      // English lacks is as broken as one that drops it — nothing supplies it,
+      // so the player sees a literal `{ghost}`. Guarding this on
+      // `want.length > 0` skips exactly that case.
       const want = placeholders(valueOf('en', key) ?? '');
-      if (want.length && placeholders(raw).join() !== want.join()) {
-        say(`  ${locale}.${key}: placeholder mismatch — English declares ${want.join(' ')}`);
+      const got = placeholders(raw);
+      if (got.join() !== want.join()) {
+        say(
+          `  ${locale}.${key}: placeholder mismatch — English declares ${want.join(' ') || '(none)'}, this has ${got.join(' ') || '(none)'}`
+        );
       }
     }
   }
