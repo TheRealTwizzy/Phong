@@ -23,7 +23,23 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = path.join(ROOT, 'scripts');
 
 const runner = fs.readFileSync(path.join(SCRIPTS, 'e2e-run.mjs'), 'utf8');
-const block = runner.slice(runner.indexOf('const SUITES = ['), runner.indexOf('];', runner.indexOf('const SUITES = [')));
+const rawBlock = runner.slice(runner.indexOf('const SUITES = ['), runner.indexOf('];', runner.indexOf('const SUITES = [')));
+
+// Comments are cut before anything is matched. A commented-out entry is the
+// single most likely way a suite stops running on purpose and stays stopped by
+// accident — somebody disables a flaky one to get a branch green and it is
+// never restored — and reading the comment as a live registration would make
+// this check report full coverage at exactly the moment coverage was lost.
+// Cutting at `//` is safe here because a suite name is `[a-z-]+` and cannot
+// contain one.
+const block = rawBlock
+  .split('\n')
+  .map((line) => {
+    const at = line.indexOf('//');
+    return at === -1 ? line : line.slice(0, at);
+  })
+  .join('\n');
+
 const registered = [...block.matchAll(/name:\s*'([a-z-]+)'/g)].map((m) => m[1]);
 
 if (!registered.length) {

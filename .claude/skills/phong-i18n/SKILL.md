@@ -72,7 +72,14 @@ counts" means a test file referencing a key satisfies the dead-key check, which 
 becomes the only thing keeping a dead string in the product. If a key is only used by a test,
 it is dead.
 
-## No browser suite needed
+## Shipping the change
 
-Copy changes do not need E2E. `tests/i18n.test.ts` states this completely and a browser adds
-nothing — that is exactly what the ship-check mapper says for `src/i18n/`.
+`tests/i18n.test.ts` is the authority on the dictionary and states it completely, so run it
+first — it is where a locale problem will actually be named.
+
+It is not a release gate, though. **Follow `phong-ship-check` like any other change**: an
+earlier version of this skill told you to skip the browser suites for copy-only work, which
+was wrong twice over. Copy is rendered by components, so a string that changes length or
+wraps differently is exactly the kind of thing only a browser sees. And deciding which suites
+a change needs from the file it touched is the reasoning `phong-ship-check` documents as
+having failed — it is not this skill's call to make.
