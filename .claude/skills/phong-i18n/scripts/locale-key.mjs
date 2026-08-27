@@ -57,14 +57,29 @@ function parse(text) {
     if (key) current.entries.push({ key: key[1], line: i });
   });
   for (const l of LOCALES) if (!blocks[l]) throw new Error(`could not parse locale block: ${l}`);
+  // Where each entry really ends. Not simply "the line before the next key":
+  // the dictionary is grouped by feature with `// App & Modes` headings and
+  // blank separators between groups, and those belong to the group BELOW them.
+  // Treating them as part of the entry above means removing the last key of a
+  // group silently takes the next group's heading with it — a loss no test can
+  // see, since the i18n suite has opinions about keys and none about layout.
+  for (const locale of LOCALES) {
+    const block = blocks[locale];
+    block.entries.forEach((entry, idx) => {
+      const limit = block.entries[idx + 1] ? block.entries[idx + 1].line : block.end;
+      let end = entry.line;
+      for (let i = entry.line + 1; i < limit; i++) {
+        if (/^\s*$/.test(lines[i]) || /^\s*\/\//.test(lines[i])) break;
+        end = i; // a wrapped value continuation
+      }
+      entry.end = end;
+    });
+  }
   return { lines, blocks };
 }
 
-/** The line each entry ends on — the line before the next key, or the block close. */
-function entryEnd(block, idx) {
-  const next = block.entries[idx + 1];
-  return (next ? next.line : block.end) - 1;
-}
+/** The last line of an entry — its key line plus any wrapped value lines. */
+const entryEnd = (block, idx) => block.entries[idx].end;
 
 const placeholders = (s) => (s.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? []).sort();
 

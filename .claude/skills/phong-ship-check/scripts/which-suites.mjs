@@ -44,8 +44,13 @@ const RULES = [
     why: 'the protocol union — every transport reads its shapes from here' },
   { re: /^src\/net\/p2p\.ts$/, suites: ['gameplay', 'duel'],
     why: 'the DataChannel replica; e2e-gameplay is the only place a real P2P link comes up' },
-  { re: /^server\.ts$/, suites: ['gameplay', 'duel', 'lobby', 'spectate', 'queue', 'eject', 'invite'],
-    why: 'the relay: rooms, seats, scoring and the REST API all live in it' },
+  // server.ts is the relay AND the whole REST API in one file, so a
+  // file-granular rule cannot tell which half moved. The relay-flow subset it
+  // used to name missed every route-driven suite: e2e-elite drives
+  // /api/missions/reroll, and rating/rules/achievements/history/profiles all
+  // POST /api/match/record or /api/practice/record. Same reasoning as App.tsx.
+  { re: /^server\.ts$/, suites: ['*'],
+    why: 'the relay and every REST route in one file — no subset can be right' },
   { re: /^server\/room\.ts$/, suites: ['duel', 'lobby', 'spectate', 'queue', 'eject'],
     why: 'room rules, seats and the reaper' },
   { re: /^server\/matchmaking\.ts$/, suites: ['queue'], why: 'who the ranked queue pairs' },
@@ -129,6 +134,14 @@ function resolveBase(explicit) {
     if (!git(['rev-parse', '--verify', '--quiet', ref])) continue;
     if (git(['merge-base', 'HEAD', ref])) return { label: ref, spec: `${ref}...HEAD` };
     return { label: `${ref} (no merge base — shallow clone, comparing trees)`, spec: ref };
+  }
+  // A base the caller NAMED and git cannot resolve is an error, not a reason to
+  // quietly fall back. Degrading to uncommitted-only would answer a misspelled
+  // ref with "Nothing to run" on a branch full of committed changes — the one
+  // output this script must never produce when it has not actually looked.
+  if (explicit) {
+    console.error(`error: cannot resolve base ref "${explicit}" — check the name, or fetch it first.`);
+    process.exit(2);
   }
   return { label: 'HEAD (uncommitted only)', spec: null };
 }
