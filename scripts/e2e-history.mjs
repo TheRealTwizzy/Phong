@@ -12,6 +12,9 @@
 //     Practice Wall tab.
 //  5. Tapping the duel opponent's name opens their public profile, which
 //     carries its own public history list with the same duel row.
+//  6. A brand-new account claims its username before the menu, and its very
+//     FIRST match — played at the shipped defaults, touching no setting —
+//     records, pays XP and lands in the history.
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which hands this
 // a fresh server, port, DATA_DIR and Chromium.
 import { chromium, devices } from 'playwright-core';
@@ -39,35 +42,24 @@ async function newPage() {
   return page;
 }
 
-// The onboarding tour opens by itself for a player who has never seen it.
+// The username claim gates the menu for a browser with no account yet.
 // Tolerant: a suite that reaches this another way is not broken by its
 // absence.
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-}
-
 let nameCounter = 0;
 const uniqueName = (prefix) => `${prefix}${Date.now().toString(36).slice(-4)}${nameCounter++}`;
 
 async function onboard(page, prefix) {
   const modal = await page.waitForSelector('#onboarding-modal-overlay', { timeout: 4000 }).catch(() => null);
-  if (!modal) return;
-  await page.fill('#input-onboarding-username', uniqueName(prefix));
+  if (!modal) return null;
+  const name = uniqueName(prefix);
+  await page.fill('#input-onboarding-username', name);
   await page.waitForSelector('#username-status-available', { timeout: 5000 });
   await page.click('#btn-onboarding-submit');
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(page);
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
+  return name;
 }
 
 async function passGatekeeper(page) {
@@ -103,8 +95,8 @@ await host.click('#toggle-p2p input, #toggle-p2p');
 await host.click('#btn-create-room');
 const code = await host
   .waitForFunction(() => {
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
-    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
   }, { timeout: 5000 })
   .then((h) => h.jsonValue());
 
@@ -362,6 +354,110 @@ const pubRows = await host.$$eval('[id^="public-history-record-"]', (els) => els
 if (pubRows !== 1) fail(`public history shows ${pubRows} rows, expected the guest's one duel`);
 ok('opponent tap opens their public profile with its own public history');
 
+// ---------------------------------------------------------------------------
+// A brand-new account's FIRST match records.
+//
+// The username is claimed before the menu is ever shown, and the very first
+// match after it has to land — this exact class of bug has shipped before: the
+// shipped default difficulty was a rung that stays LOCKED until Rookie has
+// been beaten, so every solo match a new player played came back 403
+// DIFFICULTY_LOCKED and was thrown away, paying no XP, no missions and no
+// history, until they happened to change the setting by hand. Nothing pinned
+// it. This does, at the shipped defaults, touching no settings — which is the
+// state a real first-time player is actually in.
+// ---------------------------------------------------------------------------
+{
+  const fresh = await newPage();
+  await fresh.goto(BASE, { waitUntil: 'networkidle' });
+  await passGatekeeper(fresh);
+  const claimed = await onboard(fresh, 'FirstM');
+  await fresh.waitForSelector('#main-menu-screen', { timeout: 10000 });
+
+  // Claimed at account creation, before the menu — not at the end of the
+  // first match, and not lazily on first record.
+  const before = await api(fresh, '/api/profile/me');
+  if (!before.initialized) fail('the menu was reachable with no username claimed');
+  if (before.username !== claimed) fail(`profile says "${before.username}", account was made as "${claimed}"`);
+  if (before.matchesPlayed !== 0) fail(`a brand-new account already has ${before.matchesPlayed} matches`);
+  ok(`the username is claimed before the menu (${claimed}), with nothing recorded yet`);
+
+  // Their first match, at whatever the app ships with.
+  await fresh.click('#room-rookie');
+  await fresh.waitForSelector('#menu-start-solo', { timeout: 5000 });
+  await fresh.click('#menu-start-solo');
+  await fresh.waitForSelector('#half-court-canvas', { timeout: 8000 });
+
+  // Park the paddle and keep asking to serve; the AI takes the points and the
+  // match ends on its own. Either result records — what is under test is that
+  // the match lands at all.
+  await fresh.keyboard.down('KeyA');
+  const overlay = async () => !!(await fresh.$('#btn-play-again'));
+  const deadline = Date.now() + 120000;
+  let finished = false;
+  while (Date.now() < deadline) {
+    if (await overlay()) { finished = true; break; }
+    await fresh.keyboard.press('Space').catch(() => {});
+    await fresh.waitForTimeout(700);
+  }
+  await fresh.keyboard.up('KeyA');
+  if (!finished) fail('the first solo match never reached a result');
+
+  // Recorded: on the career counters, in the history, and paid.
+  let after = null;
+  for (let i = 0; i < 40; i++) {
+    after = await api(fresh, '/api/profile/me');
+    if (after.matchesPlayed >= 1) break;
+    await fresh.waitForTimeout(250);
+  }
+  if (!after || after.matchesPlayed !== 1) {
+    fail(`the first match did not record: matchesPlayed=${after?.matchesPlayed}`);
+  }
+  if (!(after.xp > 0)) fail(`the first match paid no XP (xp=${after.xp}) — every match is progression`);
+
+  const rows = await api(fresh, '/api/matches/me');
+  if (rows.total !== 1) fail(`history holds ${rows.total} rows after one match, not 1`);
+  if (rows.matches[0]?.mode !== 'solo') fail(`the first row is a ${rows.matches[0]?.mode} match`);
+  if (rows.matches[0]?.difficulty !== 'rookie') {
+    fail(`the row says ${rows.matches[0]?.difficulty}, but the ROOKIE room was the one entered`);
+  }
+  ok(`the first match records: 1 played, ${after.xp} XP, 1 history row`);
+
+  // ...and the one after it, which is the half a match key can break. A solo
+  // key is minted on the device and rides the payload so a retry and a replay
+  // from the on-device queue are recognised as ONE match; a key that failed to
+  // re-mint between matches would make every match after the first a no-op
+  // against the `recorded_matches` ledger — answered `alreadyRecorded` with
+  // the FIRST match's result, so the client would even render a win. Nothing
+  // on the phone would look wrong. The counter is the only place it shows.
+  await fresh.click('#btn-play-again');
+  await fresh.waitForSelector('#half-court-canvas', { timeout: 8000 });
+  await fresh.keyboard.down('KeyA');
+  const secondDeadline = Date.now() + 120000;
+  let secondDone = false;
+  while (Date.now() < secondDeadline) {
+    if (await fresh.$('#btn-play-again')) { secondDone = true; break; }
+    await fresh.keyboard.press('Space').catch(() => {});
+    await fresh.waitForTimeout(700);
+  }
+  await fresh.keyboard.up('KeyA');
+  if (!secondDone) fail('the second solo match never reached a result');
+
+  let second = null;
+  for (let i = 0; i < 40; i++) {
+    second = await api(fresh, '/api/profile/me');
+    if (second.matchesPlayed >= 2) break;
+    await fresh.waitForTimeout(250);
+  }
+  if (!second || second.matchesPlayed !== 2) {
+    fail(`the second match did not record on top of the first: matchesPlayed=${second?.matchesPlayed}`);
+  }
+  const rows2 = await api(fresh, '/api/matches/me');
+  if (rows2.total !== 2) fail(`history holds ${rows2.total} rows after two matches, not 2`);
+  ok('the match after it records too, on its own key');
+  await fresh.context().close();
+}
+
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
+
 console.log('\nALL MATCH HISTORY E2E CHECKS PASSED');
 await browser.close();

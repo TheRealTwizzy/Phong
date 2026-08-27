@@ -33,19 +33,6 @@ const browser = await chromium.launch({
 // it is part of onboarding now, not a menu row. Every suite past this point
 // wants the menu, so it is waved away here. Tolerant: a suite that reaches
 // this another way is not broken by its absence.
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return false;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-  return true;
-}
-
 async function newPage() {
   const ctx = await browser.newContext({ ...devices['iPhone 13'] });
   const page = await ctx.newPage();
@@ -68,7 +55,6 @@ async function onboard(page, prefix) {
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(page);
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
 }
 
@@ -113,7 +99,7 @@ async function hostCreateRoom(page, { p2p, points = 3 }) {
     .waitForFunction(() => {
       // The code has its own element; hunting for it by a styling class meant
       // any restyle of the lobby silently broke the lookup.
-      const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+      const txt = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
       return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
     }, { timeout: 5000 })
     .then((h) => h.jsonValue());

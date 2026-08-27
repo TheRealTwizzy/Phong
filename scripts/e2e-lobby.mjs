@@ -30,18 +30,6 @@ import { chromium, devices } from 'playwright-core';
 // it is part of onboarding now, not a menu row. Every suite past this point
 // wants the menu, so it is waved away here. Tolerant: a suite that reaches
 // this another way is not broken by its absence.
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return false;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-  return true;
-}
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
 const EXEC = process.env.CHROMIUM_PATH;
 if (!EXEC) {
@@ -73,7 +61,6 @@ async function newPlayer(prefix) {
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(page);
   await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
   return page;
 }
@@ -87,8 +74,8 @@ await solo.click('#building-pvp');
 await solo.click('#room-casual');
 await solo.waitForSelector('#btn-create-room', { timeout: 8000 });
 await solo.click('#btn-create-room');
-await solo.waitForSelector('#btn-copy-link', { timeout: 8000 });
-const doomed = (await solo.textContent('#lobby-room-code'))?.trim();
+await solo.waitForSelector('#lobby-table', { timeout: 8000 });
+const doomed = (await solo.getAttribute('#lobby-table', 'data-room-id'))?.trim();
 if (!/^[A-Z0-9]{4}$/.test(doomed || '')) fail('host never got a room code');
 if ((await fetch(`${BASE}/api/room/${doomed}`)).status !== 200) fail(`room ${doomed} was never open`);
 
@@ -121,6 +108,50 @@ const after = (await fetch(`${BASE}/api/room/${doomed}`)).status;
 if (after !== 404) fail(`room ${doomed} survived its only player leaving (status ${after})`);
 ok('confirming returns to the menu and closes the room');
 
+// ---------------------------------------------------------------------------
+// Setting a match up is not playing one.
+//
+// The lobby used to be a sheet over a LIVE court: taking a seat flipped the
+// screen to `game`, so a host picking a winning score was standing on a court
+// with a ball waiting on them, and a guest who dismissed the sheet found
+// themselves there with nothing to do. The court belongs to the MATCH now —
+// `game_start` is the only thing that walks anybody onto it.
+// ---------------------------------------------------------------------------
+console.log('\nSetting up is not playing');
+{
+  const setup = await newPlayer('LbS');
+  await setup.click('#building-pvp');
+  await setup.click('#room-casual');
+  await setup.waitForSelector('#btn-create-room', { timeout: 8000 });
+  await setup.click('#btn-create-room');
+  await setup.waitForSelector('#lobby-table', { timeout: 8000 });
+  // Settle first. The screen swap is animated, so reading the DOM the instant
+  // the code appears finds no court even when one is on its way — which is a
+  // check that passes the very regression it exists to catch. Verified by
+  // putting the regression back and watching this go red.
+  await sleep(1200);
+
+  const held = await setup.evaluate(() => ({
+    court: !!document.querySelector('#half-court-canvas'),
+    hud: !!document.querySelector('#scoreboard-header'),
+    menu: !!document.querySelector('#main-menu-screen'),
+  }));
+  if (held.court) fail('a host holding a seat is standing on a live court');
+  if (held.hud) fail('a host holding a seat has an in-match HUD');
+  if (!held.menu) fail('the lobby is not a sheet over the menu any more');
+  ok('a seat is a seat: no court, no HUD, the menu still behind the sheet');
+
+  // And dismissing the sheet does not reveal one either — the confirmation is
+  // about the ROOM the relay is holding, not about a match in progress.
+  await setup.click('#btn-close-lobby');
+  await setup.waitForSelector('#btn-leave-lobby-confirm', { timeout: 5000 });
+  await setup.click('#btn-leave-lobby-confirm');
+  await setup.waitForSelector('#main-menu-screen', { timeout: 8000 });
+  if (await setup.$('#half-court-canvas')) fail('leaving the lobby uncovered a court');
+  ok('and leaving it never uncovers one');
+  await setup.context().close();
+}
+
 console.log('\nA join in flight survives the lobby being dismissed');
 
 const host = await newPlayer('LbH');
@@ -128,12 +159,12 @@ await host.click('#building-pvp');
 await host.click('#room-casual');
 await host.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host.click('#btn-create-room');
-await host.waitForSelector('#btn-copy-link', { timeout: 8000 });
+await host.waitForSelector('#lobby-table', { timeout: 8000 });
 const code = await host.evaluate(() => {
   // Read the code from its own element rather than regexing the panel's text
   // for an English label — that coupled the suite to copy that is now
   // translated, and to the label sitting immediately before the code.
-  const t = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+  const t = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
   return /^[A-Z0-9]{4}$/.test(t) ? t : null;
 });
 if (!code) fail('host never got a room code');
@@ -154,14 +185,18 @@ await lone.evaluate(() => {
   document.querySelector('#btn-close-lobby').click();
 });
 await sleep(2500);
+// Holding a seat no longer puts anybody on a court — a table you are setting
+// a match up at is not a match — so the ROOM CODE is what says the seat
+// landed. The menu being behind the sheet is now the expected state, not the
+// evidence of a bug it used to be.
 const loneState = await lone.evaluate(() => ({
-  seated: !!document.querySelector('#half-court-canvas'),
-  onMenu: !!document.querySelector('#main-menu-screen'),
+  court: !!document.querySelector('#half-court-canvas'),
   lobby: !!document.querySelector('#multiplayer-lobby-modal'),
-  code: (document.querySelector('#lobby-room-code')?.textContent || '').trim(),
+  code: (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim(),
   leave: !!document.querySelector('#btn-leave-room'),
 }));
-if (loneState.onMenu || !loneState.seated) fail('the create never landed at all — wrong bug reproduced');
+if (!loneState.code) fail('the create never landed at all — wrong bug reproduced');
+if (loneState.court) fail('a host setting up a match was put on a live court');
 if (!loneState.lobby) fail('host holds a room with the lobby shut — no code to share, no way out');
 if (!/^[A-Z0-9]{4}$/.test(loneState.code)) fail('the reopened lobby shows no room code');
 if (!loneState.leave) fail('host holds a room with no Leave control');
@@ -183,14 +218,15 @@ await sleep(2500);
 
 // `#btn-leave-room` lives INSIDE the lobby, so it cannot tell "no seat" from
 // "seat held behind a shut lobby" — which is the whole distinction here. The
-// court is what the seat puts on screen either way.
+// room code can: it is only ever rendered for a seat that was actually given.
 const state = await guest.evaluate(() => ({
-  seated: !!document.querySelector('#half-court-canvas'),
-  onMenu: !!document.querySelector('#main-menu-screen'),
+  court: !!document.querySelector('#half-court-canvas'),
+  code: (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim(),
   lobby: !!document.querySelector('#multiplayer-lobby-modal'),
   ready: !!document.querySelector('#btn-ready-play'),
 }));
-if (state.onMenu || !state.seated) fail('the join never landed at all — wrong bug reproduced');
+if (!state.code) fail('the join never landed at all — wrong bug reproduced');
+if (state.court) fail('a guest waiting to be started was put on a live court');
 ok('the seat was granted even though the lobby had been dismissed');
 if (!state.lobby) fail('guest holds a seat with the lobby shut — no way back to it');
 if (!state.ready) fail('guest holds a seat but has no Ready control, so the host waits forever');
@@ -227,7 +263,7 @@ await host2.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host2.click('#btn-create-room');
 const code2 = await host2
   .waitForFunction(() => {
-    const t = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    const t = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
     return /^[A-HJ-NP-Z2-9]{4}$/.test(t) ? t : null;
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
@@ -242,12 +278,15 @@ await host2.click('#btn-close-lobby');
 await host2.waitForSelector('#btn-leave-lobby-confirm', { timeout: 5000 });
 await host2.click('#btn-leave-lobby-confirm');
 
+// The LOBBY closing is the signal, not the menu appearing: a player waiting to
+// be started is on the menu already, with the lobby as a sheet over it, so
+// `#main-menu-screen` was there before the host ever left.
 const guestHome = await guest2
-  .waitForSelector('#main-menu-screen', { timeout: 10000 })
+  .waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 10000 })
   .then(() => true)
   .catch(() => false);
 if (!guestHome) fail('the guest was left in a lobby whose room can never start');
-if (await guest2.$('#multiplayer-lobby-modal')) fail('the lobby stayed open over the menu');
+if (!(await guest2.$('#main-menu-screen'))) fail('the guest was not returned to the menu');
 // And the room goes with them, rather than holding its code until the reaper.
 const gone = await guest2.evaluate(
   (c) => fetch(`/api/room/${c}`).then((r) => r.status),

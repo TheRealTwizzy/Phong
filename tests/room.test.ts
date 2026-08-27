@@ -56,6 +56,7 @@ const room = (over: Partial<Room> = {}): Room => ({
   soloSince: 0,
   venueRoomId: 'casual',
   visibility: 'private',
+  joinKey: null,
   spectators: [null, null],
   ...over,
 });

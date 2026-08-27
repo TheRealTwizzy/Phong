@@ -121,25 +121,7 @@ interface MainMenuProps {
   onOpenHistory: () => void;
   onOpenMissions: () => void;
   onOpenSettings: () => void;
-  /**
-   * The pre-match sheet the onboarding tour wants open. The sheet is MainMenu's
-   * own state — a duel's lives in App, because a lobby owns a room — so the
-   * tour, which does live in App, has to be able to reach in and open it.
-   */
-  tourPrematch?: GameMode | null;
-  /** Whether the tour is running at all — see openPrematch. */
-  tourActive?: boolean;
 }
-
-/**
- * Where the tour parks the navigation while it runs. Its menu steps want the
- * buildings list; its prematch step wants the Solo building's ROOKIE room, so
- * the sheet it is describing has a room behind it.
- */
-const TOUR_NAV: { building: BuildingId; room: string | null } = {
-  building: 'solo',
-  room: 'rookie',
-};
 
 /** Buildings name their icon; the component owns the drawing. */
 const BUILDING_ICONS: Record<BuildingId, React.ReactNode> = {
@@ -171,39 +153,18 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onOpenHistory,
   onOpenMissions,
   onOpenSettings,
-  tourPrematch = null,
-  tourActive = false,
 }) => {
   const lang = settings.language || 'en';
   // Which mode's pre-match sheet is open. A duel's lives in App (the lobby
   // owns a room, not just a form), so this only ever holds the other three.
   const [prematchMode, setPrematchMode] = useState<GameMode | null>(null);
-  // The tour's choice is the ONLY one while it is running, so a step that is
-  // ABOUT the pre-match sheet always has one on screen to point at — and every
-  // other step has none.
-  //
-  // A nullish fallback was wrong in the second half: the scrim is
-  // pointer-events-none, so a player can tap the highlighted Solo row during
-  // the modes step and set prematchMode themselves. Once the tour's own
-  // pre-match step passed and tourPrematch went back to null, that private
-  // value came back and left the sheet covering the tab bar and every modal
-  // stage after it.
-  const openPrematch = tourActive ? tourPrematch : prematchMode;
+  const openPrematch = prematchMode;
   // Which gate the player tapped, so the reason a rung is shut is something
   // they can read rather than a tooltip no touch device will ever show.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
   const [queueInfoOpen, setQueueInfoOpen] = useState(false);
-  // Same bug as openPrematch, on two more sheets the tour never asks for: the
-  // scrim leaves the locked-difficulty hint and the Quick Match stub tappable
-  // on every menu and pre-match step, and neither state lives in App, so the
-  // per-step cleanup there can't reach in and close them. Left open past the
-  // step that opened them, a layer-60 sheet sits above the layer-50 modal a
-  // later stage opens and hides its spotlight target for the rest of the
-  // tour. No step ever wants either one, so — unlike openPrematch — there is
-  // no tour-owned value to fall back to: both are simply forced shut for as
-  // long as the tour is running.
-  const openGateHint = tourActive ? null : gateHint;
-  const openQueueInfo = tourActive ? false : queueInfoOpen;
+  const openGateHint = gateHint;
+  const openQueueInfo = queueInfoOpen;
   const searching = quickMatch.state.status === 'searching';
   const since = quickMatch.state.status === 'searching' ? quickMatch.state.since : 0;
   // One second of state per second of searching, and only while searching:
@@ -219,25 +180,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
   }, [searching, since]);
-  // All three overrides above only stop a stray tap from MATTERING while the
-  // tour runs — nothing clears the tap itself. The tour ENDING is also a
-  // transition, and an unclear one: the moment tourActive goes false, every
-  // override above reads the raw state again, and a tap banked minutes
-  // earlier — the Solo row during the modes step, a locked pill during the
-  // tour's own prematch step — pops its sheet open over the post-tour menu,
-  // as though the player had just tapped it. This is the missing mirror
-  // image: during the tour a stray tap is overridden or forced shut: the
-  // instant it stops owning the screen, it must not un-happen retroactively.
-  // Runs on the true start/end transition only (the dependency is tourActive
-  // itself, not any of the three states), so it never fights the overrides
-  // above while the tour is actually running.
-  useEffect(() => {
-    if (tourActive) return;
-    setPrematchMode(null);
-    setGateHint(null);
-    setQueueInfoOpen(false);
-    setNav({ building: DEFAULT_BUILDING, room: null });
-  }, [tourActive]);
   // Where in the building -> room walk this player is. MainMenu's own state,
   // like prematchMode: App owns a duel's lobby because a lobby owns a ROOM on
   // the relay, but navigating to one is just navigating.
@@ -245,13 +187,22 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     building: DEFAULT_BUILDING,
     room: null,
   });
-  // The fourth thing the tour has to be able to override. The scrim is
-  // pointer-events-none, so a player can walk into a building mid-tour and
-  // leave a later menu step pointing at a list that is no longer on screen.
-  // The tour's own destination is the only one while it runs: its menu steps
-  // want the buildings list, and its prematch step wants the Solo building's
-  // ROOKIE room open behind the sheet.
-  const openNav = tourActive ? TOUR_NAV : nav;
+  const openNav = nav;
+  /**
+   * Whether the current building is also showing the rooms this player cannot
+   * enter yet.
+   *
+   * Shut by default: a list is a list of places you can go, and five rows of
+   * padlock is a wall rather than a menu. The rungs above you are still worth
+   * SEEING — they are what the ladder is for — so the selected tab doubles as
+   * the way to look: tap the tab you are already on and the locked rooms fold
+   * out, tap it again (or move to another building) and they fold away.
+   *
+   * One flag rather than one per building, because switching buildings closes
+   * it anyway: there is only ever one list on screen.
+   */
+  const [revealLocked, setRevealLocked] = useState(false);
+  const revealed = revealLocked;
 
   const MODE_META: {
     id: GameMode;
@@ -331,6 +282,29 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   const earned = profile?.achievements || [];
   const opened = (kind: 'difficulty' | 'winningScore' | 'mode', value: string | number) =>
     hasUnlock(earned, kind, value);
+
+  /**
+   * Why a room is shut, if it is. Two different gates, deliberately kept
+   * apart: a SOLO room is a rung of the AI ladder, walked through the
+   * achievement chain, and a PVP room is a skill bracket judged from level and
+   * tier. A room answers to one or the other, never both.
+   *
+   * Hoisted out of the render so the list can be FILTERED on it and the rooms
+   * it hides can be counted — a toggle nothing hints at is a toggle nobody
+   * finds.
+   */
+  const roomLock = (room: RoomDef) => {
+    const ladder =
+      room.difficulty && !opened('difficulty', room.difficulty)
+        ? unlockedBy('difficulty', room.difficulty) ?? null
+        : null;
+    const verdict = roomEntryVerdict(room, profile);
+    return { ladder, verdict, locked: !!ladder || !verdict.ok };
+  };
+
+  const buildingRooms = roomsOf(openNav.building);
+  const lockedRooms = buildingRooms.filter((room) => roomLock(room).locked);
+  const visibleRooms = revealed ? buildingRooms : buildingRooms.filter((room) => !roomLock(room).locked);
 
   // xp is a running total and xpNext an absolute threshold, so the bar has to
   // be measured from the floor of the CURRENT level — same arithmetic the
@@ -520,13 +494,41 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 role="tab"
                 aria-selected={current}
                 data-selected={current ? 'true' : 'false'}
-                onClick={() => setNav({ building: b.id, room: null })}
+                data-reveal={current && revealed ? 'true' : 'false'}
+                onClick={() => {
+                  // The tab you are on is the control for its own list; the
+                  // tabs you are not on are still just tabs. Moving buildings
+                  // always closes the locked rooms, so the list you land on is
+                  // the plain one.
+                  if (current) setRevealLocked((v) => !v);
+                  else {
+                    setNav({ building: b.id, room: null });
+                    setRevealLocked(false);
+                  }
+                }}
                 className={`flex items-center justify-center gap-1.5 rounded-ctl px-2 py-2 text-2xs transition-colors ${
                   current ? 'bg-accent text-ink-on-accent' : 'text-ink-muted'
                 }`}
               >
                 {BUILDING_ICONS[b.id]}
                 <span className="truncate">{t(b.labelKey, lang)}</span>
+                {/* The only hint that the tab does anything when you are
+                    already on it. A toggle nothing points at is a toggle
+                    nobody finds, and the count is the reason to press it:
+                    "there are three more rooms here" is the whole message.
+                    Shown on the selected tab only — an unselected one is
+                    still just a tab. */}
+                {current && lockedRooms.length > 0 && (
+                  <span
+                    id="building-locked-count"
+                    className={`flex shrink-0 items-center gap-0.5 rounded-chip px-1 text-2xs tnum ${
+                      revealed ? 'bg-ink-on-accent/25' : 'bg-ink-on-accent/15'
+                    }`}
+                  >
+                    <Lock className="h-2.5 w-2.5" />
+                    {lockedRooms.length}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -538,17 +540,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
             opens its lobby. Nothing expands in place, and every child of this
             scroll region is `shrink-0` — see the note above it for what
             happens when one is not. */}
-        {roomsOf(openNav.building).map((room) => {
-          // Two different gates, deliberately kept apart. A SOLO room is a
-          // rung of the AI ladder, walked through the achievement chain; a
-          // PVP room is a skill bracket, judged from level and tier. A room
-          // answers to one or the other, never both.
-          const ladderLock =
-            room.difficulty && !opened('difficulty', room.difficulty)
-              ? unlockedBy('difficulty', room.difficulty) ?? null
-              : null;
-          const verdict = roomEntryVerdict(room, profile);
-          const locked = !!ladderLock || !verdict.ok;
+        {visibleRooms.map((room) => {
+          const { ladder: ladderLock, verdict, locked } = roomLock(room);
           const chance = room.difficulty
             ? Math.round(winProbability(myRating, aiRating(room.difficulty, myRating.mu)) * 100)
             : null;
@@ -582,9 +575,11 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                     </span>
                   )}
                 </span>
-                <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
-                  {t(room.descKey, lang)}
-                </span>
+                {room.descKey && (
+                  <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
+                    {t(room.descKey, lang)}
+                  </span>
+                )}
                 {locked && (
                   <span
                     id={`room-${room.id}-lock`}
@@ -833,11 +828,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               id="btn-quickmatch-join"
               variant="primary"
               block
-              // Not from under the tour's scrim, which is pointer-events-none
-              // so the app underneath stays usable — the same refusal
-              // handleCreateRoom carries, for the same reason: a pairing that
-              // lands under a running tour is a seat the tour walks away from.
-              disabled={tourActive}
               onClick={quickMatch.join}
             >
               {t('menu_quickmatch_cta', lang)}

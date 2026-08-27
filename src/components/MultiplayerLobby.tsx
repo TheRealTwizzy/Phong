@@ -2,16 +2,16 @@ import React, { useState, useEffect } from 'react';
 import { ThemeConfig } from '../game/themes';
 import { isLinkableId } from '../profileRules';
 import { t } from '../i18n/translations';
-import { Button, Panel, QrBlock, Sheet, SegmentedControl, UnlockHintSheet } from './ui';
+import { Button, Panel, Sheet, SegmentedControl, UnlockHintSheet } from './ui';
 import { Achievement, LanguageCode, MatchRules, RoomMatchConfig, TableSeat, TableSeatInfo } from '../types';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { DEFAULT_ROOM_CONFIG, WINNING_SCORES, normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
 import { DEFAULT_VENUE_ROOM, roomAllowsSpectators } from '../venues';
 import {
-  Copy,
   Check,
-  QrCode,
+  Copy,
+  Share2,
   Smartphone,
   Users,
   Wifi,
@@ -66,14 +66,17 @@ interface MultiplayerLobbyProps {
   tables?: TableSummary[];
   tablesLoading?: boolean;
   onRefreshTables?: () => void;
-  /** Create a table others can find, rather than one shared by code. */
-  onCreatePublicTable?: () => void;
   /** Take a watching seat at a table rather than a playing one. */
   onWatchTable?: (roomId: string) => void;
   /** Who is sitting where at the table this player is at, or null. */
   tableState?: { seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean } | null;
   /** Move to another seat at this table. Refused server-side once a match is on. */
   onSwapSeat?: (seat: TableSeat) => void;
+  /** Whether this table is locked, and the key that opens it if it is. */
+  isPrivate?: boolean;
+  joinKey?: string | null;
+  /** Host-only, pre-match. Turning it ON always mints a FRESH key. */
+  onSetPrivate?: (isPrivate: boolean) => void;
 }
 
 /** One row of the table browser, as GET /api/rooms/:venue/tables returns it. */
@@ -118,15 +121,19 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   tables = [],
   tablesLoading = false,
   onRefreshTables,
-  onCreatePublicTable,
   onWatchTable,
   tableState = null,
   onSwapSeat,
+  isPrivate = false,
+  joinKey = null,
+  onSetPrivate,
 }) => {
   const playerName = currentUsername || 'Player';
-  const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
-  const [showQR, setShowQR] = useState<boolean>(false);
+  // Feature-detected once: a device with no share sheet gets no share button
+  // rather than one that silently does nothing.
+  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   // A gated match length explains itself on tap, rather than through a title
   // attribute that no touch device renders.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
@@ -140,17 +147,6 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
     }
   }, [roomId]);
 
-
-  const shareableUrl = roomId
-    ? `${window.location.origin}${window.location.pathname}?room=${roomId}`
-    : '';
-
-  const handleCopyLink = () => {
-    if (!shareableUrl) return;
-    navigator.clipboard.writeText(shareableUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   const handleCreate = () => {
     onCreateRoom();
@@ -306,56 +302,111 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
 
         {roomId ? (
           <>
-            {/* Share block. The label and the code stay adjacent, in that
-                order — #lobby-room-code is what the suites read now. */}
-            <Panel variant="raised" className="flex flex-col gap-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <span className="text-kicker text-ink-muted uppercase">
-                    {t('lobby_room_code', language)}
-                  </span>
-                  <div
-                    id="lobby-room-code"
-                    className="text-numeral tnum tracking-[0.2em] text-(--theme-accent)"
-                  >
-                    {roomId}
-                  </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  <Button
-                    id="btn-copy-link"
-                    size="sm"
-                    variant="secondary"
-                    icon={
-                      copied ? (
-                        <Check className="h-4 w-4 text-win" />
-                      ) : (
-                        <Copy className="h-4 w-4" />
-                      )
-                    }
-                    onClick={handleCopyLink}
-                  >
-                    {copied ? t('lobby_copied', language) : t('lobby_copy_link', language)}
-                  </Button>
-                  <button
-                    id="btn-toggle-qr"
-                    onClick={() => setShowQR(!showQR)}
-                    aria-label={t('lobby_show_qr', language)}
-                    aria-pressed={showQR}
-                    className="rounded-ctl border border-line bg-surface-3 p-2 text-ink-muted transition-colors hover:text-ink"
-                  >
-                    <QrCode className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
+            {/* The lock, and the key it mints.
+                A table is OPEN by default: it is listed in its room's browser
+                and anyone in the bracket can sit down, so there is nothing to
+                share and nothing to copy. Locking it takes it out of the
+                listing and mints a 4-character key, which is then the only way
+                in — the room id is how the relay indexes the table, not a door.
+                Turning the lock on again re-keys it, so a key already given
+                out stops working: sharing one is a decision you can take back.
 
-              {/* Encoded in-repo: no third party ever sees the room URL. */}
-              {showQR && (
-                <QrBlock
-                  id="lobby-qr"
-                  value={shareableUrl}
-                  caption={t('lobby_scan_hint', language)}
+                This replaced a Copy Link button and a QR block. Both handed
+                out a URL that outlived any decision to share it, and neither
+                could be revoked. */}
+            {/* The table's identity is an attribute, not a line of text. It
+                is real — the relay indexes the table by it and it appears in
+                GET /api/room/:id — but it is not a door for a locked table and
+                must not read as one. The only code-like TEXT here is the key,
+                and only while the lock is on. */}
+            <Panel
+              id="lobby-table"
+              data-room-id={roomId}
+              variant="raised"
+              className="flex flex-col gap-3"
+            >
+              <label
+                id="toggle-private"
+                data-on={isPrivate ? 'true' : 'false'}
+                data-readonly={isHost ? 'false' : 'true'}
+                className={`flex items-center justify-between gap-2 text-2xs font-normal tracking-normal text-ink-muted select-none ${
+                  isHost ? 'cursor-pointer' : 'opacity-60'
+                }`}
+              >
+                <span>{t('lobby_private', language)}</span>
+                <input
+                  type="checkbox"
+                  checked={isPrivate}
+                  disabled={!isHost}
+                  onChange={(e) => onSetPrivate?.(e.target.checked)}
+                  className="h-4 w-4 accent-accent"
                 />
+              </label>
+
+              {isPrivate ? (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="text-kicker text-ink-muted uppercase">
+                      {t('lobby_room_key', language)}
+                    </span>
+                    <div
+                      id="lobby-room-code"
+                      className="text-numeral tnum tracking-[0.2em] text-(--theme-accent)"
+                    >
+                      {joinKey || '····'}
+                    </div>
+                    <p className="mt-1 text-2xs font-normal tracking-normal text-ink-dim">
+                      {t('lobby_key_hint', language)}
+                    </p>
+                  </div>
+                  {/* The key and NOTHING else — no URL, no sentence around it.
+                      A link is a credential that outlives the decision to
+                      share it and cannot be taken back; four characters the
+                      host can re-mint is the whole design. `navigator.share`
+                      is offered only where the device actually has one. */}
+                  {joinKey && (
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Button
+                        id="btn-copy-key"
+                        size="sm"
+                        variant="secondary"
+                        icon={
+                          copied ? (
+                            <Check className="h-4 w-4 text-win" />
+                          ) : (
+                            <Copy className="h-4 w-4" />
+                          )
+                        }
+                        onClick={() => {
+                          navigator.clipboard?.writeText(joinKey);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 2000);
+                        }}
+                      >
+                        {copied ? t('lobby_copied', language) : t('lobby_copy_key', language)}
+                      </Button>
+                      {canShare && (
+                        <button
+                          id="btn-share-key"
+                          onClick={() => {
+                            // `text` alone. Passing `url` as well is what turns
+                            // a share into a link, which is the thing this
+                            // replaced.
+                            navigator.share?.({ text: joinKey }).catch(() => {});
+                          }}
+                          aria-label={t('lobby_share_key', language)}
+                          className="rounded-ctl border border-line bg-surface-3 p-2 text-ink-muted transition-colors hover:text-ink"
+                        >
+                          <Share2 className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p id="lobby-open-hint" className="text-2xs font-normal tracking-normal text-ink-dim">
+                  {t('lobby_open_hint', language)}
+                </p>
               )}
             </Panel>
 
@@ -645,23 +696,27 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                     ))}
                   </ul>
                 )}
-
-                {onCreatePublicTable && (
-                  <Button
-                    id="btn-create-public-table"
-                    variant="primary"
-                    size="lg"
-                    block
-                    onClick={onCreatePublicTable}
-                  >
-                    {t('lobby_tables_create', language)}
-                  </Button>
-                )}
               </Panel>
             )}
 
             {/* One column. The md: breakpoint this used to carry never fires
-                on a phone-only app. */}
+                on a phone-only app.
+
+                And ONE way to open a table. There were two, and from the
+                player's seat they were the same button: "start a table" made a
+                listed one and "host a match" an unlisted one, and both landed
+                on the identical screen — a room code, waiting for somebody.
+                Listed-versus-unlisted is invisible to the person who just
+                pressed it, so it was never a choice, only a fork.
+
+                What survives is the table reachable BOTH ways: listed in the
+                room's browser, and still carrying the 4-letter code and the QR.
+                What it costs is stated in CLAUDE.md §5 rather than hidden — a
+                listed table can be sat at by a stranger before the friend you
+                sent the code to arrives, and its joiner is judged against the
+                room's bracket, which an unlisted one never was. If invite-only
+                tables are wanted back, they belong beside "let people watch" as
+                a term of the room, not as a second front door. */}
             <Panel variant="raised" className="flex flex-col gap-2.5">
               <div>
                 <h3 className="flex items-center gap-1.5 text-2xs text-ink">
@@ -687,7 +742,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 </label>
               )}
               <Button id="btn-create-room" variant="primary" size="lg" block onClick={handleCreate}>
-                {t('lobby_host_match', language)}
+                {t('lobby_tables_create', language)}
               </Button>
             </Panel>
 

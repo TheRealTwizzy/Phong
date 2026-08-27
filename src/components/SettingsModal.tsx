@@ -39,7 +39,6 @@ interface SettingsModalProps {
   settings: GameSettings;
   onUpdateSettings: (newSettings: Partial<GameSettings>) => void;
   profile?: PlayerProfile | null;
-  onStartTour?: () => void;
   onTriggerShake?: () => void;
   /**
    * True while the match's rules have the opponent sonar on. The two net
@@ -66,7 +65,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   settings,
   onUpdateSettings,
   profile = null,
-  onStartTour,
   onTriggerShake,
   indicatorsLockedBySonar = false,
   onDeleteAccount,
@@ -172,20 +170,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
-        {onStartTour && (
-          <Button
-            id="btn-settings-start-tour"
-            size="sm"
-            variant="secondary"
-            icon={<BookOpen className="h-3.5 w-3.5" />}
-            onClick={() => {
-              onClose();
-              onStartTour();
-            }}
-          >
-            {t('tour_start', lang)}
-          </Button>
-        )}
         <button
           id="btn-close-settings"
           onClick={onClose}
