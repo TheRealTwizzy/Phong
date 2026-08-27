@@ -98,9 +98,10 @@ const host = await newPlayer('WatchHost');
 await host.click('#building-pvp');
 await host.click('#room-casual');
 await host.waitForSelector('#lobby-tables-empty', { timeout: 8000 });
-// "start a table" makes a PUBLIC one, and a public table is advertised —
-// watching seats are part of that offer, so they are open without asking.
-await host.click('#btn-create-public-table');
+// Starting a table makes a PUBLIC one — the only kind the client makes now —
+// and a public table is advertised, so watching seats are part of that offer
+// and are open without asking.
+await host.click('#btn-create-room');
 const code = await host
   .waitForFunction(() => {
     const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
@@ -216,8 +217,8 @@ const h2 = await newPlayer('SwapHost');
 await h2.click('#building-pvp');
 await h2.click('#room-casual');
 // Not the empty state this time — the first table is still up in this room.
-await h2.waitForSelector('#btn-create-public-table', { timeout: 8000 });
-await h2.click('#btn-create-public-table');
+await h2.waitForSelector('#btn-create-room', { timeout: 8000 });
+await h2.click('#btn-create-room');
 const code2 = await h2
   .waitForFunction(() => {
     const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();

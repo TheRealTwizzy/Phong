@@ -237,6 +237,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     setGateHint(null);
     setQueueInfoOpen(false);
     setNav({ building: DEFAULT_BUILDING, room: null });
+    setRevealLocked(false);
   }, [tourActive]);
   // Where in the building -> room walk this player is. MainMenu's own state,
   // like prematchMode: App owns a duel's lobby because a lobby owns a ROOM on
@@ -252,6 +253,26 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // want the buildings list, and its prematch step wants the Solo building's
   // ROOKIE room open behind the sheet.
   const openNav = tourActive ? TOUR_NAV : nav;
+  /**
+   * Whether the current building is also showing the rooms this player cannot
+   * enter yet.
+   *
+   * Shut by default: a list is a list of places you can go, and five rows of
+   * padlock is a wall rather than a menu. The rungs above you are still worth
+   * SEEING — they are what the ladder is for — so the selected tab doubles as
+   * the way to look: tap the tab you are already on and the locked rooms fold
+   * out, tap it again (or move to another building) and they fold away.
+   *
+   * One flag rather than one per building, because switching buildings closes
+   * it anyway: there is only ever one list on screen.
+   */
+  const [revealLocked, setRevealLocked] = useState(false);
+  // Deliberately NOT overridden under the tour, unlike the three states above
+  // it. Those each open a SURFACE that would mount under the scrim and cover a
+  // later step's anchor; this one only makes a list longer, and the tour
+  // re-measures its anchor every step. It is still cleared on the tour's true
+  // start/end transition below, for the same banked-tap reason.
+  const revealed = revealLocked;
 
   const MODE_META: {
     id: GameMode;
@@ -331,6 +352,29 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   const earned = profile?.achievements || [];
   const opened = (kind: 'difficulty' | 'winningScore' | 'mode', value: string | number) =>
     hasUnlock(earned, kind, value);
+
+  /**
+   * Why a room is shut, if it is. Two different gates, deliberately kept
+   * apart: a SOLO room is a rung of the AI ladder, walked through the
+   * achievement chain, and a PVP room is a skill bracket judged from level and
+   * tier. A room answers to one or the other, never both.
+   *
+   * Hoisted out of the render so the list can be FILTERED on it and the rooms
+   * it hides can be counted — a toggle nothing hints at is a toggle nobody
+   * finds.
+   */
+  const roomLock = (room: RoomDef) => {
+    const ladder =
+      room.difficulty && !opened('difficulty', room.difficulty)
+        ? unlockedBy('difficulty', room.difficulty) ?? null
+        : null;
+    const verdict = roomEntryVerdict(room, profile);
+    return { ladder, verdict, locked: !!ladder || !verdict.ok };
+  };
+
+  const buildingRooms = roomsOf(openNav.building);
+  const lockedRooms = buildingRooms.filter((room) => roomLock(room).locked);
+  const visibleRooms = revealed ? buildingRooms : buildingRooms.filter((room) => !roomLock(room).locked);
 
   // xp is a running total and xpNext an absolute threshold, so the bar has to
   // be measured from the floor of the CURRENT level — same arithmetic the
@@ -520,13 +564,41 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 role="tab"
                 aria-selected={current}
                 data-selected={current ? 'true' : 'false'}
-                onClick={() => setNav({ building: b.id, room: null })}
+                data-reveal={current && revealed ? 'true' : 'false'}
+                onClick={() => {
+                  // The tab you are on is the control for its own list; the
+                  // tabs you are not on are still just tabs. Moving buildings
+                  // always closes the locked rooms, so the list you land on is
+                  // the plain one.
+                  if (current) setRevealLocked((v) => !v);
+                  else {
+                    setNav({ building: b.id, room: null });
+                    setRevealLocked(false);
+                  }
+                }}
                 className={`flex items-center justify-center gap-1.5 rounded-ctl px-2 py-2 text-2xs transition-colors ${
                   current ? 'bg-accent text-ink-on-accent' : 'text-ink-muted'
                 }`}
               >
                 {BUILDING_ICONS[b.id]}
                 <span className="truncate">{t(b.labelKey, lang)}</span>
+                {/* The only hint that the tab does anything when you are
+                    already on it. A toggle nothing points at is a toggle
+                    nobody finds, and the count is the reason to press it:
+                    "there are three more rooms here" is the whole message.
+                    Shown on the selected tab only — an unselected one is
+                    still just a tab. */}
+                {current && lockedRooms.length > 0 && (
+                  <span
+                    id="building-locked-count"
+                    className={`flex shrink-0 items-center gap-0.5 rounded-chip px-1 text-2xs tnum ${
+                      revealed ? 'bg-ink-on-accent/25' : 'bg-ink-on-accent/15'
+                    }`}
+                  >
+                    <Lock className="h-2.5 w-2.5" />
+                    {lockedRooms.length}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -538,17 +610,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
             opens its lobby. Nothing expands in place, and every child of this
             scroll region is `shrink-0` — see the note above it for what
             happens when one is not. */}
-        {roomsOf(openNav.building).map((room) => {
-          // Two different gates, deliberately kept apart. A SOLO room is a
-          // rung of the AI ladder, walked through the achievement chain; a
-          // PVP room is a skill bracket, judged from level and tier. A room
-          // answers to one or the other, never both.
-          const ladderLock =
-            room.difficulty && !opened('difficulty', room.difficulty)
-              ? unlockedBy('difficulty', room.difficulty) ?? null
-              : null;
-          const verdict = roomEntryVerdict(room, profile);
-          const locked = !!ladderLock || !verdict.ok;
+        {visibleRooms.map((room) => {
+          const { ladder: ladderLock, verdict, locked } = roomLock(room);
           const chance = room.difficulty
             ? Math.round(winProbability(myRating, aiRating(room.difficulty, myRating.mu)) * 100)
             : null;
@@ -582,9 +645,11 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                     </span>
                   )}
                 </span>
-                <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
-                  {t(room.descKey, lang)}
-                </span>
+                {room.descKey && (
+                  <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
+                    {t(room.descKey, lang)}
+                  </span>
+                )}
                 {locked && (
                   <span
                     id={`room-${room.id}-lock`}

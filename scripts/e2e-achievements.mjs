@@ -35,7 +35,9 @@ await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
 await skipTour(page);
 await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
 
-await page.click('#building-solo');
+// No click: Solo is the building the menu opens on, and tapping the tab you
+// are already on is now the control that unfolds its locked rooms — which is
+// exactly what the next section asserts is folded.
 await page.waitForSelector('#room-rookie', { timeout: 5000 });
 // The onboarding tour opens by itself for a player who has never seen it —
 // it is part of onboarding now, not a menu row. Every suite past this point
@@ -55,14 +57,32 @@ async function skipTour(page) {
 }
 
 const dis = async (sel) => page.$eval(sel, (el) => el.disabled);
+const there = (sel) => page.$(sel).then((el) => !!el);
+
+// A list is a list of places you can go, so the four rungs a new player has
+// not earned are folded away rather than shown as four padlocks.
+if (!(await there('#room-rookie'))) fail('Rookie should be open from the start');
 if (await dis('#room-rookie')) fail('Rookie should be open from the start');
+for (const r of ['ai_pro', 'ai_elite', 'cyber', 'chaos']) {
+  if (await there(`#room-${r}`)) fail(`${r} is locked for a new player and should be folded away`);
+}
+ok('new player: Rookie on the list, the rungs above it folded away');
+
+// The fold is the tab itself: tap the one you are already on and they open.
+await revealLocked(page, 'solo');
 if (!(await dis('#room-ai_pro'))) fail('Pro should be locked for a new player');
 if (!(await dis('#room-ai_elite'))) fail('Elite should be locked for a new player');
 if (!(await dis('#room-cyber'))) fail('Cyber should be locked for a new player');
 if (!(await dis('#room-chaos'))) fail('Chaos should be locked for a new player');
-ok('new player: Rookie open, Pro and Cyber locked');
 if (!(await page.$('#room-ai_pro-lock'))) fail('no lock marker on Pro');
-ok('locked difficulties show a lock');
+ok('revealed, they are inert and each says what opens it');
+
+// And tapping it again folds them back.
+await page.click('#building-solo');
+await page
+  .waitForFunction(() => !document.querySelector('#room-ai_pro'), { timeout: 5000 })
+  .catch(() => fail('tapping the selected tab again did not fold the locked rooms away'));
+ok('and tapping the tab again folds them back');
 
 // The match-length picker lives in the pre-match sheet, which a ROOM opens —
 // the rungs above are the room list itself, one level up from it.
@@ -90,7 +110,7 @@ await page.evaluate(async () => {
 });
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-await page.click('#building-solo');
+await revealLocked(page, 'solo');
 await page.waitForSelector('#room-ai_pro', { timeout: 5000 });
 if (await dis('#room-ai_pro')) fail('beating Rookie did not open Pro');
 if (!(await dis('#room-ai_elite'))) fail('beating Rookie should not open Elite');
@@ -104,7 +124,7 @@ await page.evaluate(async () => {
 });
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-await page.click('#building-solo');
+await revealLocked(page, 'solo');
 await page.waitForSelector('#room-ai_elite', { timeout: 5000 });
 if (!(await dis('#room-ai_elite'))) fail('one Pro win should NOT open Elite');
 ok('one Pro win does not open Elite');
@@ -123,7 +143,7 @@ if (!climbed.achievements.includes('ai_pro_10')) fail('the Elite gate never open
 if (climbed.level < 10) fail(`the level gate was not enforced (level ${climbed.level})`);
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-await page.click('#building-solo');
+await revealLocked(page, 'solo');
 await page.waitForSelector('#room-ai_elite', { timeout: 5000 });
 if (await dis('#room-ai_elite')) fail('the full climb did not open Elite');
 if (!(await dis('#room-cyber'))) fail('the Pro climb must not open Cyber — that is Elite\'s climb');
@@ -171,6 +191,30 @@ if (!(await page.$('#ach-row-cyber_slayer'))) fail('ladder branch did not render
 const body = await page.textContent('#achievements-modal-container');
 if (!/\?\?\?/.test(body)) fail('no hidden achievements concealed');
 ok('tree renders per branch, with deep rungs concealed');
+
+
+/**
+ * Locked rooms are hidden until you tap the tab you are already on.
+ *
+ * A list is a list of places you can go, so the rooms this player cannot enter
+ * are folded away — and the selected tab is the fold: tapping it opens them,
+ * tapping it again (or moving to another building) closes them. Idempotent, so
+ * a caller never has to know which state it is in.
+ */
+async function revealLocked(page, building = 'solo') {
+  await page.waitForSelector(`#building-${building}`, { timeout: 8000 });
+  if ((await page.getAttribute(`#building-${building}`, 'data-selected')) !== 'true') {
+    await page.click(`#building-${building}`);
+  }
+  if ((await page.getAttribute(`#building-${building}`, 'data-reveal')) !== 'true') {
+    await page.click(`#building-${building}`);
+  }
+  await page.waitForFunction(
+    (b) => document.querySelector(`#building-${b}`)?.getAttribute('data-reveal') === 'true',
+    building,
+    { timeout: 5000 }
+  );
+}
 
 // ---------------------------------------------------------------------------
 // The toast that announces an unlock has to leave on its own, and go the

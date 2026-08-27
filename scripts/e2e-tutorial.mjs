@@ -51,6 +51,30 @@ const me = (page) => page.evaluate(async () => (await fetch('/api/profile/me')).
 
 console.log('The onboarding tour walks the real game and gives nothing for it');
 
+
+/**
+ * Locked rooms are hidden until you tap the tab you are already on.
+ *
+ * A list is a list of places you can go, so the rooms this player cannot enter
+ * are folded away — and the selected tab is the fold: tapping it opens them,
+ * tapping it again (or moving to another building) closes them. Idempotent, so
+ * a caller never has to know which state it is in.
+ */
+async function revealLocked(page, building = 'solo') {
+  await page.waitForSelector(`#building-${building}`, { timeout: 8000 });
+  if ((await page.getAttribute(`#building-${building}`, 'data-selected')) !== 'true') {
+    await page.click(`#building-${building}`);
+  }
+  if ((await page.getAttribute(`#building-${building}`, 'data-reveal')) !== 'true') {
+    await page.click(`#building-${building}`);
+  }
+  await page.waitForFunction(
+    (b) => document.querySelector(`#building-${b}`)?.getAttribute('data-reveal') === 'true',
+    building,
+    { timeout: 5000 }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 1. It opens by itself. The old deck never did, which is why it taught nobody.
 // ---------------------------------------------------------------------------
@@ -349,8 +373,18 @@ for (let i = 0; i < 60; i++) {
   const here = await locker.evaluate(() => ({
     open: !!document.querySelector('#onboarding-tour-card'),
     lock: !!document.querySelector('#room-ai_pro-lock'),
+    strip: document.querySelector('#building-solo')?.getAttribute('data-reveal') ?? null,
   }));
   if (!here.open) { lockTourEnded = true; break; }
+  // Locked rooms are folded away, so there is nothing to meddle with until
+  // the fold is opened — and opening it is itself a tap under the scrim, which
+  // is the point: the scrim is pointer-events-none and the app underneath
+  // stays usable.
+  if (here.strip === 'false' && !here.lock) {
+    await locker.evaluate(() => document.querySelector('#building-solo')?.click());
+    await sleep(200);
+    continue;
+  }
   if (here.lock && !lockPoked) {
     lockPoked = true;
     await locker.evaluate(() => document.querySelector('#room-ai_pro-lock')?.click());

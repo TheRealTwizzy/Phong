@@ -101,9 +101,35 @@ const openLadder = (page) =>
   });
 
 
+
+/**
+ * Locked rooms are hidden until you tap the tab you are already on.
+ *
+ * A list is a list of places you can go, so the rooms this player cannot enter
+ * are folded away — and the selected tab is the fold: tapping it opens them,
+ * tapping it again (or moving to another building) closes them. Idempotent, so
+ * a caller never has to know which state it is in.
+ */
+async function revealLocked(page, building = 'solo') {
+  await page.waitForSelector(`#building-${building}`, { timeout: 8000 });
+  if ((await page.getAttribute(`#building-${building}`, 'data-selected')) !== 'true') {
+    await page.click(`#building-${building}`);
+  }
+  if ((await page.getAttribute(`#building-${building}`, 'data-reveal')) !== 'true') {
+    await page.click(`#building-${building}`);
+  }
+  await page.waitForFunction(
+    (b) => document.querySelector(`#building-${b}`)?.getAttribute('data-reveal') === 'true',
+    building,
+    { timeout: 5000 }
+  );
+}
+
 // ---- 1. Per-difficulty predictions on the menu ---------------------------
 const alice = await newPlayer('Rate');
-await alice.click('#building-solo');
+// Four of the five rungs are locked for a fresh player, and locked rooms are
+// folded away — so the odds this section reads are behind the fold.
+await revealLocked(alice, 'solo');
 await alice.waitForSelector('#room-rookie-odds', { timeout: 5000 });
 
 const odds = {};
@@ -141,7 +167,8 @@ ok('five rungs on the menu; Elite and Chaos locked for a fresh player');
 const oddsAfterSoloRun = async (page) => {
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
-  await page.click('#building-solo');
+  // A reload puts the menu back to its plain list, so the fold is re-opened.
+  await revealLocked(page, 'solo');
   await page.waitForSelector('#room-cyber-odds', { timeout: 5000 });
   const out = {};
   for (const d of ['rookie', 'pro', 'elite', 'cyber']) {

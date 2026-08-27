@@ -66,8 +66,6 @@ interface MultiplayerLobbyProps {
   tables?: TableSummary[];
   tablesLoading?: boolean;
   onRefreshTables?: () => void;
-  /** Create a table others can find, rather than one shared by code. */
-  onCreatePublicTable?: () => void;
   /** Take a watching seat at a table rather than a playing one. */
   onWatchTable?: (roomId: string) => void;
   /** Who is sitting where at the table this player is at, or null. */
@@ -118,7 +116,6 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   tables = [],
   tablesLoading = false,
   onRefreshTables,
-  onCreatePublicTable,
   onWatchTable,
   tableState = null,
   onSwapSeat,
@@ -645,23 +642,27 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                     ))}
                   </ul>
                 )}
-
-                {onCreatePublicTable && (
-                  <Button
-                    id="btn-create-public-table"
-                    variant="primary"
-                    size="lg"
-                    block
-                    onClick={onCreatePublicTable}
-                  >
-                    {t('lobby_tables_create', language)}
-                  </Button>
-                )}
               </Panel>
             )}
 
             {/* One column. The md: breakpoint this used to carry never fires
-                on a phone-only app. */}
+                on a phone-only app.
+
+                And ONE way to open a table. There were two, and from the
+                player's seat they were the same button: "start a table" made a
+                listed one and "host a match" an unlisted one, and both landed
+                on the identical screen — a room code, waiting for somebody.
+                Listed-versus-unlisted is invisible to the person who just
+                pressed it, so it was never a choice, only a fork.
+
+                What survives is the table reachable BOTH ways: listed in the
+                room's browser, and still carrying the 4-letter code and the QR.
+                What it costs is stated in CLAUDE.md §5 rather than hidden — a
+                listed table can be sat at by a stranger before the friend you
+                sent the code to arrives, and its joiner is judged against the
+                room's bracket, which an unlisted one never was. If invite-only
+                tables are wanted back, they belong beside "let people watch" as
+                a term of the room, not as a second front door. */}
             <Panel variant="raised" className="flex flex-col gap-2.5">
               <div>
                 <h3 className="flex items-center gap-1.5 text-2xs text-ink">
@@ -687,7 +688,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 </label>
               )}
               <Button id="btn-create-room" variant="primary" size="lg" block onClick={handleCreate}>
-                {t('lobby_host_match', language)}
+                {t('lobby_tables_create', language)}
               </Button>
             </Panel>
 

@@ -2112,17 +2112,24 @@ export default function App() {
       config: normalizeRoomConfig({
         winningScore: settingsRef.current.winningScore,
         rules: settingsRef.current.rules,
-        // A PUBLIC table is one the host is advertising to a room full of
-        // strangers, so watching seats are part of that offer and are open
-        // by default; the host can still shut them in the lobby. A PRIVATE
-        // one is today's invite-code table and stays byte-identical — which
-        // is also why the DEFAULT in normalizeRoomConfig is off rather than
-        // this: an old bundle, the invite flow and the test harness all
-        // create a table without saying anything here.
+        // Watching seats start SHUT, and the host opens them in the lobby.
         //
-        // The venue overrules either way: the top three brackets have no
-        // watching seats, so this comes back false there.
-        spectators: visibility === 'public',
+        // They used to open by default on a public table, on the reasoning
+        // that a table being advertised is one where watching is part of the
+        // offer. That held while public was one of two choices. It stopped
+        // holding the moment public became the ONLY kind of table the client
+        // makes, because open seats force the match onto the relay —
+        // `rtc_signal` is refused for a watched table, since a P2P match never
+        // reaches the relay and a watcher would sit in front of a frozen
+        // court. Defaulting them on would therefore have taken the direct
+        // DataChannel away from every duel in the game to buy a feature
+        // nobody had asked for yet.
+        //
+        // So the trade is made where the player can see it: P2P by default,
+        // and one toggle in the lobby to open the table up — which ends the
+        // DataChannel then and there, exactly as `set_room_config` already
+        // handles.
+        spectators: false,
       }),
     }));
   };
@@ -3973,7 +3980,13 @@ export default function App() {
           opponentName={opponentName}
           isConnected={isConnected}
           currentUsername={profile?.username}
-          onCreateRoom={handleCreateRoom}
+          // The single create door, and it makes a PUBLIC table: one that is
+          // listed in the room's browser AND still carries the 4-letter code
+          // and QR. The unlisted variant is no longer reachable from the
+          // client — `visibility` stays in the protocol, and stays private by
+          // DEFAULT at the relay, which is what keeps an old bundle, the
+          // invite flow and the test harness working unchanged.
+          onCreateRoom={() => handleCreateRoom({ visibility: 'public' })}
           onJoinRoom={handleJoinRoom}
           onLeaveRoom={requestLeaveLobby}
           opponentId={opponentId}
@@ -3992,7 +4005,6 @@ export default function App() {
           tables={venueTables}
           tablesLoading={tablesLoading}
           onRefreshTables={() => refreshTables(lobbyVenue)}
-          onCreatePublicTable={() => handleCreateRoom({ visibility: 'public' })}
           onWatchTable={handleWatchTable}
           tableState={tableState}
           onSwapSeat={handleSwapSeat}
