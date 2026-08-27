@@ -79,8 +79,8 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── TESTING.md                 # The two test layers, the coverage floors, standing rules
 ├── .claude/skills/            # Project skills: the ordered touch-list for a protocol
 │                              #   change, a locale, a playerId-keyed table, a match
-│                              #   rule, a doc update — and which E2E suites a diff
-│                              #   needs. See .claude/skills/README.md
+│                              #   rule, a doc update, and the pre-push gate.
+│                              #   See .claude/skills/README.md
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
 ├── DEPLOYMENT.md              # KVM/docker-compose runbook (+ Render alternative)
 ├── Dockerfile                 # Multi-stage build → slim runtime (express+ws only)
@@ -316,7 +316,7 @@ npm run dev      # tsx watch server.ts — app + relay with hot reload on :3000
 npm run build    # vite build (client) + esbuild bundle (server) → dist/
 npm start        # node dist/server.cjs (production)
 npm run lint     # tsc --noEmit
-npm run lint:suites # is .claude/skills' file→E2E-suite map still true? (CI runs it)
+npm run lint:suites # every scripts/e2e-*.mjs is registered with the runner (CI runs it)
 npm test         # vitest run (tests/)
 npm run test:coverage # the same suites plus the per-module coverage floors CI enforces
 npm run test:e2e # browser E2E — needs `npm run build` first (see below)
@@ -336,14 +336,15 @@ from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. `verify`
 set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
 components are Playwright's job, and one number would either fail on that bet or be set low
 enough to measure nothing. It also opens with `lint:suites`, before `npm ci`, because that
-one needs no dependencies and costs seconds: `.claude/skills/phong-ship-check` maps a changed
-file to the browser suites it puts at risk, and a hand-written map of eighteen suites is
-exactly the kind of claim that rots — it drifted four times on its first day, always toward
-selecting too FEW, which is the direction that lets a targeted run report success while
-skipping the flow the change actually broke. The check regenerates the floor from what the
-suites really drive (every `#id` each one uses, resolved back to the files defining it) and
-fails when a rule sits below it, so the map cannot go stale in the gaps between somebody
-remembering to look. **A suite that
+one needs no dependencies and costs milliseconds: a file named `scripts/e2e-<name>.mjs` that
+is missing from `e2e-run.mjs`'s `SUITES` is not a skipped test, it is a test **nobody knows is
+not running** — it reads as coverage in review and never executes. Nothing else in the repo
+can notice: `npm test` does not touch those files, `tsc` does not read them, and the runner
+cannot report a suite it was never told about. A **targeted** E2E run is deliberately not
+offered: a changed-file→suite map was built and deleted, because the coupling that decides it
+(which suites play a match, or a relayed point) is behavioural rather than static, and every
+rule anybody checked was too narrow in the direction that lets a green run hide a broken flow.
+`.claude/skills/phong-ship-check` keeps that reasoning so it is not rebuilt. **A suite that
 asserts old behaviour is a suite that will be deleted rather than read** — when a rule
 changes, change the suite in the same commit.
 
