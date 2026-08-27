@@ -53,6 +53,9 @@ export interface SheetProps {
    * deliberately not covered — it dims the viewer's app, not the owner's.
    */
   cardStyle?: React.CSSProperties;
+  /** Published as data-mode, so `cos-light:` resolves inside a card that is
+      wearing a different cosmetic than the page around it. */
+  cardMode?: 'dark' | 'light';
   isOpen: boolean;
   /** Omit to make the sheet unclosable (an onboarding-style gate). */
   onClose?: () => void;
@@ -91,6 +94,7 @@ export const Sheet: React.FC<SheetProps> = ({
   id,
   cardId,
   cardStyle,
+  cardMode,
   isOpen,
   onClose,
   size = 'md',
@@ -138,6 +142,7 @@ export const Sheet: React.FC<SheetProps> = ({
           <motion.div
             id={cardId}
             style={cardStyle}
+            data-mode={cardMode}
             role="dialog"
             aria-modal="true"
             className={`w-full ${SIZE[size]} max-h-sheet flex flex-col overflow-hidden rounded-sheet border ${ACCENT[accent]} bg-surface-2 text-ink shadow-sheet ${cardClassName}`}

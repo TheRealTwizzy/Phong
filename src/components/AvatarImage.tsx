@@ -35,7 +35,7 @@ export const AvatarImage: React.FC<AvatarImageProps> = ({
 
   return (
     <div
-      className={`relative overflow-hidden bg-gradient-to-tr from-cyan-500 to-indigo-500 flex items-center justify-center shrink-0 ${className}`}
+      className={`relative overflow-hidden bg-gradient-to-tr from-accent to-indigo-500 flex items-center justify-center shrink-0 ${className}`}
       style={{ width: size, height: size }}
     >
       {src && !failed ? (
@@ -47,7 +47,7 @@ export const AvatarImage: React.FC<AvatarImageProps> = ({
           onError={() => setFailed(true)}
         />
       ) : (
-        <User className="text-white/85" style={{ width: size * 0.5, height: size * 0.5 }} />
+        <User className="text-ink/85" style={{ width: size * 0.5, height: size * 0.5 }} />
       )}
     </div>
   );

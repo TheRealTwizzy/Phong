@@ -330,9 +330,19 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       id="main-menu-screen"
       className="relative flex h-full w-full flex-col overflow-hidden bg-surface-1 text-ink select-none"
     >
-      {/* The equipped court theme is FELT here and nowhere else in the shell:
-          a wash at low alpha over the surface ramp, so twenty themes cannot
-          turn the menu into twenty different designs. */}
+      {/* This used to be the ONLY place the equipped theme reached the shell —
+          "a wash at low alpha over the surface ramp, so twenty themes cannot
+          turn the menu into twenty different designs". That restraint was right
+          while a theme was loose colours with nothing checking them: twenty
+          hand-authored shells would have been twenty designs to maintain, and
+          the first to drift would have been an unreadable one.
+
+          Both halves of that are now enforced rather than trusted. A cosmetic's
+          shell is DERIVED from its own court palette (shellFrom), so it cannot
+          become an unrelated design, and a measured contrast floor over all
+          twenty means it cannot become an illegible one. So the menu takes the
+          whole palette through the tokens, and this is just the accent bloom on
+          top of it. */}
       <div
         className="pointer-events-none absolute inset-0"
         style={{

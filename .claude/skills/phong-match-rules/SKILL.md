@@ -81,7 +81,7 @@ second one, that is a deliberate change to the shape of the rule set, not a deta
 ## Verifying
 
 ```bash
-npx vitest run tests/matchRules.test.ts tests/themes.test.ts
+npx vitest run tests/matchRules.test.ts tests/cosmetics.test.ts
 npm run build && node scripts/e2e-run.mjs rules duel
 ```
 

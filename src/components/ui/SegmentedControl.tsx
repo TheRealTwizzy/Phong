@@ -7,7 +7,7 @@ import { LockBadge } from './LockBadge';
 //
 // The selected state is exposed as `aria-checked` and `data-selected` rather
 // than being inferable only from a colour. The e2e suite used to read
-// `el.className.includes('border-cyan-400')` to find the selection, which
+// `el.className.includes('border-accent')` to find the selection, which
 // coupled the tests to a literal Tailwind class and meant any restyle broke
 // them; `data-selected` follows the precedent already set by `data-locked` on
 // the achievement branch tabs.

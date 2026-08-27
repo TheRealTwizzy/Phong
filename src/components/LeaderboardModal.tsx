@@ -66,28 +66,28 @@ export const LeaderboardModal: React.FC<Props> = ({
   const renderRankBadge = (rank: number | null) => {
     if (rank === null) {
       return (
-        <div className="w-8 h-8 rounded-full bg-violet-500/15 border border-violet-400/40 flex items-center justify-center text-violet-300 text-2xs">
+        <div className="w-8 h-8 rounded-full bg-rank-steady/15 border border-rank-steady/40 flex items-center justify-center text-rank-steady text-2xs">
           {t('board_bot', language)}
         </div>
       );
     }
     if (rank === 1) {
       return (
-        <div className="w-8 h-8 rounded-full bg-amber-400/20 border border-amber-400/50 flex items-center justify-center text-amber-300">
-          <Crown className="w-4 h-4 fill-amber-400" />
+        <div className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
+          <Crown className="w-4 h-4 fill-warn" />
         </div>
       );
     }
     if (rank === 2) {
       return (
-        <div className="w-8 h-8 rounded-full bg-slate-300/20 border border-slate-300/50 flex items-center justify-center text-slate-200">
+        <div className="w-8 h-8 rounded-full bg-slate-300/20 border border-slate-300/50 flex items-center justify-center text-ink">
           <Medal className="w-4 h-4" />
         </div>
       );
     }
     if (rank === 3) {
       return (
-        <div className="w-8 h-8 rounded-full bg-amber-700/20 border border-amber-700/50 flex items-center justify-center text-amber-600">
+        <div className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
           <Medal className="w-4 h-4" />
         </div>
       );
@@ -242,7 +242,7 @@ export const LeaderboardModal: React.FC<Props> = ({
                         </span>
                       )}
                       {entry.isBot && (
-                        <span className="rounded-chip border border-violet-400/40 bg-violet-500/25 px-1.5 py-0.5 text-2xs text-violet-300 uppercase">
+                        <span className="rounded-chip border border-rank-steady/40 bg-rank-steady/25 px-1.5 py-0.5 text-2xs text-rank-steady uppercase">
                           {t('board_bot', language)}
                         </span>
                       )}

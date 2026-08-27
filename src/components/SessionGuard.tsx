@@ -86,7 +86,7 @@ const RestoreForm: React.FC<{ language: LanguageCode }> = ({ language }) => {
           id="btn-session-claim"
           onClick={() => void submit()}
           disabled={busy || !code.trim()}
-          className="px-4 py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-bold uppercase tracking-wider text-[11px] disabled:opacity-40 active:scale-[0.98] transition shrink-0"
+          className="px-4 py-2.5 rounded-xl bg-cyan-500 text-ink-on-accent font-bold uppercase tracking-wider text-[11px] disabled:opacity-40 active:scale-[0.98] transition shrink-0"
         >
           {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t('restore_profile', language)}
         </button>
@@ -148,7 +148,7 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
         initial={{ opacity: 0, y: 14 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35 }}
-        className="relative w-full max-w-sm bg-slate-900/90 border border-cyan-500/30 rounded-3xl p-8 shadow-2xl shadow-cyan-950/40 backdrop-blur-xl flex flex-col items-center text-center"
+        className="relative w-full max-w-sm bg-slate-900/90 border border-cyan-500/30 rounded-3xl p-8 shadow-2xl shadow-surface-0/60 backdrop-blur-xl flex flex-col items-center text-center"
       >
         <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4">
           {copy.icon}
@@ -184,7 +184,7 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
                   id="btn-session-action"
                   onClick={copy.onAction}
                   disabled={busy}
-                  className="flex-1 px-3 py-3 rounded-xl bg-rose-500 text-slate-950 font-bold uppercase tracking-wider text-[11px] disabled:opacity-50 active:scale-[0.98] transition"
+                  className="flex-1 px-3 py-3 rounded-xl bg-rose-500 text-ink-on-accent font-bold uppercase tracking-wider text-[11px] disabled:opacity-50 active:scale-[0.98] transition"
                 >
                   {busy ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : t('session_moved_confirm_action', language)}
                 </button>
@@ -198,7 +198,7 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
               className={
                 isReleased
                   ? 'w-full px-5 py-3 rounded-xl bg-transparent text-slate-400 border border-slate-700 font-bold uppercase tracking-wider text-[11px] disabled:opacity-50 active:scale-[0.98] transition'
-                  : 'w-full px-5 py-3 rounded-xl bg-cyan-500 text-slate-950 font-bold uppercase tracking-wider text-xs shadow-lg shadow-cyan-500/20 disabled:opacity-50 active:scale-[0.98] transition'
+                  : 'w-full px-5 py-3 rounded-xl bg-cyan-500 text-ink-on-accent font-bold uppercase tracking-wider text-xs shadow-lg shadow-accent/20 disabled:opacity-50 active:scale-[0.98] transition'
               }
             >
               {busy && !isReleased ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : copy.action}

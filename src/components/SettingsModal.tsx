@@ -195,12 +195,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     >
 
         {/* Language Selection Dropdown */}
-        <div className="flex flex-col gap-1.5 p-3 rounded-2xl bg-zinc-900/70 border border-zinc-800">
-          <label className="text-xs font-mono font-bold text-zinc-300 flex items-center gap-1.5">
-            <Globe className="w-4 h-4 text-cyan-400" />
+        <div className="flex flex-col gap-1.5 p-3 rounded-2xl bg-surface-2/70 border border-line">
+          <label className="text-xs font-mono font-bold text-ink flex items-center gap-1.5">
+            <Globe className="w-4 h-4 text-accent" />
             {t('language', lang)}
           </label>
-          <p className="text-[10px] text-zinc-400 mb-1">
+          <p className="text-[10px] text-ink-muted mb-1">
             {t('language_desc', lang)}
           </p>
           <div className="relative">
@@ -208,25 +208,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               id="language-select-dropdown"
               value={lang}
               onChange={(e) => onUpdateSettings({ language: e.target.value as LanguageCode })}
-              className="w-full bg-slate-950 text-slate-100 text-xs font-bold font-mono py-2.5 px-3 rounded-xl border border-slate-700 hover:border-cyan-500/60 focus:border-cyan-400 focus:outline-none transition cursor-pointer appearance-none"
+              className="w-full bg-surface-0 text-ink text-xs font-bold font-mono py-2.5 px-3 rounded-xl border border-line-strong hover:border-accent/60 focus:border-accent focus:outline-none transition cursor-pointer appearance-none"
             >
               {LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code} className="bg-slate-900 text-white py-1">
+                <option key={l.code} value={l.code} className="bg-surface-2 text-ink py-1">
                   {l.flag} {l.nativeName} ({l.label})
                 </option>
               ))}
             </select>
-            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-slate-400">
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-ink-muted">
               <span className="text-xs">▼</span>
             </div>
           </div>
         </div>
 
         {/* Audio & Environment Soundscape Section */}
-        <div className="flex flex-col gap-3.5 p-3.5 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+        <div className="flex flex-col gap-3.5 p-3.5 rounded-2xl bg-surface-2/60 border border-line">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono font-bold text-zinc-300 flex items-center gap-1.5">
-              <Volume2 className="w-4 h-4 text-emerald-400" />
+            <span className="text-xs font-mono font-bold text-ink flex items-center gap-1.5">
+              <Volume2 className="w-4 h-4 text-win" />
               {t('sound_effects', lang)}
             </span>
             <button
@@ -234,8 +234,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onClick={() => onUpdateSettings({ soundEnabled: !settings.soundEnabled })}
               className={`text-[10px] px-2 py-0.5 rounded-lg font-mono font-bold border transition ${
                 settings.soundEnabled
-                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                  : 'bg-zinc-800 text-zinc-500 border-zinc-700'
+                  ? 'bg-win/20 text-win border-win/40'
+                  : 'bg-surface-3 text-ink-muted border-line-strong'
               }`}
             >
               {settings.soundEnabled ? t('sound_on', lang) : t('sound_off', lang)}
@@ -245,22 +245,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* SFX Volume Slider */}
           <div>
             <div className="flex justify-between text-xs font-mono mb-1.5">
-              <span className="text-zinc-400 flex items-center gap-1">
-                <Volume2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-ink-muted flex items-center gap-1">
+                <Volume2 className="w-3.5 h-3.5 text-accent" />
                 {t('sound_effects', lang)}
               </span>
-              <span className="text-cyan-400 font-bold">{settings.sfxVolume ?? 80}%</span>
+              <span className="text-accent font-bold">{settings.sfxVolume ?? 80}%</span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => onUpdateSettings({ sfxVolume: (settings.sfxVolume ?? 80) === 0 ? 80 : 0 })}
-                className="text-zinc-500 hover:text-zinc-300 p-0.5"
+                className="text-ink-muted hover:text-ink p-0.5"
                 title="Mute SFX"
               >
                 {(settings.sfxVolume ?? 80) === 0 ? (
-                  <VolumeX className="w-4 h-4 text-rose-400" />
+                  <VolumeX className="w-4 h-4 text-loss" />
                 ) : (
-                  <Volume2 className="w-4 h-4 text-zinc-400" />
+                  <Volume2 className="w-4 h-4 text-ink-muted" />
                 )}
               </button>
               <input
@@ -271,7 +271,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 step="5"
                 value={settings.sfxVolume ?? 80}
                 onChange={(e) => onUpdateSettings({ sfxVolume: parseInt(e.target.value, 10) })}
-                className="w-full accent-cyan-400 h-1.5 rounded-lg bg-zinc-700 cursor-pointer"
+                className="w-full accent-cyan-400 h-1.5 rounded-lg bg-surface-4 cursor-pointer"
               />
             </div>
           </div>
@@ -279,22 +279,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Background Music (BGM) Slider */}
           <div>
             <div className="flex justify-between text-xs font-mono mb-1.5">
-              <span className="text-zinc-400 flex items-center gap-1">
-                <Music className="w-3.5 h-3.5 text-purple-400" />
+              <span className="text-ink-muted flex items-center gap-1">
+                <Music className="w-3.5 h-3.5 text-rank-steady" />
                 {t('bgm_music', lang)}
               </span>
-              <span className="text-purple-400 font-bold">{settings.bgmVolume ?? 50}%</span>
+              <span className="text-rank-steady font-bold">{settings.bgmVolume ?? 50}%</span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => onUpdateSettings({ bgmVolume: (settings.bgmVolume ?? 50) === 0 ? 50 : 0 })}
-                className="text-zinc-500 hover:text-zinc-300 p-0.5"
+                className="text-ink-muted hover:text-ink p-0.5"
                 title="Mute Music"
               >
                 {(settings.bgmVolume ?? 50) === 0 ? (
-                  <VolumeX className="w-4 h-4 text-rose-400" />
+                  <VolumeX className="w-4 h-4 text-loss" />
                 ) : (
-                  <Music className="w-4 h-4 text-zinc-400" />
+                  <Music className="w-4 h-4 text-ink-muted" />
                 )}
               </button>
               <input
@@ -305,21 +305,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 step="5"
                 value={settings.bgmVolume ?? 50}
                 onChange={(e) => onUpdateSettings({ bgmVolume: parseInt(e.target.value, 10) })}
-                className="w-full accent-purple-400 h-1.5 rounded-lg bg-zinc-700 cursor-pointer"
+                className="w-full accent-purple-400 h-1.5 rounded-lg bg-surface-4 cursor-pointer"
               />
             </div>
           </div>
 
           {/* Environment Soundscape Selection & Volume */}
-          <div className="pt-2 border-t border-zinc-800/80 flex flex-col gap-2.5">
+          <div className="pt-2 border-t border-line/80 flex flex-col gap-2.5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5">
-                <Waves className="w-4 h-4 text-cyan-400" />
-                <span className="text-xs font-mono font-bold text-zinc-300">
+                <Waves className="w-4 h-4 text-accent" />
+                <span className="text-xs font-mono font-bold text-ink">
                   {t('environment_title', lang)}
                 </span>
               </div>
-              <span className="text-[10px] font-mono text-cyan-400 font-bold uppercase">
+              <span className="text-[10px] font-mono text-accent font-bold uppercase">
                 {settings.soundscape || 'none'}
               </span>
             </div>
@@ -342,8 +342,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }}
                     className={`p-2 rounded-xl border text-left flex items-center gap-2 transition active:scale-95 ${
                       isSelected
-                        ? 'border-cyan-400 bg-cyan-950/50 text-cyan-200 font-bold shadow-sm'
-                        : 'border-zinc-800 bg-zinc-950/60 hover:bg-zinc-800/50 text-zinc-400'
+                        ? 'border-accent bg-accent/50 text-accent font-bold shadow-sm'
+                        : 'border-line bg-surface-0/60 hover:bg-surface-3/50 text-ink-muted'
                     }`}
                   >
                     <span className="text-sm">{sc.icon}</span>
@@ -359,8 +359,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {settings.soundscape && settings.soundscape !== 'none' && (
               <div className="mt-1">
                 <div className="flex justify-between text-xs font-mono mb-1">
-                  <span className="text-zinc-400">{t('soundscape_volume', lang)}</span>
-                  <span className="text-cyan-400 font-bold">{settings.soundscapeVolume ?? 40}%</span>
+                  <span className="text-ink-muted">{t('soundscape_volume', lang)}</span>
+                  <span className="text-accent font-bold">{settings.soundscapeVolume ?? 40}%</span>
                 </div>
                 <input
                   id="slider-soundscape-volume"
@@ -374,7 +374,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onUpdateSettings({ soundscapeVolume: val });
                     sound.setSoundscapeVolume(val / 100);
                   }}
-                  className="w-full accent-cyan-400 h-1.5 rounded-lg bg-zinc-700 cursor-pointer"
+                  className="w-full accent-cyan-400 h-1.5 rounded-lg bg-surface-4 cursor-pointer"
                 />
               </div>
             )}
@@ -382,26 +382,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Screen Shake Intensity Control */}
-        <div className="flex flex-col gap-2 p-3.5 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+        <div className="flex flex-col gap-2 p-3.5 rounded-2xl bg-surface-2/60 border border-line">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono font-bold text-zinc-300 flex items-center gap-1.5">
-              <Zap className="w-4 h-4 text-amber-400" />
+            <span className="text-xs font-mono font-bold text-ink flex items-center gap-1.5">
+              <Zap className="w-4 h-4 text-warn" />
               {t('screen_shake', lang)}
             </span>
             <div className="flex items-center gap-2">
-              <span className="text-amber-400 font-bold text-xs font-mono">
+              <span className="text-warn font-bold text-xs font-mono">
                 {settings.screenShakeIntensity ?? 60}%
               </span>
               <button
                 id="btn-test-screen-shake"
                 onClick={handleTestShake}
-                className="text-[10px] px-2.5 py-0.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 active:scale-95 transition"
+                className="text-[10px] px-2.5 py-0.5 rounded-lg bg-surface-3 hover:bg-surface-4 text-ink border border-line-strong active:scale-95 transition"
               >
                 {t('test_shake', lang)}
               </button>
             </div>
           </div>
-          <p className="text-[10px] text-zinc-400">
+          <p className="text-[10px] text-ink-muted">
             {t('screen_shake_desc', lang)}
           </p>
           <input
@@ -412,26 +412,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             step="10"
             value={settings.screenShakeIntensity ?? 60}
             onChange={(e) => onUpdateSettings({ screenShakeIntensity: parseInt(e.target.value, 10) })}
-            className="w-full accent-amber-400 h-1.5 rounded-lg bg-zinc-700 cursor-pointer"
+            className="w-full accent-amber-400 h-1.5 rounded-lg bg-surface-4 cursor-pointer"
           />
         </div>
 
         {/* Haptic Feedback Intensity Slider */}
-        <div className="flex flex-col gap-2.5 p-3.5 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+        <div className="flex flex-col gap-2.5 p-3.5 rounded-2xl bg-surface-2/60 border border-line">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono font-bold text-zinc-300 flex items-center gap-1.5">
-              <Vibrate className="w-4 h-4 text-amber-400" />
+            <span className="text-xs font-mono font-bold text-ink flex items-center gap-1.5">
+              <Vibrate className="w-4 h-4 text-warn" />
               {t('haptics', lang)}
             </span>
             <button
               id="toggle-haptics"
               onClick={() => onUpdateSettings({ hapticsEnabled: !settings.hapticsEnabled })}
               className={`w-10 h-5 rounded-full transition-colors relative p-0.5 ${
-                settings.hapticsEnabled ? 'bg-amber-500' : 'bg-zinc-700'
+                settings.hapticsEnabled ? 'bg-warn' : 'bg-surface-4'
               }`}
             >
               <div
-                className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                className={`w-4 h-4 rounded-full bg-white cos-light:bg-surface-1 transition-transform ${
                   settings.hapticsEnabled ? 'translate-x-5' : 'translate-x-0'
                 }`}
               />
@@ -441,12 +441,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {settings.hapticsEnabled && (
             <div className="pt-1">
               <div className="flex justify-between items-center text-xs font-mono mb-1.5">
-                <span className="text-zinc-400">{t('haptic_intensity', lang)}</span>
+                <span className="text-ink-muted">{t('haptic_intensity', lang)}</span>
                 <div className="flex items-center gap-2">
-                  <span className="text-amber-400 font-bold">{settings.hapticIntensity ?? 75}%</span>
+                  <span className="text-warn font-bold">{settings.hapticIntensity ?? 75}%</span>
                   <button
                     onClick={handleTestHaptic}
-                    className="text-[10px] px-2 py-0.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 active:scale-95 transition"
+                    className="text-[10px] px-2 py-0.5 rounded-lg bg-surface-3 hover:bg-surface-4 text-ink border border-line-strong active:scale-95 transition"
                   >
                     {t('test_tap', lang)}
                   </button>
@@ -460,7 +460,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 step="5"
                 value={settings.hapticIntensity ?? 75}
                 onChange={(e) => onUpdateSettings({ hapticIntensity: parseInt(e.target.value, 10) })}
-                className="w-full accent-amber-400 h-1.5 rounded-lg bg-zinc-700 cursor-pointer"
+                className="w-full accent-amber-400 h-1.5 rounded-lg bg-surface-4 cursor-pointer"
               />
             </div>
           )}
@@ -469,23 +469,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Toggles: Ball Trails, Gyroscope Tilt, Sonar Radar, the two net markers */}
         <div className="flex flex-col gap-2">
           {/* Dynamic Ball Velocity Trails */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800">
+          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-surface-2/40 border border-line">
             <div className="flex items-center gap-2">
-              <Flame className="w-4 h-4 text-amber-400" />
+              <Flame className="w-4 h-4 text-warn" />
               <div>
                 <div className="text-xs font-mono font-medium">{t('ball_trails', lang)}</div>
-                <div className="text-[10px] text-zinc-400">Decaying velocity comet trail for high-speed tracking</div>
+                <div className="text-[10px] text-ink-muted">Decaying velocity comet trail for high-speed tracking</div>
               </div>
             </div>
             <button
               id="toggle-ball-trails"
               onClick={() => onUpdateSettings({ showTrails: !settings.showTrails })}
               className={`w-11 h-6 rounded-full transition-colors relative p-0.5 ${
-                settings.showTrails ? 'bg-amber-500' : 'bg-zinc-700'
+                settings.showTrails ? 'bg-warn' : 'bg-surface-4'
               }`}
             >
               <div
-                className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                className={`w-5 h-5 rounded-full bg-white cos-light:bg-surface-1 transition-transform ${
                   settings.showTrails ? 'translate-x-5' : 'translate-x-0'
                 }`}
               />
@@ -493,23 +493,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           {/* Tilt motion */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800">
+          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-surface-2/40 border border-line">
             <div className="flex items-center gap-2">
-              <Smartphone className="w-4 h-4 text-cyan-400" />
+              <Smartphone className="w-4 h-4 text-accent" />
               <div>
                 <div className="text-xs font-mono font-medium">{t('tilt_gyro', lang)}</div>
-                <div className="text-[10px] text-zinc-400">Tilt phone left/right to move paddle</div>
+                <div className="text-[10px] text-ink-muted">Tilt phone left/right to move paddle</div>
               </div>
             </div>
             <button
               id="toggle-tilt-control"
               onClick={handleRequestTiltPermission}
               className={`w-11 h-6 rounded-full transition-colors relative p-0.5 ${
-                settings.tiltEnabled ? 'bg-cyan-500' : 'bg-zinc-700'
+                settings.tiltEnabled ? 'bg-accent' : 'bg-surface-4'
               }`}
             >
               <div
-                className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                className={`w-5 h-5 rounded-full bg-white cos-light:bg-surface-1 transition-transform ${
                   settings.tiltEnabled ? 'translate-x-5' : 'translate-x-0'
                 }`}
               />
@@ -517,23 +517,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           {/* Sonar Radar Preview */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800">
+          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-surface-2/40 border border-line">
             <div className="flex items-center gap-2">
-              <Eye className="w-4 h-4 text-emerald-400" />
+              <Eye className="w-4 h-4 text-win" />
               <div>
                 <div className="text-xs font-mono font-medium">{t('opponent_radar', lang)}</div>
-                <div className="text-[10px] text-zinc-400">Mini overlay preview of hidden court</div>
+                <div className="text-[10px] text-ink-muted">Mini overlay preview of hidden court</div>
               </div>
             </div>
             <button
               id="toggle-radar-preview"
               onClick={() => onUpdateSettings({ showRadar: !settings.showRadar })}
               className={`w-11 h-6 rounded-full transition-colors relative p-0.5 ${
-                settings.showRadar ? 'bg-emerald-500' : 'bg-zinc-700'
+                settings.showRadar ? 'bg-win' : 'bg-surface-4'
               }`}
             >
               <div
-                className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                className={`w-5 h-5 rounded-full bg-white cos-light:bg-surface-1 transition-transform ${
                   settings.showRadar ? 'translate-x-5' : 'translate-x-0'
                 }`}
               />
@@ -566,15 +566,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             return (
               <div
                 key={row.id}
-                className={`flex items-center justify-between p-2.5 rounded-2xl bg-zinc-900/40 border border-zinc-800 ${
+                className={`flex items-center justify-between p-2.5 rounded-2xl bg-surface-2/40 border border-line ${
                   indicatorsLockedBySonar ? 'opacity-60' : ''
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <Crosshair className="w-4 h-4 text-cyan-400" />
+                  <Crosshair className="w-4 h-4 text-accent" />
                   <div>
                     <div className="text-xs font-mono font-medium">{t(row.labelKey, lang)}</div>
-                    <div className="text-[10px] text-zinc-400">
+                    <div className="text-[10px] text-ink-muted">
                       {indicatorsLockedBySonar
                         ? t('indicator_locked_by_sonar', lang)
                         : t(row.hintKey, lang)}
@@ -586,11 +586,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   disabled={indicatorsLockedBySonar}
                   onClick={() => onUpdateSettings({ [row.key]: !settings[row.key] })}
                   className={`w-11 h-6 rounded-full transition-colors relative p-0.5 disabled:cursor-not-allowed ${
-                    on ? 'bg-cyan-500' : 'bg-zinc-700'
+                    on ? 'bg-accent' : 'bg-surface-4'
                   }`}
                 >
                   <div
-                    className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    className={`w-5 h-5 rounded-full bg-white cos-light:bg-surface-1 transition-transform ${
                       on ? 'translate-x-5' : 'translate-x-0'
                     }`}
                   />
@@ -608,9 +608,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {onDeleteAccount && profile?.initialized && (
           <div
             id="danger-zone"
-            className="mt-2 flex flex-col gap-2.5 rounded-2xl border border-rose-500/30 bg-rose-950/20 p-3.5"
+            className="mt-2 flex flex-col gap-2.5 rounded-2xl border border-loss/30 bg-loss/20 p-3.5"
           >
-            <div className="flex items-center gap-1.5 text-rose-300">
+            <div className="flex items-center gap-1.5 text-loss">
               <Trash2 className="h-4 w-4" />
               <span className="text-xs font-mono font-bold uppercase tracking-wider">
                 {t('delete_account_title', lang)}
@@ -619,7 +619,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {deleteStep === 'idle' && (
               <>
-                <p className="text-[10px] leading-relaxed text-zinc-400">
+                <p className="text-[10px] leading-relaxed text-ink-muted">
                   {t('delete_account_desc', lang)}
                 </p>
                 <Button
@@ -633,7 +633,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     setDeleteError(null);
                     setDeleteStep('name');
                   }}
-                  className="border-rose-500/40 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+                  className="border-loss/40 text-loss hover:bg-loss/10 hover:text-loss"
                 >
                   {t('delete_account_start', lang)}
                 </Button>
@@ -643,15 +643,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* Step 1 — the username, typed exactly. */}
             {deleteStep === 'name' && (
               <>
-                <p className="text-[11px] font-medium leading-relaxed text-zinc-200">
+                <p className="text-[11px] font-medium leading-relaxed text-ink">
                   {t('delete_account_name_prompt', lang)}
                 </p>
-                <p className="text-[10px] leading-relaxed text-zinc-400">
+                <p className="text-[10px] leading-relaxed text-ink-muted">
                   {t('delete_account_name_hint', lang)}
                 </p>
                 <div
                   id="delete-account-name-echo"
-                  className="select-all rounded-xl border border-zinc-800 bg-slate-950 py-1.5 text-center font-mono text-sm font-bold tracking-wider text-zinc-300"
+                  className="select-all rounded-xl border border-line bg-surface-0 py-1.5 text-center font-mono text-sm font-bold tracking-wider text-ink"
                 >
                   {accountName}
                 </div>
@@ -672,10 +672,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   spellCheck={false}
                   maxLength={USERNAME_MAX}
                   placeholder={t('delete_account_name_prompt', lang)}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 font-mono text-base text-slate-100 transition placeholder:text-slate-600 focus:border-rose-400 focus:outline-none"
+                  className="w-full rounded-xl border border-line-strong bg-surface-0 px-3 py-2.5 font-mono text-base text-ink transition placeholder:text-ink-dim focus:border-loss focus:outline-none"
                 />
                 {typedName.length > 0 && !nameMatches && (
-                  <p id="delete-account-name-mismatch" className="text-[10px] font-mono text-rose-400">
+                  <p id="delete-account-name-mismatch" className="text-[10px] font-mono text-loss">
                     {t('delete_account_name_mismatch', lang)}
                   </p>
                 )}
@@ -708,7 +708,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 Settings panel with nothing spent. */}
             {deleteStep === 'confirm' && (
               <>
-                <div className="flex items-center gap-1.5 text-rose-300">
+                <div className="flex items-center gap-1.5 text-loss">
                   <AlertTriangle className="h-4 w-4 shrink-0" />
                   <span className="text-xs font-bold uppercase tracking-wider">
                     {t('delete_account_permanent_title', lang)}
@@ -716,12 +716,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <p
                   id="delete-account-permanent-warning"
-                  className="text-[11px] leading-relaxed text-amber-200/90"
+                  className="text-[11px] leading-relaxed text-warn/90"
                 >
                   {t('delete_account_permanent_body', lang, { name: accountName })}
                 </p>
                 {deleteError && (
-                  <p id="delete-account-error" className="text-[10px] font-mono text-rose-400">
+                  <p id="delete-account-error" className="text-[10px] font-mono text-loss">
                     {t('delete_account_failed', lang)}
                   </p>
                 )}

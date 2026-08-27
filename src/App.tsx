@@ -3036,6 +3036,21 @@ export default function App() {
    */
   const equippedCosmeticId = normalizeCosmeticId(profile?.cosmetic ?? settings.cosmetic);
   const currentTheme: Cosmetic = COSMETICS[equippedCosmeticId];
+  /**
+   * The browser chrome is not reachable from CSS, so it is set from here.
+   *
+   * `<meta name="theme-color">` colours the address bar and, on iOS, the area
+   * behind a `black-translucent` status bar. Left at the shipped dark value a
+   * light cosmetic gets white text on a white status bar — invisible, and
+   * invisible only on a real phone, which is the worst place to find out.
+   */
+  useEffect(() => {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', currentTheme.shell.surface1);
+    const bar = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+    if (bar) bar.setAttribute('content', currentTheme.mode === 'light' ? 'default' : 'black-translucent');
+  }, [currentTheme]);
+
   const missionsSummary = getMissionsStatusSummary(missions);
   // One motion vocabulary for the whole app; it collapses to zero duration
   // under prefers-reduced-motion without this file knowing about it.
@@ -3061,6 +3076,7 @@ export default function App() {
       <div
         id="app-root-container"
         data-cosmetic={equippedCosmeticId}
+        data-mode={currentTheme.mode}
         className="relative w-full h-full overflow-hidden flex flex-col font-sans select-none bg-surface-1"
         style={cosmeticVars(currentTheme) as React.CSSProperties}
       >
@@ -3424,10 +3440,10 @@ export default function App() {
             id="link-status-badge"
             className={`absolute top-14 right-2 z-30 rounded-chip border px-2 py-0.5 text-2xs select-none ${
               linkStatus === 'p2p'
-                ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-300'
+                ? 'bg-win/15 border-win/50 text-win'
                 : linkStatus === 'connecting'
-                  ? 'bg-amber-500/15 border-amber-400/50 text-amber-300 animate-pulse'
-                  : 'bg-cyan-500/15 border-cyan-400/50 text-cyan-300'
+                  ? 'bg-warn/15 border-warn/50 text-warn animate-pulse'
+                  : 'bg-accent/15 border-accent/50 text-accent'
             }`}
             title={
               linkStatus === 'p2p'

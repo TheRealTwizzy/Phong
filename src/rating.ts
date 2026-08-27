@@ -383,15 +383,15 @@ export const TIER_LABEL_KEY: Record<Tier, string> = {
 // Tailwind classes reusing the existing tinted-chip pattern already used for
 // rankTitle / BOT pills, so tier badges match the rest of the UI.
 export const TIER_STYLE: Record<Tier, string> = {
-  unranked: 'bg-zinc-700/30 text-zinc-400 border-zinc-600/40',
-  rookie: 'bg-slate-500/20 text-slate-300 border-slate-400/40',
-  contender: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/40',
-  vanguard: 'bg-cyan-500/15 text-cyan-300 border-cyan-400/40',
-  ace: 'bg-sky-500/20 text-sky-300 border-sky-400/40',
-  master: 'bg-violet-500/20 text-violet-300 border-violet-400/40',
-  grandmaster: 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-400/40',
-  legend: 'bg-amber-500/20 text-amber-300 border-amber-400/40',
-  overlord: 'bg-rose-500/20 text-rose-300 border-rose-400/50',
+  unranked: 'bg-zinc-700/30 text-zinc-400 border-zinc-600/40 cos-light:text-zinc-700 cos-light:border-zinc-600/50',
+  rookie: 'bg-slate-500/20 text-slate-300 border-slate-400/40 cos-light:text-slate-700 cos-light:border-slate-600/50',
+  contender: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/40 cos-light:text-emerald-700 cos-light:border-emerald-600/50',
+  vanguard: 'bg-cyan-500/15 text-cyan-300 border-cyan-400/40 cos-light:text-cyan-700 cos-light:border-cyan-600/50',
+  ace: 'bg-sky-500/20 text-sky-300 border-sky-400/40 cos-light:text-sky-700 cos-light:border-sky-600/50',
+  master: 'bg-violet-500/20 text-violet-300 border-violet-400/40 cos-light:text-violet-700 cos-light:border-violet-600/50',
+  grandmaster: 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-400/40 cos-light:text-fuchsia-700 cos-light:border-fuchsia-600/50',
+  legend: 'bg-amber-500/20 text-amber-300 border-amber-400/40 cos-light:text-amber-700 cos-light:border-amber-600/50',
+  overlord: 'bg-rose-500/20 text-rose-300 border-rose-400/50 cos-light:text-rose-700 cos-light:border-rose-600/50',
 };
 
 // ---------------------------------------------------------------------------

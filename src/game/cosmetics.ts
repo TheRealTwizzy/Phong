@@ -209,6 +209,27 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'neon',
     nameKey: 'cosmetic_neon',
     mode: 'dark',
+    // The ONLY authored shell in the catalogue, and it is a pin rather than a
+    // design: these are the exact token literals src/index.css shipped before
+    // cosmetics existed. shellFrom derives values within a shade of them, but
+    // "within a shade" is still a visible change to every player who never
+    // opens the picker, and a deploy should not repaint the app for them.
+    // Every other cosmetic derives; this one reproduces.
+    shell: {
+      surface0: '#05070c',
+      surface1: '#090d16',
+      surface2: '#0f141f',
+      surface3: '#151b28',
+      surface4: '#1d2534',
+      line: '#222a3a',
+      lineStrong: '#303a4d',
+      ink: '#f3f6fb',
+      inkMuted: '#9aa5b8',
+      inkDim: '#6b7688',
+      inkOnAccent: '#04121a',
+      accent: '#19e3ff',
+      accentPress: '#00c7e6',
+    },
     background: '#090d16',
     courtColor: '#0c1322',
     courtBorder: '#00f0ff',

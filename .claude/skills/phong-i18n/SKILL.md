@@ -64,7 +64,7 @@ decision, not an omission.
 
 When `audit` or the test reports a **dead** key, deleting it is usually right: 47 of 333 keys
 were once referenced nowhere, including ten theme names that had drifted out of sync with
-`themes.ts` and would have rendered the wrong words if anything had used them. Dead weight is
+the catalogue and would have rendered the wrong words if anything had used them. Dead weight is
 cheap to carry and expensive to trust.
 
 One trap worth knowing: **do not name a key in a test to keep it alive.** "Quoted anywhere

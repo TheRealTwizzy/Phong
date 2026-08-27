@@ -276,7 +276,7 @@ export const ProfileModal: React.FC<Props> = ({
             <button
               id="close-profile-btn"
               onClick={onClose}
-              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white rounded-full hover:bg-white/10 transition-colors"
+              className="absolute top-4 right-4 p-2 text-ink-muted hover:text-ink rounded-full hover:bg-white/10 transition-colors"
             >
               <X className="w-5 h-5" />
             </button>
@@ -288,9 +288,9 @@ export const ProfileModal: React.FC<Props> = ({
                   hasAvatar={profile.hasAvatar}
                   avatarVersion={profile.avatarVersion}
                   size={72}
-                  className="rounded-2xl border-2 border-cyan-500/40 shadow-lg shadow-cyan-500/20"
+                  className="rounded-2xl border-2 border-accent/40 shadow-lg shadow-accent/20"
                 />
-                <div className="absolute -bottom-2 -right-2 bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 font-black text-xs px-2 py-0.5 rounded-full shadow border border-slate-900">
+                <div className="absolute -bottom-2 -right-2 bg-gradient-to-r from-warn to-xp text-ink-on-accent font-black text-xs px-2 py-0.5 rounded-full shadow border border-line">
                   LV {profile.level}
                 </div>
                 {/* Avatar change / remove controls */}
@@ -300,7 +300,7 @@ export const ProfileModal: React.FC<Props> = ({
                     onClick={() => avatarInputRef.current?.click()}
                     disabled={avatarBusy}
                     title={profile.hasAvatar ? t('change_avatar', language) : t('upload_avatar', language)}
-                    className="p-1 rounded-lg bg-slate-800/95 hover:bg-slate-700 text-cyan-300 border border-slate-600 shadow transition active:scale-95 disabled:opacity-50"
+                    className="p-1 rounded-lg bg-surface-3/95 hover:bg-surface-4 text-accent border border-line-strong shadow transition active:scale-95 disabled:opacity-50"
                   >
                     <ImagePlus className="w-3 h-3" />
                   </button>
@@ -310,7 +310,7 @@ export const ProfileModal: React.FC<Props> = ({
                       onClick={handleRemoveAvatar}
                       disabled={avatarBusy}
                       title={t('remove_avatar', language)}
-                      className="p-1 rounded-lg bg-slate-800/95 hover:bg-slate-700 text-rose-300 border border-slate-600 shadow transition active:scale-95 disabled:opacity-50"
+                      className="p-1 rounded-lg bg-surface-3/95 hover:bg-surface-4 text-loss border border-line-strong shadow transition active:scale-95 disabled:opacity-50"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
@@ -338,13 +338,14 @@ export const ProfileModal: React.FC<Props> = ({
                           setTempName(e.target.value);
                           setNameError(null);
                         }}
-                        className="bg-slate-800 border border-cyan-400/60 rounded-lg px-3 py-1 text-base text-white font-bold focus:outline-none focus:ring-2 focus:ring-cyan-400 min-w-0"
+                        className="bg-surface-3 border border-accent/60 rounded-lg px-3 py-1 text-base text-ink font-bold focus:outline-none focus:ring-2 focus:ring-accent min-w-0"
                         autoFocus
                       />
                       <button
+                        id="btn-save-username"
                         onClick={handleSaveName}
                         disabled={isSaving}
-                        className="p-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded-lg"
+                        className="p-1.5 bg-accent hover:bg-accent-press text-ink-on-accent rounded-lg"
                       >
                         <Check className="w-4 h-4" />
                       </button>
@@ -354,36 +355,36 @@ export const ProfileModal: React.FC<Props> = ({
                           setIsEditingName(false);
                           setNameError(null);
                         }}
-                        className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg"
+                        className="p-1.5 bg-surface-3 hover:bg-surface-4 text-ink-muted rounded-lg"
                       >
                         <X className="w-4 h-4" />
                       </button>
                     </div>
                     {nameError && (
-                      <p id="username-edit-error" className="text-[10px] font-mono text-rose-400">
+                      <p id="username-edit-error" className="text-[10px] font-mono text-loss">
                         {nameError}
                       </p>
                     )}
                   </div>
                 ) : (
                   <div className="flex items-center gap-2">
-                    <h2 className="text-xl font-black text-white truncate">{profile.username}</h2>
+                    <h2 className="text-xl font-black text-ink truncate">{profile.username}</h2>
                     <span
                       className={`inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full border ${
                         playerStatus === 'online'
-                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                          ? 'bg-win/10 text-win border-win/30'
                           : playerStatus === 'idle'
-                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                          ? 'bg-warn/10 text-warn border-warn/30'
+                          : 'bg-surface-3 text-ink-muted border-line-strong'
                       }`}
                     >
                       <span
                         className={`w-1.5 h-1.5 rounded-full ${
                           playerStatus === 'online'
-                            ? 'bg-emerald-400 animate-pulse'
+                            ? 'bg-win animate-pulse'
                             : playerStatus === 'idle'
-                            ? 'bg-amber-400'
-                            : 'bg-slate-500'
+                            ? 'bg-warn'
+                            : 'bg-ink-dim'
                         }`}
                       />
                       {playerStatus === 'online' ? 'ACTIVE' : playerStatus === 'idle' ? 'IDLE' : 'OFFLINE'}
@@ -391,7 +392,7 @@ export const ProfileModal: React.FC<Props> = ({
                     <button
                       id="edit-username-btn"
                       onClick={() => setIsEditingName(true)}
-                      className="text-slate-400 hover:text-cyan-400 transition-colors p-1"
+                      className="text-ink-muted hover:text-accent transition-colors p-1"
                       title="Edit Callsign"
                     >
                       <Edit2 className="w-3.5 h-3.5" />
@@ -402,7 +403,7 @@ export const ProfileModal: React.FC<Props> = ({
                 <div className="flex items-center gap-2 mt-1 flex-wrap">
                   <TierBadge tier={profile.tier} language={language} size="md" />
                   {profile.tier === 'unranked' && (
-                    <span className="text-[10px] text-slate-400 font-mono">
+                    <span className="text-[10px] text-ink-muted font-mono">
                       {t('placement_progress', language, {
                         // Clamped like RankBadge's meter: placement counts
                         // games AND needs sigma to settle, so an unplaced
@@ -416,9 +417,9 @@ export const ProfileModal: React.FC<Props> = ({
                   {/* Daily Streak Header Badge */}
                   <span
                     id="profile-streak-badge"
-                    className="inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-gradient-to-r from-amber-500/20 to-orange-500/20 text-amber-300 border border-amber-500/40 shadow-sm"
+                    className="inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-gradient-to-r from-warn/20 to-warn/20 text-warn border border-warn/40 shadow-sm"
                   >
-                    <Flame className="w-3.5 h-3.5 text-amber-400 fill-amber-400 animate-pulse" />
+                    <Flame className="w-3.5 h-3.5 text-warn fill-warn animate-pulse" />
                     <span>{profile.dailyStreak || 1} Day Streak</span>
                   </span>
                 </div>
@@ -427,13 +428,13 @@ export const ProfileModal: React.FC<Props> = ({
 
             {/* Level XP Bar */}
             <div className="mt-5">
-              <div className="flex justify-between text-xs text-slate-400 font-semibold mb-1">
+              <div className="flex justify-between text-xs text-ink-muted font-semibold mb-1">
                 <span>Progress to Level {profile.level + 1}</span>
                 {/* Progress WITHIN this level, matching the bar beside it.
                     These used to be the cumulative totals while the bar showed
                     the level slice, so the number and the fill disagreed:
                     at level 3 the bar read 38% next to the text "700 / 930". */}
-                <span className="text-cyan-400">
+                <span className="text-accent">
                   {xpCurrentLevelProgress.toLocaleString()} / {xpNeededForLevel.toLocaleString()} XP
                 </span>
               </div>
@@ -442,14 +443,14 @@ export const ProfileModal: React.FC<Props> = ({
           </div>
 
           {/* Navigation Tabs */}
-          <div className="flex border-b border-slate-800 bg-slate-950/50">
+          <div className="flex border-b border-line bg-surface-0/50">
             <button
               id="profile-tab-stats"
               onClick={() => setActiveTab('stats')}
               className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
                 activeTab === 'stats'
-                  ? 'border-cyan-400 text-cyan-400 bg-cyan-500/5'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-accent text-accent bg-accent/5'
+                  : 'border-transparent text-ink-muted hover:text-ink'
               }`}
             >
               {t('profile_tab_stats', language)}
@@ -459,8 +460,8 @@ export const ProfileModal: React.FC<Props> = ({
               onClick={() => setActiveTab('cosmetics')}
               className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
                 activeTab === 'cosmetics'
-                  ? 'border-cyan-400 text-cyan-400 bg-cyan-500/5'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-accent text-accent bg-accent/5'
+                  : 'border-transparent text-ink-muted hover:text-ink'
               }`}
             >
               {t('cosmetics', language)}
@@ -470,8 +471,8 @@ export const ProfileModal: React.FC<Props> = ({
               onClick={() => setActiveTab('history')}
               className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
                 activeTab === 'history'
-                  ? 'border-cyan-400 text-cyan-400 bg-cyan-500/5'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-accent text-accent bg-accent/5'
+                  : 'border-transparent text-ink-muted hover:text-ink'
               }`}
             >
               {t('public_history_section', language)}
@@ -511,23 +512,25 @@ export const ProfileModal: React.FC<Props> = ({
             ) : activeTab === 'stats' ? (
               <div className="space-y-4">
                 {/* Daily Streak Highlight Banner */}
-                <div className="bg-gradient-to-r from-amber-950/40 via-orange-950/30 to-slate-900/60 border border-amber-500/40 rounded-2xl p-4 flex items-center justify-between shadow-lg shadow-amber-500/10">
+                <div className="bg-gradient-to-r from-warn/12 via-warn/8 to-surface-2/60 border border-warn/40 rounded-2xl p-4 flex items-center justify-between shadow-lg shadow-warn/10">
                   <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-amber-500/20 border border-amber-400/50 flex items-center justify-center text-amber-400 shadow-inner">
-                      <Flame className="w-7 h-7 fill-amber-400 animate-bounce" />
+                    <div className="w-12 h-12 rounded-xl bg-warn/20 border border-warn/50 flex items-center justify-center text-warn shadow-inner">
+                      <Flame className="w-7 h-7 fill-warn animate-bounce" />
                     </div>
                     <div>
-                      <div className="text-xs font-mono font-bold text-amber-300 uppercase tracking-wide">
-                        Consecutive Daily Login Streak
+                      <div className="text-xs font-mono font-bold text-warn uppercase tracking-wide">
+                        {t('profile_streak_title', language)}
                       </div>
-                      <div className="text-2xl font-black text-white flex items-baseline gap-1.5">
+                      <div className="text-2xl font-black text-ink flex items-baseline gap-1.5">
                         <span>{profile.dailyStreak || 1}</span>
-                        <span className="text-xs font-sans text-slate-400 font-normal">
-                          {(profile.dailyStreak || 1) === 1 ? 'day active' : 'days in a row!'}
+                        <span className="text-xs font-sans text-ink-muted font-normal">
+                          {(profile.dailyStreak || 1) === 1
+                            ? t('profile_streak_day', language)
+                            : t('profile_streak_days', language)}
                         </span>
                       </div>
-                      <div className="text-[11px] text-amber-200/70 mt-0.5">
-                        Keep logging in daily to maintain streak boosts & unlock special themes!
+                      <div className="text-[11px] text-warn/70 mt-0.5">
+                        {t('profile_streak_hint', language)}
                       </div>
                     </div>
                   </div>
@@ -536,15 +539,15 @@ export const ProfileModal: React.FC<Props> = ({
                 {/* Device Identity & Recovery */}
                 <div
                   id="recovery-card"
-                  className="bg-slate-900/70 border border-cyan-500/25 rounded-2xl p-4 space-y-3"
+                  className="bg-surface-2/70 border border-accent/25 rounded-2xl p-4 space-y-3"
                 >
-                  <div className="flex items-center gap-2 text-cyan-300">
+                  <div className="flex items-center gap-2 text-accent">
                     <KeyRound className="w-4 h-4" />
                     <span className="text-xs font-mono font-bold uppercase tracking-wider">
                       Profile Recovery Code
                     </span>
                   </div>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                  <p className="text-[11px] text-ink-muted leading-relaxed">
                     Your profile lives on this device. Save this code somewhere safe — it moves your
                     profile to a new phone or restores it after clearing browser data. Using it
                     generates a fresh code.
@@ -552,7 +555,7 @@ export const ProfileModal: React.FC<Props> = ({
                   <div className="flex items-center gap-2">
                     <code
                       id="recovery-code"
-                      className="flex-1 text-center text-lg font-black font-mono tracking-[0.2em] text-cyan-300 bg-slate-950 border border-slate-800 rounded-xl py-2 select-all"
+                      className="flex-1 text-center text-lg font-black font-mono tracking-[0.2em] text-accent bg-surface-0 border border-line rounded-xl py-2 select-all"
                     >
                       {profile.recoveryCode || '····-····'}
                     </code>
@@ -560,13 +563,13 @@ export const ProfileModal: React.FC<Props> = ({
                       id="btn-copy-recovery"
                       onClick={copyRecoveryCode}
                       title="Copy code"
-                      className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95"
+                      className="p-2.5 rounded-xl bg-surface-3 hover:bg-surface-4 text-ink border border-line-strong transition active:scale-95"
                     >
-                      {codeCopied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                      {codeCopied ? <Check className="w-4 h-4 text-win" /> : <Copy className="w-4 h-4" />}
                     </button>
                   </div>
-                  <div className="pt-1 border-t border-slate-800/80 space-y-2">
-                    <p className="text-[11px] text-slate-400">
+                  <div className="pt-1 border-t border-line/80 space-y-2">
+                    <p className="text-[11px] text-ink-muted">
                       Have a code from another device? Restore that profile here:
                     </p>
                     <div className="flex items-center gap-2">
@@ -576,58 +579,58 @@ export const ProfileModal: React.FC<Props> = ({
                         onChange={(e) => setClaimCode(e.target.value.toUpperCase())}
                         placeholder="XXXX-XXXX"
                         maxLength={9}
-                        className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-base font-mono tracking-widest text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/60"
+                        className="flex-1 bg-surface-0 border border-line-strong rounded-xl px-3 py-2 text-base font-mono tracking-widest text-ink placeholder:text-ink-dim focus:outline-none focus:border-accent/60"
                       />
                       <button
                         id="btn-claim-profile"
                         onClick={handleClaim}
                         disabled={claimBusy || !claimCode.trim()}
-                        className="px-4 py-2 rounded-xl font-mono text-xs font-bold bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-800 disabled:text-slate-500 text-white transition active:scale-95"
+                        className="px-4 py-2 rounded-xl font-mono text-xs font-bold bg-accent hover:bg-accent disabled:bg-surface-3 disabled:text-ink-muted text-ink transition active:scale-95"
                       >
                         {claimBusy ? '…' : 'Restore'}
                       </button>
                     </div>
-                    {claimError && <p className="text-[11px] text-rose-400">{claimError}</p>}
+                    {claimError && <p className="text-[11px] text-loss">{claimError}</p>}
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                  <div className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-3.5 flex flex-col">
-                    <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1">
-                      <Trophy className="w-4 h-4 text-yellow-400" />
+                  <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
+                    <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
+                      <Trophy className="w-4 h-4 text-xp" />
                       <span>Win Rate</span>
                     </div>
-                    <div className="text-2xl font-black text-white">{winRate}%</div>
-                    <div className="text-[11px] text-slate-400 mt-1">
+                    <div className="text-2xl font-black text-ink">{winRate}%</div>
+                    <div className="text-[11px] text-ink-muted mt-1">
                       {profile.matchesWon} Won / {profile.matchesPlayed} Matches
                     </div>
                   </div>
 
-                  <div className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-3.5 flex flex-col">
-                    <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1">
-                      <Flame className="w-4 h-4 text-orange-400" />
+                  <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
+                    <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
+                      <Flame className="w-4 h-4 text-warn" />
                       <span>Highest Rally</span>
                     </div>
-                    <div className="text-2xl font-black text-white">{profile.highestRally}</div>
-                    <div className="text-[11px] text-slate-400 mt-1">Best return streak</div>
+                    <div className="text-2xl font-black text-ink">{profile.highestRally}</div>
+                    <div className="text-[11px] text-ink-muted mt-1">Best return streak</div>
                   </div>
 
-                  <div className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-3.5 flex flex-col">
-                    <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1">
-                      <Zap className="w-4 h-4 text-cyan-400" />
+                  <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
+                    <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
+                      <Zap className="w-4 h-4 text-accent" />
                       <span>Total Points</span>
                     </div>
-                    <div className="text-2xl font-black text-white">{profile.totalPointsScored}</div>
-                    <div className="text-[11px] text-slate-400 mt-1">Volleys past opponent</div>
+                    <div className="text-2xl font-black text-ink">{profile.totalPointsScored}</div>
+                    <div className="text-[11px] text-ink-muted mt-1">Volleys past opponent</div>
                   </div>
 
-                  <div className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-3.5 flex flex-col">
-                    <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1">
-                      <Award className="w-4 h-4 text-purple-400" />
+                  <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
+                    <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
+                      <Award className="w-4 h-4 text-rank-steady" />
                       <span>Achievements</span>
                     </div>
-                    <div className="text-2xl font-black text-white">{profile.achievements.length}</div>
-                    <div className="text-[11px] text-slate-400 mt-1">Badges Unlocked</div>
+                    <div className="text-2xl font-black text-ink">{profile.achievements.length}</div>
+                    <div className="text-[11px] text-ink-muted mt-1">Badges Unlocked</div>
                   </div>
                 </div>
 
@@ -638,13 +641,13 @@ export const ProfileModal: React.FC<Props> = ({
                     account to write to. */}
                 {modeRows.length > 0 && (
                   <div id="profile-mode-stats" className="space-y-2">
-                    <div className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">
+                    <div className="text-xs font-mono font-bold uppercase tracking-wider text-ink-muted">
                       By Mode
                     </div>
                     <div className="overflow-x-auto">
-                      <table className="w-full text-[11px] text-slate-300">
+                      <table className="w-full text-[11px] text-ink">
                         <thead>
-                          <tr className="text-slate-500 text-left whitespace-nowrap">
+                          <tr className="text-ink-muted text-left whitespace-nowrap">
                             <th className="py-1 pr-2 font-medium">Mode</th>
                             <th className="py-1 px-1.5 font-medium text-right">Played</th>
                             <th className="py-1 px-1.5 font-medium text-right">W–L</th>
@@ -658,9 +661,9 @@ export const ProfileModal: React.FC<Props> = ({
                             <tr
                               key={mode}
                               id={`profile-mode-${mode}`}
-                              className="border-t border-slate-800/80 whitespace-nowrap"
+                              className="border-t border-line/80 whitespace-nowrap"
                             >
-                              <td className="py-1.5 pr-2 text-slate-200">
+                              <td className="py-1.5 pr-2 text-ink">
                                 {MODE_LABEL[mode] || mode}
                               </td>
                               <td className="py-1.5 px-1.5 text-right tabular-nums">{st.matchesPlayed}</td>
@@ -670,7 +673,7 @@ export const ProfileModal: React.FC<Props> = ({
                               <td className="py-1.5 px-1.5 text-right tabular-nums">
                                 {mode === 'practice' ? '—' : st.pointsScored}
                               </td>
-                              <td className="py-1.5 px-1.5 text-right tabular-nums text-orange-300">
+                              <td className="py-1.5 px-1.5 text-right tabular-nums text-warn">
                                 {st.bestStreak}
                               </td>
                               <td className="py-1.5 pl-1.5 text-right tabular-nums">

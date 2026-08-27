@@ -23,9 +23,28 @@
        override. That is why the elevation tokens below are rebuilt in
        `cosmeticVars` rather than derived here.
 
-   The values are the `neon` cosmetic's derived shell, so the default equipped
-   look is byte-for-byte what shipped before cosmetics existed.
+   These values and the `neon` cosmetic's shell are the same thirteen literals,
+   pinned to each other on purpose: neon is the ONLY catalogue entry that
+   authors its shell instead of deriving one, so that a deploy adding cosmetics
+   repaints nothing for a player who never opens the picker.
 --------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   `cos-light:` — the escape hatch for a LIGHT cosmetic.
+
+   The token utilities above follow the equipped cosmetic on their own, but
+   around six hundred literal palette classes (`text-zinc-300`, TIER_STYLE's
+   nine tier badges) do not, and cannot: a tier's colour is its identity, not
+   chrome, so it must keep its hue rather than become the accent. On a dark
+   ground those literals are merely off-palette. On a LIGHT one a pale-300 ink
+   is invisible, which is a different kind of problem.
+
+   So the mode is published as an attribute and this variant reads it, letting a
+   site that genuinely needs a different value on light say so in place —
+   `text-emerald-300 cos-light:text-emerald-700` — instead of every one of them
+   being migrated onto tokens they should not be on.
+--------------------------------------------------------------------------- */
+@custom-variant cos-light (&:where([data-mode='light'], [data-mode='light'] *));
+
 @theme {
   /* -- Surface ramp. Never pure #000: OLED black smears when the page pans. */
   --color-surface-0: #05070c;   /* scrims, gutters, below everything         */

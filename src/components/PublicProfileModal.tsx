@@ -93,6 +93,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
       accent="accent"
       cardId="public-profile-card"
       cardStyle={cosmeticVars(COSMETICS[normalizeCosmeticId(profile?.cosmetic)]) as React.CSSProperties}
+      cardMode={COSMETICS[normalizeCosmeticId(profile?.cosmetic)].mode}
       closeId="btn-close-public-profile"
       closeLabel={t('close', language)}
       title={
@@ -102,7 +103,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
               {profile.username}
             </span>
             {profile.isBot && (
-              <span className="flex items-center gap-0.5 rounded-chip border border-violet-500/40 bg-violet-500/25 px-1.5 py-0.5 text-2xs text-violet-300">
+              <span className="flex items-center gap-0.5 rounded-chip border border-rank-steady/40 bg-rank-steady/25 px-1.5 py-0.5 text-2xs text-rank-steady">
                 <Bot className="h-2.5 w-2.5" />
                 BOT
               </span>
@@ -184,7 +185,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
               t('total_points', language)
             )}
             {careerStat(
-              <Award className="h-4 w-4 text-violet-400" />,
+              <Award className="h-4 w-4 text-rank-steady" />,
               profile.achievements.length,
               t('achievements', language)
             )}

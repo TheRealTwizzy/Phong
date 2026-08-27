@@ -308,6 +308,24 @@ describe('the equipped cosmetic survives being stored', () => {
     expect(missing, `declared in index.css but never published: ${missing.join(', ')}`).toEqual([]);
   });
 
+  it('leaves the shipped look untouched for a player who never opens the picker', () => {
+    // The default cosmetic is the one entry that AUTHORS its shell rather than
+    // deriving one, pinned to the literals index.css already shipped. The
+    // derivation lands within a shade of them, and within a shade is still a
+    // repaint of the whole app for everybody who never picked a cosmetic — so
+    // the two are held identical here rather than described as identical in a
+    // comment. Edit either side alone and this fails.
+    const css = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8');
+    const shipped = new Map(
+      [...css.matchAll(/^\s*(--color-[a-z0-9-]+):\s*([^;]+);/gm)].map((m) => [m[1], m[2].trim()])
+    );
+    const published = cosmeticVars(COSMETICS[DEFAULT_COSMETIC_ID]);
+    const drifted = [...shipped.entries()]
+      .filter(([name, value]) => published[name] && published[name].toLowerCase() !== value.toLowerCase())
+      .map(([name, value]) => `${name}: index.css ${value} vs cosmetic ${published[name]}`);
+    expect(drifted, `the default cosmetic no longer matches the shipped tokens:\n  ${drifted.join('\n  ')}`).toEqual([]);
+  });
+
   it('resolves a renamed id forward instead of silently defaulting', () => {
     // The equipped id lives in localStorage and in a players column, so a rename
     // is not a compile error — it is a player quietly losing a cosmetic they own.

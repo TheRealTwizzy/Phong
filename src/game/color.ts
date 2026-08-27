@@ -94,14 +94,18 @@ export function colorDistance(a: string, b: string): number | null {
  * apart than it did yesterday.
  */
 export function paletteDistance(
-  a: Record<string, string>,
-  b: Record<string, string>,
+  a: object,
+  b: object,
   keys: readonly string[]
 ): number {
+  const read = (o: object, k: string): string => {
+    const v = (o as Record<string, unknown>)[k];
+    return typeof v === 'string' ? v : '';
+  };
   let total = 0;
   let counted = 0;
   for (const key of keys) {
-    const d = colorDistance(a[key], b[key]);
+    const d = colorDistance(read(a, key), read(b, key));
     if (d === null) continue;
     total += d;
     counted++;

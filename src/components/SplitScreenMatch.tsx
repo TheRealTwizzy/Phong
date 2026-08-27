@@ -567,7 +567,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={resetAll}
-              className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-zinc-950 font-mono font-bold text-xs active:scale-95 transition"
+              className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-ink-on-accent font-mono font-bold text-xs active:scale-95 transition"
             >
               {t('play_again', lang)}
             </button>

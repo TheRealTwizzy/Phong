@@ -34,19 +34,19 @@ interface Props {
 }
 
 const ICON_MAP: Record<string, React.ReactNode> = {
-  zap: <Zap className="w-5 h-5 text-yellow-400" />,
-  activity: <Zap className="w-5 h-5 text-emerald-400" />,
-  flame: <Flame className="w-5 h-5 text-orange-400" />,
-  shield: <Shield className="w-5 h-5 text-cyan-400" />,
-  trophy: <Trophy className="w-5 h-5 text-amber-400" />,
-  star: <Star className="w-5 h-5 text-purple-400" />,
-  cpu: <Cpu className="w-5 h-5 text-pink-400" />,
-  smartphone: <Smartphone className="w-5 h-5 text-blue-400" />,
-  target: <Target className="w-5 h-5 text-rose-400" />,
-  award: <Award className="w-5 h-5 text-amber-300" />,
-  sparkles: <Sparkles className="w-5 h-5 text-yellow-300" />,
-  crown: <Crown className="w-5 h-5 text-yellow-400" />,
-  'trending-up': <TrendingUp className="w-5 h-5 text-emerald-300" />,
+  zap: <Zap className="w-5 h-5 text-xp" />,
+  activity: <Zap className="w-5 h-5 text-win" />,
+  flame: <Flame className="w-5 h-5 text-warn" />,
+  shield: <Shield className="w-5 h-5 text-accent" />,
+  trophy: <Trophy className="w-5 h-5 text-warn" />,
+  star: <Star className="w-5 h-5 text-rank-steady" />,
+  cpu: <Cpu className="w-5 h-5 text-pink-400 cos-light:text-pink-700" />,
+  smartphone: <Smartphone className="w-5 h-5 text-blue-400 cos-light:text-blue-700" />,
+  target: <Target className="w-5 h-5 text-loss" />,
+  award: <Award className="w-5 h-5 text-warn" />,
+  sparkles: <Sparkles className="w-5 h-5 text-xp" />,
+  crown: <Crown className="w-5 h-5 text-xp" />,
+  'trending-up': <TrendingUp className="w-5 h-5 text-win" />,
 };
 
 export const AchievementsModal: React.FC<Props> = ({
@@ -97,7 +97,7 @@ export const AchievementsModal: React.FC<Props> = ({
     achievements.length > 0 ? Math.round((unlockedCount / achievements.length) * 100) : 0;
 
   const header = (
-    <div className="shrink-0 relative border-b border-line bg-gradient-to-r from-violet-500/12 via-surface-2 to-surface-2 p-4">
+    <div className="shrink-0 relative border-b border-line bg-gradient-to-r from-rank-steady/12 via-surface-2 to-surface-2 p-4">
       <button
         id="close-achievements-btn"
         onClick={onClose}
@@ -108,7 +108,7 @@ export const AchievementsModal: React.FC<Props> = ({
       </button>
 
       <div className="flex items-center gap-3">
-        <div className="rounded-card border border-violet-400/30 bg-violet-400/10 p-2.5 text-violet-400">
+        <div className="rounded-card border border-rank-steady/30 bg-rank-steady/10 p-2.5 text-rank-steady">
           <Award className="w-6 h-6" />
         </div>
         <div>
@@ -155,7 +155,7 @@ export const AchievementsModal: React.FC<Props> = ({
                     data-selected={branch === b.id ? 'true' : 'false'}
                     className={`flex min-h-8 items-center gap-1 whitespace-nowrap rounded-ctl px-3 py-1 text-2xs transition-colors ${
                       branch === b.id
-                        ? 'bg-violet-500 text-ink'
+                        ? 'bg-rank-steady text-ink'
                         : open
                           ? 'bg-surface-3 text-ink-muted hover:text-ink'
                           : 'bg-surface-1 text-locked hover:text-ink-muted'
@@ -237,7 +237,7 @@ export const AchievementsModal: React.FC<Props> = ({
                     <div
                       className={`flex min-w-0 flex-1 items-start gap-3.5 rounded-card border p-3.5 transition-colors ${
                         isUnlocked
-                          ? 'border-violet-500/30 bg-violet-500/10'
+                          ? 'border-rank-steady/30 bg-rank-steady/10'
                           : reachable
                             ? 'border-line bg-surface-3/40 opacity-80'
                             : 'border-line/60 bg-surface-1 opacity-45'
@@ -246,12 +246,12 @@ export const AchievementsModal: React.FC<Props> = ({
                       <div
                         className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-ctl border ${
                           isUnlocked
-                            ? 'border-violet-400/40 bg-violet-500/20 text-violet-300'
+                            ? 'border-rank-steady/40 bg-rank-steady/20 text-rank-steady'
                             : 'border-line bg-surface-3 text-locked'
                         }`}
                       >
                         {isUnlocked ? (
-                          ICON_MAP[ach.icon] || <Award className="w-5 h-5 text-purple-400" />
+                          ICON_MAP[ach.icon] || <Award className="w-5 h-5 text-rank-steady" />
                         ) : revealed ? (
                           <Lock className="w-5 h-5" />
                         ) : (
