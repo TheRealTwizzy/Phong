@@ -1167,10 +1167,10 @@ export default function App() {
       // court. The last line of three: the canvas is readOnly, so its pointer
       // and keyboard handlers are gone, and the timer above is gated too.
       if (spectatingRef.current) return;
-      // A duel's serve needs someone on the other end. A host waiting in the
-      // lobby is already on the court underneath it, so without this a serve
-      // (auto or tapped) would fire the ball into an empty room, where it
-      // crosses the net and is simply gone.
+      // A duel's serve needs someone on the other end. Nobody reaches the
+      // court without a match now, so this is defence rather than the thing
+      // doing the work — but it is cheap, and it is what stops a serve firing
+      // into a room whose opponent left between the whistle and the tap.
       if (modeRef.current === 'multiplayer' && !opponentIdRef.current) return;
       // And no serve of any kind before or under the start countdown.
       if (
@@ -1231,7 +1231,10 @@ export default function App() {
   );
 
   // An armed countdown starts the moment this player is on the court with the
-  // lobby out of the way — which is also the moment they can first see it.
+  // lobby out of the way — which `game_start` now does in one step, and which
+  // is the moment they can first see it. Kept as a guarded effect rather than
+  // folded into that handler because a rematch and a P2P-agreed restart reach
+  // it by their own paths.
   useEffect(() => {
     if (!countdownArmed) return;
     if (mode !== 'multiplayer' || screen !== 'game' || isMultiplayerOpen) return;
@@ -1375,19 +1378,21 @@ export default function App() {
         // Same rule as room_joined below, and it was missing here: asking for
         // a room and being given one are separate moments, and the lobby can
         // be dismissed in between — before roomId is set, so that dismissal is
-        // a plain one and asks nothing. This case then flips the screen to
-        // `game` and seats the host behind a shut lobby: alone on a live court
-        // with no room code to share and no Leave control, while the relay
-        // goes on holding the room they had probably already sent someone.
+        // a plain one and asks nothing, which is what leaves the host with no
+        // way back to a room the relay is still holding.
         // ...unless the relay seated this player out of the QUEUE, where the
-        // sheet would flash for the one round trip before game_start closes
-        // everything anyway.
+        // sheet would flash for the one round trip before game_start replaces
+        // it anyway.
         setIsMultiplayerOpen(!queueSeatingRef.current);
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
         setMode('multiplayer');
-        setScreen('game');
+        // Deliberately NOT setScreen('game'). Holding a seat is not playing a
+        // match: the court belongs to the match, and until one starts there is
+        // nothing on it — no serve to take (handleServe needs an opponent), no
+        // physics to run, and nothing for the player to do but watch a ball
+        // that is not there. `game_start` is what walks both phones onto it.
         p2pRef.current?.close();
         p2pRef.current = null;
         setLinkStatus('relay');
@@ -1411,7 +1416,7 @@ export default function App() {
         setOpponentName(msg.opponentName);
         setOpponentId(msg.opponentId);
         setMode('multiplayer');
-        setScreen('game');
+        // Not onto the court — see room_created.
         p2pRef.current?.close();
         p2pRef.current = null;
         setLinkStatus('relay');
@@ -1494,10 +1499,14 @@ export default function App() {
         setCountdownArmed(true);
         setLobbyReady([false, false]);
         setTelemetryOpen(false);
-        // The host starting the match is what closes BOTH lobbies: nobody
-        // walks onto the court until the room says the match exists. For a
-        // queue match the relay is the host, and this is where the search
-        // ends — the spinner has a court to hand over to.
+        // The one way onto the court, and the only one. The host starting the
+        // match is what closes BOTH lobbies AND puts both phones on it: a
+        // player setting up a match is not playing one, and used to be stood
+        // on a live court behind the lobby sheet — a ball waiting on them
+        // while they picked a winning score. For a queue match the relay is
+        // the host, and this is where the search ends.
+        setMode('multiplayer');
+        setScreen('game');
         setIsMultiplayerOpen(false);
         queueSeatingRef.current = false;
         quickMatchRef.current?.reset();
@@ -1644,14 +1653,11 @@ export default function App() {
           setOpponentName(msg.seats[side === 0 ? 1 : 0]?.playerName ?? null);
           setOpponentId(msg.seats[side === 0 ? 1 : 0]?.playerId ?? null);
           setMode('multiplayer');
-          setScreen('game');
-          // The lobby is deliberately NOT closed here. It is a sheet over a
-          // live court for a watcher exactly as it is for a player: before a
-          // match exists there is nothing to watch and the seat map is the
-          // useful surface, so a player standing up pre-match stays in the
-          // lobby. What closes it is `game_start` — for everyone at the table
-          // at once — or the spectator_sync below, which says outright that a
-          // match is already under way.
+          // Not onto the court, for the same reason a player is not: a table
+          // with no match on it has nothing to watch, and the seat map is the
+          // useful surface until it does. `game_start` walks everyone at the
+          // table on at once; `spectator_sync` below does it for somebody who
+          // sat down at a match already in progress.
           //
           // Nothing peer-to-peer for a watcher: the relay is the only thing
           // that can see this table at all.
@@ -1678,10 +1684,14 @@ export default function App() {
         setStats((s) => ({ ...s, score: mine, opponentScore: theirs }));
         setIsPlayerServer(snap.servingPlayer === side);
         setWinner(null);
-        // Sitting down at a table with a match already on it: the court is
-        // the surface, so the lobby gets out of the way. A table between
-        // matches keeps its lobby, which is where the seats are.
-        if (snap.matchSeq > 0 && !snap.matchOver) setIsMultiplayerOpen(false);
+        // Sitting down at a table with a match already ON it: there is
+        // something to watch, so the court is the surface. A table between
+        // matches keeps its lobby, which is where the seats are — and the
+        // next `game_start` walks this watcher on with everybody else.
+        if (snap.matchSeq > 0 && !snap.matchOver) {
+          setIsMultiplayerOpen(false);
+          setScreen('game');
+        }
         break;
       }
 
