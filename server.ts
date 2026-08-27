@@ -1558,6 +1558,9 @@ async function startServer() {
             // a table created by anything that predates this is an
             // invite-code table exactly as it always was.
             visibility: msg.visibility === 'public' ? 'public' : 'private',
+            // Both watching seats start vacant. Whether they can be taken at
+            // all is config.spectators, a term of the match.
+            spectators: [null, null],
           };
 
           rooms.set(code, room);
