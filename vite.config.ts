@@ -31,6 +31,10 @@ const FLOORS = {
   'src/venues.ts': { statements: 95, branches: 85 },
   'src/game/physics.ts': { statements: 90, branches: 88 },
   'src/game/cosmetics.ts': { statements: 95, branches: 95 },
+  // Forty lines of arithmetic that the contrast and distinctness floors both
+  // stand on, and that decides every colour the app paints. A gap here is a
+  // gap in both floors at once.
+  'src/game/color.ts': { statements: 95, branches: 95 },
   'src/game/missions.ts': { statements: 80, branches: 80 },
   'src/media/qr.ts': { statements: 95, branches: 95 },
   // The client networking layer: every one of these was under 55% before the

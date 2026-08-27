@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { CosmeticId, PlayerProfile } from '../src/types';
-import { COSMETICS, isCosmeticUnlocked } from '../src/game/cosmetics';
+import { readFileSync } from 'fs';
+import {
+  COSMETICS,
+  DEFAULT_COSMETIC_ID,
+  LEGACY_COSMETIC_IDS,
+  cosmeticVars,
+  isCosmeticUnlocked,
+  normalizeCosmeticId,
+} from '../src/game/cosmetics';
+import { contrastRatio, luminance, paletteDistance } from '../src/game/color';
 import { TIER_ORDER, type Tier } from '../src/rating';
 import { ALL_ACHIEVEMENTS } from '../src/achievements';
 import { ELITE_POOL } from '../src/game/missions';
@@ -172,5 +181,150 @@ describe('the tier gate', () => {
   it('still opens for an unranked player who earned it another way', () => {
     // The tier arm being shut must not shut the theme: the rules are an OR.
     expect(isCosmeticUnlocked('quantum-gold', base({ tier: 'unranked', highestRally: 30 }))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two floors
+//
+// A cosmetic used to be seventeen loose colours the canvas painted with. Now it
+// paints the entire shell, so two things that were matters of taste became
+// matters of correctness, and both are checked here rather than looked at:
+//
+//   - it has to be READABLE, because a cosmetic now supplies the ink and the
+//     surface behind it, and nothing else in the app would notice if a pair of
+//     them could not be told apart;
+//   - it has to be DISTINCT, because a reward you cannot distinguish from one
+//     you already had is not a reward.
+//
+// Both run over every cosmetic and every pair, so they hold for the twenty-first
+// as well — which is the whole reason the shell is derived rather than authored.
+// ---------------------------------------------------------------------------
+
+describe('every cosmetic is readable', () => {
+  // The ratios src/index.css states as its own contract. `ink` is nowhere near
+  // its floor on any shipped cosmetic; the two that bind are ink-muted, which is
+  // body text, and ink-dim, which is only ever >=18px or decorative.
+  const FLOORS = { ink: 7, inkMuted: 4.5, inkDim: 3 } as const;
+
+  for (const id of themeIds) {
+    it(`${id}: ink is legible on its own card`, () => {
+      const { shell } = COSMETICS[id];
+      for (const [key, floor] of Object.entries(FLOORS)) {
+        const ratio = contrastRatio(shell[key as keyof typeof FLOORS], shell.surface2);
+        expect(ratio, `${id}.${key} on surface2`).not.toBeNull();
+        expect(ratio!, `${id}.${key} on surface2 is ${ratio!.toFixed(2)}:1`).toBeGreaterThanOrEqual(
+          floor
+        );
+      }
+    });
+  }
+
+  // The accent is the one surface a cosmetic does not choose the ink for —
+  // shellFrom picks whichever of near-black or near-white can be read on it.
+  // A yellow accent and a navy one need opposite answers, so assuming either is
+  // how a primary button ships with invisible text.
+  it('picks ink for the accent that can actually be read on it', () => {
+    for (const id of themeIds) {
+      const { shell } = COSMETICS[id];
+      const ratio = contrastRatio(shell.inkOnAccent, shell.accent)!;
+      expect(ratio, `${id}: ink-on-accent is ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('holds the floor for a light cosmetic too, not just the dark ones', () => {
+    // Guards a specific mistake rather than restating the loop above. The first
+    // shellFrom expressed both modes as one expression with the direction
+    // flipped, which lightens a dark card off a dark page and DARKENS a light
+    // card off a light one — landing dark ink on a darkened card. Every light
+    // cosmetic failed, and there was one, so it was noticed; with none in the
+    // catalogue the derivation would have been broken and silent.
+    const light = themeIds.filter((id) => COSMETICS[id].mode === 'light');
+    expect(light.length, 'no light cosmetic ships, so nothing exercises that branch').toBeGreaterThan(0);
+    for (const id of light) {
+      const { shell } = COSMETICS[id];
+      expect(luminance(shell.surface2)!).toBeGreaterThan(luminance(shell.surface1)!);
+      expect(luminance(shell.ink)!).toBeLessThan(luminance(shell.surface2)!);
+    }
+  });
+});
+
+describe('no two cosmetics look alike', () => {
+  // Mean perceptual distance across the colours a player actually reads a
+  // cosmetic by. 0.08 is calibrated, not picked: at the time it was set the
+  // catalogue's closest pair sat at 0.034 and its median at 0.17, seven pairs
+  // failed, and the next step up (0.10) failed eighteen — a redesign of the
+  // whole catalogue rather than a fix.
+  const FLOOR = 0.08;
+  const KEYS = [
+    'background',
+    'courtColor',
+    'playerPaddleColor',
+    'opponentPaddleColor',
+    'ballColor',
+    'accentColor',
+    'netGlowColor',
+  ] as const;
+
+  it('keeps every pair above the distinctness floor', () => {
+    const tooClose: string[] = [];
+    for (let i = 0; i < themeIds.length; i++) {
+      for (let j = i + 1; j < themeIds.length; j++) {
+        const a = themeIds[i];
+        const b = themeIds[j];
+        const d = paletteDistance(COSMETICS[a], COSMETICS[b], KEYS);
+        if (d < FLOOR) tooClose.push(`${a} vs ${b} (${d.toFixed(4)})`);
+      }
+    }
+    expect(
+      tooClose,
+      `these cosmetics are too close to tell apart:\n  ${tooClose.join('\n  ')}`
+    ).toEqual([]);
+  });
+
+  it('measures the whole palette, not its most different swatch', () => {
+    // The metric is a MEAN for a reason. A minimum calls two cosmetics distinct
+    // the moment any single swatch differs, which is exactly what shipped:
+    // retro-crt and monochrome-noir agreed on white-on-black everywhere and
+    // differed in one glow, and a player read them as the same cosmetic.
+    const identicalButOne = {
+      ...COSMETICS.neon,
+      accentColor: '#ff0000',
+    };
+    expect(paletteDistance(COSMETICS.neon, identicalButOne, KEYS)).toBeLessThan(FLOOR);
+  });
+});
+
+describe('the equipped cosmetic survives being stored', () => {
+  it('publishes a value for every token index.css expects', () => {
+    // A token declared in index.css but missing here inherits whatever the
+    // enclosing subtree had — which, on the public-profile card, is the
+    // OBSERVER's colour. That is the exact bug the feature exists to prevent,
+    // and it is invisible against a viewer whose own cosmetic is the default.
+    const css = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8');
+    const declared = [...css.matchAll(/^\s*(--color-[a-z0-9-]+):/gm)].map((m) => m[1]);
+    const published = Object.keys(cosmeticVars(COSMETICS.neon));
+    const missing = declared.filter((name) => !published.includes(name));
+    expect(missing, `declared in index.css but never published: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('resolves a renamed id forward instead of silently defaulting', () => {
+    // The equipped id lives in localStorage and in a players column, so a rename
+    // is not a compile error — it is a player quietly losing a cosmetic they own.
+    for (const [legacy, current] of Object.entries(LEGACY_COSMETIC_IDS)) {
+      expect(normalizeCosmeticId(legacy), `${legacy} should resolve to ${current}`).toBe(current);
+      expect(COSMETICS[current], `${legacy} maps to an id that does not exist`).toBeDefined();
+    }
+  });
+
+  it('falls back to the default for anything it does not recognise', () => {
+    for (const junk of [undefined, null, 42, {}, '', 'not-a-cosmetic']) {
+      expect(normalizeCosmeticId(junk)).toBe(DEFAULT_COSMETIC_ID);
+    }
+    expect(COSMETICS[DEFAULT_COSMETIC_ID].unlockRequirement).toBeUndefined();
+  });
+
+  it('keeps every id it currently ships', () => {
+    for (const id of themeIds) expect(normalizeCosmeticId(id)).toBe(id);
   });
 });

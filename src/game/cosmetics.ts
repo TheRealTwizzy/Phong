@@ -119,29 +119,42 @@ export function shellFrom(
   accent: string,
   mode: CosmeticMode
 ): ShellPalette {
-  // The ramp is built toward a TINT of the cosmetic's own accent, never toward
+  // The ramp moves toward a TINT of the cosmetic's own accent, never toward
   // flat white or black. Mixing toward white desaturates as it lightens, so a
   // ramp built that way arrives grey — the surfaces stop belonging to the
   // cosmetic exactly where there is most of them.
-  const toward = mode === 'dark' ? mixHex(WHITE, accent, 0.3) : mixHex(BLACK, accent, 0.25);
-  const away = mode === 'dark' ? BLACK : WHITE;
+  const lift = mixHex(WHITE, accent, 0.3);
+  const sink = mixHex(BLACK, accent, 0.25);
 
   // surface1 IS the cosmetic's own background: the court and the menu behind it
   // are the same ground, which is what stops the two reading as two products.
   const surface1 = background;
-  const surface2 = mixHex(background, toward, mode === 'dark' ? 0.05 : 0.5);
+
+  // The two modes are not one expression with the direction flipped, which is
+  // how the first version of this got written and why every light cosmetic
+  // failed the contrast floor. A dark UI raises the CARD off a dark page; a
+  // light UI does the same thing by making the card whiter than an already
+  // light page, while its dividers and pressed states go DOWN. Flipping a
+  // single direction gives you dark ink on a darkened card.
+  const surface2 = mode === 'dark' ? mixHex(background, lift, 0.05) : mixHex(background, WHITE, 0.62);
+  const surface3 = mode === 'dark' ? mixHex(background, lift, 0.09) : mixHex(background, sink, 0.06);
+  const surface4 = mode === 'dark' ? mixHex(background, lift, 0.15) : mixHex(background, sink, 0.14);
+  const surface0 = mode === 'dark' ? mixHex(background, BLACK, 0.45) : mixHex(background, sink, 0.1);
+  const line = mixHex(background, mode === 'dark' ? lift : sink, mode === 'dark' ? 0.12 : 0.17);
+  const lineStrong = mixHex(background, mode === 'dark' ? lift : sink, mode === 'dark' ? 0.21 : 0.34);
+
   const ink = mixHex(mode === 'dark' ? WHITE : '#0a0e15', accent, 0.06);
 
   // The muted and dim inks are the two a floor actually binds, so they are
   // stated as a mix TOWARD the surface they will be read on rather than as
   // fixed greys: on a light cosmetic a fixed grey is the wrong side of legible.
-  const inkMuted = mixHex(ink, surface2, mode === 'dark' ? 0.42 : 0.38);
-  const inkDim = mixHex(ink, surface2, mode === 'dark' ? 0.62 : 0.56);
+  const inkMuted = mixHex(ink, surface2, mode === 'dark' ? 0.42 : 0.4);
+  const inkDim = mixHex(ink, surface2, mode === 'dark' ? 0.62 : 0.52);
 
   // Whichever of near-black or near-white can actually be read on this accent.
   // Picked rather than assumed: a yellow accent and a blue one disagree, and
   // assuming dark text is how a light-on-light chip gets shipped.
-  const onDark = mixHex(background, BLACK, 0.55);
+  const onDark = mixHex(mode === 'dark' ? background : sink, BLACK, 0.55);
   const onLight = '#f7fbff';
   const inkOnAccent =
     (contrastRatio(onDark, accent) ?? 0) >= (contrastRatio(onLight, accent) ?? 0)
@@ -149,19 +162,19 @@ export function shellFrom(
       : onLight;
 
   return {
-    surface0: mixHex(background, away, mode === 'dark' ? 0.45 : 0.06),
+    surface0,
     surface1,
     surface2,
-    surface3: mixHex(background, toward, mode === 'dark' ? 0.09 : 0.36),
-    surface4: mixHex(background, toward, mode === 'dark' ? 0.15 : 0.24),
-    line: mixHex(background, toward, mode === 'dark' ? 0.12 : 0.14),
-    lineStrong: mixHex(background, toward, mode === 'dark' ? 0.21 : 0.28),
+    surface3,
+    surface4,
+    line,
+    lineStrong,
     ink,
     inkMuted,
     inkDim,
     inkOnAccent,
     accent,
-    accentPress: mixHex(accent, away, 0.18),
+    accentPress: mixHex(accent, mode === 'dark' ? BLACK : WHITE, 0.18),
   };
 }
 
@@ -216,20 +229,20 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'retro-crt',
     nameKey: 'cosmetic_retro-crt',
     mode: 'dark',
-    background: '#0a0a0a',
-    courtColor: '#050505',
-    courtBorder: '#ffffff',
-    netLineColor: '#ffffff',
-    netGlowColor: 'rgba(255, 255, 255, 0.4)',
-    playerPaddleColor: '#ffffff',
-    playerPaddleGlow: '#ffffff',
-    opponentPaddleColor: '#cccccc',
-    opponentPaddleGlow: '#cccccc',
-    ballColor: '#ffffff',
-    ballGlow: '#ffffff',
-    trailColor: 'rgba(255, 255, 255, 0.3)',
+    background: '#0a0700',
+    courtColor: '#050300',
+    courtBorder: '#ffb000',
+    netLineColor: '#ffb000',
+    netGlowColor: 'rgba(255, 176, 0, 0.45)',
+    playerPaddleColor: '#ffc233',
+    playerPaddleGlow: '#ffb000',
+    opponentPaddleColor: '#c07f00',
+    opponentPaddleGlow: '#c07f00',
+    ballColor: '#ffd980',
+    ballGlow: '#ffb000',
+    trailColor: 'rgba(255, 176, 0, 0.3)',
     gridColor: 'transparent',
-    accentColor: '#ffffff',
+    accentColor: '#ffb000',
     scanlines: true,
   },
   midnight: {
@@ -367,20 +380,20 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'monochrome-noir',
     nameKey: 'cosmetic_monochrome-noir',
     mode: 'dark',
-    background: '#0d0d0f',
-    courtColor: '#17171a',
-    courtBorder: '#9ca3af',
-    netLineColor: '#e5e7eb',
-    netGlowColor: 'rgba(229, 231, 235, 0.5)',
-    playerPaddleColor: '#f3f4f6',
-    playerPaddleGlow: 'rgba(255, 255, 255, 0.4)',
-    opponentPaddleColor: '#9ca3af',
-    opponentPaddleGlow: 'rgba(156, 163, 175, 0.3)',
-    ballColor: '#ffffff',
-    ballGlow: 'rgba(255, 255, 255, 0.8)',
-    trailColor: 'rgba(255, 255, 255, 0.25)',
-    gridColor: 'rgba(255, 255, 255, 0.04)',
-    accentColor: '#ffffff',
+    background: '#101012',
+    courtColor: '#1b1b1e',
+    courtBorder: '#6b6b70',
+    netLineColor: '#c8c8cc',
+    netGlowColor: 'rgba(192, 57, 43, 0.45)',
+    playerPaddleColor: '#e8e8ea',
+    playerPaddleGlow: 'rgba(232, 232, 234, 0.35)',
+    opponentPaddleColor: '#7a7a80',
+    opponentPaddleGlow: 'rgba(122, 122, 128, 0.28)',
+    ballColor: '#f5f5f7',
+    ballGlow: 'rgba(245, 245, 247, 0.7)',
+    trailColor: 'rgba(200, 200, 204, 0.22)',
+    gridColor: 'rgba(255, 255, 255, 0.03)',
+    accentColor: '#c0392b',
     scanlines: false,
     unlockRequirement: {
       minLevel: 5,
@@ -438,21 +451,21 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
   'flawless-white': {
     id: 'flawless-white',
     nameKey: 'cosmetic_flawless-white',
-    mode: 'dark',
-    background: '#0a0a0c',
-    courtColor: '#141419',
-    courtBorder: '#f8fafc',
-    netLineColor: '#f8fafc',
-    netGlowColor: 'rgba(248,250,252,0.7)',
-    playerPaddleColor: '#f8fafc',
-    playerPaddleGlow: '#f8fafc',
-    opponentPaddleColor: '#cbd5e1',
-    opponentPaddleGlow: '#cbd5e1',
-    ballColor: '#ffffff',
-    ballGlow: '#f8fafc',
-    trailColor: 'rgba(248,250,252,0.35)',
-    gridColor: 'rgba(248,250,252,0.10)',
-    accentColor: '#e2e8f0',
+    mode: 'light',
+    background: '#eaeef4',
+    courtColor: '#f7f9fc',
+    courtBorder: '#94a3b8',
+    netLineColor: '#334155',
+    netGlowColor: 'rgba(51, 65, 85, 0.35)',
+    playerPaddleColor: '#1e3a5f',
+    playerPaddleGlow: 'rgba(30, 58, 95, 0.35)',
+    opponentPaddleColor: '#64748b',
+    opponentPaddleGlow: 'rgba(100, 116, 139, 0.3)',
+    ballColor: '#0f172a',
+    ballGlow: 'rgba(15, 23, 42, 0.4)',
+    trailColor: 'rgba(30, 58, 95, 0.25)',
+    gridColor: 'rgba(51, 65, 85, 0.06)',
+    accentColor: '#0369a1',
     scanlines: false,
     unlockRequirement: {
       achievementId: 'cyber_shutout',
@@ -485,20 +498,20 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'fixture-bronze',
     nameKey: 'cosmetic_fixture-bronze',
     mode: 'dark',
-    background: '#140d05',
-    courtColor: '#241708',
-    courtBorder: '#d97706',
-    netLineColor: '#d97706',
-    netGlowColor: 'rgba(217,119,6,0.7)',
-    playerPaddleColor: '#f59e0b',
-    playerPaddleGlow: '#f59e0b',
-    opponentPaddleColor: '#b45309',
-    opponentPaddleGlow: '#b45309',
-    ballColor: '#fde68a',
-    ballGlow: '#f59e0b',
-    trailColor: 'rgba(245,158,11,0.4)',
-    gridColor: 'rgba(217,119,6,0.12)',
-    accentColor: '#f59e0b',
+    background: '#120b06',
+    courtColor: '#20140b',
+    courtBorder: '#a9713f',
+    netLineColor: '#a9713f',
+    netGlowColor: 'rgba(169, 113, 63, 0.6)',
+    playerPaddleColor: '#c98a52',
+    playerPaddleGlow: '#c98a52',
+    opponentPaddleColor: '#7d5330',
+    opponentPaddleGlow: '#7d5330',
+    ballColor: '#e8c9a8',
+    ballGlow: '#c98a52',
+    trailColor: 'rgba(201, 138, 82, 0.35)',
+    gridColor: 'rgba(169, 113, 63, 0.1)',
+    accentColor: '#c98a52',
     scanlines: false,
     unlockRequirement: {
       achievementId: 'veteran_200',
@@ -554,20 +567,20 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'arctic-glass',
     nameKey: 'cosmetic_arctic-glass',
     mode: 'dark',
-    background: '#04121a',
-    courtColor: '#08202e',
-    courtBorder: '#7dd3fc',
-    netLineColor: '#7dd3fc',
-    netGlowColor: 'rgba(125,211,252,0.7)',
-    playerPaddleColor: '#bae6fd',
-    playerPaddleGlow: '#bae6fd',
-    opponentPaddleColor: '#38bdf8',
-    opponentPaddleGlow: '#38bdf8',
-    ballColor: '#f0f9ff',
-    ballGlow: '#7dd3fc',
-    trailColor: 'rgba(125,211,252,0.35)',
-    gridColor: 'rgba(125,211,252,0.10)',
-    accentColor: '#7dd3fc',
+    background: '#0c1418',
+    courtColor: '#16242a',
+    courtBorder: '#cfe9f0',
+    netLineColor: '#e8f6fa',
+    netGlowColor: 'rgba(232, 246, 250, 0.55)',
+    playerPaddleColor: '#f2fbfd',
+    playerPaddleGlow: '#f2fbfd',
+    opponentPaddleColor: '#8fb4c0',
+    opponentPaddleGlow: '#8fb4c0',
+    ballColor: '#ffffff',
+    ballGlow: '#e8f6fa',
+    trailColor: 'rgba(232, 246, 250, 0.3)',
+    gridColor: 'rgba(207, 233, 240, 0.08)',
+    accentColor: '#a8dce8',
     scanlines: false,
     unlockRequirement: {
       eliteMissionId: 'elite_shutout_2',
@@ -577,20 +590,20 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'molten-core',
     nameKey: 'cosmetic_molten-core',
     mode: 'dark',
-    background: '#150703',
-    courtColor: '#2a0e05',
-    courtBorder: '#f97316',
-    netLineColor: '#f97316',
-    netGlowColor: 'rgba(249,115,22,0.75)',
-    playerPaddleColor: '#fb923c',
-    playerPaddleGlow: '#fb923c',
-    opponentPaddleColor: '#ea580c',
-    opponentPaddleGlow: '#ea580c',
-    ballColor: '#ffedd5',
-    ballGlow: '#f97316',
-    trailColor: 'rgba(249,115,22,0.45)',
+    background: '#160a02',
+    courtColor: '#2c1104',
+    courtBorder: '#ff7a00',
+    netLineColor: '#ff7a00',
+    netGlowColor: 'rgba(255, 122, 0, 0.7)',
+    playerPaddleColor: '#ff9d3d',
+    playerPaddleGlow: '#ff9d3d',
+    opponentPaddleColor: '#d15a00',
+    opponentPaddleGlow: '#d15a00',
+    ballColor: '#fff3c4',
+    ballGlow: '#ff9d3d',
+    trailColor: 'rgba(255, 157, 61, 0.4)',
     gridColor: 'rgba(249,115,22,0.12)',
-    accentColor: '#fb923c',
+    accentColor: '#ff7a00',
     scanlines: true,
     unlockRequirement: {
       eliteMissionId: 'elite_points_60',
@@ -600,20 +613,20 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'signal-lost',
     nameKey: 'cosmetic_signal-lost',
     mode: 'dark',
-    background: '#0a0f0a',
-    courtColor: '#111a11',
-    courtBorder: '#4ade80',
-    netLineColor: '#4ade80',
-    netGlowColor: 'rgba(74,222,128,0.7)',
-    playerPaddleColor: '#86efac',
-    playerPaddleGlow: '#86efac',
-    opponentPaddleColor: '#16a34a',
-    opponentPaddleGlow: '#16a34a',
-    ballColor: '#dcfce7',
-    ballGlow: '#4ade80',
-    trailColor: 'rgba(74,222,128,0.4)',
-    gridColor: 'rgba(74,222,128,0.12)',
-    accentColor: '#86efac',
+    background: '#0b0810',
+    courtColor: '#16101f',
+    courtBorder: '#8b7fa0',
+    netLineColor: '#ff2fb8',
+    netGlowColor: 'rgba(255, 47, 184, 0.5)',
+    playerPaddleColor: '#ff5ec8',
+    playerPaddleGlow: '#ff5ec8',
+    opponentPaddleColor: '#6f6480',
+    opponentPaddleGlow: '#6f6480',
+    ballColor: '#f0e6f5',
+    ballGlow: '#ff2fb8',
+    trailColor: 'rgba(255, 47, 184, 0.32)',
+    gridColor: 'rgba(139, 127, 160, 0.12)',
+    accentColor: '#ff2fb8',
     scanlines: true,
     unlockRequirement: {
       eliteMissionId: 'elite_duel_3',
@@ -623,20 +636,20 @@ const DEFS: Record<CosmeticId, CosmeticDef> = {
     id: 'gilded-age',
     nameKey: 'cosmetic_gilded-age',
     mode: 'dark',
-    background: '#120e02',
-    courtColor: '#231c05',
-    courtBorder: '#eab308',
-    netLineColor: '#eab308',
-    netGlowColor: 'rgba(234,179,8,0.75)',
-    playerPaddleColor: '#facc15',
-    playerPaddleGlow: '#facc15',
-    opponentPaddleColor: '#ca8a04',
-    opponentPaddleGlow: '#ca8a04',
-    ballColor: '#fef9c3',
-    ballGlow: '#eab308',
-    trailColor: 'rgba(234,179,8,0.45)',
-    gridColor: 'rgba(234,179,8,0.12)',
-    accentColor: '#facc15',
+    background: '#06110c',
+    courtColor: '#0b1d15',
+    courtBorder: '#b8952c',
+    netLineColor: '#d4af37',
+    netGlowColor: 'rgba(212, 175, 55, 0.6)',
+    playerPaddleColor: '#e6c34f',
+    playerPaddleGlow: '#e6c34f',
+    opponentPaddleColor: '#4f7a63',
+    opponentPaddleGlow: '#4f7a63',
+    ballColor: '#fff0b8',
+    ballGlow: '#e6c34f',
+    trailColor: 'rgba(230, 195, 79, 0.35)',
+    gridColor: 'rgba(212, 175, 55, 0.08)',
+    accentColor: '#d4af37',
     scanlines: false,
     unlockRequirement: {
       eliteMissionId: 'elite_aces_8',
