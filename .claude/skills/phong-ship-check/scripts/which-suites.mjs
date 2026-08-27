@@ -40,8 +40,8 @@ function knownSuites() {
 // what it is doing there — otherwise the honest response to a long list is
 // to ignore it.
 const RULES = [
-  { re: /^src\/types\.ts$/, suites: ['gameplay', 'duel', 'spectate', 'queue', 'eject'],
-    why: 'the protocol union — every transport reads its shapes from here' },
+  { re: /^src\/types\.ts$/, suites: ['*'],
+    why: 'the shared shapes — imported by the server and by every transport' },
   { re: /^src\/net\/p2p\.ts$/, suites: ['gameplay', 'duel'],
     why: 'the DataChannel replica; e2e-gameplay is the only place a real P2P link comes up' },
   // server.ts is the relay AND the whole REST API in one file, so a
@@ -70,16 +70,22 @@ const RULES = [
   { re: /^server\/bots\.ts$/, suites: ['rating'], why: 'the seeded roster the leaderboard shows' },
   { re: /^server\/admin\.ts$/, suites: [], why: 'the read-only support CLI — bundled beside the server, never served to a player' },
 
-  { re: /^src\/rating\.ts$/, suites: ['rating', 'achievements'], why: 'tiers, prediction, XP' },
-  { re: /^src\/achievements\.ts$/, suites: ['achievements', 'elite'], why: 'the tree and the unlocks it gates' },
-  { re: /^src\/matchRules\.ts$/, suites: ['rules', 'duel'], why: 'ranked bands and the pre-match badge' },
-  { re: /^src\/venues\.ts$/, suites: ['venues', 'queue'], why: 'the bracket predicate the menu draws and the relay enforces' },
+  // These four are imported BY THE SERVER, so recordMatch runs them on every
+  // match every suite plays — the rating update, the achievement pass, the
+  // ranked derivation and the mission progress all happen inside one
+  // transaction behind /api/match/record. A subset of suites is as fictional
+  // here as it was for db.ts; the `serverImports` check in --verify now holds
+  // this, so it cannot drift back.
+  { re: /^src\/rating\.ts$/, suites: ['*'], why: 'tiers, prediction and XP — recordMatch runs it for every suite' },
+  { re: /^src\/achievements\.ts$/, suites: ['*'], why: 'the tree recordMatch evaluates on every recorded match' },
+  { re: /^src\/matchRules\.ts$/, suites: ['*'], why: 'the ranked derivation recordMatch re-does server-side every time' },
+  { re: /^src\/venues\.ts$/, suites: ['*'], why: 'the bracket predicate the relay enforces on every seat taken' },
   { re: /^src\/profileRules\.ts$/, suites: ['*'], why: 'the username rules every suite onboards through' },
   { re: /^src\/device\.ts$/, suites: ['*'], why: 'the smartphone gate every suite has to get past before anything else' },
   { re: /^src\/game\/physics\.ts$/, suites: ['gameplay', 'rules', 'split'], why: 'ball, collisions, serve aim, AI' },
   { re: /^src\/game\/streaks\.ts$/, suites: ['streak', 'rules'], why: 'the run carried between matches' },
   { re: /^src\/game\/themes\.ts$/, suites: ['elite'], why: 'elite missions bank theme unlocks' },
-  { re: /^src\/game\/missions\.ts$/, suites: ['elite'], why: 'the dealt hand and the reroll allowances' },
+  { re: /^src\/game\/missions\.ts$/, suites: ['*'], why: 'the dealt hand, and the progress recordMatch advances on every match' },
   { re: /^src\/net\/session\.ts$/, suites: ['*'], why: 'the heartbeat every page runs, and the walls it can raise over any flow' },
   { re: /^src\/net\/matchRecord\.ts$/, suites: ['rating', 'history'], why: 'the POST and the on-device replay queue' },
   { re: /^src\/net\/runChain\.ts$/, suites: ['streak'], why: 'run ordering across writes' },
@@ -255,6 +261,34 @@ if (argv.includes('--verify')) {
 
   let gaps = 0;
   let stale = 0;
+
+  // Criterion two, and the one four review rounds kept finding by hand: a
+  // `src/` module the SERVER imports runs inside server behaviour that no DOM
+  // id can reveal — recordMatch's rating/achievement/mission/ranked pass for
+  // most of them, the relay's seat gate for venues.ts. The floor above cannot
+  // see any of it, so it is derived separately from the server's own imports.
+  // Widening is the safe answer and narrowing has been wrong every time it was
+  // tried here, which is what makes a blanket '*' the right rule rather than a
+  // lazy one.
+  const serverSources = ['server.ts', ...fs.readdirSync(path.join(ROOT, 'server')).map((f) => `server/${f}`)]
+    .filter((f) => f.endsWith('.ts'));
+  const serverImports = new Set();
+  for (const f of serverSources) {
+    const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    for (const m of text.matchAll(/from '(?:\.\.\/)?(?:\.\/)?((?:src\/)[a-zA-Z0-9_/-]+)'/g)) {
+      serverImports.add(m[1]);
+    }
+  }
+  for (const mod of [...serverImports].sort()) {
+    for (const ext of ['.ts', '.tsx']) {
+      const rel = mod + ext;
+      if (!fs.existsSync(path.join(ROOT, rel))) continue;
+      const { suites, unknown } = suitesForFile(rel);
+      if (unknown || suites.includes('*')) continue;
+      console.log(`  ${rel}\n      the server imports it, so it runs inside flows no DOM id can reveal — must be '*', selects ${suites.join(' ')}`);
+      gaps++;
+    }
+  }
 
   // A rule naming a suite that does not exist is a broken map, and the DOM
   // floor below cannot see it — the floor only knows about suites that are

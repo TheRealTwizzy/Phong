@@ -68,9 +68,17 @@ The map is a claim about this repo, and a hand-written claim about eighteen suit
 this one drifted three times on its first day, always toward selecting too few, which is the
 direction that lets a targeted run report success while skipping the broken flow.
 
-It derives a **floor** from evidence instead of memory: every `#id` each suite drives,
-resolved back to the source files that define it. A rule selecting fewer suites than the
-derivation found is reported, and the check exits non-zero. Run it whenever you touch `RULES` — CI will anyway.
+It derives **two floors** from evidence instead of memory: every `#id` each suite drives,
+resolved back to the source files that define it; and every `src/` module the **server**
+imports, which must be `'*'`. A rule below either floor is reported and the check exits
+non-zero. Run it whenever you touch `RULES` — CI will anyway.
+
+The second floor exists because the first cannot see server behaviour: `rating.ts`,
+`achievements.ts`, `missions.ts` and `matchRules.ts` render no ids at all, yet `recordMatch`
+runs every one of them inside a single transaction on every match any suite plays, and
+`venues.ts` gates every seat the relay hands out. Four review rounds found that class one file
+at a time; the check now finds it in one pass — it caught `venues.ts` on its first run, before
+anyone had reported it.
 
 It is a floor, not the map. It sees DOM coupling only, so a file a suite depends on
 *behaviourally* never appears — that is what the reasoned `why` on each rule is for. Widening
