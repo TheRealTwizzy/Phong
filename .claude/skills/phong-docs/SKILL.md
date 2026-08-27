@@ -30,41 +30,50 @@ So doc updates are part of the change, not a follow-up.
 
 ## The voice
 
-Read a few paragraphs of the surrounding section before writing — the register is consistent
-and easy to match once you have seen it. The pattern, near-universally:
+Read a few paragraphs of the surrounding section before writing — the register is consistent and
+easy to match once seen. The pattern, near-universally:
 
 > **State the rule. Then name what it replaced, concretely, and what that cost a player.**
 
-Not: *"The relay records abandoned duels."*
-
-But: *"Walking out of a duel is losing it: `vacateSeat` calls `recordRoomMatch` with the
-leaver's seat named, before the seat empties so the room is still whole. What that replaced
-was a flat `rankMu` penalty and no match recorded anywhere, which is how a player could quit
-every duel they were losing and keep a 100% win rate with no tracked losses, while their
-opponents' wins evaporated with them."*
+Not: *"The relay records abandoned duels."* But: *"Walking out of a duel is losing it:
+`vacateSeat` calls `recordRoomMatch` with the leaver's seat named, before the seat empties so the
+room is still whole. What that replaced was a flat `rankMu` penalty and no match recorded
+anywhere, which is how a player could quit every duel they were losing and keep a 100% win rate
+with no tracked losses, while their opponents' wins evaporated with them."*
 
 What makes that work, and what to carry into anything you add:
 
 - **Name the failure in numbers a person can picture.** "Three device identities per page
-  load." "Level 1 to 15 in ten requests." "The Start button sat ~160px below the viewport."
-  Vague harm ("could cause issues") is the one thing these files never say.
+  load." "Level 1 to 15 in ten requests." Vague harm is the one thing these files never say.
 - **Explain the mechanism, not just the outcome.** Why the bug was possible is the part that
   stops it coming back.
-- **Prose, in flowing paragraphs.** Bullets appear for genuine enumerations — protocol tables,
-  the list of REST routes, the file tree. A rule with reasoning is a paragraph. Resist the
-  reflex to convert an argument into a list; the argument is the content.
+- **Prose, in flowing paragraphs.** Bullets are for genuine enumerations — protocol tables, the
+  REST routes, the file tree. A rule with reasoning is a paragraph; the argument is the content.
 - **Bold the standing rule, once, where it is decided.** "**Never add a match-recording path
-  that has no `matchKey`.**" "**Never add a middleware order in which an `/api` call can be
-  the first thing a browser does.**"
-- **Em-dashes and semicolons carry the clauses.** Long sentences are fine here; the files
-  earn them by being precise.
+  that has no `matchKey`.**"
+- **Em-dashes and semicolons carry the clauses.** Long sentences are fine here; the files earn
+  them by being precise.
 - **Present tense for what is true now, past tense for what it replaced.**
-- **Record rejected alternatives and why.** A curving-in-flight spin model was built and
-  rejected because it makes the ball unreadable on a blind half-court. That paragraph stops
-  someone rebuilding it.
-- **Record a rule that was learned twice.** The solo μ cap was wrong in both directions, and
-  the section says so, because "a constant per difficulty" is only obviously right once you
-  know what the two wrong answers cost.
+- **Record a rule that was learned twice.** The solo μ cap was wrong in both directions and the
+  section says so — "a constant per difficulty" is only obviously right once you know why.
+
+## Writing it before the code
+
+Most of this is about prose written when a change lands. Two parts can be written *before*, and
+should be: nine of the last nine feature PRs edited `CLAUDE.md`, all at the end, from memory.
+
+**Write the rule as one bolded sentence.** A rule you cannot state in one sentence is one you
+have not decided — a design problem, not a writing one, and it belongs back with the
+classification question `phong-match-rules` asks.
+
+**Write down the alternative you rejected, and why, as you reject it.** There is no RFC
+convention here but a strong habit of recording rejected designs — the curving-in-flight spin
+model, the `anchor + AI_ADAPT_BAND` cap formula, the accordion pre-match sheet. Those paragraphs
+stop work being rebuilt, and they are currently reconstructed weeks late.
+
+**What you cannot write yet is the bug history.** The voice above wants past tense for what a
+change replaced, and before the code there is no past — told to "write the paragraph first", an
+author invents one, or writes "could cause issues". Add the failure when the change lands.
 
 ## Updating rather than appending
 
@@ -85,12 +94,11 @@ sections up. When a rule moves:
 
 ## When a rule changes, its test changes too
 
-TESTING.md §5 is the invariant list, and each entry names the suite that holds it. If you are
-writing a new invariant there, it needs a suite; if you are removing one, the suite goes in the
-same commit. **A suite that asserts old behaviour is deleted rather than read.**
+TESTING.md §5 is the invariant list, and each entry names the suite that holds it. A new
+invariant needs a suite; a removed one takes its suite in the same commit. **A suite that
+asserts old behaviour is deleted rather than read.**
 
 ## Length is not the problem
 
 `CLAUDE.md` is long because the reasoning is long. Do not "tidy" it by compressing arguments
-into bullets or trimming the bug histories — that is deleting the content and keeping the
-headings. If a section is genuinely obsolete, delete the section.
+into bullets or trimming bug histories — that deletes the content and keeps the headings.
