@@ -301,6 +301,8 @@ describe('moving an account', () => {
     const hand = db.getMissions(from); // deals: slots + recent_missions
     expect(db.rerollMission(from, hand[0].id).ok).toBe(true); // daily_rerolls
     db.recordMatch({ ...win(from), matchKey: 'move:duel:1' } as never); // mode stats + recorded_matches
+    // A solo match populates daily_solo (the XP fatigue tally) as well.
+    db.recordMatch({ ...win(from), mode: 'solo', difficulty: 'rookie', matchKey: 'move:solo:1' } as never);
     db.recordAbandon(from); // daily_abandons
     db.recordPractice(from, { bestStreak: 4, earnedStreak: 4, endStreak: 4 }); // daily_practice
     // The two tables nothing above reaches deterministically (mission

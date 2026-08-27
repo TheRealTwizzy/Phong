@@ -527,6 +527,15 @@ if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
   await solo.waitForSelector('#court-stats-overlay', { timeout: 3000 });
   ok('the player can open telemetry during the match');
   await solo.click('#btn-quit-to-menu');
+  // Quitting a solo match a point has been scored in is an abandon, and it
+  // asks first. Whether this scripted match HAS a point on the board by now
+  // depends on how many balls the AI got back, so the confirmation is walked
+  // through when it appears rather than assumed either way — it started
+  // appearing here when the AI ladder's floor came up.
+  await solo
+    .waitForSelector('#quit-confirm-modal', { timeout: 2000 })
+    .then(() => solo.click('#btn-quit-confirm'))
+    .catch(() => {});
   await solo.waitForSelector('#main-menu-screen', { timeout: 5000 });
   await solo.click('#menu-mode-solo');
   await solo.click('#menu-start-solo');

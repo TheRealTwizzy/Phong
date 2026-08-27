@@ -2,11 +2,14 @@ import type { Tier } from './rating';
 
 export type GameMode = 'solo' | 'multiplayer' | 'split' | 'practice';
 
-// Three rungs: Rookie is the floor, Pro is the average-player baseline, Cyber
-// is the ceiling. 'chaos' was retired — it sat between Pro and Cyber in rating
-// but was defined by volatility rather than strength, which made the ladder
-// read as four rungs with only three distinct difficulties.
-export type AIDifficulty = 'rookie' | 'pro' | 'cyber';
+// Five rungs, each simulating a band of the PvP ladder: Rookie plays like an
+// Unranked/Contender human, Pro like Vanguard/Ace, Elite like Master/
+// Grandmaster, Cyber like Grandmaster/Legend, and Chaos like a Legend+ player.
+// 'chaos' is a REVIVED name: it once sat between Pro and Cyber (defined by
+// volatility rather than strength) and was retired; legacy history rows were
+// relabelled to 'cyber' by the chaos_relabel_v1 migration before the name was
+// given its new meaning at the top of the ladder.
+export type AIDifficulty = 'rookie' | 'pro' | 'elite' | 'cyber' | 'chaos';
 
 export type CourtTheme =
   | 'neon'
@@ -238,7 +241,9 @@ export interface PlayerProfile {
   /** Solo wins per difficulty — what the ladder branch is measured on. */
   rookieWins: number;
   proWins: number;
+  eliteWins: number;
   cyberWins: number;
+  chaosWins: number;
   /**
    * Career count of duels walked out on mid-match (disconnect or quit with a
    * live ball). Recorded by the relay, never reported by a client. The first

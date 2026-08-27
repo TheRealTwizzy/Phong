@@ -7,6 +7,17 @@ import {
   levelFromXp,
   matchXp,
   surpriseMultiplier,
+  soloMomentum,
+  soloFatigue,
+  soloAdjustedXp,
+  SOLO_MOMENTUM_MAX,
+  SOLO_FATIGUE_FLOOR,
+  SOLO_XP_MATCH_CAP,
+  AI_DIFFICULTIES,
+  AI_RATINGS,
+  aiRating,
+  winProbability,
+  newRating,
 } from '../src/rating';
 
 // A representative match. The streak was 10 when a rally number counted both
@@ -101,6 +112,8 @@ describe('achievement XP scales with what was actually beaten', () => {
     const scaled = ALL_ACHIEVEMENTS.filter((a) => a.scaled).map((a) => a.id).sort();
     // Everything that means "you beat something", and nothing else.
     expect(scaled).toEqual([
+      'ai_chaos',
+      'ai_elite',
       'ai_pro',
       'ai_rookie',
       'cyber_shutout',
@@ -197,6 +210,89 @@ describe('level progress is reported consistently', () => {
       const boundary = xpForLevel(level + 1);
       expect(levelFromXp(boundary - 1).level).toBe(level);
       expect(levelFromXp(boundary).level).toBe(level + 1);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Solo XP momentum and fatigue. The worked example that specified this system
+// fixed RELATIONSHIPS, not numbers: a win streak ramps XP with diminishing
+// increments, same-day volume decays it, a loss ending a long run pays more
+// than an early loss, and nothing ever exceeds the (non-diminishing) cap.
+// These tests pin each relationship on the pure functions; the through-the-
+// store half — the streak read pre-bump, the fatigue tally, idempotency —
+// lives in tests/db.test.ts where the real recordMatch runs.
+// ---------------------------------------------------------------------------
+
+describe('solo XP momentum and fatigue', () => {
+  it('same streak, more games today, less XP (fatigue)', () => {
+    // The example's G3 win (streak 0, two games played) < G1 win (streak 0,
+    // none played).
+    const g1 = soloAdjustedXp(200, 0, 0);
+    const g3 = soloAdjustedXp(200, 0, 2 + 2); // past the free games
+    expect(g3).toBeLessThan(g1);
+  });
+
+  it('a growing streak strictly increases XP even as fatigue grows, with diminishing increments', () => {
+    // The example's games 3-8: +5, +5, +4, +3, +2 — each match pays more
+    // than the last, by less each time.
+    const run: number[] = [];
+    for (let w = 0; w < 6; w++) run.push(soloAdjustedXp(200, w, 2 + w));
+    for (let i = 1; i < run.length; i++) expect(run[i]).toBeGreaterThan(run[i - 1]);
+    const increments = run.slice(1).map((v, i) => v - run[i]);
+    for (let i = 1; i < increments.length; i++) {
+      expect(increments[i]).toBeLessThanOrEqual(increments[i - 1]);
+    }
+  });
+
+  it('never exceeds the cap, however long the unbroken streak runs', () => {
+    // "Continues to win, theoretically forever."
+    for (let w = 0; w < 500; w++) {
+      expect(soloAdjustedXp(10000, w, w)).toBeLessThanOrEqual(SOLO_XP_MATCH_CAP);
+    }
+    // And the cap is a constant — momentum saturates INSIDE it, fatigue
+    // floors, so the bound itself never diminishes.
+    expect(soloMomentum(1e6)).toBeLessThanOrEqual(SOLO_MOMENTUM_MAX);
+    expect(soloFatigue(1e6)).toBe(SOLO_FATIGUE_FLOOR);
+  });
+
+  it('pays a loss ending a long streak more than one ending a short streak', () => {
+    // Momentum reads the streak CARRIED IN, so it applies to the loss that
+    // ends the run — the example's G9 loss (walked in on 6) vs G2 (on 1).
+    const lossBase = 60;
+    const earlyLoss = soloAdjustedXp(lossBase, 1, 1);
+    const lateLoss = soloAdjustedXp(lossBase, 6, 8);
+    expect(lateLoss).toBeGreaterThan(earlyLoss);
+  });
+
+  it('keeps the floor: fatigue attacks the multiplier, never the minimum', () => {
+    // "Every match is progression, levels never regress" survives this
+    // system: however fatigued, no solo match pays under XP_FLOOR.
+    expect(soloAdjustedXp(XP_FLOOR, 0, 1000)).toBe(XP_FLOOR);
+    expect(soloAdjustedXp(1, 0, 1000)).toBe(XP_FLOOR);
+  });
+
+  it('always pays more against a harder rung, win or loss, with no per-difficulty table', () => {
+    // The guarantee is structural: anchors are monotone, adaptation
+    // preserves their spread, so winProbability strictly falls as the rung
+    // rises and both surprise multipliers rise with it. Momentum and fatigue
+    // are difficulty-blind, so the ordering survives them.
+    const me = newRating();
+    const stats = { playerScore: 3, bestStreak: 7 } as const;
+    let prevWin = -Infinity;
+    let prevLoss = -Infinity;
+    for (const d of AI_DIFFICULTIES) {
+      const p = winProbability(me, aiRating(d, me.mu));
+      const win = soloAdjustedXp(matchXp({ ...stats, won: true, winProb: p, mode: 'solo' }), 2, 3);
+      const loss = soloAdjustedXp(matchXp({ ...stats, won: false, winProb: p, mode: 'solo' }), 2, 3);
+      expect(win).toBeGreaterThan(prevWin);
+      expect(loss).toBeGreaterThanOrEqual(prevLoss);
+      prevWin = win;
+      prevLoss = loss;
+    }
+    // The anchors themselves must stay monotone, or everything above is vacuous.
+    for (let i = 1; i < AI_DIFFICULTIES.length; i++) {
+      expect(AI_RATINGS[AI_DIFFICULTIES[i]].mu).toBeGreaterThan(AI_RATINGS[AI_DIFFICULTIES[i - 1]].mu);
     }
   });
 });

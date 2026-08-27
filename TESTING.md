@@ -36,7 +36,7 @@ coverage number.
 
 | Suite | Owns |
 |---|---|
-| `rating` `xp` `achievements` | TrueSkill, tiers, XP curve, the achievement tree and the unlocks it gates |
+| `rating` `xp` `achievements` | TrueSkill, tiers, the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `matchHistory` | History reads: one row per player per match, the `ranked` column, mode/ranked filters, paging, per-player retention |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
@@ -49,7 +49,7 @@ coverage number.
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
-| `db-wipe` `taskReset` `placementRescue` | The one-shot migrations |
+| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` | The one-shot migrations |
 
 ### Browser layer
 
@@ -259,8 +259,23 @@ the suite for a reason that is not the rule), and the fix was to move the rule s
 could be stated — `src/game/streaks.ts` — rather than to loosen the assertion until it
 passed. `scripts/e2e-streak.mjs` keeps only what a browser can say without luck.
 
+**Solo must never be the cheap way up.** Two rules hold it, and both are pinned rather than
+remembered. The per-rung `SOLO_MU_CAPS` are DATA, each sitting under a tier floor, because the
+`anchor + AI_ADAPT_BAND` formula they replaced collapses at five rungs — it hands Elite, Cyber
+and Chaos one identical ceiling, so farming the Master-tier rung would reach Legend as fast as
+farming the hardest thing in the game; `tests/rating.test.ts` pins every value and the
+below-the-next-floor property. And solo XP carries momentum and fatigue, so a win streak is
+what pays rather than volume; `tests/xp.test.ts` pins the shape (ramp, diminishing increments,
+the constant cap, a loss on a long run paying more than an early one, harder-always-pays-more)
+and `tests/db.test.ts` pins the plumbing — the streak read BEFORE the match's own bump, and the
+day tally riding recordMatch's transaction and its idempotency.
+
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
-its suite in the same commit.
+its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test
+pinning `competenceForMu` bit-for-bit at and above the old Cyber anchor, written when the floor
+was raised on the explicit condition that the ceiling did not move. Raising the ceiling IS this
+change, so the test was not updated but removed, and the hard bound it protected (`no
+difficulty may ever return ≥88%`) restated at the new ceiling as `≥93%`.
 
 ## 6. Writing a new test here
 

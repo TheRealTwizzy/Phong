@@ -2,12 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { DatabaseSync } from 'node:sqlite';
 import type { MatchEndPayload, MatchRules } from '../src/types';
 import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, soloMuCap } from '../src/rating';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-db-test-'));
 process.env.DATA_DIR = TMP;
+const DB_FILE = path.join(TMP, 'phong.db');
 
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 let db: typeof import('../server/db').db;
@@ -477,17 +479,17 @@ describe('GameDatabase', () => {
 
 describe('scaled achievement rewards', () => {
   it('pays a scaled achievement by the prediction, not a flat constant', () => {
-    // cyber_slayer sits at the far end of the ladder branch: Rookie, then Pro,
-    // then ten Pro wins at level 10 or above. The whole path has to be walked
-    // before it can be earned at all.
+    // ai_elite sits deep in the ladder branch: Rookie, then Pro, then ten Pro
+    // wins at level 10 or above. The whole path has to be walked before it
+    // can be earned at all.
     init('p_ach_hard', 'AchHard');
     db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'rookie', bestStreak: 5 }));
     for (let i = 0; i < 60 && !db.getProfile('p_ach_hard').achievements.includes('ai_pro_10'); i++) {
       db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'pro', bestStreak: 5 }));
     }
     expect(db.getProfile('p_ach_hard').achievements).toContain('ai_pro_10');
-    const res = db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'cyber', bestStreak: 5 }));
-    const hard = res.newAchievements.find((a) => a.id === 'cyber_slayer')!;
+    const res = db.recordMatch(match('p_ach_hard', { mode: 'solo', difficulty: 'elite', bestStreak: 5 }));
+    const hard = res.newAchievements.find((a) => a.id === 'ai_elite')!;
     expect(hard).toBeTruthy();
     expect(hard.awardedXp).toBeGreaterThan(0);
     // The award is the base reward bent by the prediction, not the raw constant.
@@ -687,12 +689,17 @@ describe('counters the server derives, and the client cannot report', () => {
     expect([p.rookieWins, p.proWins, p.cyberWins]).toEqual([1, 1, 1]);
   });
 
-  it('credits a retired difficulty to the rung that replaced it', () => {
-    // 'chaos' was removed from the ladder; a device that still has it stored
-    // must not have its wins vanish, and normalizeDifficulty maps it to cyber.
+  it('credits each of the five rungs to its own counter', () => {
+    // 'chaos' is a live rung again (legacy rows were relabelled once by
+    // chaos_relabel_v1 — see tests/chaosRelabel.test.ts), so a chaos win
+    // lands on chaosWins, not on cyber's counter.
     init('c_chaos', 'ChaosCase');
-    played('c_chaos', { mode: 'solo', difficulty: 'chaos' as any, isWinner: true }, 1);
-    expect(db.getProfile('c_chaos').cyberWins).toBe(1);
+    played('c_chaos', { mode: 'solo', difficulty: 'chaos', isWinner: true }, 1);
+    played('c_chaos', { mode: 'solo', difficulty: 'elite', isWinner: true }, 2);
+    const counted = db.getProfile('c_chaos');
+    expect(counted.chaosWins).toBe(1);
+    expect(counted.eliteWins).toBe(1);
+    expect(counted.cyberWins).toBe(0);
   });
 
   it('credits nothing per-difficulty for a loss, or for a duel', () => {
@@ -1360,5 +1367,70 @@ describe('a carried run is not paid for twice', () => {
       mode: 'solo', difficulty: 'rookie', bestStreak: 3, earnedStreak: 9999, endStreak: 3, matchKey: 'cl:b',
     }));
     expect(liar.earnedXp).toBe(honest.earnedXp);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Solo XP momentum and fatigue, through the real store. The pure shape lives
+// in tests/xp.test.ts; what THIS half owns is the plumbing: the win streak is
+// read from player_mode_stats BEFORE the match's own bump, the fatigue tally
+// rides recordMatch's transaction and idempotency, and PvP never touches it.
+// Rookie is the fixture on purpose: its solo cap IS START_MU, so a fresh
+// player's hidden rating cannot move and the prediction stays put — which
+// leaves momentum as the only force moving the payout.
+// ---------------------------------------------------------------------------
+
+describe('solo XP momentum, recorded', () => {
+  const soloWin = (id: string, n: number) =>
+    db.recordMatch(
+      match(id, {
+        mode: 'solo',
+        difficulty: 'rookie',
+        playerScore: 5,
+        opponentScore: 2,
+        bestStreak: 4,
+        earnedStreak: 4,
+        endStreak: 0,
+        matchKey: `momentum:${id}:${n}`,
+      })
+    );
+
+  it('ramps consecutive wins up, and a loss resets the ramp', () => {
+    init('p_momentum', 'Momentum');
+    const run: number[] = [];
+    for (let i = 0; i < 5; i++) run.push(soloWin('p_momentum', i).earnedXp);
+    // Each consecutive win pays more than the last — the streak walked in on
+    // grows faster than the day's fatigue accrues.
+    for (let i = 1; i < run.length; i++) expect(run[i]).toBeGreaterThan(run[i - 1]);
+
+    db.recordMatch(
+      match('p_momentum', {
+        mode: 'solo', difficulty: 'rookie', playerScore: 1, opponentScore: 5,
+        isWinner: false, bestStreak: 2, earnedStreak: 2, endStreak: 0,
+        matchKey: 'momentum:p_momentum:loss',
+      })
+    );
+    // The next win walks in on a reset streak AND a fatigued day: well below
+    // the pre-loss peak.
+    const afterLoss = soloWin('p_momentum', 99).earnedXp;
+    expect(afterLoss).toBeLessThan(run[run.length - 1]);
+  });
+
+  it('counts a solo game into the day once per matchKey, and never for a duel', () => {
+    init('p_fatigue', 'FatigueCase');
+    soloWin('p_fatigue', 1);
+    // A replay of the same matchKey is answered from the stamp: no second
+    // payment, and no second tick on the fatigue tally.
+    soloWin('p_fatigue', 1);
+    db.recordMatch(match('p_fatigue', { matchKey: 'momentum:p_fatigue:duel' })); // multiplayer
+    const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      const row = raw
+        .prepare("SELECT gamesPlayed FROM daily_solo WHERE playerId = 'p_fatigue'")
+        .get() as { gamesPlayed: number } | undefined;
+      expect(row?.gamesPlayed).toBe(1);
+    } finally {
+      raw.close();
+    }
   });
 });

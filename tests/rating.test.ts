@@ -14,6 +14,7 @@ import {
   PLACEMENT_GAMES,
   PVP_UPDATE,
   SOLO_UPDATE,
+  START_MU,
   Rating,
   newRating,
   recommendedDifficulty,
@@ -148,8 +149,10 @@ describe('adaptive AI anchors', () => {
       expect(Math.abs(adapted - 0.5)).toBeLessThanOrEqual(Math.abs(fixed - 0.5) + 1e-9);
       // Playable at both ends. It never reaches a flat 50/50 by design —
       // that would be rubber-banding, and would erase the rungs entirely.
+      // (Pro anchors at 24 now — a shade under START_MU — so a very strong
+      // player is favoured a little harder than under the old 25 anchor.)
       expect(adapted).toBeGreaterThan(0.45);
-      expect(adapted).toBeLessThan(0.92);
+      expect(adapted).toBeLessThan(0.95);
     }
   });
 
@@ -271,13 +274,23 @@ describe('solo is capped and always lighter than PvP', () => {
     }
   });
 
-  it('never rates a rung above the hardest that rung ever plays', () => {
-    // What makes the ceiling honest rather than arbitrary: the AI adapts
-    // upward by at most AI_ADAPT_BAND, so this is the most beating it can
-    // demonstrate — and it is a CONSTANT, so it cannot chase the player up.
+  it('caps each rung one tier above what it simulates, and all of solo below Overlord', () => {
+    // The caps are DATA, not the anchor+band formula: with five rungs that
+    // formula collides Elite, Cyber and Chaos at one ceiling and makes the
+    // top rungs interchangeable for rank farming. Pinned value-by-value so a
+    // moved anchor cannot silently move what farming a rung is worth.
+    expect(soloMuCap('rookie')).toBe(START_MU); // farming the open rung from a standing start moves nothing
+    expect(soloMuCap('pro')).toBe(30.9);
+    expect(soloMuCap('elite')).toBe(33.9);
+    expect(soloMuCap('cyber')).toBe(36.9);
+    expect(soloMuCap('chaos')).toBe(36.9);
+    // Every cap is a constant that sits strictly below the Overlord floor
+    // (37): the apex is a PvP achievement, however much solo is farmed.
     for (const difficulty of AI_DIFFICULTIES) {
-      const hardestItEverPlays = effectiveAiMu(difficulty, 1e6);
-      expect(soloMuCap(difficulty)).toBeCloseTo(hardestItEverPlays, 9);
+      expect(soloMuCap(difficulty)).toBeLessThan(37);
+      // And no cap may fall below its own anchor, or a rung would be
+      // unfarmable the moment it was unlocked.
+      expect(soloMuCap(difficulty)).toBeGreaterThanOrEqual(AI_RATINGS[difficulty].mu - 1e-9);
     }
   });
 
@@ -301,8 +314,10 @@ describe('solo is capped and always lighter than PvP', () => {
       r = updateRating(r, aiRating('pro', r.mu), won, soloVs('pro'));
     }
     expect(r.mu).toBeLessThan(newRating().mu);
-    // Pro tracks them all the way down: the odds must not have worsened.
-    expect(effectiveAiMu('pro', r.mu)).toBeCloseTo(r.mu, 6);
+    // Pro tracks them all the way down at full strength, holding its fixed
+    // offset from START_MU (its 24 anchor sits one mu under it), so the odds
+    // must not have worsened as they fell.
+    expect(effectiveAiMu('pro', r.mu)).toBeCloseTo(r.mu + (AI_RATINGS.pro.mu - START_MU), 6);
   });
 });
 

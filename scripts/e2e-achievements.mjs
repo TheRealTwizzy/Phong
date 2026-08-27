@@ -57,7 +57,9 @@ async function skipTour(page) {
 const dis = async (sel) => page.$eval(sel, (el) => el.disabled);
 if (await dis('#menu-diff-rookie')) fail('Rookie should be open from the start');
 if (!(await dis('#menu-diff-pro'))) fail('Pro should be locked for a new player');
+if (!(await dis('#menu-diff-elite'))) fail('Elite should be locked for a new player');
 if (!(await dis('#menu-diff-cyber'))) fail('Cyber should be locked for a new player');
+if (!(await dis('#menu-diff-chaos'))) fail('Chaos should be locked for a new player');
 ok('new player: Rookie open, Pro and Cyber locked');
 if (!(await page.$('#menu-diff-pro-lock'))) fail('no lock marker on Pro');
 ok('locked difficulties show a lock');
@@ -84,7 +86,7 @@ await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
 await page.click('#menu-mode-solo');
 await page.waitForSelector('#menu-diff-pro', { timeout: 5000 });
 if (await dis('#menu-diff-pro')) fail('beating Rookie did not open Pro');
-if (!(await dis('#menu-diff-cyber'))) fail('beating Rookie should not open Cyber');
+if (!(await dis('#menu-diff-elite'))) fail('beating Rookie should not open Elite');
 ok('beating Rookie opens Pro, and only Pro');
 
 // A single Pro win used to hand over Cyber in a first session. It now needs
@@ -96,9 +98,9 @@ await page.evaluate(async () => {
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
 await page.click('#menu-mode-solo');
-await page.waitForSelector('#menu-diff-cyber', { timeout: 5000 });
-if (!(await dis('#menu-diff-cyber'))) fail('one Pro win should NOT open Cyber');
-ok('one Pro win does not open Cyber');
+await page.waitForSelector('#menu-diff-elite', { timeout: 5000 });
+if (!(await dis('#menu-diff-elite'))) fail('one Pro win should NOT open Elite');
+ok('one Pro win does not open Elite');
 
 const proProfile = await page.evaluate(async () => (await fetch('/api/profile/me')).json());
 for (let i = 0; i < 60; i++) {
@@ -110,14 +112,15 @@ for (let i = 0; i < 60; i++) {
   });
 }
 const climbed = await page.evaluate(async () => (await fetch('/api/profile/me')).json());
-if (!climbed.achievements.includes('ai_pro_10')) fail('the Cyber gate never opened over 60 Pro wins');
+if (!climbed.achievements.includes('ai_pro_10')) fail('the Elite gate never opened over 60 Pro wins');
 if (climbed.level < 10) fail(`the level gate was not enforced (level ${climbed.level})`);
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
 await page.click('#menu-mode-solo');
-await page.waitForSelector('#menu-diff-cyber', { timeout: 5000 });
-if (await dis('#menu-diff-cyber')) fail('the full climb did not open Cyber');
-ok(`Cyber opens after the climb: ${climbed.proWins} Pro wins, level ${climbed.level} (was ${proProfile.level})`);
+await page.waitForSelector('#menu-diff-elite', { timeout: 5000 });
+if (await dis('#menu-diff-elite')) fail('the full climb did not open Elite');
+if (!(await dis('#menu-diff-cyber'))) fail('the Pro climb must not open Cyber — that is Elite\'s climb');
+ok(`Elite opens after the climb: ${climbed.proWins} Pro wins, level ${climbed.level} (was ${proProfile.level})`);
 if (await dis('#menu-pts-10')) fail('a first win should open first-to-10');
 ok('a first win opens longer matches');
 

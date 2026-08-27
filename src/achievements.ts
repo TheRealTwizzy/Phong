@@ -336,11 +336,33 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     icon: 'cpu',
   },
   {
+    id: 'ai_elite',
+    title: 'Upper Bracket',
+    description: 'Beat the Elite AI in Solo mode.',
+    branch: 'ladder',
+    parent: 'ai_pro_10',
+    category: 'mastery',
+    xpReward: 360,
+    scaled: true,
+    icon: 'cpu',
+  },
+  {
+    id: 'ai_elite_10',
+    title: 'Bracket Fixture',
+    description: 'Beat the Elite AI 10 times, at level 15 or above.',
+    branch: 'ladder',
+    parent: 'ai_elite',
+    category: 'mastery',
+    xpReward: 390,
+    gate: { level: 15 },
+    icon: 'cpu',
+  },
+  {
     id: 'cyber_slayer',
     title: 'Cyber Slayer',
     description: 'Beat the Cyber AI in Solo mode.',
     branch: 'ladder',
-    parent: 'ai_pro_10',
+    parent: 'ai_elite_10',
     category: 'mastery',
     xpReward: 420,
     scaled: true,
@@ -362,13 +384,37 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'cyber_10',
     title: 'Machine Ender',
-    description: 'Beat the Cyber AI 10 times.',
+    description: 'Beat the Cyber AI 10 times, at Grandmaster tier or above.',
     branch: 'ladder',
     parent: 'cyber_shutout',
     category: 'mastery',
     xpReward: 800,
     hidden: true,
-    gate: { tier: 'ace' },
+    gate: { tier: 'grandmaster' },
+    icon: 'cpu',
+  },
+  {
+    id: 'ai_chaos',
+    title: 'Eye of the Storm',
+    description: 'Beat the Chaos AI in Solo mode.',
+    branch: 'ladder',
+    parent: 'cyber_10',
+    category: 'mastery',
+    xpReward: 900,
+    scaled: true,
+    hidden: true,
+    icon: 'cpu',
+  },
+  {
+    id: 'chaos_10',
+    title: 'Stormbreaker',
+    description: 'Beat the Chaos AI 10 times, at Legend tier or above.',
+    branch: 'ladder',
+    parent: 'ai_chaos',
+    category: 'mastery',
+    xpReward: 1000,
+    hidden: true,
+    gate: { tier: 'legend' },
     icon: 'cpu',
   },
 
@@ -689,11 +735,14 @@ export const UNLOCKS: Record<string, GameUnlock[]> = {
   first_win: [{ kind: 'winningScore', value: 10 }],
   veteran_10: [{ kind: 'winningScore', value: 15 }],
   ai_rookie: [{ kind: 'difficulty', value: 'pro' }],
-  // Cyber used to open on a SINGLE Pro win, which a player could take in
-  // their first session — the top rung arrived before they had any feel for
-  // the middle one. It now needs ten Pro wins AND level 10, so the hardest
-  // opponent in the game is something you climb to rather than stumble into.
-  ai_pro_10: [{ kind: 'difficulty', value: 'cyber' }],
+  // Each higher rung opens on TEN wins at the rung below plus a progression
+  // gate on the achievement itself (level or tier), so the ladder is climbed
+  // a rung at a time — Cyber once opened on a SINGLE Pro win, which handed a
+  // first-session player the then-hardest opponent in the game before they
+  // had any feel for the middle rung.
+  ai_pro_10: [{ kind: 'difficulty', value: 'elite' }],
+  ai_elite_10: [{ kind: 'difficulty', value: 'cyber' }],
+  cyber_10: [{ kind: 'difficulty', value: 'chaos' }],
 };
 
 /** Everything available from the start, before a single achievement. */
@@ -754,7 +803,7 @@ function clampToUnlocked<T extends string | number>(
 }
 
 /** Difficulties easiest-first. Only `rookie` is open from the first match. */
-export const DIFFICULTY_ORDER = ['rookie', 'pro', 'cyber'] as const;
+export const DIFFICULTY_ORDER = ['rookie', 'pro', 'elite', 'cyber', 'chaos'] as const;
 
 /** Match lengths shortest-first. 3 and 5 are open from the first match. */
 export const WINNING_SCORE_ORDER = WINNING_SCORES;

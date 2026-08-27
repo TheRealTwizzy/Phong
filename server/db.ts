@@ -47,6 +47,7 @@ import {
   practiceXp,
   achievementXpCap,
   PRACTICE_XP_DAILY_CAP,
+  soloAdjustedXp,
 } from '../src/rating';
 import { BotSeed, botProfileFields } from './bots';
 import {
@@ -190,6 +191,7 @@ export const PLAYER_KEYED_TABLES = [
   'daily_abandons',
   'daily_rerolls',
   'daily_practice',
+  'daily_solo',
   'elite_completions',
   'recent_missions',
   'recorded_matches',
@@ -252,7 +254,9 @@ interface PlayerRow {
   shutoutsWon: number | null;
   rookieWins: number | null;
   proWins: number | null;
+  eliteWins: number | null;
   cyberWins: number | null;
+  chaosWins: number | null;
   abandons: number | null;
   id: string;
   username: string;
@@ -300,7 +304,9 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
     shutoutsWon: row.shutoutsWon || 0,
     rookieWins: row.rookieWins || 0,
     proWins: row.proWins || 0,
+    eliteWins: row.eliteWins || 0,
     cyberWins: row.cyberWins || 0,
+    chaosWins: row.chaosWins || 0,
     abandons: row.abandons || 0,
     achievements: JSON.parse(row.achievements || '[]'),
     recoveryCode: row.recoveryCode || undefined,
@@ -384,7 +390,9 @@ class GameDatabase {
         shutoutsWon INTEGER NOT NULL DEFAULT 0,
         rookieWins INTEGER NOT NULL DEFAULT 0,
         proWins INTEGER NOT NULL DEFAULT 0,
+        eliteWins INTEGER NOT NULL DEFAULT 0,
         cyberWins INTEGER NOT NULL DEFAULT 0,
+        chaosWins INTEGER NOT NULL DEFAULT 0,
         abandons INTEGER NOT NULL DEFAULT 0,
         dailyStreak INTEGER NOT NULL,
         lastDailyDate TEXT NOT NULL,
@@ -519,6 +527,16 @@ class GameDatabase {
         xpAwarded INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (playerId, dayKey)
       );
+      -- Solo matches recorded today, for the XP fatigue curve: same-day solo
+      -- grinding decays the momentum multiplier toward a floor (rating.ts,
+      -- soloFatigue). Day-keyed like daily_practice, and for the same reason:
+      -- a new day is a new row, so nothing ever needs expiring.
+      CREATE TABLE IF NOT EXISTS daily_solo (
+        playerId TEXT NOT NULL,
+        dayKey TEXT NOT NULL,
+        gamesPlayed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, dayKey)
+      );
       -- One row per match actually paid out, so recording the same match
       -- twice pays once. A duel is reported up to three times over — the
       -- relay records it for both seats the moment the score decides it, and
@@ -621,6 +639,7 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS daily_abandons');
       this.sql.exec('DROP TABLE IF EXISTS elite_completions');
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
+      this.sql.exec('DROP TABLE IF EXISTS daily_solo');
       this.sql.exec('DROP TABLE IF EXISTS recorded_matches');
       this.sql.exec('DROP TABLE IF EXISTS released_devices');
       // Added with the multi-browser rework and missed here at the time. A
@@ -699,7 +718,9 @@ class GameDatabase {
     addColumn('shutoutsWon', 'shutoutsWon INTEGER NOT NULL DEFAULT 0');
     addColumn('rookieWins', 'rookieWins INTEGER NOT NULL DEFAULT 0');
     addColumn('proWins', 'proWins INTEGER NOT NULL DEFAULT 0');
+    addColumn('eliteWins', 'eliteWins INTEGER NOT NULL DEFAULT 0');
     addColumn('cyberWins', 'cyberWins INTEGER NOT NULL DEFAULT 0');
+    addColumn('chaosWins', 'chaosWins INTEGER NOT NULL DEFAULT 0');
     addColumn('abandons', 'abandons INTEGER NOT NULL DEFAULT 0');
     // One account, one live session. Which one is recorded here.
     addColumn('activeSessionId', 'activeSessionId TEXT');
@@ -721,7 +742,12 @@ class GameDatabase {
 
     this.releaseStrandedPlacements();
     this.resetActiveTasks();
+    // Order matters between these two: the backfill classifies legacy rows
+    // from mode + difficulty, and a legacy 'chaos' row (which meant the old
+    // between-Pro-and-Cyber rung) must be judged and relabelled under its old
+    // meaning before the name is revived at the top of the ladder.
     this.backfillMatchRanked();
+    this.relabelChaosMatches();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -793,6 +819,61 @@ class GameDatabase {
       console.log(
         `ranked_backfill_v1: classified ${rankedRows.changes} ranked and ${unrankedRows.changes} un-ranked legacy match row(s)`
       );
+    }
+  }
+
+  /**
+   * Solo matches recorded for `playerId` so far this UTC day — the fatigue
+   * input, read BEFORE this match's own bump so the first game of a day
+   * counts as zero played.
+   */
+  /**
+   * The solo win streak this player carries INTO a match — the momentum
+   * input. Read straight from the row rather than through getModeStats, whose
+   * public shape deliberately omits the live per-mode win streak; and read
+   * BEFORE bumpModeStats applies this match's own result.
+   */
+  private soloWinStreak(playerId: string): number {
+    const row = this.stmt(
+        `SELECT winStreak FROM player_mode_stats WHERE playerId = ? AND mode = 'solo'`
+      )
+      .get(playerId) as { winStreak: number } | undefined;
+    return row?.winStreak ?? 0;
+  }
+
+  private soloGamesToday(playerId: string, now: Date): number {
+    const row = this.stmt('SELECT gamesPlayed FROM daily_solo WHERE playerId = ? AND dayKey = ?')
+      .get(playerId, missionDayKey(now)) as { gamesPlayed: number } | undefined;
+    return row?.gamesPlayed ?? 0;
+  }
+
+  private bumpSoloGames(playerId: string, now: Date): void {
+    this.stmt(
+        `INSERT INTO daily_solo (playerId, dayKey, gamesPlayed) VALUES (?, ?, 1)
+         ON CONFLICT(playerId, dayKey) DO UPDATE SET gamesPlayed = gamesPlayed + 1`
+      )
+      .run(playerId, missionDayKey(now));
+  }
+
+  /**
+   * Relabel legacy 'chaos' match rows to 'cyber' — ONCE, before the name
+   * changes hands.
+   *
+   * 'chaos' was a retired difficulty that sat BETWEEN Pro and Cyber, and
+   * normalizeDifficulty mapped it to 'cyber' ("a stored chaos still means the
+   * hard one"). The five-rung ladder revives the name as the NEW TOP RUNG, so
+   * a legacy history row left saying 'chaos' would silently start rendering
+   * as the hardest opponent in the game — a match the player never played.
+   * Rewriting the rows to what the retirement map already said they meant,
+   * one time, is what lets the map itself be deleted.
+   */
+  private relabelChaosMatches(): void {
+    const KEY = 'chaos_relabel_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(`UPDATE matches SET difficulty = 'cyber' WHERE difficulty = 'chaos'`).run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`chaos_relabel_v1: relabelled ${rows.changes} legacy chaos match row(s) to cyber`);
     }
   }
 
@@ -887,10 +968,10 @@ class GameDatabase {
     this.stmt(
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins,
-           winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, cyberWins, abandons, dailyStreak, lastDailyDate,
+           winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, eliteWins, cyberWins, chaosWins, abandons, dailyStreak, lastDailyDate,
            achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt,
            tutorialCompletedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
@@ -901,7 +982,8 @@ class GameDatabase {
            totalAces=excluded.totalAces, multiplayerWins=excluded.multiplayerWins,
            winStreak=excluded.winStreak, bestWinStreak=excluded.bestWinStreak,
            shutoutsWon=excluded.shutoutsWon, rookieWins=excluded.rookieWins,
-           proWins=excluded.proWins, cyberWins=excluded.cyberWins,
+           proWins=excluded.proWins, eliteWins=excluded.eliteWins,
+           cyberWins=excluded.cyberWins, chaosWins=excluded.chaosWins,
            abandons=excluded.abandons,
            dailyStreak=excluded.dailyStreak,
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
@@ -933,7 +1015,9 @@ class GameDatabase {
         p.shutoutsWon || 0,
         p.rookieWins || 0,
         p.proWins || 0,
+        p.eliteWins || 0,
         p.cyberWins || 0,
+        p.chaosWins || 0,
         p.abandons || 0,
         p.dailyStreak,
         p.lastDailyDate,
@@ -1031,7 +1115,9 @@ class GameDatabase {
         shutoutsWon: 0,
         rookieWins: 0,
         proWins: 0,
+        eliteWins: 0,
         cyberWins: 0,
+        chaosWins: 0,
         abandons: 0,
         dailyStreak: 1,
         lastDailyDate: todayStr,
@@ -2111,7 +2197,9 @@ class GameDatabase {
       shutoutsWon: 0,
       rookieWins: 0,
       proWins: 0,
+      eliteWins: 0,
       cyberWins: 0,
+      chaosWins: 0,
       abandons: 0,
       dailyStreak: bot.dailyStreak || 1,
       lastDailyDate: todayStr,
@@ -2227,13 +2315,27 @@ class GameDatabase {
     const earnedStreak = Math.min(bound(payload.earnedStreak), bestStreak);
     payload.earnedStreak = earnedStreak;
 
-    const earnedXp = matchXp({
+    let earnedXp = matchXp({
       playerScore: payload.playerScore,
       bestStreak: earnedStreak,
       won: isWin,
       winProb,
       mode: payload.mode,
     });
+    // Solo only: consecutive-win momentum ramps the payout toward a hard
+    // per-match cap, and same-day solo volume decays it toward a floor — see
+    // the design note beside soloAdjustedXp in rating.ts. Both inputs are the
+    // state BEFORE this match: the win streak the player walked in on (the
+    // same convention the rally carry uses, and what makes a loss ending a
+    // long run pay more than an early one) and the solo games already
+    // recorded today. PvP is deliberately untouched.
+    if (payload.mode === 'solo') {
+      earnedXp = soloAdjustedXp(
+        earnedXp,
+        this.soloWinStreak(payload.playerId),
+        this.soloGamesToday(payload.playerId, now)
+      );
+    }
     profile.xp += earnedXp;
 
     const { level, xpNext } = calculateLevelFromXp(profile.xp);
@@ -2368,7 +2470,9 @@ class GameDatabase {
     if (isWin && payload.mode === 'solo') {
       if (difficulty === 'rookie') profile.rookieWins += 1;
       else if (difficulty === 'pro') profile.proWins += 1;
+      else if (difficulty === 'elite') profile.eliteWins += 1;
       else if (difficulty === 'cyber') profile.cyberWins += 1;
+      else if (difficulty === 'chaos') profile.chaosWins += 1;
     }
     // The career best rally STREAK — this player's own consecutive returns,
     // never the opponent's, and never a whole point's worth of both.
@@ -2463,9 +2567,13 @@ class GameDatabase {
     if (profile.rookieWins >= 10) unlock('ai_rookie_10');
     if (isWin && solo && difficulty === 'pro') unlock('ai_pro');
     if (profile.proWins >= 10) unlock('ai_pro_10');
+    if (isWin && solo && difficulty === 'elite') unlock('ai_elite');
+    if (profile.eliteWins >= 10) unlock('ai_elite_10');
     if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
     if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
     if (profile.cyberWins >= 10) unlock('cyber_10');
+    if (isWin && solo && difficulty === 'chaos') unlock('ai_chaos');
+    if (profile.chaosWins >= 10) unlock('chaos_10');
 
     // Duel
     if (pvp) unlock('first_duel');
@@ -2555,6 +2663,11 @@ class GameDatabase {
     this.sql.exec('BEGIN');
     try {
       this.bumpModeStats(profile.id, payload.mode, modeDelta);
+      // The fatigue tally rides the same transaction and the same idempotency
+      // as everything else here: this line is only reached when the matchKey
+      // is unstamped, so a replayed match no more double-counts a day's games
+      // than it double-pays.
+      if (payload.mode === 'solo') this.bumpSoloGames(payload.playerId, now);
       // Read back what that just wrote, from inside the transaction that wrote
       // it. `profile` was loaded before the bump, so its per-mode snapshot is
       // the one from BEFORE this match — and it is the object handed to the

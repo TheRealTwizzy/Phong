@@ -8,8 +8,9 @@ import { AIDifficulty, GameMode } from './types';
 //   * hidden MMR  — moved by EVERY match (solo included). Drives the win
 //     prediction, the XP surprise multiplier, and difficulty recommendation.
 //     Never shown as a number and never exposed on public profiles.
-//   * ranked      — moved by PvP ONLY. Drives the visible tier badge.
-// Solo results therefore can never move a player's rank.
+//   * ranked      — moved by PvP, and by solo at an EARNED difficulty
+//     (RANKED_SOLO_DIFFICULTIES), always under SOLO_MU_CAPS. Drives the
+//     visible tier badge.
 
 export interface Rating {
   mu: number; // skill estimate
@@ -70,29 +71,37 @@ export function winProbability(a: Rating, b: Rating): number {
 // AI opponents as fixed anchors
 // ---------------------------------------------------------------------------
 
-// Mapped from the real AI parameters in game/physics.ts (reaction time, max
-// paddle speed, aim error). Anchors never move, and carry a small sigma
-// because a difficulty tier is a known quantity.
+// Each anchor is the strength of the PvP band its rung simulates, mapped from
+// the real AI parameters in game/physics.ts (reaction time, max paddle speed,
+// aim error). Anchors never move, and carry a small sigma because a difficulty
+// tier is a known quantity. Against the tier floors in TIER_FLOORS below:
+// Rookie plays like an Unranked/Contender human, Pro like Vanguard/Ace, Elite
+// like Master/Grandmaster, Cyber like Grandmaster/Legend, Chaos like Legend+.
 export const AI_RATINGS: Record<AIDifficulty, Rating> = {
-  rookie: { mu: 18, sigma: 0.5 },
-  pro: { mu: 25, sigma: 0.5 },
-  cyber: { mu: 29, sigma: 0.5 },
+  rookie: { mu: 20, sigma: 0.5 },
+  pro: { mu: 24, sigma: 0.5 },
+  elite: { mu: 30, sigma: 0.5 },
+  cyber: { mu: 33, sigma: 0.5 },
+  chaos: { mu: 36, sigma: 0.5 },
 };
 
-export const AI_DIFFICULTIES: AIDifficulty[] = ['rookie', 'pro', 'cyber'];
+export const AI_DIFFICULTIES: AIDifficulty[] = ['rookie', 'pro', 'elite', 'cyber', 'chaos'];
 
 /**
- * Coerce anything that claims to be a difficulty into one that still exists.
- * Retired names map to the nearest surviving rung rather than silently
- * becoming the default, so a stored 'chaos' still means "the hard one" and an
- * old match-history row still renders.
+ * Coerce anything that claims to be a difficulty into one that exists.
+ *
+ * 'chaos' is deliberately NOT special-cased any more: it was retired (it sat
+ * between Pro and Cyber, defined by volatility) and mapped to 'cyber' here,
+ * but the name has been revived as the top rung — legacy matches rows were
+ * relabelled to 'cyber' by chaos_relabel_v1 in server/db.ts BEFORE the name
+ * changed hands, so a 'chaos' reaching this function now means the new rung.
+ * A stale stored setting naming it is clamped down to an earned rung by
+ * playableDifficulty like any other locked choice.
  */
-const RETIRED_DIFFICULTIES: Record<string, AIDifficulty> = { chaos: 'cyber' };
-
 export function normalizeDifficulty(value: unknown): AIDifficulty {
   const key = typeof value === 'string' ? value.toLowerCase() : '';
   if ((AI_DIFFICULTIES as string[]).includes(key)) return key as AIDifficulty;
-  return RETIRED_DIFFICULTIES[key] || 'pro';
+  return 'pro';
 }
 
 // The anchors above are the *reference* strengths, calibrated for an average
@@ -131,44 +140,59 @@ export function effectiveAiMu(difficulty: AIDifficulty, playerMu: number): numbe
 }
 
 /**
- * The ceiling a solo win may lift hidden mu to, per difficulty.
+ * The most a solo win may lift μ to, per difficulty.
  *
  * The cap exists so that farming one rung converges on it and stops. It used
- * to be the difficulty's BASE anchor, which froze the whole early game: every
- * player starts at START_MU, which is exactly Pro's base, so beating Pro moved
- * mu by nothing at all — while losses moved it freely down. The hidden rating
- * could only ratchet DOWNWARD until Cyber was unlocked, and Cyber is behind
- * ten Pro wins at level 10. Prediction, XP scaling and the AI's own upward
- * adaptation all key off this mu, so none of them could ever reflect a solo
- * player improving.
+ * to be the difficulty's BASE anchor, which froze the whole early game (every
+ * player started exactly on Pro's base, so beating Pro moved μ by nothing at
+ * all while losses moved it freely down), and then `anchor + AI_ADAPT_BAND`,
+ * which stopped working the moment the ladder grew: it hands Elite, Cyber and
+ * Chaos an identical cap at the Overlord clamp, making the three top rungs
+ * interchangeable for rank farming. So the cap is DATA, not a formula — each
+ * value sits 0.1 under a tier floor, so farming a rung converges roughly one
+ * tier above the band it simulates and stops, always short of the tier above.
+ * AI_ADAPT_BAND is thereby purely a gameplay-adaptation range again; it no
+ * longer decides what farming a rung is worth.
  *
- * The ceiling is the hardest that difficulty ever plays: it adapts upward by
- * at most AI_ADAPT_BAND over its anchor, so beating it cannot demonstrate more
- * than that. Deliberately a CONSTANT per difficulty rather than anything
- * derived from the player's own mu — a cap that rose with the player would
- * chase them upward without bound, which is why the base anchor was chosen in
- * the first place. Rookie's ceiling lands exactly on START_MU, so farming the
- * easiest rung from a standing start still moves nothing.
+ * Deliberately CONSTANTS rather than anything derived from the player's own
+ * μ — a cap that rose with the player would chase them upward without bound.
+ * Rookie's cap is START_MU exactly, so farming the one rung open from the
+ * first match moves nothing from a standing start. Legend is the solo
+ * ceiling: Overlord (37) is only ever reached through PvP, which is also what
+ * keeps the self-reported-solo trade-off (CLAUDE.md §5) bounded.
  */
-export const soloMuCap = (difficulty: AIDifficulty): number =>
-  AI_RATINGS[difficulty].mu + AI_ADAPT_BAND;
+export const SOLO_MU_CAPS: Record<AIDifficulty, number> = {
+  rookie: START_MU, // 25 — farming the open rung from a standing start moves nothing
+  pro: 30.9, //   under the Grandmaster floor (31): Pro farming tops out at Master
+  elite: 33.9, // under the Legend floor (34): Elite farming tops out at Grandmaster
+  cyber: 36.9, // under the Overlord floor (37): tops out at Legend
+  chaos: 36.9, // same — the apex stays a PvP achievement
+};
+
+export const soloMuCap = (difficulty: AIDifficulty): number => SOLO_MU_CAPS[difficulty];
 
 /**
  * The solo difficulties that feed the RANKED track, not just hidden MMR.
  *
  * Rookie is the tutorial rung — open from the first match, and the one the
  * ladder hands you before you have proved anything — so placing against it
- * would be a formality and the tier badge would stop meaning much. Pro and
- * Cyber both have to be earned (Pro by beating Rookie, Cyber by ten Pro wins
- * at level 10), which is what makes them worth rating against.
+ * would be a formality and the tier badge would stop meaning much. Every
+ * higher rung has to be earned through the achievement chain (see UNLOCKS in
+ * achievements.ts), which is what makes them worth rating against.
  *
  * A solo result still weighs less than a duel wherever it lands: a lighter mu
- * step, and the soloMuCap ceiling, so no amount of farming an AI reaches the
- * top of the ladder. Note the standing trade-off (CLAUDE.md §5) — solo stats
- * are self-reported, so a modified client can forge them. That was the reason
- * the ranked track was PvP-only, and counting solo here accepts it knowingly.
+ * step, and the SOLO_MU_CAPS ceiling, so no amount of farming an AI reaches
+ * the top of the ladder. Note the standing trade-off (CLAUDE.md §5) — solo
+ * stats are self-reported, so a modified client can forge them. That was the
+ * reason the ranked track was PvP-only, and counting solo here accepts it
+ * knowingly.
  */
-export const RANKED_SOLO_DIFFICULTIES: readonly AIDifficulty[] = ['pro', 'cyber'];
+export const RANKED_SOLO_DIFFICULTIES: readonly AIDifficulty[] = [
+  'pro',
+  'elite',
+  'cyber',
+  'chaos',
+];
 
 /** Whether a solo match at this difficulty moves the visible ranked rating. */
 export const soloCountsForRank = (difficulty: AIDifficulty): boolean =>
@@ -432,6 +456,81 @@ export function matchXp(params: {
   const modeMult = params.mode === 'multiplayer' ? XP_PVP_MULTIPLIER : 1;
   const xp = base * surpriseMultiplier(params.winProb, params.won) * modeMult;
   return Math.max(XP_FLOOR, Math.round(xp));
+}
+
+// ---------------------------------------------------------------------------
+// Solo XP momentum and fatigue
+// ---------------------------------------------------------------------------
+//
+// Two forces, multiplied into SOLO match XP only, both computed server-side
+// inside recordMatch — a client still never sends an XP amount, and PvP XP is
+// untouched:
+//
+//   soloXp = clamp(matchXp × momentum(w) × fatigue(n), XP_FLOOR, SOLO_XP_MATCH_CAP)
+//
+// MOMENTUM rewards consecutive solo wins, ramping with diminishing increments
+// toward saturation. `w` is the solo win streak the player CARRIES INTO the
+// match — the streak before this result is applied, the same walked-in-on
+// convention the rally carry uses — which is what makes a loss that ends a
+// long run still pay more than an early loss: the multiplier applies to
+// losses too, on the run they arrived holding, and the loss then resets the
+// streak as it always did.
+//
+// FATIGUE decays the multiplier with the number of solo matches already
+// recorded today (UTC), floored well above zero: same-day solo grinding
+// trends toward reduced efficiency but never toward nothing, so "solo cannot
+// be farmed at full efficiency" is arithmetic rather than a rule someone has
+// to remember. PvP never fatigues.
+//
+// The CAP is a constant, deliberately not scaled by anything — however long
+// the streak, no solo match ever pays more than it. XP_FLOOR survives
+// unchanged underneath, so "every match is progression, levels never regress"
+// keeps holding: fatigue attacks the multiplier, never the floor.
+//
+// Difficulty needs no term here. The anchors are monotone and adaptation
+// preserves their spread, so winProbability is strictly lower against a
+// harder rung and both surprise multipliers rise as it falls — harder always
+// pays more, win or loss, with no per-difficulty XP table anywhere.
+
+/** Saturation of the win-streak ramp: a long run at most doubles XP. */
+export const SOLO_MOMENTUM_MAX = 2.0;
+/** Fatigue never cuts a match below this fraction of its unfatigued value. */
+export const SOLO_FATIGUE_FLOOR = 0.6;
+/** Solo matches per day before fatigue starts to bite. */
+export const SOLO_FATIGUE_FREE_GAMES = 3;
+/**
+ * Multiplier lost per fatigued game until the floor. Deliberately gentle
+ * next to the ramp: the specifying example has a mid-session win streak
+ * paying strictly more per match through game eight even as the day's games
+ * mount, so the ramp must outpace the decay over any realistic streak —
+ * fatigue is there to tax streak-LESS grinding, not to cancel momentum.
+ */
+export const SOLO_FATIGUE_STEP = 0.02;
+/** No solo match ever pays more than this, however long the streak. */
+export const SOLO_XP_MATCH_CAP = 450;
+
+/** Concave, saturating: increments diminish as the streak grows. */
+export const soloMomentum = (winStreak: number): number => {
+  const w = Math.max(0, Math.floor(winStreak || 0));
+  return 1 + (SOLO_MOMENTUM_MAX - 1) * (w / (w + 3));
+};
+
+export const soloFatigue = (gamesToday: number): number => {
+  const n = Math.max(0, Math.floor(gamesToday || 0));
+  return Math.max(
+    SOLO_FATIGUE_FLOOR,
+    1 - SOLO_FATIGUE_STEP * Math.max(0, n - SOLO_FATIGUE_FREE_GAMES)
+  );
+};
+
+/**
+ * Momentum and fatigue applied to a solo match's XP. `winStreak` is the solo
+ * win streak carried INTO the match; `gamesToday` counts solo matches already
+ * recorded this UTC day, before this one.
+ */
+export function soloAdjustedXp(baseXp: number, winStreak: number, gamesToday: number): number {
+  const adjusted = Math.round(baseXp * soloMomentum(winStreak) * soloFatigue(gamesToday));
+  return Math.min(SOLO_XP_MATCH_CAP, Math.max(XP_FLOOR, adjusted));
 }
 
 // ---------------------------------------------------------------------------

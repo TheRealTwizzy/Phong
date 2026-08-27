@@ -75,10 +75,11 @@ const record = (page, body) =>
 const me = (page) => page.evaluate(async () => (await fetch('/api/profile/me')).json());
 
 // The achievement tree gates the ladder now: a fresh player can only play
-// Rookie, so anything that needs Pro or Cyber has to earn its way there first.
-// Walk the whole ladder. Cyber is behind ten Pro wins AND level 10, so a
-// helper that just beat Pro once now leaves it locked — and the server
-// rejects a locked difficulty, which is the point of the gate.
+// Rookie, so anything above has to be earned rung by rung. Walk the ladder up
+// to CYBER: ten Pro wins at level 10 opens Elite, ten Elite wins at level 15
+// opens Cyber — and the server rejects a locked difficulty, which is the
+// point of the gate. (Chaos stays shut: it needs ten Cyber wins at
+// Grandmaster behind a Cyber shutout, which no scripted climb earns.)
 const openLadder = (page) =>
   page.evaluate(async () => {
     const win = (difficulty) =>
@@ -91,10 +92,11 @@ const openLadder = (page) =>
         }),
       });
     await win('rookie');
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 150; i++) {
       const me = await (await fetch('/api/profile/me')).json();
-      if (me.achievements.includes('ai_pro_10') && me.level >= 10) break;
-      await win('pro');
+      if (me.achievements.includes('ai_elite_10')) break;
+      if (!me.achievements.includes('ai_pro_10')) await win('pro');
+      else await win('elite');
     }
   });
 
@@ -105,23 +107,29 @@ await alice.click('#menu-mode-solo');
 await alice.waitForSelector('#menu-diff-rookie-odds', { timeout: 5000 });
 
 const odds = {};
-for (const d of ['rookie', 'pro', 'cyber']) {
+const RUNGS = ['rookie', 'pro', 'elite', 'cyber', 'chaos'];
+for (const d of RUNGS) {
   const txt = await alice.textContent(`#menu-diff-${d}-odds`);
   odds[d] = parseInt(txt, 10);
 }
-if (!(odds.rookie > odds.pro && odds.pro > odds.cyber)) {
-  fail(`odds not ordered by difficulty: ${JSON.stringify(odds)}`);
+for (let i = 1; i < RUNGS.length; i++) {
+  if (!(odds[RUNGS[i]] <= odds[RUNGS[i - 1]])) {
+    fail(`odds not ordered by difficulty: ${JSON.stringify(odds)}`);
+  }
 }
+if (!(odds.rookie > odds.chaos)) fail(`the ladder spans no range: ${JSON.stringify(odds)}`);
 if (Math.abs(odds.pro - 50) > 8) fail(`Pro should be ~50/50 for a new player, got ${odds.pro}%`);
 ok(`win chance shown per difficulty and correctly ordered: ${JSON.stringify(odds)}`);
 
 if (!(await alice.$('#menu-diff-balanced'))) fail('no BALANCED badge on any difficulty');
 ok('BALANCED badge marks the closest-to-even difficulty');
 
-if (await alice.$('#menu-diff-chaos')) fail('the retired Chaos difficulty is still on the menu');
-const menuText = await alice.textContent('#main-menu-screen');
-if (/chaos/i.test(menuText)) fail('the word Chaos still appears on the menu');
-ok('Chaos is gone from the menu — three rungs only');
+// Chaos is a revived, TOP rung now — present on the menu and locked for a
+// fresh player, alongside Elite.
+if (!(await alice.$('#menu-diff-chaos'))) fail('the Chaos rung is missing from the menu');
+if (!(await alice.$('#menu-diff-elite-lock'))) fail('Elite is not locked for a fresh player');
+if (!(await alice.$('#menu-diff-chaos-lock'))) fail('Chaos is not locked for a fresh player');
+ok('five rungs on the menu; Elite and Chaos locked for a fresh player');
 
 // ---- 1b. The ladder slides with the player's hidden rating ---------------
 // A fixed ladder is what made Pro unreachable for a beginner and Rookie a
@@ -132,7 +140,7 @@ const oddsAfterSoloRun = async (page) => {
   await page.click('#menu-mode-solo');
   await page.waitForSelector('#menu-diff-cyber-odds', { timeout: 5000 });
   const out = {};
-  for (const d of ['rookie', 'pro', 'cyber']) {
+  for (const d of ['rookie', 'pro', 'elite', 'cyber']) {
     out[d] = parseInt(await page.textContent(`#menu-diff-${d}-odds`), 10);
   }
   return out;
@@ -154,7 +162,7 @@ if (oddsAfter.rookie <= oddsBefore.rookie) {
 if (oddsAfter.cyber >= 75) {
   fail(`Cyber stopped being a stretch after a solo run (${oddsAfter.cyber}%)`);
 }
-if (!(oddsAfter.rookie > oddsAfter.pro && oddsAfter.pro > oddsAfter.cyber)) {
+if (!(oddsAfter.rookie > oddsAfter.pro && oddsAfter.pro >= oddsAfter.elite && oddsAfter.elite >= oddsAfter.cyber)) {
   fail(`the ladder lost its ordering after adapting: ${JSON.stringify(oddsAfter)}`);
 }
 ok(`ladder slides with skill and keeps its order: ${JSON.stringify(oddsBefore)} -> ${JSON.stringify(oddsAfter)}`);
