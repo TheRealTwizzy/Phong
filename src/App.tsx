@@ -19,6 +19,8 @@ import {
   MatchRules,
   CourtTheme,
   RoomMatchConfig,
+  TableSeat,
+  TableSeatInfo,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
 import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
@@ -343,6 +345,23 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [pingMs, setPingMs] = useState<number>(0);
   const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
+  /**
+   * Which side of a table this page is WATCHING, or null when it is playing.
+   *
+   * Mutually exclusive with holding a playing seat — the relay refuses a
+   * second seat outright, so these cannot both be true. `side` is the player
+   * being watched, and `playerIndex` is deliberately set to it as well: the
+   * whole fan-out is built so a spectator looks, on the wire, exactly like
+   * the player beside them, which is what lets score_update, game_start and
+   * ball_incoming work here with no spectating branch at all.
+   */
+  const [spectating, setSpectating] = useState<{ roomId: string; side: 0 | 1 } | null>(null);
+  /** Who is sitting where at the table, as the relay last described it. */
+  const [tableState, setTableState] = useState<{
+    seats: TableSeatInfo[];
+    yourSeat: TableSeat | null;
+    spectatorsEnabled: boolean;
+  } | null>(null);
   // The room's terms, as the server last broadcast them. Null until a room
   // exists. In a duel this — never the local menu — decides how long the match
   // is and how the ball behaves, so both phones play the same match.
@@ -514,6 +533,8 @@ export default function App() {
    * next room_created/room_joined.
    */
   const roomIdRef = useRef<string | null>(null);
+  /** Read by the game loop and the senders, which must not run for a watcher. */
+  const spectatingRef = useRef<{ roomId: string; side: 0 | 1 } | null>(null);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
 
   ballRef.current = ball;
@@ -529,6 +550,7 @@ export default function App() {
   profileRef.current = profile;
   playerIndexRef.current = playerIndex;
   roomIdRef.current = roomId;
+  spectatingRef.current = spectating;
   opponentIdRef.current = opponentId;
   oppPaddleXRef.current = oppPaddleX;
   matchCountdownRef.current = matchCountdown;
@@ -1610,6 +1632,55 @@ export default function App() {
         };
         setActiveChatMessages((prev) => [...prev.slice(-3), chatItem]);
         sound.playBallIncoming();
+        break;
+      }
+
+      case 'table_state': {
+        setTableState({
+          seats: msg.seats,
+          yourSeat: msg.yourSeat,
+          spectatorsEnabled: msg.spectatorsEnabled,
+        });
+        const watchingSeat = msg.yourSeat !== null && msg.yourSeat >= 2;
+        if (watchingSeat) {
+          const side: 0 | 1 = msg.yourSeat === 3 ? 1 : 0;
+          // A watcher never receives room_created or room_joined, so this is
+          // where they learn which table they are at — and where they become,
+          // for every handler below, the player they are sitting beside.
+          setSpectating({ roomId: msg.roomId, side });
+          setRoomId(msg.roomId);
+          setPlayerIndex(side);
+          playerIndexRef.current = side;
+          setOpponentName(msg.seats[side === 0 ? 1 : 0]?.playerName ?? null);
+          setOpponentId(msg.seats[side === 0 ? 1 : 0]?.playerId ?? null);
+          setMode('multiplayer');
+          setScreen('game');
+          setIsMultiplayerOpen(false);
+          // Nothing peer-to-peer for a watcher: the relay is the only thing
+          // that can see this table at all.
+          p2pRef.current?.close();
+          p2pRef.current = null;
+          setLinkStatus('relay');
+        } else if (msg.yourSeat !== null) {
+          // Playing. Kept in step because a seat can change hands.
+          setSpectating(null);
+        }
+        break;
+      }
+
+      case 'spectator_sync': {
+        // Sitting down mid-match: the relay is the only party that knows where
+        // it got to, so without this the court would render 0-0 until the next
+        // point happened to arrive.
+        const snap = msg.snapshot;
+        const side = spectatingRef.current?.side ?? playerIndexRef.current ?? 0;
+        const mine = side === 0 ? snap.p1Score : snap.p2Score;
+        const theirs = side === 0 ? snap.p2Score : snap.p1Score;
+        setRoomConfig(snap.config);
+        matchSeqRef.current = snap.matchSeq;
+        setStats((s) => ({ ...s, score: mine, opponentScore: theirs }));
+        setIsPlayerServer(snap.servingPlayer === side);
+        setWinner(null);
         break;
       }
 

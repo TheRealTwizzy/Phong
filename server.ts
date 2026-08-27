@@ -39,7 +39,7 @@ import {
   countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
-import { MatchEndPayload, RoomMatchConfig } from './src/types';
+import { MatchEndPayload, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import {
   DEFAULT_VENUE_ROOM,
@@ -82,10 +82,101 @@ function carriedStreak(deviceId: string | null): number {
   }
 }
 
+/**
+ * Everything the table's absolute state is made of, to everyone at it.
+ *
+ * Watchers included, and byte-identically: the score, the terms, the
+ * readiness, the rematch votes and a match starting are facts about the
+ * match rather than about a point of view, so a spectator gets the player's
+ * own copy and App.tsx's existing handlers work unmodified.
+ *
+ * Note what does NOT come through here and must not be added: `match_recorded`
+ * carries another player's XP, missions and rank direction, and `opponent_left`
+ * would report a departure to somebody who lost nobody. Both are sent to named
+ * sockets instead.
+ */
 function broadcast(room: Room, payload: unknown): void {
   const json = JSON.stringify(payload);
-  room.players.forEach((p) => {
+  for (const p of room.players) {
     if (p?.ws && p.ws.readyState === WebSocket.OPEN) p.ws.send(json);
+  }
+  for (const w of room.spectators) {
+    if (w?.ws && w.ws.readyState === WebSocket.OPEN) w.ws.send(json);
+  }
+}
+
+/** The wire seat a watching slot is addressed by: 0/1 play, 2/3 watch. */
+const spectatorSeat = (slot: 0 | 1): TableSeat => (slot === 0 ? 2 : 3);
+
+/**
+ * Who is sitting where, told to each socket separately.
+ *
+ * Per-socket rather than broadcast because `yourSeat` differs by recipient —
+ * and because that is the one field a client cannot work out for itself once
+ * seats can change hands. It names the table too: a watcher never receives
+ * `room_created` or `room_joined`, so this is the only message that tells
+ * them which room they are in.
+ */
+function broadcastTableState(room: Room): void {
+  const seats: TableSeatInfo[] = [
+    { seat: 0, playerId: room.players[0]?.playerId ?? null, playerName: room.players[0]?.playerName ?? null, enabled: true },
+    { seat: 1, playerId: room.players[1]?.playerId ?? null, playerName: room.players[1]?.playerName ?? null, enabled: true },
+    { seat: 2, playerId: room.spectators[0]?.playerId ?? null, playerName: room.spectators[0]?.playerName ?? null, enabled: room.config.spectators },
+    { seat: 3, playerId: room.spectators[1]?.playerId ?? null, playerName: room.spectators[1]?.playerName ?? null, enabled: room.config.spectators },
+  ];
+  const send = (ws: WebSocket | undefined, yourSeat: TableSeat | null): void => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'table_state', roomId: room.id, seats, yourSeat, spectatorsEnabled: room.config.spectators }));
+  };
+  room.players.forEach((p, i) => send(p?.ws, i as TableSeat));
+  room.spectators.forEach((w, i) => send(w?.ws, spectatorSeat(i as 0 | 1)));
+}
+
+/**
+ * Where the match already stands, for a watcher who has just sat down.
+ *
+ * The easy one to forget. A spectator arriving at 3-2 has missed `game_start`
+ * and every `score_update` since, and the relay is the only party that knows —
+ * so without this their court renders 0-0 until the next point happens to
+ * arrive. Sent on arrival, and again on a side flip.
+ */
+function sendSpectatorSync(room: Room, ws: WebSocket): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const snapshot: SpectatorSnapshot = {
+    p1Score: room.scores[0],
+    p2Score: room.scores[1],
+    servingPlayer: room.servingPlayer,
+    matchSeq: room.matchSeq,
+    inPlay: room.inPlay,
+    matchOver: room.matchOver,
+    config: room.config,
+    streaks: [room.streaks[0], room.streaks[1]],
+  };
+  ws.send(JSON.stringify({ type: 'spectator_sync', snapshot }));
+}
+
+/**
+ * Close every watching socket at a table that is going away.
+ *
+ * One function for both departures, for the same reason `vacateSeat` is one
+ * implementation for two: the reaper sweeps a table, and the last player
+ * leaving deletes one, and a watcher left attached to a room no longer in the
+ * map would sit on a court whose every message the relay silently drops.
+ *
+ * The slots are cleared as well as closed, because the room object can
+ * outlive this call — a reap hands the caller the room after deleting it, and
+ * the close handler that would otherwise clear the slot runs against a room
+ * `rooms.get` can no longer find.
+ */
+function ejectSpectators(room: Room, reason: string): void {
+  room.spectators.forEach((w, i) => {
+    if (!w) return;
+    room.spectators[i] = null;
+    try {
+      if (w.ws.readyState === WebSocket.OPEN) w.ws.close(1000, reason);
+    } catch {
+      /* already gone */
+    }
   });
 }
 
@@ -691,6 +782,8 @@ async function startServer() {
         inPlay: room.inPlay,
         config: room.config,
         waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
+        spectatorCount: room.spectators.filter(Boolean).length,
+        spectatorsEnabled: room.config.spectators,
       });
     }
     res.json({ venueRoomId, tables });
@@ -723,6 +816,10 @@ async function startServer() {
       // the browser suites read those and they still mean PLAYERS.
       venueRoomId: room.venueRoomId,
       visibility: room.visibility,
+      // Watchers, counted separately for the same reason: playerCount means
+      // PLAYERS and must keep meaning that.
+      spectatorCount: room.spectators.filter(Boolean).length,
+      spectatorsEnabled: room.config.spectators,
     });
   });
 
@@ -1387,6 +1484,11 @@ async function startServer() {
           if (seat && seat.ws.readyState === WebSocket.OPEN) seat.ws.close(1000, reason);
         }
       }
+      // Watchers, ALWAYS — including 'empty'. "An empty room has nothing
+      // attached by definition" was true when only players could attach, and
+      // `empty` now means no live PLAYER: a table watched by two people and
+      // played by nobody is exactly the case this branch used to skip.
+      ejectSpectators(room, reason);
       console.log(`room ${id} reaped: ${reason}`);
     }
   }, ROOM_SWEEP_MS).unref?.();
@@ -1522,7 +1624,10 @@ async function startServer() {
       try {
         const msg = JSON.parse(raw.toString());
 
-        if (msg.type === 'create_room' || msg.type === 'join_room') {
+        // An uninitialized profile takes no seat of ANY kind: a seat's display
+        // name is stamped at join time and never revisited, so a watcher would
+        // sit in the table state as Paddle-XXXX for the life of the room.
+        if (msg.type === 'create_room' || msg.type === 'join_room' || msg.type === 'spectate_room') {
           const refusal = seatRefusal();
           if (refusal) {
             ws.send(JSON.stringify({ type: 'error', message: refusal }));
@@ -1627,6 +1732,7 @@ async function startServer() {
             })
           );
           ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+          broadcastTableState(room);
         } else if (msg.type === 'join_room') {
           const code = (msg.roomId || '').toUpperCase().trim();
           const room = rooms.get(code);
@@ -1744,6 +1850,91 @@ async function startServer() {
               }
             });
           }
+
+          // Anyone watching learns the second seat is filled the way the host
+          // does, and never through `opponent_left`-shaped news about people
+          // they were not playing.
+          broadcastTableState(room);
+
+        } else if (msg.type === 'spectate_room') {
+          const code = String(msg.roomId || '').toUpperCase();
+          const room = rooms.get(code);
+          if (!room) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Room not found.' }));
+            return;
+          }
+          if (!room.config.spectators) {
+            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            return;
+          }
+
+          // Strict enum membership, and deliberately NOT clampInt: that turns
+          // junk into `lo`, which in a seat namespace is seat 0 — the HOST
+          // seat. It exists for bounded gameplay scalars, and for an enum it
+          // silently reinterprets garbage as a privileged request.
+          const wanted = msg.seat;
+          if (wanted !== 2 && wanted !== 3) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat you can watch from.' }));
+            return;
+          }
+          const slot: 0 | 1 = wanted === 2 ? 0 : 1;
+
+          if (currentRoomId === code) {
+            // Already at this table. Refused rather than treated as a move for
+            // the same reason join_room refuses it: the vacate below would run
+            // against the very room being taken a seat in.
+            ws.send(JSON.stringify({ type: 'error', message: 'You are already at this table.' }));
+            return;
+          }
+          // Non-null, not non-live: a seat holding a socket that has died is
+          // occupied until its close handler clears it, and treating it as
+          // free orphans the session sitting in it.
+          if (room.spectators[slot] !== null) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            return;
+          }
+          // One account, one seat at a table. Without this an account
+          // displaced across two devices — which is a live state, not a
+          // hypothetical — could hold two of the four seats.
+          if (cookieDeviceId) {
+            const already =
+              room.players.some((p) => p?.deviceId === cookieDeviceId) ||
+              room.spectators.some((w) => w?.deviceId === cookieDeviceId);
+            if (already) {
+              ws.send(JSON.stringify({ type: 'error', message: 'You already have a seat at this table.' }));
+              return;
+            }
+          }
+
+          // Nothing above this line may fail. Same rule as create_room and
+          // join_room: a refused seat must never cost the one already held.
+          vacateSeat();
+
+          currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
+          const watcherName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Spectator';
+          room.spectators[slot] = {
+            ws,
+            playerId: currentPlayerId,
+            playerName: watcherName,
+            // Derived from the slot taken, never read off the message: slot 0
+            // sits beside player 0.
+            side: slot,
+            deviceId: cookieDeviceId || null,
+            sessionId: cookieSessionId,
+          };
+          currentRoomId = code;
+          seat = { role: 'spectator', slot };
+
+          // Deliberately NOT touched: `soloSince`. Clearing it would exempt a
+          // one-player table from the only clock that can expire a busy one,
+          // so a host could park a table forever by having a friend sit down —
+          // which is the `pairedAt` leak that field was rewritten to close.
+          // `lastActive` is left alone for the same reason: watchers arriving
+          // and leaving must not hold a dead table past the idle clock.
+
+          ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+          broadcastTableState(room);
+          sendSpectatorSync(room, ws);
 
         } else if (msg.type === 'paddle_move' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
@@ -1949,8 +2140,14 @@ async function startServer() {
             ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
             return;
           }
+          const watchedBefore = room.config.spectators;
           room.config = roomConfigFor(room.venueRoomId, msg.config);
           broadcast(room, { type: 'room_config', config: room.config });
+          // Closing the seats closes them on whoever is in them. The host owns
+          // the terms, and "no spectators" is not a term that can be true while
+          // two people are watching.
+          if (watchedBefore && !room.config.spectators) ejectSpectators(room, 'spectator seats closed');
+          broadcastTableState(room);
           // The guest readied under the OLD terms; new terms need a new yes.
           if (room.ready[1]) {
             room.ready = [false, false];
@@ -2020,6 +2217,7 @@ async function startServer() {
         if (room.spectators[seat.slot]?.ws === ws) room.spectators[seat.slot] = null;
         currentRoomId = null;
         seat = null;
+        broadcastTableState(room);
         return;
       }
 
@@ -2086,10 +2284,15 @@ async function startServer() {
       }
       if (!room.players[0] && !room.players[1]) {
         rooms.delete(currentRoomId);
+        // The table is gone, so nobody is watching it. A watcher left attached
+        // to a room no longer in the map would sit on a court whose every
+        // message the relay silently drops.
+        ejectSpectators(room, 'table closed');
       } else {
         // One player left in it. That is a room with nobody to play against,
         // however busy the survivor keeps it, so the clock starts again.
         room.soloSince = Date.now();
+        broadcastTableState(room);
       }
       currentRoomId = null;
       seat = null;
