@@ -173,11 +173,14 @@ export const ROOMS: RoomDef[] = [
   // ---- SOLO AI: one room per rung. Gated by the achievement chain, not by
   // a RoomGate — the ladder is walked through UNLOCKS in achievements.ts, and
   // duplicating that here would be a second answer to the same question.
-  { id: 'rookie', building: 'solo', labelKey: 'room_rookie', descKey: 'room_rookie_desc', difficulty: 'rookie' },
-  { id: 'ai_pro', building: 'solo', labelKey: 'room_ai_pro', descKey: 'room_ai_pro_desc', difficulty: 'pro' },
-  { id: 'ai_elite', building: 'solo', labelKey: 'room_ai_elite', descKey: 'room_ai_elite_desc', difficulty: 'elite' },
-  { id: 'cyber', building: 'solo', labelKey: 'room_cyber', descKey: 'room_cyber_desc', difficulty: 'cyber' },
-  { id: 'chaos', building: 'solo', labelKey: 'room_chaos', descKey: 'room_chaos_desc', difficulty: 'chaos' },
+  // No descKey: the rung's NAME and its win-chance are what a player picks on,
+  // and a line of prose under each of five rows was five lines of prose to
+  // scroll past. The odds beside the row say the same thing in a number.
+  { id: 'rookie', building: 'solo', labelKey: 'room_rookie', difficulty: 'rookie' },
+  { id: 'ai_pro', building: 'solo', labelKey: 'room_ai_pro', difficulty: 'pro' },
+  { id: 'ai_elite', building: 'solo', labelKey: 'room_ai_elite', difficulty: 'elite' },
+  { id: 'cyber', building: 'solo', labelKey: 'room_cyber', difficulty: 'cyber' },
+  { id: 'chaos', building: 'solo', labelKey: 'room_chaos', difficulty: 'chaos' },
 
   // ---- TRAINING: no opponent to rate against, so nothing to gate ----------
   { id: 'practice', building: 'training', labelKey: 'mode_practice', descKey: 'menu_practice_desc', mode: 'practice' },

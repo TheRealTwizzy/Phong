@@ -22,18 +22,6 @@ const browser = await chromium.launch({ executablePath: EXEC, args: ['--no-sandb
 const pageErrors = [];
 let seq = 0;
 
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-}
-
 async function newPlayer(prefix) {
   const ctx = await browser.newContext({ ...devices['iPhone 13'] });
   const page = await ctx.newPage();
@@ -47,7 +35,6 @@ async function newPlayer(prefix) {
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(page);
   await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
   return page;
 }

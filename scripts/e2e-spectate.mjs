@@ -28,18 +28,6 @@ const browser = await chromium.launch({ executablePath: EXEC, args: ['--no-sandb
 const pageErrors = [];
 let seq = 0;
 
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-}
-
 const NAMES = new WeakMap();
 
 async function newPlayer(prefix) {
@@ -56,7 +44,6 @@ async function newPlayer(prefix) {
   await page.waitForSelector('#btn-onboarding-code-continue', { timeout: 10000 })
     .then((b) => b.click())
     .catch(() => {});
-  await skipTour(page);
   await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
   NAMES.set(page, username);
   return page;
@@ -98,16 +85,30 @@ const host = await newPlayer('WatchHost');
 await host.click('#building-pvp');
 await host.click('#room-casual');
 await host.waitForSelector('#lobby-tables-empty', { timeout: 8000 });
-// "start a table" makes a PUBLIC one, and a public table is advertised —
-// watching seats are part of that offer, so they are open without asking.
-await host.click('#btn-create-public-table');
+// Starting a table makes a PUBLIC one — the only kind the client makes now —
+// and a public table is advertised, so watching seats are part of that offer
+// and are open without asking.
+await host.click('#btn-create-room');
 const code = await host
   .waitForFunction(() => {
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
-    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
 const hostName = NAMES.get(host);
+
+// Watching seats start SHUT — open ones force the match onto the relay, since
+// rtc_signal is refused for a watched table, and defaulting them open would
+// take the direct DataChannel away from every duel in the game. So the host
+// opens them deliberately, which is the flow this suite is here to drive.
+await host.waitForSelector('#toggle-spectators', { timeout: 8000 });
+await host.click('#toggle-spectators input');
+await host.waitForFunction(
+  async (c) => (await (await fetch(`/api/room/${c}`)).json()).spectatorsEnabled === true,
+  code,
+  { timeout: 8000 }
+);
+ok('the host opens the table up to watchers');
 
 const guest = await newPlayer('WatchGuest');
 await guest.click('#building-pvp');
@@ -216,12 +217,15 @@ const h2 = await newPlayer('SwapHost');
 await h2.click('#building-pvp');
 await h2.click('#room-casual');
 // Not the empty state this time — the first table is still up in this room.
-await h2.waitForSelector('#btn-create-public-table', { timeout: 8000 });
-await h2.click('#btn-create-public-table');
+await h2.waitForSelector('#btn-create-room', { timeout: 8000 });
+await h2.click('#btn-create-room');
+// Seats open here too, or the guest below has nowhere to stand up TO.
+await h2.waitForSelector('#toggle-spectators', { timeout: 8000 });
+await h2.click('#toggle-spectators input');
 const code2 = await h2
   .waitForFunction(() => {
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
-    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
 

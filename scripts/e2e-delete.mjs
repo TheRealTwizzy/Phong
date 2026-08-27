@@ -44,18 +44,6 @@ async function newPage() {
 }
 
 // The onboarding tour opens by itself for a player who has never seen it.
-async function skipTour(page) {
-  const card = await page
-    .waitForSelector('#onboarding-tour-card', { timeout: 8000 })
-    .catch(() => null);
-  if (!card) return;
-  await page.click('#btn-tour-skip');
-  await page.click('#btn-tour-skip-confirm');
-  await page
-    .waitForSelector('#onboarding-tour-overlay', { state: 'detached', timeout: 8000 })
-    .catch(() => {});
-}
-
 async function onboard(page, username) {
   await page.waitForSelector('#onboarding-modal-overlay', { timeout: 8000 });
   await page.fill('#input-onboarding-username', username);
@@ -63,7 +51,6 @@ async function onboard(page, username) {
   await page.click('#btn-onboarding-submit');
   await page.waitForSelector('#onboarding-code-step', { timeout: 10000 });
   await page.click('#btn-onboarding-code-continue');
-  await skipTour(page);
   await page.waitForSelector('#onboarding-modal-overlay', { state: 'detached', timeout: 8000 });
   await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
 }

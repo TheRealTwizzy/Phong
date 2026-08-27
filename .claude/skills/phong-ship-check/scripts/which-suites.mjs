@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // which-suites.mjs — which browser E2E suites does THIS change actually need?
 //
-// `npm run test:e2e` runs nineteen suites, each with its own server, port,
+// `npm run test:e2e` runs eighteen suites, each with its own server, port,
 // DATA_DIR and Chromium. That is minutes, and it is the reason the honest
 // options today are "run everything" or "run nothing and hope". Neither is
 // what you want after a two-line fix to the reaper.
@@ -69,7 +69,6 @@ const RULES = [
   { re: /^src\/game\/streaks\.ts$/, suites: ['streak', 'rules'], why: 'the run carried between matches' },
   { re: /^src\/game\/themes\.ts$/, suites: ['elite'], why: 'elite missions bank theme unlocks' },
   { re: /^src\/game\/missions\.ts$/, suites: ['elite'], why: 'the dealt hand and the reroll allowances' },
-  { re: /^src\/game\/tour\.ts$/, suites: ['tutorial'], why: 'the onboarding tour steps' },
   { re: /^src\/net\/session\.ts$/, suites: ['profiles', 'invite', 'build-id'], why: 'the heartbeat and the blocking states' },
   { re: /^src\/net\/matchRecord\.ts$/, suites: ['rating', 'history'], why: 'the POST and the on-device replay queue' },
   { re: /^src\/net\/runChain\.ts$/, suites: ['streak'], why: 'run ordering across writes' },
@@ -79,16 +78,15 @@ const RULES = [
   { re: /^src\/i18n\//, suites: [], why: 'tests/i18n.test.ts states this completely — the browser adds nothing' },
   { re: /^src\/audio\//, suites: [], why: 'procedural audio; no suite asserts sound' },
 
-  { re: /^src\/App\.tsx$/, suites: ['gameplay', 'duel', 'lobby', 'rules', 'streak', 'tutorial', 'spectate'],
+  { re: /^src\/App\.tsx$/, suites: ['gameplay', 'duel', 'lobby', 'rules', 'streak', 'spectate'],
     why: 'the controller — every screen, socket handler and match lifecycle' },
   { re: /^src\/components\/CourtCanvas\.tsx$/, suites: ['gameplay', 'rules', 'spectate'], why: 'the court, the joystick, the indicators' },
-  { re: /^src\/components\/MainMenu\.tsx$/, suites: ['venues', 'rules', 'achievements', 'tutorial'], why: 'buildings, rooms and the pre-match sheet' },
+  { re: /^src\/components\/MainMenu\.tsx$/, suites: ['venues', 'rules', 'achievements'], why: 'buildings, rooms and the pre-match sheet' },
   { re: /^src\/components\/MultiplayerLobby\.tsx$/, suites: ['lobby', 'duel', 'invite', 'spectate', 'queue'], why: 'the lobby, the table browser and the invite box' },
   { re: /^src\/components\/MatchRulesPanel\.tsx$/, suites: ['rules', 'duel'], why: 'the shared rules panel, solo sheet and duel lobby' },
   { re: /^src\/components\/SplitScreenMatch\.tsx$/, suites: ['split'], why: 'two thumbs on one device' },
-  { re: /^src\/components\/OnboardingTour\.tsx$/, suites: ['tutorial'], why: 'the tour' },
-  { re: /^src\/components\/OnboardingModal\.tsx$/, suites: ['profiles', 'tutorial', 'invite'], why: 'every suite onboards before it can do anything' },
-  { re: /^src\/components\/SettingsModal\.tsx$/, suites: ['delete', 'tutorial'], why: 'account deletion and the tour replay live at its ends' },
+  { re: /^src\/components\/OnboardingModal\.tsx$/, suites: ['profiles', 'invite'], why: 'every suite onboards before it can do anything' },
+  { re: /^src\/components\/SettingsModal\.tsx$/, suites: ['delete'], why: 'account deletion sits at the bottom of the sheet' },
   { re: /^src\/components\/SessionGuard\.tsx$/, suites: ['invite', 'build-id'], why: 'the released/superseded/stale-build walls' },
   { re: /^src\/components\/MatchHistory/, suites: ['history'], why: 'tabs, filters and paging' },
   { re: /^src\/components\/(Missions|Achievement)/, suites: ['elite', 'achievements'], why: 'the tasks sheet and the tree' },

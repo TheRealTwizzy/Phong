@@ -1,6 +1,6 @@
 // The shell's shared primitives. Import from here, not from the files.
 //
-// Deliberately partial: QrBlock and the toast host land with the phases that
+// Deliberately partial: the toast host lands with the phases that
 // consume them, rather than sitting here untested with an API guessed ahead
 // of its call sites.
 
@@ -16,7 +16,6 @@ export {
 } from './SegmentedControl';
 export { RankBadge, type RankBadgeProps } from './RankBadge';
 export { Pagination, type PaginationProps } from './Pagination';
-export { QrBlock, type QrBlockProps } from './QrBlock';
 export { ToastHost, TOAST_TTL, type ToastSpec } from './Toast';
 export {
   LockBadge,

@@ -6,7 +6,7 @@ prose: which files a change touches, in what order, and which test fails when on
 
 | Skill | Reach for it when |
 |---|---|
-| `phong-ship-check` | Before committing, pushing or opening a PR. Picks which of the 19 browser suites the change needs, and runs the gauntlet in the order that fails cheapest first. |
+| `phong-ship-check` | Before committing, pushing or opening a PR. Picks which of the 18 browser suites the change needs, and runs the gauntlet in the order that fails cheapest first. |
 | `phong-protocol` | Adding or changing a WebSocket message. The relay and the P2P replica are two implementations of one protocol and have drifted before. |
 | `phong-i18n` | Any user-facing string. All seven locales or it does not ship — and both failure modes are silent. |
 | `phong-persistence` | Schema, migrations, `PLAYER_KEYED_TABLES`, or a new write path in `server/db.ts`. |

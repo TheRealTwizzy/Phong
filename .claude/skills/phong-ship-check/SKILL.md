@@ -2,7 +2,7 @@
 name: phong-ship-check
 description: >-
   Phong's pre-push gate — run the right checks in the right order, and work out which of the
-  nineteen browser E2E suites this change actually needs instead of running all of them or none.
+  eighteen browser E2E suites this change actually needs instead of running all of them or none.
   Use this whenever you are about to commit, push or open a PR in the Phong repo, and whenever
   the user says "run the tests", "verify this", "check it works", "is this ready to ship" or asks
   what needs re-running after an edit. Reach for it even when the change looks small: `npm test`
@@ -13,7 +13,7 @@ description: >-
 # Shipping a change in Phong
 
 `npm test` is the fast layer and it is genuinely fast, but it covers rules, not flows. The
-flows live in nineteen Playwright suites that each boot their own server — minutes, not
+flows live in eighteen Playwright suites that each boot their own server — minutes, not
 seconds — which is why the real-world choice has been "run everything" or "run nothing and
 hope". This skill removes that choice.
 
