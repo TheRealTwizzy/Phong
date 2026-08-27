@@ -89,30 +89,64 @@ const RULES = [
   // 4,000-line controller touches, and the honest answer is all of them.
   { re: /^src\/App\.tsx$/, suites: ['*'],
     why: 'the controller — every screen, socket handler, match lifecycle and modal reads from it' },
-  { re: /^src\/components\/CourtCanvas\.tsx$/, suites: ['gameplay', 'rules', 'spectate'], why: 'the court, the joystick, the indicators' },
-  { re: /^src\/components\/MainMenu\.tsx$/, suites: ['venues', 'rules', 'achievements'], why: 'buildings, rooms and the pre-match sheet' },
-  { re: /^src\/components\/MultiplayerLobby\.tsx$/, suites: ['lobby', 'duel', 'invite', 'spectate', 'queue'], why: 'the lobby, the table browser and the invite box' },
+  { re: /^src\/components\/CourtCanvas\.tsx$/,
+    suites: ['achievements', 'duel', 'eject', 'gameplay', 'history', 'lobby', 'queue', 'rules', 'spectate', 'streak', 'venues'],
+    why: 'the court, the joystick, the indicators — every suite that reaches a match' },
+  // 16 of 18 suites drive an id this file defines: every one of them starts at
+  // the menu and launches its mode from here. A subset is fiction.
+  { re: /^src\/components\/MainMenu\.tsx$/, suites: ['*'], why: 'the menu every suite launches its mode from' },
+  { re: /^src\/components\/MultiplayerLobby\.tsx$/,
+    suites: ['duel', 'eject', 'gameplay', 'history', 'invite', 'lobby', 'profiles', 'queue', 'spectate', 'venues'],
+    why: 'the lobby, the table browser and the invite box' },
   { re: /^src\/components\/MatchRulesPanel\.tsx$/, suites: ['rules', 'duel'], why: 'the shared rules panel, solo sheet and duel lobby' },
   { re: /^src\/components\/SplitScreenMatch\.tsx$/, suites: ['split'], why: 'two thumbs on one device' },
-  { re: /^src\/components\/OnboardingModal\.tsx$/, suites: ['profiles', 'invite'], why: 'every suite onboards before it can do anything' },
-  { re: /^src\/components\/SettingsModal\.tsx$/, suites: ['delete'], why: 'account deletion sits at the bottom of the sheet' },
-  { re: /^src\/components\/SessionGuard\.tsx$/, suites: ['invite', 'build-id'], why: 'the released/superseded/stale-build walls' },
+  // Literally every suite onboards before it can touch anything else.
+  { re: /^src\/components\/OnboardingModal\.tsx$/, suites: ['*'], why: 'every suite onboards before it can do anything' },
+  { re: /^src\/components\/SettingsModal\.tsx$/, suites: ['delete', 'rules'], why: 'account deletion at the bottom of the sheet, and the device preferences above it' },
+  { re: /^src\/components\/SessionGuard\.tsx$/, suites: ['gameplay', 'invite', 'build-id'], why: 'the released/superseded/stale-build walls' },
   { re: /^src\/components\/MatchHistory/, suites: ['history'], why: 'tabs, filters and paging' },
   { re: /^src\/components\/(Missions|Achievement)/, suites: ['elite', 'achievements'], why: 'the tasks sheet and the tree' },
-  { re: /^src\/components\/(Leaderboard|Profile|PublicProfile|TierBadge|AvatarImage)/, suites: ['profiles', 'rating'], why: 'identity surfaces' },
-  { re: /^src\/components\/(ScoreBoard|StatsOverlay|QuickChat|RadarPreview)/, suites: ['gameplay', 'rules'], why: 'in-match HUD' },
-  { re: /^src\/components\/MobileGatekeeper\.tsx$/, suites: ['profiles'], why: 'the gate in front of every suite' },
-  { re: /^src\/components\/ui\//, suites: ['rules', 'delete', 'history'],
-    why: 'shared primitives — Sheet scroll/clipping is what put a Start button below the viewport once' },
+  { re: /^src\/components\/MobileGatekeeper\.tsx$/, suites: ['gameplay', 'profiles'], why: 'the gate in front of every suite' },
+  { re: /^src\/components\/(Leaderboard|Profile|PublicProfile|TierBadge|AvatarImage)/, suites: ['profiles', 'rating', 'history'], why: 'identity surfaces' },
+  { re: /^src\/components\/(ScoreBoard|StatsOverlay|QuickChat|RadarPreview)/,
+    suites: ['achievements', 'duel', 'gameplay', 'history', 'lobby', 'profiles', 'queue', 'rules', 'spectate', 'streak'],
+    why: 'in-match HUD — read by every suite that watches a score' },
+  // The shared primitives sit under every modal and every sheet in the app, so
+  // there is no subset: --verify found SegmentedControl alone driven by five
+  // suites. Sheet's scroll/clipping is what put a Start button 160px below the
+  // viewport once, and that was reachable from any flow that opens a sheet.
+  { re: /^src\/components\/ui\//, suites: ['*'],
+    why: 'shared primitives under every modal and sheet in the app' },
 
   { re: /^src\/(main\.tsx|index\.css|vite-env\.d\.ts)$/, suites: ['gameplay', 'venues'], why: 'app shell and base styles' },
   { re: /^index\.html$/, suites: ['build-id', 'profiles'], why: 'the document that sets the device cookie, and the hashed build id' },
   { re: /^(vite\.config\.ts|tsconfig\.json|package(-lock)?\.json)$/, suites: ['*'], why: 'build or dependency change — nothing is safely excluded' },
 
-  // Not shipped code: no browser flow to break.
+  // A browser suite is not shipped to a player, but editing one and running
+  // nothing is the gate failing at its own job: a broken selector or a syntax
+  // error in scripts/e2e-queue.mjs survives a clean "no browser suite needed".
+  // `null` means "resolve the suite from the filename"; the shared runner and
+  // anything else under scripts/ widen, since a helper serves all of them.
+  { re: /^scripts\/e2e-(?!run\b)[a-z-]+\.mjs$/, suites: null, why: 'this suite itself changed' },
+  { re: /^scripts\/e2e-run\.mjs$/, suites: ['*'], why: 'the shared runner every suite is launched by' },
   { re: /^(scripts|tests|deploy|\.github|\.claude)\//, suites: [], why: 'not shipped to a player' },
   { re: /\.(md|yml|yaml|example)$|^(Dockerfile|docker-compose\.yml|render\.yaml|\.nvmrc|\.gitignore|\.dockerignore)$/, suites: [], why: 'docs / infra' },
 ];
+
+// --- resolving a rule ----------------------------------------------------
+/**
+ * The suites one file selects: an explicit list, the '*' sentinel, or — for a
+ * rule carrying `suites: null` — the suite named by the file itself.
+ */
+function suitesForFile(file) {
+  const rule = RULES.find((r) => r.re.test(file));
+  if (!rule) return { rule: null, suites: null, unknown: true };
+  if (rule.suites === null) {
+    const named = file.match(/e2e-([a-z-]+)\.mjs$/);
+    return { rule, suites: named ? [named[1]] : [] };
+  }
+  return { rule, suites: rule.suites };
+}
 
 // --- changed files -------------------------------------------------------
 const git = (args) => {
@@ -166,6 +200,70 @@ if (argv.includes('--all')) {
   process.exit(0);
 }
 
+// --verify: check the map against what the suites actually drive.
+//
+// The map is a claim, and a hand-written claim about eighteen suites drifts —
+// it drifted three times in this file's first day, always in the direction of
+// selecting too few. This derives a FLOOR from evidence rather than memory:
+// every `#id` a suite drives, resolved to the source files that define it. A
+// rule that omits a suite the derivation found is reported.
+//
+// It is a floor, not the map. It sees DOM coupling only, so a file a suite
+// depends on behaviourally will not appear — that is what the reasoned `why`
+// on each rule is for. Widening past the floor is always allowed; falling
+// below it is the bug.
+if (argv.includes('--verify')) {
+  const suiteFiles = fs
+    .readdirSync(path.join(ROOT, 'scripts'))
+    .filter((f) => /^e2e-(?!run\b)[a-z-]+\.mjs$/.test(f));
+  const srcFiles = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(e.name)) srcFiles.push(full);
+    }
+  };
+  walk(path.join(ROOT, 'src'));
+  const srcText = new Map(srcFiles.map((f) => [path.relative(ROOT, f), fs.readFileSync(f, 'utf8')]));
+
+  const floor = new Map(); // relative src path -> Set(suite)
+  for (const f of suiteFiles) {
+    const suite = f.slice('e2e-'.length, -'.mjs'.length);
+    const body = fs.readFileSync(path.join(ROOT, 'scripts', f), 'utf8');
+    const ids = new Set([...body.matchAll(/#([a-z][a-z0-9-]{3,})/g)].map((m) => m[1]));
+    for (const id of ids) {
+      const quoted = new RegExp(`['"\`]${id}['"\`]`);
+      for (const [rel, text] of srcText) {
+        if (!quoted.test(text)) continue;
+        if (!floor.has(rel)) floor.set(rel, new Set());
+        floor.get(rel).add(suite);
+      }
+    }
+  }
+
+  let gaps = 0;
+  for (const [file, needed] of [...floor].sort()) {
+    const { suites, unknown } = suitesForFile(file);
+    if (unknown) {
+      console.log(`  ${file}\n      no rule covers it, but ${[...needed].sort().join(' ')} drive it`);
+      gaps++;
+      continue;
+    }
+    if (suites.includes('*')) continue;
+    const missing = [...needed].filter((x) => !suites.includes(x)).sort();
+    if (!missing.length) continue;
+    console.log(`  ${file}\n      selects ${suites.join(' ')}\n      but these also drive it: ${missing.join(' ')}`);
+    gaps++;
+  }
+  if (gaps) {
+    console.log(`\n${gaps} rule(s) below the derived floor. Widen them, or say in the rule's \`why\` that the coupling is not real.`);
+    process.exit(1);
+  }
+  console.log(`Map covers the derived floor: ${floor.size} source file(s) checked against ${suiteFiles.length} suites.`);
+  process.exit(0);
+}
+
 const base = resolveBase(argv.find((a) => !a.startsWith('-')));
 const files = changedFiles(base);
 
@@ -180,17 +278,17 @@ const broad = [];
 let everything = false;
 
 for (const file of files) {
-  const rule = RULES.find((r) => r.re.test(file));
-  if (!rule) {
+  const { rule, suites, unknown } = suitesForFile(file);
+  if (unknown) {
     unmapped.push(file);
     continue;
   }
-  if (rule.suites.includes('*')) {
+  if (suites.includes('*')) {
     everything = true;
     broad.push(`${file} — ${rule.why}`);
     continue;
   }
-  for (const suite of rule.suites) {
+  for (const suite of suites) {
     if (!ALL.includes(suite)) {
       console.error(`map error: rule for ${rule.re} names unknown suite "${suite}"`);
       continue;

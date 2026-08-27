@@ -50,12 +50,33 @@ node .claude/skills/phong-ship-check/scripts/which-suites.mjs --all
 It reads the changed files (committed *and* uncommitted — the point is to run it before you
 commit), maps them onto the flows they could break, and prints the command with a reason
 beside every suite. A file no rule covers **widens to the full run** rather than narrowing to
-none: being slow is a cost, being quiet about a broken flow is a bug.
+none: being slow is a cost, being quiet about a broken flow is a bug. Editing a suite runs
+that suite; a named base ref git cannot resolve is an error, not a silent fallback.
 
-The map is a claim about this repo, not a fact. When it names a suite that makes no sense, or
-misses one that broke, edit `RULES` in that script — it is the only place the claim lives, and
-it validates its suite names against `scripts/e2e-run.mjs` so a typo surfaces immediately
-rather than as "Unknown suite".
+## Keeping the map honest
+
+```bash
+node .claude/skills/phong-ship-check/scripts/which-suites.mjs --verify
+```
+
+The map is a claim about this repo, and a hand-written claim about eighteen suites drifts —
+this one drifted three times on its first day, always toward selecting too few, which is the
+direction that lets a targeted run report success while skipping the broken flow.
+
+`--verify` derives a **floor** from evidence instead of memory: every `#id` each suite drives,
+resolved back to the source files that define it. A rule selecting fewer suites than the
+derivation found is reported, and the check exits non-zero. Run it whenever you touch `RULES`.
+
+It is a floor, not the map. It sees DOM coupling only, so a file a suite depends on
+*behaviourally* never appears — that is what the reasoned `why` on each rule is for. Widening
+past the floor is always fine; falling below it is the bug. Some rules are deliberately `'*'`
+because no subset can be right: `src/App.tsx` and `server.ts` (each is a whole layer in one
+file), `MainMenu.tsx` and `OnboardingModal.tsx` (every suite starts at the menu and onboards
+before it can touch anything), and `src/components/ui/` (the primitives under every sheet).
+
+When a suite is added or removed, the script reads the list from `scripts/e2e-run.mjs` rather
+than duplicating it, so a stale rule announces itself as a `map error` line instead of failing
+later as "Unknown suite".
 
 ## Reading a failure
 
