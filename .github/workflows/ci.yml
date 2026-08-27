@@ -16,6 +16,16 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      # Before `npm ci`: it needs no dependencies and costs milliseconds, so it
+      # fails before anything is installed. A file named scripts/e2e-<name>.mjs
+      # that is missing from e2e-run.mjs's SUITES is not a skipped test, it is
+      # a test nobody knows is not running — it reads as coverage in review and
+      # never executes. Nothing else can notice: `npm test` does not touch
+      # these files, tsc does not read them, and the runner cannot report a
+      # suite it was never told about.
+      - name: Every browser suite is registered
+        run: npm run lint:suites
+
       - name: Install dependencies
         run: npm ci
 

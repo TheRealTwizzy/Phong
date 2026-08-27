@@ -77,6 +77,10 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── CLAUDE.md                  # This guide
 ├── README.md                  # Quickstart
 ├── TESTING.md                 # The two test layers, the coverage floors, standing rules
+├── .claude/skills/            # Project skills: the ordered touch-list for a protocol
+│                              #   change, a locale, a playerId-keyed table, a match
+│                              #   rule, a doc update, and the pre-push gate.
+│                              #   See .claude/skills/README.md
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
 ├── DEPLOYMENT.md              # KVM/docker-compose runbook (+ Render alternative)
 ├── Dockerfile                 # Multi-stage build → slim runtime (express+ws only)
@@ -312,6 +316,7 @@ npm run dev      # tsx watch server.ts — app + relay with hot reload on :3000
 npm run build    # vite build (client) + esbuild bundle (server) → dist/
 npm start        # node dist/server.cjs (production)
 npm run lint     # tsc --noEmit
+npm run lint:suites # every scripts/e2e-*.mjs is registered with the runner (CI runs it)
 npm test         # vitest run (tests/)
 npm run test:coverage # the same suites plus the per-module coverage floors CI enforces
 npm run test:e2e # browser E2E — needs `npm run build` first (see below)
@@ -330,7 +335,16 @@ from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. `verify`
 `test:coverage` rather than a bare `npm test`: per-module floors on the shared pure logic,
 set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
 components are Playwright's job, and one number would either fail on that bet or be set low
-enough to measure nothing. **A suite that
+enough to measure nothing. It also opens with `lint:suites`, before `npm ci`, because that
+one needs no dependencies and costs milliseconds: a file named `scripts/e2e-<name>.mjs` that
+is missing from `e2e-run.mjs`'s `SUITES` is not a skipped test, it is a test **nobody knows is
+not running** — it reads as coverage in review and never executes. Nothing else in the repo
+can notice: `npm test` does not touch those files, `tsc` does not read them, and the runner
+cannot report a suite it was never told about. A **targeted** E2E run is deliberately not
+offered: a changed-file→suite map was built and deleted, because the coupling that decides it
+(which suites play a match, or a relayed point) is behavioural rather than static, and every
+rule anybody checked was too narrow in the direction that lets a green run hide a broken flow.
+`.claude/skills/phong-ship-check` keeps that reasoning so it is not rebuilt. **A suite that
 asserts old behaviour is a suite that will be deleted rather than read** — when a rule
 changes, change the suite in the same commit.
 
@@ -355,6 +369,15 @@ set, and the standing invariants the tests exist to hold. Read it before adding 
 12. **Anything that shows the player the half they are not meant to see is a match RULE, and it costs the rating.** The blind half-court is the game; a feature that lifts it is not a presentation preference however it is spelled, and it belongs in `MatchRules` behind `isRankedRules` rather than in `GameSettings`. The two net indicators are the line: they say where the opponent's paddle is and whether the ball is over there, which is what a player on the other side of a real table can see anyway, so they are device preferences and they are free. The sonar draws the half itself, so it is a rule and it is not. A new one of these is a decision about which side of that line it falls on — make it deliberately, and if it is on the sonar's side, add it to `isRankedRules` and to `unrankedReasons` in the same commit or the pre-match badge starts lying.
 
 13. **Every transient notification goes through `ToastHost`, which owns BOTH the timer and the tap target.** A notice that appears by itself and leaves by itself is dismiss-on-tap, without exception — the quick-chat bubbles (`pointer-events-none`, aged out on a timestamp) and the match-start countdown (`pointer-events-none` so the paddle stays drivable) are the only overheads that are not, and neither is a notification the player has to get rid of. A call site supplies `ttlMs` and `onDismiss` and nothing else; it must never arm its own `setTimeout`. Three of them used to, bare and uncancelled, so re-raising a notice inside its window let the first timer cut the second one short. **A timer must never be armed by an effect that depends on the dismiss callback.** App rebuilds every one of those on every render and re-renders once per animation frame while a ball is in play, so such an effect tears its timer down and re-arms it sixty times a second and never fires: that is how the achievement toast came to outlive the match that raised it, the winner overlay, and the menu after that — 15-30 seconds, and a different number every time, since it actually expired 4.5s after App last happened to re-render. `ToastItem` keys its effect on `[id, ttlMs]` alone and reads the callback through a ref, so the fix holds for every toast rather than one. The stack sits at `z-[75]` — above every `Sheet` layer (50/60/70) — because at `z-50` it was EARLIER in the DOM than the modals and the theme-unlock notice was painted over by the very Missions sheet that raised it; now that the notice expires on a timer, that would have made it invisible for good. It clears the screen's own top bar (`pt-safe-bar`) rather than burying the HUD row it is announcing something about. `toast-record-failed` is the one entry with no `ttlMs`, deliberately: it reports a state that is still unresolved and is cleared when the retry lands.
+
+14. **A rule stated here is repeated in `.claude/skills/`, and both move together.** The skills
+carry the *procedure* — which files a protocol change touches and in what order, which test
+fails when a `playerId`-keyed table is not claimed, what the pre-match badge has to be told
+about a new rule — while this file carries the reasoning. That duplication is deliberate and
+it is the kind that drifts, exactly like the relay and the P2P replica: a skill that misstates
+a touch-list is worse than no skill, because it is trusted. When a rule here moves,
+`grep -rl "<identifier>" .claude/skills/` and fix it in the same commit, the same way a suite
+asserting old behaviour is changed rather than left to be read later.
 
 ## 10. Deployment
 
