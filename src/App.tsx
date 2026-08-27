@@ -56,6 +56,8 @@ import {
   isRankedRules,
   unrankedReasons,
 } from './matchRules';
+import { DEFAULT_VENUE_ROOM } from './venues';
+import type { TableSummary } from './components/MultiplayerLobby';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
 import {
@@ -1834,7 +1836,57 @@ export default function App() {
     attempt();
   };
 
-  const handleCreateRoom = () => {
+  /**
+   * The venue room a table is created in, and whether it is listed.
+   *
+   * Held in a ref rather than passed down through the lobby: the lobby is
+   * `MultiplayerLobby`'s surface and knows nothing about buildings, while the
+   * choice is made a level up, in the menu's room list. Defaults match a
+   * `create_room` that names nothing — the ungated venue, private — so the
+   * invitation flow is byte-identical to what it has always been.
+   */
+  const venueRef = useRef<{ roomId: string; visibility: 'public' | 'private' }>({
+    roomId: DEFAULT_VENUE_ROOM,
+    visibility: 'private',
+  });
+
+  // The tables open in the venue the lobby was reached from. Polled rather
+  // than pushed: browsing is a read, and a WS message for it would have to be
+  // handled in both the relay and the P2P replica (protocolParity) for no
+  // gain over an unauthenticated GET the relay already answers.
+  const [venueTables, setVenueTables] = useState<TableSummary[]>([]);
+  const [tablesLoading, setTablesLoading] = useState<boolean>(false);
+  const [lobbyVenue, setLobbyVenue] = useState<string | null>(null);
+
+  const refreshTables = useCallback(async (venue: string | null) => {
+    if (!venue) return;
+    setTablesLoading(true);
+    try {
+      const res = await fetch(`/api/rooms/${venue}/tables`);
+      if (!res.ok) {
+        setVenueTables([]);
+        return;
+      }
+      const body = await res.json();
+      setVenueTables(Array.isArray(body?.tables) ? body.tables : []);
+    } catch {
+      // A failed poll leaves the last list standing rather than blanking the
+      // browser: a dropped request is not evidence that the room emptied.
+    } finally {
+      setTablesLoading(false);
+    }
+  }, []);
+
+  // Poll while the browser is actually on screen, and only then: a lobby with
+  // a seat in it is showing the room, not the list.
+  useEffect(() => {
+    if (!isMultiplayerOpen || !lobbyVenue || roomId) return;
+    refreshTables(lobbyVenue);
+    const id = window.setInterval(() => refreshTables(lobbyVenue), 3000);
+    return () => window.clearInterval(id);
+  }, [isMultiplayerOpen, lobbyVenue, roomId, refreshTables]);
+
+  const handleCreateRoom = (over?: { visibility?: 'public' | 'private' }) => {
     // Not from under the tour. Its scrim is deliberately pointer-events-none —
     // the app underneath is the real app and stays usable, which is the whole
     // idea — but a room opened during it is one the tour then walks away from:
@@ -1851,9 +1903,12 @@ export default function App() {
     }
     // The host opens the room on their own menu choices; from then on the
     // room owns them and the lobby is where they change.
+    const visibility = over?.visibility ?? venueRef.current.visibility;
     sendWhenOpen(socket, () => ({
       type: 'create_room',
       playerId,
+      venueRoomId: venueRef.current.roomId,
+      visibility,
       config: normalizeRoomConfig({
         winningScore: settingsRef.current.winningScore,
         rules: settingsRef.current.rules,
@@ -3131,7 +3186,14 @@ export default function App() {
             onStartSolo={() => startMatch('solo')}
             onStartPractice={() => startMatch('practice')}
             onStartSplit={() => startMatch('split')}
-            onOpenMultiplayer={() => setIsMultiplayerOpen(true)}
+            onOpenMultiplayer={(venue) => {
+              // A PvP room sets the venue a created table lands in, and the
+              // browser the lobby shows. No venue means the bare invite flow.
+              venueRef.current = { roomId: venue ?? DEFAULT_VENUE_ROOM, visibility: 'private' };
+              setLobbyVenue(venue ?? null);
+              setVenueTables([]);
+              setIsMultiplayerOpen(true);
+            }}
             onOpenProfile={() => setIsProfileOpen(true)}
             onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
             onOpenAchievements={() => setIsAchievementsOpen(true)}
@@ -3554,6 +3616,11 @@ export default function App() {
           language={currentLanguage}
           p2pEnabled={p2pEnabled}
           onToggleP2P={setP2pEnabled}
+          venueRoomId={lobbyVenue}
+          tables={venueTables}
+          tablesLoading={tablesLoading}
+          onRefreshTables={() => refreshTables(lobbyVenue)}
+          onCreatePublicTable={() => handleCreateRoom({ visibility: 'public' })}
         />
 
         {/* Player Profile & Stats Modal */}

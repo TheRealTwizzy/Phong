@@ -49,6 +49,7 @@ coverage number.
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
+| `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` | The one-shot migrations |
 
@@ -273,6 +274,13 @@ samples a fast bucket and a sharply angled one), so the same AI returns more bal
 0.873-0.968 against 0.880-0.906 at the same mu. The binding ceiling rule lives beside the
 harder sample; the easier one only catches a literal wall. Copying a bound between them would
 be reading one distribution's number off another's.
+
+**A private table must never appear in the listing.** `GET /api/rooms/:venue/tables` is an
+unauthenticated read of live room state, so `visibility` is not a display preference — it is
+the whole boundary protecting today's invite-code tables, whose 4-letter codes would otherwise
+be harvestable by anyone who can call the endpoint. `tests/tableBrowser.test.ts` asserts the
+absence across every venue, and was verified the way TESTING.md §6 asks: by deleting the
+filter and watching it go red.
 
 **A bracket the menu draws is a bracket the server enforces.** The menu is the client, so
 `roomEntryVerdict` in `src/venues.ts` is written once and asked by both — the same reasoning

@@ -171,6 +171,25 @@ export interface Room {
    * link knows things the relay does not, and a maximum cannot go backwards.
    */
   relayCounted: boolean;
+  /**
+   * The venue room this table sits in (`src/venues.ts`) — a PvP bracket, or
+   * the hidden queue room. Normalized against a whitelist by the caller, never
+   * taken as free client text: the browser is keyed on it, so an arbitrary
+   * string would make that listing an unbounded index keyed on whatever a
+   * caller sends.
+   */
+  venueRoomId: string;
+  /**
+   * Whether the room browser lists this table.
+   *
+   * `private` is today's invite-code table exactly, and it is the DEFAULT for
+   * a `create_room` that names nothing — which is what keeps the invite flow,
+   * old bundles and the test harness working unchanged. It is also the entire
+   * security boundary protecting those tables: the listing is an
+   * unauthenticated read of live room state, so a bug that lists a private
+   * table makes every private room's 4-letter code harvestable.
+   */
+  visibility: 'public' | 'private';
 }
 
 /** A seat's hidden rating, as the ladder in src/rating.ts models it. */

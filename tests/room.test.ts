@@ -53,6 +53,8 @@ const room = (over: Partial<Room> = {}): Room => ({
   startRatingsSeq: 0,
   relayCounted: false,
   soloSince: 0,
+  venueRoomId: 'casual',
+  visibility: 'private',
   ...over,
 });
 

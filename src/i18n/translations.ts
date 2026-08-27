@@ -315,6 +315,14 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Menu shell.
     menu_section_play: 'Play',
+    // The table browser inside a PvP room.
+    lobby_tables_title: 'Open tables',
+    lobby_tables_empty: 'No tables here yet. Start one and wait for an opponent.',
+    lobby_tables_create: 'Start a table',
+    lobby_tables_refresh: 'Refresh tables',
+    lobby_tables_waiting: 'Waiting for an opponent',
+    lobby_tables_in_play: 'Match in progress',
+    lobby_tables_host_unknown: 'Open table',
     // Buildings, rooms and their gates (see src/venues.ts).
     building_training: 'Training',
     building_training_desc: 'Drill alone, or hand a friend the other half',
@@ -817,6 +825,14 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     // Menú principal y navegación de modos
     main_menu: 'Menú Principal',
     menu_section_play: 'Jugar',
+    // The table browser inside a PvP room.
+    lobby_tables_title: 'Mesas abiertas',
+    lobby_tables_empty: 'Aún no hay mesas. Crea una y espera a un rival.',
+    lobby_tables_create: 'Crear una mesa',
+    lobby_tables_refresh: 'Actualizar mesas',
+    lobby_tables_waiting: 'Esperando a un rival',
+    lobby_tables_in_play: 'Partida en curso',
+    lobby_tables_host_unknown: 'Mesa abierta',
     // Buildings, rooms and their gates (see src/venues.ts).
     building_training: 'Entrenamiento',
     building_training_desc: 'Practica solo, o cede la otra mitad a un amigo',
@@ -1316,6 +1332,14 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     // メインメニューとモード選択
     main_menu: 'メインメニュー',
     menu_section_play: 'プレイ',
+    // The table browser inside a PvP room.
+    lobby_tables_title: '空きテーブル',
+    lobby_tables_empty: 'まだテーブルがありません。作って対戦相手を待ちましょう。',
+    lobby_tables_create: 'テーブルを作る',
+    lobby_tables_refresh: 'テーブルを更新',
+    lobby_tables_waiting: '対戦相手を待っています',
+    lobby_tables_in_play: '試合中',
+    lobby_tables_host_unknown: '空きテーブル',
     // Buildings, rooms and their gates (see src/venues.ts).
     building_training: 'トレーニング',
     building_training_desc: '一人で練習、または友達に反対側を渡す',
@@ -1815,6 +1839,14 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     // Hauptmenü & Modus-Navigation
     main_menu: 'Hauptmenü',
     menu_section_play: 'Spielen',
+    // The table browser inside a PvP room.
+    lobby_tables_title: 'Offene Tische',
+    lobby_tables_empty: 'Noch keine Tische. Eröffne einen und warte auf einen Gegner.',
+    lobby_tables_create: 'Tisch eröffnen',
+    lobby_tables_refresh: 'Tische aktualisieren',
+    lobby_tables_waiting: 'Wartet auf einen Gegner',
+    lobby_tables_in_play: 'Match läuft',
+    lobby_tables_host_unknown: 'Offener Tisch',
     // Buildings, rooms and their gates (see src/venues.ts).
     building_training: 'Training',
     building_training_desc: 'Allein üben oder einem Freund die andere Hälfte geben',
@@ -2314,6 +2346,14 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     // Menu principal et navigation des modes
     main_menu: 'Menu Principal',
     menu_section_play: 'Jouer',
+    // The table browser inside a PvP room.
+    lobby_tables_title: 'Tables ouvertes',
+    lobby_tables_empty: 'Aucune table ici. Ouvrez-en une et attendez un adversaire.',
+    lobby_tables_create: 'Ouvrir une table',
+    lobby_tables_refresh: 'Actualiser les tables',
+    lobby_tables_waiting: 'En attente d\'un adversaire',
+    lobby_tables_in_play: 'Match en cours',
+    lobby_tables_host_unknown: 'Table ouverte',
     // Buildings, rooms and their gates (see src/venues.ts).
     building_training: 'Entraînement',
     building_training_desc: 'S\'entraîner seul, ou céder l\'autre moitié à un ami',
@@ -2813,6 +2853,14 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     // Menu principal e navegação de modos
     main_menu: 'Menu Principal',
     menu_section_play: 'Jogar',
+    // The table browser inside a PvP room.
+    lobby_tables_title: 'Mesas abertas',
+    lobby_tables_empty: 'Ainda não há mesas. Abra uma e espere por um adversário.',
+    lobby_tables_create: 'Abrir uma mesa',
+    lobby_tables_refresh: 'Atualizar mesas',
+    lobby_tables_waiting: 'À espera de um adversário',
+    lobby_tables_in_play: 'Partida a decorrer',
+    lobby_tables_host_unknown: 'Mesa aberta',
     // Buildings, rooms and their gates (see src/venues.ts).
     building_training: 'Treino',
     building_training_desc: 'Treine sozinho, ou passe a outra metade a um amigo',
@@ -3312,6 +3360,14 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     // 主菜单与模式导航
     main_menu: '主菜单',
     menu_section_play: '开始游戏',
+    // The table browser inside a PvP room.
+    lobby_tables_title: '空闲球台',
+    lobby_tables_empty: '这里还没有球台。开一张，等对手来。',
+    lobby_tables_create: '开一张球台',
+    lobby_tables_refresh: '刷新球台',
+    lobby_tables_waiting: '等待对手',
+    lobby_tables_in_play: '比赛进行中',
+    lobby_tables_host_unknown: '空闲球台',
     // Buildings, rooms and their gates (see src/venues.ts).
     building_training: '训练',
     building_training_desc: '独自练习，或把另一半球场交给朋友',

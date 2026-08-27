@@ -17,6 +17,7 @@ import {
   ArrowRight,
   Play,
   User,
+  RefreshCw,
 } from 'lucide-react';
 
 interface MultiplayerLobbyProps {
@@ -54,6 +55,28 @@ interface MultiplayerLobbyProps {
   /** The host's own achievements, so the length picker gates as the menu does. */
   earnedAchievements?: string[];
   language?: LanguageCode;
+  /**
+   * The venue room the player walked in from, or null for the bare invite
+   * flow. Present means the browser above is shown: a bracket lists its own
+   * open tables, and "host a match" there creates a PUBLIC one.
+   */
+  venueRoomId?: string | null;
+  tables?: TableSummary[];
+  tablesLoading?: boolean;
+  onRefreshTables?: () => void;
+  /** Create a table others can find, rather than one shared by code. */
+  onCreatePublicTable?: () => void;
+}
+
+/** One row of the table browser, as GET /api/rooms/:venue/tables returns it. */
+export interface TableSummary {
+  id: string;
+  hostName: string | null;
+  hostId: string | null;
+  playerCount: number;
+  isFull: boolean;
+  inPlay: boolean;
+  waitingMs: number | null;
 }
 
 export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
@@ -80,6 +103,11 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   onStartMatch,
   earnedAchievements = [],
   language = 'en',
+  venueRoomId = null,
+  tables = [],
+  tablesLoading = false,
+  onRefreshTables,
+  onCreatePublicTable,
 }) => {
   const playerName = currentUsername || 'Player';
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
@@ -442,6 +470,83 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
           </>
         ) : (
           <>
+            {/* The tables open in this room. Shown only when the player
+                walked in from one — the bare invite flow (a link, a QR, a
+                typed code) has no venue and no browser, exactly as before.
+
+                Empty is a real state and says so rather than showing nothing:
+                a room with no tables is a room you START one in, which is why
+                the empty copy carries the CTA rather than sitting above a
+                separate button the player has to find. */}
+            {venueRoomId && (
+              <Panel as="section" variant="raised" className="flex flex-col gap-2.5">
+                <div className="flex items-center gap-1.5">
+                  <h3 className="flex flex-1 items-center gap-1.5 text-2xs text-ink">
+                    <Users className="h-4 w-4 text-accent" />
+                    {t('lobby_tables_title', language)}
+                  </h3>
+                  {onRefreshTables && (
+                    <button
+                      id="btn-refresh-tables"
+                      onClick={onRefreshTables}
+                      aria-label={t('lobby_tables_refresh', language)}
+                      className="rounded-ctl border border-line bg-surface-2 p-1.5 text-ink-muted transition-colors active:scale-95 motion-reduce:active:scale-100"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${tablesLoading ? 'animate-spin' : ''}`} />
+                    </button>
+                  )}
+                </div>
+
+                {tables.length === 0 ? (
+                  <p id="lobby-tables-empty" className="text-2xs font-normal tracking-normal text-ink-muted">
+                    {t('lobby_tables_empty', language)}
+                  </p>
+                ) : (
+                  <ul id="lobby-tables" className="flex flex-col gap-1.5">
+                    {tables.map((table) => (
+                      <li key={table.id}>
+                        <button
+                          id={`table-${table.id}`}
+                          data-full={table.isFull ? 'true' : 'false'}
+                          disabled={table.isFull}
+                          onClick={() => onJoinRoom(table.id)}
+                          className={`flex w-full items-center gap-2 rounded-card border p-2.5 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
+                            table.isFull ? 'border-line bg-surface-1 opacity-60' : 'border-line bg-surface-2'
+                          }`}
+                        >
+                          <div className="flex min-w-0 flex-1 flex-col">
+                            <span className="truncate text-2xs text-ink">
+                              {table.hostName || t('lobby_tables_host_unknown', language)}
+                            </span>
+                            <span className="text-2xs font-normal tracking-normal text-ink-dim">
+                              {table.inPlay
+                                ? t('lobby_tables_in_play', language)
+                                : t('lobby_tables_waiting', language)}
+                            </span>
+                          </div>
+                          <span className="shrink-0 text-2xs tnum font-normal tracking-normal text-ink-muted">
+                            {table.playerCount}/2
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {onCreatePublicTable && (
+                  <Button
+                    id="btn-create-public-table"
+                    variant="primary"
+                    size="lg"
+                    block
+                    onClick={onCreatePublicTable}
+                  >
+                    {t('lobby_tables_create', language)}
+                  </Button>
+                )}
+              </Panel>
+            )}
+
             {/* One column. The md: breakpoint this used to carry never fires
                 on a phone-only app. */}
             <Panel variant="raised" className="flex flex-col gap-2.5">

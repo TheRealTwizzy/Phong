@@ -606,7 +606,7 @@ export interface RoomMatchConfig {
 // player's name from the device-cookie profile, so clients can't spoof one.
 export type WSClientMessage =
   | { type: 'join_room'; roomId: string; playerId: string }
-  | { type: 'create_room'; playerId: string; config?: RoomMatchConfig }
+  | { type: 'create_room'; playerId: string; config?: RoomMatchConfig; venueRoomId?: string; visibility?: 'public' | 'private' }
   | { type: 'set_room_config'; config: RoomMatchConfig }
   | { type: 'player_ready'; ready: boolean }
   | { type: 'start_match' }

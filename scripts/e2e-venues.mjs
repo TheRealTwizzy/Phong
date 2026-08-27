@@ -3,15 +3,18 @@
 // The menu used to be a flat list of four mode rows. It is a PLACE now: a
 // building says what kind of game, a room says who you are playing and at
 // what level, and the match begins from there. What this suite pins:
-//   1. The three buildings are on the menu, and walking into one shows its
-//      rooms and nothing else.
-//   2. Back returns to the buildings, so the walk is not one-way.
+//   1. The three buildings are on the menu as a TAB STRIP, and the one that
+//      is selected shows its rooms and nothing else.
+//   2. Switching buildings is one tap, and the strip marks where you are.
 //   3. A SOLO room is a rung — entering one sets the difficulty the sheet
 //      then confirms, rather than asking a second time.
 //   4. A locked rung says what opens it, and cannot be entered.
 //   5. A PVP bracket a fresh player is too weak for is locked and SAYS the
 //      level it needs; the ungated rooms stay open to them.
 //   6. Training rooms reach the Practice Wall and Split Screen.
+//   7. The table browser: an empty room offers to start one, a public table
+//      is findable and joinable with no code, and a private one is not listed
+//      at all — that last is the whole boundary protecting invite codes.
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs).
 import { chromium, devices } from 'playwright-core';
 
@@ -160,6 +163,59 @@ await page.waitForSelector('#menu-start-practice', { timeout: 5000 });
 await page.click('#menu-start-practice');
 await page.waitForSelector('#half-court-canvas', { timeout: 8000 });
 ok('the Training building reaches the Practice Wall');
+
+// ---- 7. The table browser inside a PvP room ------------------------------
+// A room with no tables is a room you START one in, so the empty state says
+// exactly that rather than showing nothing.
+const browser1 = await newPlayer('Table');
+await browser1.click('#building-pvp');
+await browser1.click('#room-casual');
+await browser1.waitForSelector('#lobby-tables-empty', { timeout: 8000 });
+ok('an empty room shows the empty state, not a blank browser');
+
+// Starting a table there makes it PUBLIC — and a second player standing in
+// the same room finds it without ever being told a code.
+await browser1.click('#btn-create-public-table');
+const code = await browser1
+  .waitForFunction(() => {
+    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+  }, { timeout: 8000 })
+  .then((h) => h.jsonValue());
+
+const browser2 = await newPlayer('Finder');
+await browser2.click('#building-pvp');
+await browser2.click('#room-casual');
+await browser2.waitForSelector(`#table-${code}`, { timeout: 10000 });
+ok(`a public table is findable from the room browser (${code}) with no code typed`);
+
+// And joining it seats them: the browser is a way IN, not just a list.
+await browser2.click(`#table-${code}`);
+await browser2.waitForSelector('#lobby-room-code', { timeout: 8000 });
+const seated = await browser2.textContent('#lobby-room-code');
+if (seated.trim() !== code) fail(`joining from the browser landed in ${seated.trim()}, not ${code}`);
+ok('tapping a table seats the player at it');
+
+// The private flow is untouched and stays out of the listing entirely.
+const priv = await newPlayer('Priv');
+await priv.click('#building-pvp');
+await priv.click('#room-casual');
+await priv.waitForSelector('#btn-create-room', { timeout: 8000 });
+await priv.click('#btn-create-room');
+const privCode = await priv
+  .waitForFunction(() => {
+    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+  }, { timeout: 8000 })
+  .then((h) => h.jsonValue());
+const listed = await priv.evaluate(async () => {
+  const r = await fetch('/api/rooms/casual/tables');
+  return (await r.json()).tables.map((t) => t.id);
+});
+if (listed.includes(privCode)) {
+  fail(`a private table (${privCode}) is listed in the room browser — its code is harvestable`);
+}
+ok(`"host a match" still makes a PRIVATE table (${privCode}), absent from the listing`);
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 console.log('\nALL VENUE E2E CHECKS PASSED');

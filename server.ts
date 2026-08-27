@@ -41,6 +41,13 @@ import {
 import { validateAvatarPng } from './server/image';
 import { MatchEndPayload, RoomMatchConfig } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
+import {
+  DEFAULT_VENUE_ROOM,
+  normalizeVenueRoomId,
+  roomById,
+  roomEntryVerdict,
+  roomsOf,
+} from './src/venues';
 import { validateUsername } from './src/profileRules';
 import { Rating, winProbability } from './src/rating';
 
@@ -611,6 +618,51 @@ async function startServer() {
     res.json({ iceServers });
   });
 
+  /**
+   * The tables open in one venue room, for the browser.
+   *
+   * Registered BEFORE anything `/api/room/:roomId`-shaped, the same ordering
+   * care `/api/profile/:id` documents — a two-segment pattern registered first
+   * would swallow this one.
+   *
+   * Three filters, and each is load-bearing:
+   *  - the venue, so a bracket lists its own tables and no others;
+   *  - `visibility === 'public'`, which is the ENTIRE boundary protecting
+   *    today's invite-code tables. This is an unauthenticated read of live
+   *    room state, so a bug here makes every private room's 4-letter code
+   *    harvestable;
+   *  - has-a-live-player, which is what makes "empty tables are never listed"
+   *    true inside the 15-second window before the reaper sweeps one.
+   */
+  app.get('/api/rooms/:venueRoomId/tables', (req, res) => {
+    const venueRoomId = normalizeVenueRoomId(req.params.venueRoomId);
+    const def = roomById(venueRoomId);
+    // A room nothing may browse has no listing, rather than an empty one: the
+    // queue's room is excluded as DATA (listable: false), not by a special
+    // case here.
+    if (!def || def.listable === false) {
+      return res.status(404).json({ error: 'ROOM_NOT_LISTABLE' });
+    }
+    const tables = [];
+    for (const room of rooms.values()) {
+      if (room.venueRoomId !== venueRoomId) continue;
+      if (room.visibility !== 'public') continue;
+      const seated = room.players.filter((p) => p && p.ws.readyState === WebSocket.OPEN);
+      if (seated.length === 0) continue;
+      tables.push({
+        id: room.id,
+        hostName: room.players[0]?.playerName ?? null,
+        hostId: room.players[0]?.playerId ?? null,
+        playerCount: room.players.filter(Boolean).length,
+        isFull: room.players.filter(Boolean).length >= 2,
+        inPlay: room.inPlay,
+        config: room.config,
+        waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
+      });
+    }
+    res.json({ venueRoomId, tables });
+  });
+
   // Room status check
   app.get('/api/room/:roomId', (req, res) => {
     const roomId = req.params.roomId.toUpperCase();
@@ -634,6 +686,10 @@ async function startServer() {
       // been and gone. Beside inPlay for the same reason: a waiting room and a
       // live one are different things and this endpoint exists to say which.
       waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
+      // Added, never redefining playerCount/isFull above: existing clients and
+      // the browser suites read those and they still mean PLAYERS.
+      venueRoomId: room.venueRoomId,
+      visibility: room.visibility,
     });
   });
 
@@ -1378,6 +1434,31 @@ async function startServer() {
      * refused. A socket with no cookie at all is the synthetic-id fallback
      * the load test and other tooling run on; it records nothing either way.
      */
+    /**
+     * Whether this socket's player may PLAY in a venue room.
+     *
+     * The menu draws these brackets, and the menu is the client — so the same
+     * predicate is asked here, exactly as DIFFICULTY_LOCKED is enforced behind
+     * /api/match/record rather than trusted to the picker. `roomEntryVerdict`
+     * lives in src/venues.ts and is imported by both, so they cannot drift.
+     *
+     * Deliberately NOT asked of a private table: an invite is an invite, and
+     * two friends in different brackets are exactly who the code flow exists
+     * for. A cookieless socket (the load test's path) is not judged either —
+     * it has no profile to judge.
+     */
+    const venueRefusal = (venueRoomId: string): string | null => {
+      if (!cookieDeviceId) return null;
+      const room = roomById(venueRoomId);
+      if (!room?.gate) return null;
+      const profile = db.getProfile(cookieDeviceId);
+      const verdict = roomEntryVerdict(room, profile);
+      if (verdict.ok) return null;
+      if (verdict.reason === 'level') return `This room needs level ${verdict.needLevel}.`;
+      if (verdict.reason === 'tier_low') return `This room needs ${verdict.needTier} or above.`;
+      return `This room is for ${verdict.maxTier} and below.`;
+    };
+
     const seatRefusal = (): string | null => {
       if (!cookieDeviceId) return null;
       return db.getProfile(cookieDeviceId).initialized
@@ -1398,6 +1479,15 @@ async function startServer() {
         }
 
         if (msg.type === 'create_room') {
+          const venueRoomId = normalizeVenueRoomId(msg.venueRoomId);
+          // Judged BEFORE the room is built and before vacateSeat runs: a
+          // refused create must not cost the player the seat they already
+          // hold, still less charge them an abandon for a match they are in.
+          const venueRefused = venueRefusal(venueRoomId);
+          if (venueRefused) {
+            ws.send(JSON.stringify({ type: 'error', message: venueRefused }));
+            return;
+          }
           let code = generateRoomCode();
           while (rooms.has(code)) {
             code = generateRoomCode();
@@ -1460,6 +1550,14 @@ async function startServer() {
             startRatings: null,
             startRatingsSeq: 0,
             relayCounted: false,
+            // Whitelisted, never free client text — the browser is keyed on
+            // this. An unnamed venue lands in the ungated default, which is
+            // what keeps the invite flow and old bundles working unchanged.
+            venueRoomId,
+            // PRIVATE unless the caller asks otherwise, for the same reason:
+            // a table created by anything that predates this is an
+            // invite-code table exactly as it always was.
+            visibility: msg.visibility === 'public' ? 'public' : 'private',
           };
 
           rooms.set(code, room);
@@ -1495,6 +1593,24 @@ async function startServer() {
           if (room.players[1] !== null) {
             ws.send(JSON.stringify({ type: 'error', message: 'Room is already full (2 players).' }));
             return;
+          }
+
+          // A PUBLIC table is one this player browsed to, so the bracket that
+          // listed it applies to them as well as to its host. A PRIVATE table
+          // is an invitation, and an invitation is not bracketed: two friends
+          // in different brackets are exactly who the code flow exists for,
+          // and e2e-invite's guest is a brand-new level-1 player. Checked here
+          // rather than only at create, because the browser is polled and a
+          // table can be listed to somebody who then fails the gate.
+          //
+          // Above vacateSeat for the same reason as everything else here:
+          // nothing that can REFUSE may run after the old seat is given up.
+          if (room.visibility === 'public') {
+            const joinRefused = venueRefusal(room.venueRoomId);
+            if (joinRefused) {
+              ws.send(JSON.stringify({ type: 'error', message: joinRefused }));
+              return;
+            }
           }
 
           // The destination is real and has room, so the old seat can go. See

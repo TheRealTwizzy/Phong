@@ -99,7 +99,8 @@ interface MainMenuProps {
   onStartSolo: () => void;
   onStartPractice: () => void;
   onStartSplit: () => void;
-  onOpenMultiplayer: () => void;
+  /** `venue` is the PvP room walked in from, or undefined for the bare flow. */
+  onOpenMultiplayer: (venue?: string) => void;
   onOpenProfile: () => void;
   onOpenLeaderboard: () => void;
   onOpenAchievements: () => void;
@@ -249,7 +250,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   const handleRoomTap = (room: RoomDef) => {
     setNav((n) => ({ ...n, room: room.id }));
     if (room.building === 'pvp') {
-      onOpenMultiplayer();
+      onOpenMultiplayer(room.id);
       return;
     }
     if (room.difficulty) {
