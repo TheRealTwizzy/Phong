@@ -55,11 +55,17 @@ const RULES = [
     why: 'room rules, seats and the reaper' },
   { re: /^server\/matchmaking\.ts$/, suites: ['queue'], why: 'who the ranked queue pairs' },
   { re: /^server\/transform\.ts$/, suites: ['gameplay'], why: 'the cross-net mirror both phones depend on' },
-  { re: /^server\/auth\.ts$/, suites: ['profiles', 'invite', 'delete', 'build-id'],
-    why: 'device cookies and sessions — every identity flow' },
+  // auth.ts issues the device cookie on the document navigation, so every
+  // suite depends on it before it has done anything at all.
+  { re: /^server\/auth\.ts$/, suites: ['*'],
+    why: 'the device cookie and session every suite holds before it can act' },
   { re: /^server\/build\.ts$/, suites: ['build-id'], why: 'the deploy-refresh promise' },
-  { re: /^server\/db\.ts$/, suites: ['history', 'rating', 'achievements', 'elite', 'delete'],
-    why: 'recordMatch derives ratings, counters, missions and history from here' },
+  // The whole store. 17 of 18 suites onboard — that is a profile written — and
+  // the ones that look unrelated still lean on it: e2e-profiles drives the
+  // avatar BLOBs, e2e-streak asserts a run survives a reload. Same shape as
+  // server.ts: a shared layer has no honest subset.
+  { re: /^server\/db\.ts$/, suites: ['*'],
+    why: 'the whole store — every suite writes a profile before it does anything else' },
   { re: /^server\/image\.ts$/, suites: ['profiles'], why: 'avatar validation' },
   { re: /^server\/bots\.ts$/, suites: ['rating'], why: 'the seeded roster the leaderboard shows' },
   { re: /^server\/admin\.ts$/, suites: [], why: 'the read-only support CLI — bundled beside the server, never served to a player' },
@@ -243,6 +249,20 @@ if (argv.includes('--verify')) {
   }
 
   let gaps = 0;
+  let stale = 0;
+
+  // A rule naming a suite that does not exist is a broken map, and the DOM
+  // floor below cannot see it — the floor only knows about suites that are
+  // real. This is what makes `npm run lint:suites` catch a deleted suite.
+  for (const rule of RULES) {
+    for (const suite of rule.suites ?? []) {
+      if (suite !== '*' && !ALL.includes(suite)) {
+        console.log(`  rule ${rule.re}\n      names unknown suite "${suite}" — it is not in scripts/e2e-run.mjs`);
+        stale++;
+      }
+    }
+  }
+
   for (const [file, needed] of [...floor].sort()) {
     const { suites, unknown } = suitesForFile(file);
     if (unknown) {
@@ -256,8 +276,11 @@ if (argv.includes('--verify')) {
     console.log(`  ${file}\n      selects ${suites.join(' ')}\n      but these also drive it: ${missing.join(' ')}`);
     gaps++;
   }
-  if (gaps) {
-    console.log(`\n${gaps} rule(s) below the derived floor. Widen them, or say in the rule's \`why\` that the coupling is not real.`);
+  if (stale || gaps) {
+    const parts = [];
+    if (stale) parts.push(`${stale} rule(s) naming a suite that no longer exists — delete or rename them`);
+    if (gaps) parts.push(`${gaps} rule(s) below the derived floor — widen them, or say in the rule's \`why\` that the coupling is not real`);
+    console.log(`\n${parts.join('\n')}`);
     process.exit(1);
   }
   console.log(`Map covers the derived floor: ${floor.size} source file(s) checked against ${suiteFiles.length} suites.`);
@@ -275,6 +298,7 @@ if (!files.length) {
 const picked = new Map(); // suite -> reasons
 const unmapped = [];
 const broad = [];
+const mapErrors = [];
 let everything = false;
 
 for (const file of files) {
@@ -290,7 +314,12 @@ for (const file of files) {
   }
   for (const suite of suites) {
     if (!ALL.includes(suite)) {
-      console.error(`map error: rule for ${rule.re} names unknown suite "${suite}"`);
+      // Fail CLOSED. Dropping the suite and carrying on lets a stale rule —
+      // exactly what a deleted suite leaves behind — print a shorter command,
+      // or "no browser suite needed", and exit 0. A map that is known to be
+      // broken cannot also be trusted to narrow.
+      mapErrors.push(`${rule.re} names unknown suite "${suite}"`);
+      everything = true;
       continue;
     }
     if (!picked.has(suite)) picked.set(suite, new Set());
@@ -299,6 +328,12 @@ for (const file of files) {
 }
 
 console.log(`Changed vs ${base.label}: ${files.length} file(s)\n`);
+
+if (mapErrors.length) {
+  console.log('The map is stale — a rule names a suite that no longer exists:');
+  for (const e of mapErrors) console.log(`  ${e}`);
+  console.log('\nFix RULES (and run `npm run lint:suites`). Running everything meanwhile.\n');
+}
 
 if (broad.length) {
   console.log('Changed something the whole build rests on:');

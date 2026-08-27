@@ -74,10 +74,25 @@ derivation found is reported, and the check exits non-zero. Run it whenever you 
 
 It is a floor, not the map. It sees DOM coupling only, so a file a suite depends on
 *behaviourally* never appears — that is what the reasoned `why` on each rule is for. Widening
-past the floor is always fine; falling below it is the bug. Some rules are deliberately `'*'`
-because no subset can be right: `src/App.tsx` and `server.ts` (each is a whole layer in one
-file), `MainMenu.tsx` and `OnboardingModal.tsx` (every suite starts at the menu and onboards
-before it can touch anything), and `src/components/ui/` (the primitives under every sheet).
+past the floor is always fine; falling below it is the bug.
+
+**The shape the map settled into, after being wrong five times in a row:**
+
+- **A shared layer is `'*'`.** `src/App.tsx`, `server.ts`, `server/db.ts`, `server/auth.ts`,
+  `MainMenu.tsx`, `OnboardingModal.tsx`, `src/components/ui/`. Every suite starts at the menu,
+  onboards, holds a device cookie and writes a profile before it does anything interesting, so
+  a subset of suites for any of these is fiction. Every attempt to name one has been wrong.
+- **A leaf rule module narrows honestly.** `rating.ts`, `matchRules.ts`, `venues.ts`,
+  `physics.ts`, `themes.ts`, `transform.ts`, `room.ts`, `matchmaking.ts` — these are where the
+  tool earns its keep, and not by accident: they are the modules stated as rules rather than
+  reached through flows, which is the same property that made them cheap to unit-test.
+
+If you find yourself adding a fourth suite to a rule, ask whether the file is really a shared
+layer wearing a subset. That question has been answered "yes" every time so far.
+
+**A stale rule fails closed.** Naming a suite that is not in `scripts/e2e-run.mjs` — what a
+deleted suite leaves behind — fails `lint:suites`, and in advisory mode it says so and widens
+to the full run rather than quietly printing a shorter command.
 
 When a suite is added or removed, the script reads the list from `scripts/e2e-run.mjs` rather
 than duplicating it, so a stale rule announces itself as a `map error` line instead of failing
