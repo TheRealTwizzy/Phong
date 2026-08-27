@@ -2,11 +2,14 @@ import type { Tier } from './rating';
 
 export type GameMode = 'solo' | 'multiplayer' | 'split' | 'practice';
 
-// Three rungs: Rookie is the floor, Pro is the average-player baseline, Cyber
-// is the ceiling. 'chaos' was retired — it sat between Pro and Cyber in rating
-// but was defined by volatility rather than strength, which made the ladder
-// read as four rungs with only three distinct difficulties.
-export type AIDifficulty = 'rookie' | 'pro' | 'cyber';
+// Five rungs, each simulating a band of the PvP ladder: Rookie plays like an
+// Unranked/Contender human, Pro like Vanguard/Ace, Elite like Master/
+// Grandmaster, Cyber like Grandmaster/Legend, and Chaos like a Legend+ player.
+// 'chaos' is a REVIVED name: it once sat between Pro and Cyber (defined by
+// volatility rather than strength) and was retired; legacy history rows were
+// relabelled to 'cyber' by the chaos_relabel_v1 migration before the name was
+// given its new meaning at the top of the ladder.
+export type AIDifficulty = 'rookie' | 'pro' | 'elite' | 'cyber' | 'chaos';
 
 export type CourtTheme =
   | 'neon'
@@ -238,7 +241,9 @@ export interface PlayerProfile {
   /** Solo wins per difficulty — what the ladder branch is measured on. */
   rookieWins: number;
   proWins: number;
+  eliteWins: number;
   cyberWins: number;
+  chaosWins: number;
   /**
    * Career count of duels walked out on mid-match (disconnect or quit with a
    * live ball). Recorded by the relay, never reported by a client. The first
@@ -594,6 +599,65 @@ export interface RTCSignalPayload {
 export interface RoomMatchConfig {
   winningScore: number;
   rules: MatchRules;
+  /**
+   * Whether this table opens its two watching seats.
+   *
+   * A term of the match beside the winning score, and deliberately NOT a
+   * MatchRule: MatchRules feed isRankedRules and unrankedReasons, so a
+   * seat-availability flag put there would show up in the "what unranks this
+   * match" list as though it were physics. It is not — whether a rated match
+   * may be watched at all is answered by the VENUE (src/venues.ts), which is
+   * why the top three brackets simply have no spectator seats and everything
+   * below them rates exactly as it always did.
+   *
+   * Being a config field means it rides room_config and game_start for free
+   * and is already locked during play by set_room_config's own guard.
+   */
+  spectators: boolean;
+}
+
+/**
+ * A seat at a table, on the wire: 0 and 1 play, 2 and 3 watch.
+ *
+ * One flat namespace for the client, because a client only ever asks for "a
+ * seat". The relay maps it to (array, index) at its own boundary and keeps
+ * `players` and `spectators` apart internally, which is what stops a watching
+ * slot ever reaching something that indexes `streaks` or `ready`.
+ */
+export type TableSeat = 0 | 1 | 2 | 3;
+
+/** One seat's occupant, as the table browser and the lobby draw it. */
+export interface TableSeatInfo {
+  seat: TableSeat;
+  /** Null when nobody is in it. */
+  playerId: string | null;
+  playerName: string | null;
+  /**
+   * Whether this seat exists at this table at all. Always true for the two
+   * playing seats; for a watching seat it is the room's `config.spectators`,
+   * which the venue can force off however the host set it.
+   */
+  enabled: boolean;
+}
+
+/**
+ * Where the match stands, for somebody who has just sat down to watch it.
+ *
+ * A spectator arriving at 3-2 has missed `game_start` and every
+ * `score_update`, and the relay is the only party that knows — so without
+ * this their court renders 0-0 until the next point. Sent on arrival, and
+ * again whenever a watcher changes which side they are sitting beside.
+ */
+export interface SpectatorSnapshot {
+  p1Score: number;
+  p2Score: number;
+  servingPlayer: 0 | 1;
+  matchSeq: number;
+  inPlay: boolean;
+  matchOver: boolean;
+  config: RoomMatchConfig;
+  /** Both seats' live runs, for the telemetry overlay. Never counted here. */
+  streaks: [number, number];
 }
 
 // WebSocket Messages
@@ -601,8 +665,15 @@ export interface RoomMatchConfig {
 // player's name from the device-cookie profile, so clients can't spoof one.
 export type WSClientMessage =
   | { type: 'join_room'; roomId: string; playerId: string }
-  | { type: 'create_room'; playerId: string; config?: RoomMatchConfig }
+  | { type: 'create_room'; playerId: string; config?: RoomMatchConfig; venueRoomId?: string; visibility?: 'public' | 'private' }
   | { type: 'set_room_config'; config: RoomMatchConfig }
+  | { type: 'spectate_room'; roomId: string; seat?: number }
+  | { type: 'swap_seat'; seat: number }
+  // The ranked queue. `rttMs` is the client's own last round-trip reading —
+  // a tiebreak hint and never a gate, so its being self-reported costs
+  // nothing: forging it buys a marginally better-connected opponent.
+  | { type: 'queue_join'; rttMs?: number }
+  | { type: 'queue_cancel' }
   | { type: 'player_ready'; ready: boolean }
   | { type: 'start_match' }
   | { type: 'paddle_move'; x: number }
@@ -646,6 +717,26 @@ export type WSServerMessage =
   // one phone never manages to POST it.
   | { type: 'match_recorded'; matchKey: string; result: MatchEndResult }
   | { type: 'opponent_left' }
+  // Who is sitting where at this table, and which seat the recipient holds.
+  // Sent per-socket rather than broadcast, since `yourSeat` differs by
+  // recipient. A spectator is told about a seat change the way a player is
+  // told about `opponent_joined` — never with `opponent_left`, which would
+  // report a departure to somebody who lost nobody.
+  | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean }
+  // Where the match already stands, for a watcher who has just sat down.
+  | { type: 'spectator_sync'; snapshot: SpectatorSnapshot }
+  // Where the search stands. `found` is followed immediately by the ordinary
+  // room_created/room_joined/room_config and then game_start: the relay seats
+  // the pair and starts the match itself, with no lobby and no ready tap.
+  | { type: 'queue_state'; status: 'searching' | 'found' | 'cancelled'; opponent?: PublicProfile }
+  // The three frames only a WATCHER receives, all about the court of the
+  // player they are sitting beside — which that player never needs, because
+  // they are simulating it. RAW, in that player's own coordinates: no mirror
+  // and no transform, unlike opponent_paddle/opponent_ball/ball_incoming,
+  // which a watcher receives byte-identically to the player beside them.
+  | { type: 'watched_paddle'; x: number }
+  | { type: 'watched_ball'; x: number; y: number }
+  | { type: 'watched_ball_left' }
   // The relay refused this socket because the account is not held by this
   // session any more (transferred to another device, displaced by a newer
   // load, or minted under a previous deployment). Sent immediately before the

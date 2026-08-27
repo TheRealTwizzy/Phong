@@ -401,47 +401,37 @@ export function checkPaddleCollision(
 /**
  * Competence 0 (flailing) .. 1 (near-perfect) for an AI playing at `mu`.
  *
- * The slope is unchanged — the floor must not move, and Rookie (mu 18) and Pro
- * (mu 25) sit exactly where they did. Only the CEILING came down: the clamp
- * was 0.9, which let an adapted Cyber return 93% of balls, close enough to a
- * wall that the top rung stopped being a contest and became a lottery on the
- * AI's own error. At 0.66 the hardest thing in the game returns ~85%.
+ * The ceiling moved UP with the five-rung ladder — a deliberate reversal of
+ * the 0.9 → 0.66 cut, taken knowingly: players reported the whole ladder too
+ * easy, and two new top rungs need headroom above the old Cyber to be
+ * distinct. 0.78 puts the hardest thing in the game (Chaos, and an adapted
+ * Chaos at the clamp) near ~90% of balls returned — a genuine wall that still
+ * drops roughly one ball in ten. The old lottery critique is honoured by the
+ * hard rule in tests/physics.test.ts: no difficulty may ever return ≥93%.
  */
-export const MAX_AI_COMPETENCE = 0.66;
+export const MAX_AI_COMPETENCE = 0.78;
 
 // The ladder as it is actually PLAYED, in competence.
 //
-// The floor was the complaint: Rookie sat at c 0.21 and returned under 60% of
-// balls, which is less a warm-up than an empty half-court, and Pro at 0.45 was
-// not far enough above it to read as a step up. Raising the mu anchors instead
-// was not available — soloMuCap('rookie') is pinned to START_MU by the design
-// note in rating.ts and by a test, and widening AI_ADAPT_BAND to free it would
-// drag Pro's and Cyber's caps along with it. So what a rung PLAYS like moves
-// while what it is WORTH stays exactly where it was.
-//
-// Cyber's knot is the value the old straight line already produced, and at and
-// above its anchor that straight line is still what runs — so the top of the
-// ladder, and the MAX_AI_COMPETENCE clamp an adapted Cyber reaches, are
-// bit-for-bit unchanged. Only the stretch below it is lifted.
-//
-// The two middle knots are calibrated against the rally simulation in
-// tests/physics.test.ts rather than chosen: they are what put Rookie near 66%
-// of balls returned and Pro near 79%, i.e. an average player taking roughly
-// 75% of matches off Rookie and 42% off Pro, with Cyber left at 29%.
-const CEILING_MU = 29;
-const CEILING_C = (CEILING_MU - 12) / 29;
-
+// Knots at the five anchors in rating.ts (rookie 20, pro 24, elite 30, cyber
+// 33, chaos 36), each calibrated against the rally simulation in
+// tests/physics.test.ts rather than chosen: the targets are roughly 72% of
+// balls returned at Rookie, 79% at Pro, 85% at Elite, 88% at Cyber and 90% at
+// Chaos. Return rate saturates near the top, so the top rungs sit closer
+// together in balls returned than in matches won — the measure players feel.
+// Above the top anchor the curve is flat at the clamp: an adapted Chaos plays
+// the ceiling, never past it.
 const COMPETENCE_KNOTS: readonly (readonly [number, number])[] = [
   [12, 0.05],
-  [18, 0.28],
-  [25, 0.49],
-  [CEILING_MU, CEILING_C],
+  [20, 0.36],
+  [24, 0.49],
+  [30, 0.66],
+  [33, 0.72],
+  [36, MAX_AI_COMPETENCE],
 ];
 
 export function competenceForMu(mu: number): number {
-  // Above Cyber's anchor the original line, untouched — this is the half of
-  // the curve that must not move.
-  if (mu >= CEILING_MU) return clamp((mu - 12) / 29, 0.05, MAX_AI_COMPETENCE);
+  if (!Number.isFinite(mu)) return 0.05;
   for (let i = 1; i < COMPETENCE_KNOTS.length; i++) {
     const [mLo, cLo] = COMPETENCE_KNOTS[i - 1];
     const [mHi, cHi] = COMPETENCE_KNOTS[i];
@@ -450,7 +440,7 @@ export function competenceForMu(mu: number): number {
       return clamp(cLo + (cHi - cLo) * t, 0.05, MAX_AI_COMPETENCE);
     }
   }
-  return clamp(CEILING_C, 0.05, MAX_AI_COMPETENCE);
+  return MAX_AI_COMPETENCE;
 }
 
 interface AIStyle {
@@ -463,7 +453,12 @@ interface AIStyle {
 const AI_STYLES: Record<AIDifficulty, AIStyle> = {
   rookie: { volatility: 0.06, aggression: 0.15 },
   pro: { volatility: 0.08, aggression: 0.58 },
+  elite: { volatility: 0.05, aggression: 0.75 },
   cyber: { volatility: 0.04, aggression: 0.9 },
+  // Chaos recovers its historical identity — strength is the anchor, STYLE is
+  // volatility. At the competence clamp its swings can only reach downward,
+  // so it sometimes plays a rally like Elite: erratic, never superhuman.
+  chaos: { volatility: 0.11, aggression: 0.95 },
 };
 
 interface AIParams {
@@ -477,18 +472,15 @@ interface AIParams {
   spinRead: number;
 }
 
-// A lapse is the AI not moving for a WHOLE rally, and on the old line
+// A lapse is the AI not moving for a WHOLE rally, and on the original line
 // (`lerp(0.14, 0, c)`) that was one rally in nine at Rookie — the single most
-// visible thing about the bottom rung, and the part that reads as broken
-// rather than easy.
-//
-// Cut at the bottom and PINNED at the top. At and above Cyber's competence
-// this is the original expression, unchanged, so no amount of tuning down here
-// can raise the ceiling by the back door.
-const LAPSE_AT_CEILING = lerp(0.14, 0, CEILING_C);
+// visible thing about the bottom rung, and the part that read as broken
+// rather than easy. Cut at the bottom (0.075, as before) and running down to
+// what the original expression gives at the ceiling (0.14 × (1 − 0.78) ≈
+// 0.03): even Chaos stands a rally out roughly one time in thirty-three,
+// which is part of why the ceiling is not a wall.
 function lapseForCompetence(c: number): number {
-  if (c >= CEILING_C) return lerp(0.14, 0, c);
-  return lerp(0.075, LAPSE_AT_CEILING, c / CEILING_C);
+  return lerp(0.075, 0.03, clamp(c / MAX_AI_COMPETENCE, 0, 1));
 }
 
 // Calibrated by simulating rallies through the real checkPaddleCollision above.

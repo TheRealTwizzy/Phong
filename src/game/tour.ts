@@ -171,7 +171,11 @@ export const TOUR_STEPS: readonly TourStep[] = [
   {
     id: 'modes',
     stage: 'menu',
-    anchor: 'menu-mode-solo',
+    // The buildings list, not a mode row: the menu is a place to walk now.
+    // Duel is still NAMED and not walked — the PvP building is pointed at
+    // from here, never entered, because walking it needs a second phone and
+    // a second person the player does not have while the tour is open.
+    anchor: 'building-solo',
     titleKey: 'tour_modes_title',
     bodyKey: 'tour_modes_body',
   },

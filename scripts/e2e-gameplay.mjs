@@ -78,7 +78,8 @@ async function hostCreateRoom(page, { p2p }) {
   await page.goto(BASE, { waitUntil: 'networkidle' });
   await passGatekeeper(page);
   await onboard(page, 'Host');
-  await page.click('#menu-mode-multiplayer');
+  await page.click('#building-pvp');
+  await page.click('#room-casual');
   await page.waitForSelector('#btn-create-room', { timeout: 5000 });
   if (!p2p) {
     await page.click('#toggle-p2p input, #toggle-p2p');

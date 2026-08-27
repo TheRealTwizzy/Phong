@@ -3,7 +3,7 @@ import { GameMode, PlayerStats, PlayerProfile, PlayerStatus, LanguageCode } from
 import { ThemeConfig } from '../game/themes';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
-import { Volume2, VolumeX, Settings, Flame, RefreshCw, Home, Trophy } from 'lucide-react';
+import { Volume2, VolumeX, Settings, Flame, RefreshCw, Home, Trophy, Eye } from 'lucide-react';
 
 // In-match HUD. Out-of-match navigation (leaderboard, missions, history,
 // multiplayer lobby, …) lives on the MainMenu — the HUD only carries what a
@@ -37,6 +37,20 @@ interface ScoreBoardProps {
   onQuitToMenu: () => void;
   winningScore: number;
   opponentName?: string;
+  /**
+   * The player whose court is on screen, when this page is WATCHING rather
+   * than playing. The score column headed "YOU" is theirs, not the viewer's,
+   * so it takes their name instead — a watcher reading "YOU 3" about somebody
+   * else's points is the whole confusion in one label.
+   */
+  watchingName?: string | null;
+  /**
+   * Move to the other watching seat. A watcher is ON the court with no lobby
+   * to go back to, so this is the only way they can change which half of the
+   * table they are looking at — and looking at the other half is most of what
+   * watching is.
+   */
+  onSwapSide?: () => void;
   // Provided only when the opponent has a real public profile (multiplayer
   // with a linkable id) — makes their name a tap target.
   onViewOpponent?: () => void;
@@ -78,6 +92,8 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
   onQuitToMenu,
   winningScore,
   opponentName = 'Opponent',
+  watchingName = null,
+  onSwapSide,
   onViewOpponent,
   language = 'en',
 }) => {
@@ -181,8 +197,11 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
           </div>
 
           <div className="flex flex-col items-center">
-            <span className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
-              {t('you', language)}
+            <span
+              id="score-player-label"
+              className="max-w-[60px] truncate text-2xs font-normal tracking-normal text-ink-muted uppercase"
+            >
+              {watchingName || t('you', language)}
             </span>
             <span
               id="score-player"
@@ -209,6 +228,19 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
 
       {/* Right: what a running match needs */}
       <div className="flex shrink-0 items-center gap-1">
+        {watchingName && (
+          <button
+            id="hud-watching-chip"
+            onClick={onSwapSide}
+            disabled={!onSwapSide}
+            aria-label={t('watch_other_side', language)}
+            title={onSwapSide ? t('watch_other_side', language) : t('watching_table', language)}
+            className="flex items-center gap-1 rounded-chip border border-accent/40 bg-accent/15 px-1.5 py-0.5 text-2xs text-accent transition-transform active:scale-95 motion-reduce:active:scale-100 disabled:opacity-60"
+          >
+            <Eye className="h-3 w-3" />
+            {t('watching', language)}
+          </button>
+        )}
         <HudButton id="btn-sound-toggle" label={t('sound_effects', language)} onClick={onToggleSound}>
           {soundEnabled ? (
             <Volume2 className="h-4 w-4 text-win" />

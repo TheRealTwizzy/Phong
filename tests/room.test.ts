@@ -4,6 +4,7 @@ import {
   breakStreakOnPoint,
   clampInt,
   countReturn,
+  clearSeatStreaks,
   resetStreaks,
   startMatchStreaks,
   generateRoomCode,
@@ -53,6 +54,9 @@ const room = (over: Partial<Room> = {}): Room => ({
   startRatingsSeq: 0,
   relayCounted: false,
   soloSince: 0,
+  venueRoomId: 'casual',
+  visibility: 'private',
+  spectators: [null, null],
   ...over,
 });
 
@@ -449,10 +453,40 @@ describe('reapRooms', () => {
   });
 });
 
+const watcher = (alive: boolean, side: 0 | 1) =>
+  ({
+    ws: { readyState: alive ? 1 : 3 },
+    playerId: `w${side}`,
+    playerName: `Watcher ${side + 1}`,
+    side,
+    deviceId: `wd${side}`,
+    sessionId: `ws${side}`,
+  }) as never;
+
 describe('isRoomEmpty', () => {
   it('reads a seat holding a dead socket as vacant', () => {
     expect(isRoomEmpty(room({ players: [seat(false, 0), null] }), live as never)).toBe(true);
     expect(isRoomEmpty(room({ players: [seat(true, 0), null] }), live as never)).toBe(false);
+  });
+
+  // "Empty" is narrower than "nobody is connected", deliberately: a table
+  // nobody can PLAY at is a table the reaper takes, however many people are
+  // watching it. That is "no empty tables in the database" for free, and the
+  // safety net for a player socket that dies half-open.
+  it('counts a table with only spectators as empty', () => {
+    const watched = room({
+      players: [null, null],
+      spectators: [watcher(true, 0), watcher(true, 1)],
+    });
+    expect(isRoomEmpty(watched, live as never)).toBe(true);
+  });
+
+  it('does not let a live spectator keep a dead player seat alive', () => {
+    const stale = room({
+      players: [seat(false, 0), null],
+      spectators: [watcher(true, 0), null],
+    });
+    expect(isRoomEmpty(stale, live as never)).toBe(true);
   });
 });
 
@@ -539,6 +573,32 @@ describe('rally streaks', () => {
     breakStreakOnPoint(r, 1, 1);
     expect(r.streaks[0]).toBe(0);
     expect(r.bestStreaks[0]).toBe(9);
+  });
+
+  // A run belongs to a player, not to a chair. When a seat changes hands the
+  // numbers must not be inherited — startMatchStreaks opens bestStreaks ON
+  // streaks, so a value left behind becomes the next occupant's opening peak,
+  // and a peak is permanent: the career best, the mode best and the rally
+  // achievements are all keyed on it.
+  it('clears ONE seat when that seat changes hands, leaving the other running', () => {
+    const r = st({
+      streaks: [4, 7],
+      bestStreaks: [9, 12],
+      earnedStreaks: [3, 6],
+      earnedBests: [5, 8],
+    });
+    clearSeatStreaks(r, 0);
+    expect(r.streaks).toEqual([0, 7]);
+    expect(r.bestStreaks).toEqual([0, 12]);
+    expect(r.earnedStreaks).toEqual([0, 6]);
+    expect(r.earnedBests).toEqual([0, 8]);
+  });
+
+  it('does not let a cleared seat inherit a peak from its last occupant', () => {
+    const r = st({ streaks: [11, 0], bestStreaks: [11, 0] });
+    clearSeatStreaks(r, 0);
+    startMatchStreaks(r, 0);
+    expect(r.bestStreaks[0]).toBe(0);
   });
 
   it('is cleared wholesale by resetStreaks, best streaks included', () => {

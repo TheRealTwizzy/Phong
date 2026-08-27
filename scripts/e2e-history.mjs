@@ -77,7 +77,8 @@ async function passGatekeeper(page) {
 
 /** Winning score lives in SOLO's pre-match sheet; a duel takes the room's. */
 async function pickShortMatch(page, points = 3) {
-  await page.click('#menu-mode-solo');
+  await page.click('#building-solo');
+  await page.click('#room-rookie');
   const btn = await page.waitForSelector(`#menu-pts-${points}:not([disabled])`, { timeout: 4000 }).catch(() => null);
   if (!btn) fail(`winning-score button #menu-pts-${points} not available`);
   await btn.click();
@@ -93,7 +94,8 @@ await host.goto(BASE, { waitUntil: 'networkidle' });
 await passGatekeeper(host);
 await onboard(host, 'HistHost');
 await pickShortMatch(host, 3);
-await host.click('#menu-mode-multiplayer');
+await host.click('#building-pvp');
+await host.click('#room-casual');
 await host.waitForSelector('#btn-create-room', { timeout: 5000 });
 // Relay transport keeps the scoring on the server, which is the recording
 // path this suite is about; P2P has its own suite.
@@ -110,7 +112,8 @@ const guest = await newPage();
 await guest.goto(BASE, { waitUntil: 'networkidle' });
 await passGatekeeper(guest);
 await onboard(guest, 'HistGuest');
-await guest.click('#menu-mode-multiplayer');
+await guest.click('#building-pvp');
+await guest.click('#room-casual');
 await guest.waitForSelector('#input-room-code', { timeout: 5000 });
 await guest.fill('#input-room-code', code);
 await guest.click('#btn-join-room-submit');
@@ -261,7 +264,8 @@ await host.click('#btn-close-match-history');
 await host.waitForSelector('#main-menu-screen', { timeout: 5000 });
 const lossesBefore = (await api(host, '/api/profile/me')).matchesLost;
 
-await host.click('#menu-mode-solo');
+await host.click('#building-solo');
+await host.click('#room-rookie');
 await host.waitForSelector('#menu-start-solo', { timeout: 5000 });
 await host.click('#menu-start-solo');
 await host.waitForSelector('#half-court-canvas', { timeout: 8000 });
@@ -326,7 +330,8 @@ ok('quitting a live solo match records it as a loss');
 // A match nobody has scored in is not a match: quitting at 0-0 records
 // nothing, so backing out of one that never started costs nothing.
 const beforeIdle = (await api(host, '/api/matches/me')).total;
-await host.click('#menu-mode-solo');
+await host.click('#building-solo');
+await host.click('#room-rookie');
 await host.waitForSelector('#menu-start-solo', { timeout: 5000 });
 await host.click('#menu-start-solo');
 await host.waitForSelector('#half-court-canvas', { timeout: 8000 });

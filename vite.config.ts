@@ -25,6 +25,10 @@ const FLOORS = {
   'src/matchRules.ts': { statements: 95, branches: 90 },
   'src/achievements.ts': { statements: 95, branches: 90 },
   'src/profileRules.ts': { statements: 100, branches: 95 },
+  // The bracket predicate the menu and the relay share. A room the menu draws
+  // as open is a room the server has to seat, so this is cheap to test and
+  // expensive to get wrong — the same bet as matchRules.ts beside it.
+  'src/venues.ts': { statements: 95, branches: 85 },
   'src/game/physics.ts': { statements: 90, branches: 88 },
   'src/game/themes.ts': { statements: 95, branches: 95 },
   'src/game/missions.ts': { statements: 80, branches: 80 },
@@ -40,6 +44,9 @@ const FLOORS = {
   // Server-side.
   'server/transform.ts': { statements: 100, branches: 100 },
   'server/room.ts': { statements: 95, branches: 92 },
+  // Pairing rules, pure for the same reason room.ts is: who the queue puts
+  // together is worth arguing about in a test rather than on a live server.
+  'server/matchmaking.ts': { statements: 95, branches: 92 },
   'server/db.ts': { statements: 90, branches: 88 },
   'server/image.ts': { statements: 90, branches: 88 },
   'server/bots.ts': { statements: 100, branches: 100 },

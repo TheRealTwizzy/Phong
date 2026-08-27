@@ -83,7 +83,8 @@ console.log('Leaving a lobby is a decision, and it closes the room');
 // A host with nobody else in the room. `roomId` is set, so both the X and the
 // Leave button are requests rather than actions.
 const solo = await newPlayer('LbX');
-await solo.click('#menu-mode-multiplayer');
+await solo.click('#building-pvp');
+await solo.click('#room-casual');
 await solo.waitForSelector('#btn-create-room', { timeout: 8000 });
 await solo.click('#btn-create-room');
 await solo.waitForSelector('#btn-copy-link', { timeout: 8000 });
@@ -123,7 +124,8 @@ ok('confirming returns to the menu and closes the room');
 console.log('\nA join in flight survives the lobby being dismissed');
 
 const host = await newPlayer('LbH');
-await host.click('#menu-mode-multiplayer');
+await host.click('#building-pvp');
+await host.click('#room-casual');
 await host.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host.click('#btn-create-room');
 await host.waitForSelector('#btn-copy-link', { timeout: 8000 });
@@ -144,7 +146,8 @@ ok(`host opened room ${code}`);
 // lobby: alone on a live court with no code to share and no Leave control,
 // while the relay goes on holding the room they may already have sent someone.
 const lone = await newPlayer('LbC');
-await lone.click('#menu-mode-multiplayer');
+await lone.click('#building-pvp');
+await lone.click('#room-casual');
 await lone.waitForSelector('#btn-create-room', { timeout: 8000 });
 await lone.evaluate(() => {
   document.querySelector('#btn-create-room').click();
@@ -168,7 +171,8 @@ await lone.context().close();
 // Ask for the seat and shut the lobby in the same tick — the answer cannot
 // have arrived yet, so this is the window rather than a race against it.
 const guest = await newPlayer('LbG');
-await guest.click('#menu-mode-multiplayer');
+await guest.click('#building-pvp');
+await guest.click('#room-casual');
 await guest.waitForSelector('#btn-join-room-submit', { timeout: 8000 });
 await guest.fill('#input-room-code', code);
 await guest.evaluate(() => {
@@ -217,7 +221,8 @@ ok('the duel starts normally afterwards');
 const host2 = await newPlayer('LbH2');
 const guest2 = await newPlayer('LbG2');
 
-await host2.click('#menu-mode-multiplayer');
+await host2.click('#building-pvp');
+await host2.click('#room-casual');
 await host2.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host2.click('#btn-create-room');
 const code2 = await host2

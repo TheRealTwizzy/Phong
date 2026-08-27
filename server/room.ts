@@ -37,6 +37,33 @@ export interface PlayerSession {
   sessionId: string | null;
 }
 
+/**
+ * Somebody watching a table rather than playing at it.
+ *
+ * Deliberately NOT a PlayerSession with a flag, and deliberately without a
+ * field called `playerIndex`: a name like that is how a spectator's slot
+ * eventually gets passed to something that indexes `streaks`, `ready`,
+ * `rematchVotes` or a seat rating — every one of which is a two-element array
+ * about the two people actually playing. The slot is `side`, it says only
+ * which player is being watched, and it is derived from the seat taken rather
+ * than read off a message.
+ *
+ * It keeps deviceId/sessionId not because a spectator is ever recorded — it
+ * never is, on either profile — but because evictStaleSockets,
+ * closeDisplacedSockets and closeAccountSockets walk the live socket set and
+ * must be able to evict a watching socket for the same reasons they evict a
+ * playing one.
+ */
+export interface SpectatorSession {
+  ws: WebSocket;
+  playerId: string;
+  playerName: string;
+  /** Which player this seat sits beside. Derived from the slot, never sent. */
+  side: 0 | 1;
+  deviceId: string | null;
+  sessionId: string | null;
+}
+
 export interface Room {
   id: string;
   players: (PlayerSession | null)[];
@@ -171,6 +198,43 @@ export interface Room {
    * link knows things the relay does not, and a maximum cannot go backwards.
    */
   relayCounted: boolean;
+  /**
+   * The venue room this table sits in (`src/venues.ts`) — a PvP bracket, or
+   * the hidden queue room. Normalized against a whitelist by the caller, never
+   * taken as free client text: the browser is keyed on it, so an arbitrary
+   * string would make that listing an unbounded index keyed on whatever a
+   * caller sends.
+   */
+  venueRoomId: string;
+  /**
+   * Whether the room browser lists this table.
+   *
+   * `private` is today's invite-code table exactly, and it is the DEFAULT for
+   * a `create_room` that names nothing — which is what keeps the invite flow,
+   * old bundles and the test harness working unchanged. It is also the entire
+   * security boundary protecting those tables: the listing is an
+   * unauthenticated read of live room state, so a bug that lists a private
+   * table makes every private room's 4-letter code harvestable.
+   */
+  visibility: 'public' | 'private';
+  /**
+   * The two watching seats: slot 0 sits beside player 0, slot 1 beside
+   * player 1.
+   *
+   * A PARALLEL array rather than a widened `players`, and that is the whole
+   * design. `players[0]`/`players[1]` and the `playerIndex === 0 ? 1 : 0` that
+   * falls out of them are load-bearing in every gameplay handler in server.ts
+   * and in every function in this file — startMatch, applyMatchSync,
+   * countReturn, breakStreakOnPoint, isRoomEmpty, performanceWeight — all of
+   * which are about the two people playing. A four-seat array would put a
+   * spectator's index within reach of all of them; a second array is reachable
+   * by none of them.
+   *
+   * Whether a table HAS these seats is `config.spectators`, a term of the
+   * match like the winning score, and a room whose venue forbids them has it
+   * forced false server-side.
+   */
+  spectators: (SpectatorSession | null)[];
 }
 
 /** A seat's hidden rating, as the ladder in src/rating.ts models it. */
@@ -491,7 +555,17 @@ export function partitionHeartbeats<T>(
   return { dead, probe };
 }
 
-/** Whether every seat is either vacant or holds a socket that is already gone. */
+/**
+ * Whether every PLAYING seat is either vacant or holds a socket that is
+ * already gone.
+ *
+ * "Empty" is narrower than "nobody is connected", and that is deliberate: a
+ * table with two spectators and no player is a table nobody can play at, so it
+ * is empty and the reaper sweeps it within 15 seconds. That is the brief's
+ * "no empty tables in the database" obtained for free — and, more usefully, it
+ * is the safety net for a player socket that dies half-open, where `vacateSeat`
+ * never runs and no other clock can expire the room.
+ */
 export function isRoomEmpty(room: Room, isLive: SocketLiveness): boolean {
   return !room.players.some((seat) => seat && isLive(seat.ws));
 }
@@ -590,6 +664,26 @@ export function resetStreaks(state: StreakState, servingPlayer: 0 | 1): void {
   state.earnedBests = [0, 0];
   state.crossingsThisPoint = 0;
   state.servingPlayer = servingPlayer;
+}
+
+/**
+ * Wipe ONE seat's runs, because the person sitting in it has left it.
+ *
+ * A run belongs to a player, not to a chair. When a seat changes hands its
+ * numbers must not be inherited: `startMatchStreaks` opens `bestStreaks` ON
+ * `streaks`, so a value left behind by the previous occupant becomes the next
+ * one's opening peak — and a peak is what the career best, the mode best and
+ * the rally achievements are keyed on, so it would be permanent.
+ *
+ * Deliberately separate from `resetStreaks`, which wipes BOTH seats for a
+ * fresh room: this one is about a seat, and the other seat's run is still
+ * running.
+ */
+export function clearSeatStreaks(state: StreakState, seat: 0 | 1): void {
+  state.streaks[seat] = 0;
+  state.bestStreaks[seat] = 0;
+  state.earnedStreaks[seat] = 0;
+  state.earnedBests[seat] = 0;
 }
 
 /**

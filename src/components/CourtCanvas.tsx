@@ -60,6 +60,15 @@ interface CourtCanvasProps {
   shakeTrigger?: number;
   // Overrides the top-line caption (e.g. Practice Wall's "return line").
   netLabel?: string;
+  /**
+   * A court somebody else is playing on.
+   *
+   * Drops every pointer handler outright rather than ignoring the events
+   * inside them: a watcher has no paddle to drive and no serve to aim, and a
+   * handler that runs and then declines is a handler that can still capture a
+   * pointer, arm a joystick or leave a stale press behind.
+   */
+  readOnly?: boolean;
 }
 
 export const CourtCanvas: React.FC<CourtCanvasProps> = ({
@@ -81,6 +90,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   hasOpponent,
   rallyCount,
   language = 'en',
+  readOnly = false,
   onImpact,
   shakeTrigger = 0,
   netLabel,
@@ -111,7 +121,10 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
 
   // Handle mobile tilt / gyroscope
   useEffect(() => {
-    if (!settings.tiltEnabled) return;
+    // A watcher has no paddle to tilt. Dropping the pointer handlers is not
+    // enough on its own: tilt and the keyboard below reach onPaddleMove
+    // without ever touching the canvas.
+    if (readOnly || !settings.tiltEnabled) return;
 
     const handleOrientation = (e: DeviceOrientationEvent) => {
       if (e.gamma !== null) {
@@ -128,10 +141,11 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     return () => {
       window.removeEventListener('deviceorientation', handleOrientation);
     };
-  }, [settings.tiltEnabled, onPaddleMove]);
+  }, [readOnly, settings.tiltEnabled, onPaddleMove]);
 
   // Keyboard controls
   useEffect(() => {
+    if (readOnly) return; // see the tilt effect above — and Space would serve
     const keysPressed = new Set<string>();
     let animFrame: number;
 
@@ -174,7 +188,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       window.removeEventListener('keyup', handleKeyUp);
       cancelAnimationFrame(animFrame);
     };
-  }, [onPaddleMove, isServing, onServe]);
+  }, [readOnly, onPaddleMove, isServing, onServe]);
 
   // Create particle burst helper
   const addParticles = useCallback((x: number, y: number, count: number, color: string) => {
@@ -807,7 +821,11 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       // and its own line) AND a separate slingshot readout from the paddle with
       // an arrowhead and a power bar pinned to the bottom of the screen. Two
       // competing pictures of a single gesture.
-      if (isServing) {
+      // Not for a watcher: the aim overlay and its "drag to aim" prompt are
+      // an instruction to somebody who cannot act on it. The ball still sits
+      // on the paddle, which is what a serve LOOKS like from the other side of
+      // the table.
+      if (isServing && !readOnly) {
         const liveAim = aimRef.current;
         const stick = joystickRef.current;
         ctx.save();
@@ -919,6 +937,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     autoServeSeconds,
     serveCountdown,
     paddleWidth,
+    readOnly,
   ]);
 
   return (
@@ -932,17 +951,20 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       // `document.body.textContent`, which canvas text never reaches, so the
       // check passed whatever the app did.
       data-serving={isServing ? '1' : '0'}
-      className="relative w-full h-full select-none overflow-hidden touch-none flex items-center justify-center cursor-grab active:cursor-grabbing"
+      data-readonly={readOnly ? '1' : '0'}
+      className={`relative w-full h-full select-none overflow-hidden touch-none flex items-center justify-center ${
+        readOnly ? '' : 'cursor-grab active:cursor-grabbing'
+      }`}
       style={{ backgroundColor: theme.background }}
     >
       <canvas
         ref={canvasRef}
         id="half-court-canvas"
         className="w-full h-full block touch-none"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerCancel}
+        onPointerDown={readOnly ? undefined : handlePointerDown}
+        onPointerMove={readOnly ? undefined : handlePointerMove}
+        onPointerUp={readOnly ? undefined : handlePointerUp}
+        onPointerCancel={readOnly ? undefined : handlePointerCancel}
       />
 
       {/* CRT Scanline Overlay if theme is retro */}

@@ -20,7 +20,7 @@ import { LockBadge } from './LockBadge';
 
 export interface SegmentOption<T> {
   value: T;
-  /** e.g. 'menu-diff-pro', 'lobby-pts-3'. */
+  /** e.g. 'menu-pts-5', 'lobby-pts-3'. */
   id: string;
   label: React.ReactNode;
   /** The win-% under a difficulty, say. */

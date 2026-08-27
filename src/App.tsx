@@ -19,8 +19,11 @@ import {
   MatchRules,
   CourtTheme,
   RoomMatchConfig,
+  TableSeat,
+  TableSeatInfo,
 } from './types';
 import { P2PGameLink, P2PStatus } from './net/p2p';
+import { QuickMatch, useQuickMatch } from './net/useQuickMatch';
 import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
 import { nextRunSeq } from './net/runChain';
 import { THEMES, ThemeConfig } from './game/themes';
@@ -56,6 +59,8 @@ import {
   isRankedRules,
   unrankedReasons,
 } from './matchRules';
+import { DEFAULT_VENUE_ROOM } from './venues';
+import type { TableSummary } from './components/MultiplayerLobby';
 import { sound } from './audio/soundEffects';
 import { t } from './i18n/translations';
 import {
@@ -341,6 +346,23 @@ export default function App() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [pingMs, setPingMs] = useState<number>(0);
   const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
+  /**
+   * Which side of a table this page is WATCHING, or null when it is playing.
+   *
+   * Mutually exclusive with holding a playing seat — the relay refuses a
+   * second seat outright, so these cannot both be true. `side` is the player
+   * being watched, and `playerIndex` is deliberately set to it as well: the
+   * whole fan-out is built so a spectator looks, on the wire, exactly like
+   * the player beside them, which is what lets score_update, game_start and
+   * ball_incoming work here with no spectating branch at all.
+   */
+  const [spectating, setSpectating] = useState<{ roomId: string; side: 0 | 1 } | null>(null);
+  /** Who is sitting where at the table, as the relay last described it. */
+  const [tableState, setTableState] = useState<{
+    seats: TableSeatInfo[];
+    yourSeat: TableSeat | null;
+    spectatorsEnabled: boolean;
+  } | null>(null);
   // The room's terms, as the server last broadcast them. Null until a room
   // exists. In a duel this — never the local menu — decides how long the match
   // is and how the ball behaves, so both phones play the same match.
@@ -378,6 +400,8 @@ export default function App() {
   const [leaveLobbyConfirmOpen, setLeaveLobbyConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
   const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
+  /** The table this page was WATCHING has gone — never an abandon notice. */
+  const [toastTableEnded, setToastTableEnded] = useState<boolean>(false);
   // An invitation link that never got its holder a seat. Silence here reads as
   // "the link is broken" — which it may well be (a dead room code), but the
   // player deserves to be told rather than left on a menu that swallowed it.
@@ -397,11 +421,22 @@ export default function App() {
     // the player has tuned their own would demonstrate a serve at their serve
     // power, a paddle at their paddle size — and, if they have turned the
     // sonar off, a radar step pointing at an element that is not rendered.
+    // `spectators: false` in both non-duel arms: a watching seat is a seat at
+    // a relay TABLE, and a solo, practice or split match has no room to sit in.
     tourStage === 'match'
-      ? { winningScore: TOUR_WINNING_SCORE, rules: DEFAULT_MATCH_RULES }
+      ? { winningScore: TOUR_WINNING_SCORE, rules: DEFAULT_MATCH_RULES, spectators: false }
       : mode === 'multiplayer' && roomConfig
-        ? roomConfig
-        : { winningScore: settings.winningScore, rules: settings.rules };
+        ? spectating
+          ? // A watcher sees the whole table, sonar and all — that is what
+            // watching IS, and it is why the rooms where rating is on the
+            // line have no watching seats at all. Applied HERE, to this
+            // page's own view, and never written back to room.config: that
+            // field unranks the match for the PLAYERS, so writing it would
+            // let a losing player unrank a match on demand by asking a
+            // friend to sit down.
+            { ...roomConfig, rules: { ...roomConfig.rules, opponentSonar: true } }
+          : roomConfig
+        : { winningScore: settings.winningScore, rules: settings.rules, spectators: false };
   /** Who the AI is playing as — see activeConfig for why the tour overrides. */
   const activeDifficulty: AIDifficulty = tourStage === 'match' ? TOUR_DIFFICULTY : settings.difficulty;
 
@@ -510,6 +545,20 @@ export default function App() {
    * next room_created/room_joined.
    */
   const roomIdRef = useRef<string | null>(null);
+  /** Read by the game loop and the senders, which must not run for a watcher. */
+  const spectatingRef = useRef<{ roomId: string; side: 0 | 1 } | null>(null);
+  /** The last watched_ball sample, so the next one can be given a velocity. */
+  const watchedBallRef = useRef<{ x: number; y: number; t: number } | null>(null);
+  /**
+   * The queue, reachable from the dispatch above where it is declared.
+   *
+   * And `queueSeating`, which suppresses one lobby flash: the relay seats a
+   * found pair with the ordinary room_created/room_joined, and those reopen
+   * the lobby by design — for a queue match that sheet would appear for the
+   * single round trip before `game_start` closes everything anyway.
+   */
+  const quickMatchRef = useRef<QuickMatch | null>(null);
+  const queueSeatingRef = useRef<boolean>(false);
   const countdownArmedRef = useRef<boolean>(countdownArmed);
 
   ballRef.current = ball;
@@ -525,6 +574,7 @@ export default function App() {
   profileRef.current = profile;
   playerIndexRef.current = playerIndex;
   roomIdRef.current = roomId;
+  spectatingRef.current = spectating;
   opponentIdRef.current = opponentId;
   oppPaddleXRef.current = oppPaddleX;
   matchCountdownRef.current = matchCountdown;
@@ -914,10 +964,18 @@ export default function App() {
       recordedWinnerRef.current = null;
       return;
     }
+    // A watcher's `winner` is somebody else's result. It is set because the
+    // whole fan-out makes a spectator look like the player they are sitting
+    // beside — score_update reaches them byte-identically — and that is what
+    // draws the overlay. Recording it would file another player's match onto
+    // this account: XP, rating, achievements and streaks for a match this
+    // device never played. The relay refuses it, but a POST that has to be
+    // refused is a POST that should not have been sent.
+    if (spectating) return;
     if (recordedWinnerRef.current === winner) return;
     recordedWinnerRef.current = winner;
     recordMatchCompletion(winner === 'player');
-  }, [winner, recordMatchCompletion]);
+  }, [winner, spectating, recordMatchCompletion]);
 
   // Daily Mission Claim Handler
   const handleClaimMissionReward = async (missionId: string) => {
@@ -1161,6 +1219,12 @@ export default function App() {
   const handleServe = useCallback(
     (aim?: ServeAim) => {
       if (!isServingRef.current) return;
+      // A watcher has no ball. Their isServing mirrors the player beside them,
+      // which is what makes the fan-out work and would otherwise let the
+      // space bar or the auto-serve timer spawn a phantom on somebody else's
+      // court. The last line of three: the canvas is readOnly, so its pointer
+      // and keyboard handlers are gone, and the timer above is gated too.
+      if (spectatingRef.current) return;
       // Nothing is served under a frozen court.
       if (tourFreezeRef.current) return;
       // A duel's serve needs someone on the other end. A host waiting in the
@@ -1262,7 +1326,12 @@ export default function App() {
         !isMultiplayerOpen &&
         !countdownArmed &&
         (matchCountdown ?? 0) <= 0);
+    // Never for a watcher. Their `isServing`/`isPlayerServer` mirror the
+    // player they are sitting beside — that is what makes the whole fan-out
+    // work — so without this the timer would fire a serve on a court they do
+    // not own, spawning a phantom ball the relay then refuses.
     const active =
+      !spectating &&
       isServing && isPlayerServer && screen === 'game' && !winner && duelReady && !tourFreeze;
     if (!active || seconds <= 0) {
       setServeCountdown(null);
@@ -1291,6 +1360,7 @@ export default function App() {
     matchCountdown,
     activeConfig.rules.autoServeSeconds,
     tourFreeze,
+    spectating,
     handleServe,
   ]);
 
@@ -1379,7 +1449,10 @@ export default function App() {
         // `game` and seats the host behind a shut lobby: alone on a live court
         // with no room code to share and no Leave control, while the relay
         // goes on holding the room they had probably already sent someone.
-        setIsMultiplayerOpen(true);
+        // ...unless the relay seated this player out of the QUEUE, where the
+        // sheet would flash for the one round trip before game_start closes
+        // everything anyway.
+        setIsMultiplayerOpen(!queueSeatingRef.current);
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
@@ -1405,7 +1478,7 @@ export default function App() {
         // and being given one, and this case then put them on a live court
         // with no Ready control — holding the room while the host waited for a
         // readiness they had no way to signal.
-        setIsMultiplayerOpen(true);
+        setIsMultiplayerOpen(!queueSeatingRef.current); // see room_created
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
@@ -1424,7 +1497,13 @@ export default function App() {
         sound.playScore();
         // Host offers a direct connection; gameplay stays on the relay until
         // (unless) the DataChannels open.
-        if (p2pEnabled) {
+        //
+        // Not at a table with watching seats open: a P2P match never reaches
+        // the relay — paddles, balls and points all travel the DataChannel —
+        // so there would be nothing for a watcher to be shown. This is a
+        // hint, not the boundary: the relay refuses rtc_signal for such a
+        // table, which is what a modified client cannot get past.
+        if (p2pEnabled && !roomConfig?.spectators) {
           createP2PLink(true)
             .startAsHost()
             .catch((e) => console.warn('P2P offer failed, staying on relay:', e));
@@ -1490,8 +1569,12 @@ export default function App() {
         setLobbyReady([false, false]);
         setTelemetryOpen(false);
         // The host starting the match is what closes BOTH lobbies: nobody
-        // walks onto the court until the room says the match exists.
+        // walks onto the court until the room says the match exists. For a
+        // queue match the relay is the host, and this is where the search
+        // ends — the spinner has a court to hand over to.
         setIsMultiplayerOpen(false);
+        queueSeatingRef.current = false;
+        quickMatchRef.current?.reset();
         setIsServing(true);
         p2pRef.current?.resetMatchState(msg.servingPlayer, matchSeqRef.current, msg.streaks);
         break;
@@ -1608,6 +1691,116 @@ export default function App() {
         sound.playBallIncoming();
         break;
       }
+
+      case 'queue_state':
+        // The relay seats a found pair itself, so `found` is a beat rather
+        // than a prompt: the room messages are already on their way behind it.
+        if (msg.status === 'found') queueSeatingRef.current = true;
+        quickMatchRef.current?.apply(msg);
+        break;
+
+      case 'table_state': {
+        setTableState({
+          seats: msg.seats,
+          yourSeat: msg.yourSeat,
+          spectatorsEnabled: msg.spectatorsEnabled,
+        });
+        const watchingSeat = msg.yourSeat !== null && msg.yourSeat >= 2;
+        if (watchingSeat) {
+          const side: 0 | 1 = msg.yourSeat === 3 ? 1 : 0;
+          // A watcher never receives room_created or room_joined, so this is
+          // where they learn which table they are at — and where they become,
+          // for every handler below, the player they are sitting beside.
+          setSpectating({ roomId: msg.roomId, side });
+          setRoomId(msg.roomId);
+          setPlayerIndex(side);
+          playerIndexRef.current = side;
+          setOpponentName(msg.seats[side === 0 ? 1 : 0]?.playerName ?? null);
+          setOpponentId(msg.seats[side === 0 ? 1 : 0]?.playerId ?? null);
+          setMode('multiplayer');
+          setScreen('game');
+          // The lobby is deliberately NOT closed here. It is a sheet over a
+          // live court for a watcher exactly as it is for a player: before a
+          // match exists there is nothing to watch and the seat map is the
+          // useful surface, so a player standing up pre-match stays in the
+          // lobby. What closes it is `game_start` — for everyone at the table
+          // at once — or the spectator_sync below, which says outright that a
+          // match is already under way.
+          //
+          // Nothing peer-to-peer for a watcher: the relay is the only thing
+          // that can see this table at all.
+          p2pRef.current?.close();
+          p2pRef.current = null;
+          setLinkStatus('relay');
+        } else if (msg.yourSeat !== null) {
+          // Playing. Kept in step because a seat can change hands.
+          setSpectating(null);
+        }
+        break;
+      }
+
+      case 'spectator_sync': {
+        // Sitting down mid-match: the relay is the only party that knows where
+        // it got to, so without this the court would render 0-0 until the next
+        // point happened to arrive.
+        const snap = msg.snapshot;
+        const side = spectatingRef.current?.side ?? playerIndexRef.current ?? 0;
+        const mine = side === 0 ? snap.p1Score : snap.p2Score;
+        const theirs = side === 0 ? snap.p2Score : snap.p1Score;
+        setRoomConfig(snap.config);
+        matchSeqRef.current = snap.matchSeq;
+        setStats((s) => ({ ...s, score: mine, opponentScore: theirs }));
+        setIsPlayerServer(snap.servingPlayer === side);
+        setWinner(null);
+        // Sitting down at a table with a match already on it: the court is
+        // the surface, so the lobby gets out of the way. A table between
+        // matches keeps its lobby, which is where the seats are.
+        if (snap.matchSeq > 0 && !snap.matchOver) setIsMultiplayerOpen(false);
+        break;
+      }
+
+      case 'watched_paddle':
+        // RAW — no mirror. This is the watched player's OWN paddle on the
+        // watched player's OWN court, which is the court being drawn. The
+        // `1 - x` that belongs on `opponent_paddle` would put it on the wrong
+        // side here, and against a paddle at 0.5 that mistake is invisible.
+        setPaddleX(msg.x);
+        break;
+
+      case 'watched_ball': {
+        // Twenty samples a second, deliberately not more: raising the rate for
+        // a watched table would spend the PLAYERS' bandwidth on somebody
+        // else's view. The velocity is derived from the last two samples
+        // rather than assumed, so a wall bounce or a paddle hit is followed
+        // without the watcher knowing any physics; the loop dead-reckons
+        // between them so the ball glides rather than steps.
+        const now = performance.now();
+        const prev = watchedBallRef.current;
+        const dt = prev ? Math.max(0.016, (now - prev.t) / 1000) : 0;
+        const vx = prev && dt < 0.5 ? (msg.x - prev.x) / dt : 0;
+        const vy = prev && dt < 0.5 ? (msg.y - prev.y) / dt : 0;
+        watchedBallRef.current = { x: msg.x, y: msg.y, t: now };
+        setOppBall(null);
+        setBall({
+          x: msg.x,
+          y: msg.y,
+          vx,
+          vy,
+          radius: ballRadiusRef.current,
+          active: true,
+          spin: 0,
+          speedMultiplier: 1,
+        });
+        break;
+      }
+
+      case 'watched_ball_left':
+        // The ball has left this half. A watcher has no physics to run it out
+        // with, so it is told outright rather than left drawing a ball that is
+        // no longer there.
+        watchedBallRef.current = null;
+        setBall((b) => ({ ...b, active: false }));
+        break;
 
       case 'match_prediction':
         setMatchPrediction(msg.winProbability);
@@ -1799,7 +1992,16 @@ export default function App() {
         // Two different things to say. Mid-match the relay has recorded an
         // abandon and told the opponent, so "removed from the match" is the
         // truth. Alone in a lobby there was never a match to be removed from.
-        const notice = opponentIdRef.current ? setToastEjected : setToastRoomExpired;
+        // Three things to say, not two. Mid-match the relay has recorded an
+        // abandon and told the opponent, so "removed from the match" is the
+        // truth; alone in a lobby there was never a match to be removed from;
+        // and a WATCHER was never in a match at all, so an abandon notice
+        // would be about something that did not happen to them.
+        const notice = spectatingRef.current
+          ? setToastTableEnded
+          : opponentIdRef.current
+            ? setToastEjected
+            : setToastRoomExpired;
         notice(true);
         handleLeaveRoomRef.current();
       }
@@ -1834,7 +2036,57 @@ export default function App() {
     attempt();
   };
 
-  const handleCreateRoom = () => {
+  /**
+   * The venue room a table is created in, and whether it is listed.
+   *
+   * Held in a ref rather than passed down through the lobby: the lobby is
+   * `MultiplayerLobby`'s surface and knows nothing about buildings, while the
+   * choice is made a level up, in the menu's room list. Defaults match a
+   * `create_room` that names nothing — the ungated venue, private — so the
+   * invitation flow is byte-identical to what it has always been.
+   */
+  const venueRef = useRef<{ roomId: string; visibility: 'public' | 'private' }>({
+    roomId: DEFAULT_VENUE_ROOM,
+    visibility: 'private',
+  });
+
+  // The tables open in the venue the lobby was reached from. Polled rather
+  // than pushed: browsing is a read, and a WS message for it would have to be
+  // handled in both the relay and the P2P replica (protocolParity) for no
+  // gain over an unauthenticated GET the relay already answers.
+  const [venueTables, setVenueTables] = useState<TableSummary[]>([]);
+  const [tablesLoading, setTablesLoading] = useState<boolean>(false);
+  const [lobbyVenue, setLobbyVenue] = useState<string | null>(null);
+
+  const refreshTables = useCallback(async (venue: string | null) => {
+    if (!venue) return;
+    setTablesLoading(true);
+    try {
+      const res = await fetch(`/api/rooms/${venue}/tables`);
+      if (!res.ok) {
+        setVenueTables([]);
+        return;
+      }
+      const body = await res.json();
+      setVenueTables(Array.isArray(body?.tables) ? body.tables : []);
+    } catch {
+      // A failed poll leaves the last list standing rather than blanking the
+      // browser: a dropped request is not evidence that the room emptied.
+    } finally {
+      setTablesLoading(false);
+    }
+  }, []);
+
+  // Poll while the browser is actually on screen, and only then: a lobby with
+  // a seat in it is showing the room, not the list.
+  useEffect(() => {
+    if (!isMultiplayerOpen || !lobbyVenue || roomId) return;
+    refreshTables(lobbyVenue);
+    const id = window.setInterval(() => refreshTables(lobbyVenue), 3000);
+    return () => window.clearInterval(id);
+  }, [isMultiplayerOpen, lobbyVenue, roomId, refreshTables]);
+
+  const handleCreateRoom = (over?: { visibility?: 'public' | 'private' }) => {
     // Not from under the tour. Its scrim is deliberately pointer-events-none —
     // the app underneath is the real app and stays usable, which is the whole
     // idea — but a room opened during it is one the tour then walks away from:
@@ -1851,14 +2103,41 @@ export default function App() {
     }
     // The host opens the room on their own menu choices; from then on the
     // room owns them and the lobby is where they change.
+    const visibility = over?.visibility ?? venueRef.current.visibility;
     sendWhenOpen(socket, () => ({
       type: 'create_room',
       playerId,
+      venueRoomId: venueRef.current.roomId,
+      visibility,
       config: normalizeRoomConfig({
         winningScore: settingsRef.current.winningScore,
         rules: settingsRef.current.rules,
+        // A PUBLIC table is one the host is advertising to a room full of
+        // strangers, so watching seats are part of that offer and are open
+        // by default; the host can still shut them in the lobby. A PRIVATE
+        // one is today's invite-code table and stays byte-identical — which
+        // is also why the DEFAULT in normalizeRoomConfig is off rather than
+        // this: an old bundle, the invite flow and the test harness all
+        // create a table without saying anything here.
+        //
+        // The venue overrules either way: the top three brackets have no
+        // watching seats, so this comes back false there.
+        spectators: visibility === 'public',
       }),
     }));
+  };
+
+  /**
+   * Move to another seat at the table already held.
+   *
+   * Every guard is the relay's: a seat taken, a table with no watching seats,
+   * a court that would be left empty, and above all the match lock — a player
+   * may not become a watcher mid-match, because "stand up, look at the hidden
+   * half, sit back down" is a two-second cheat in a blind half-court game.
+   * The lobby only draws what is free.
+   */
+  const handleSwapSeat = (seat: TableSeat) => {
+    sendWhenOpen(ws, () => ({ type: 'swap_seat', seat }));
   };
 
   const handleJoinRoom = (code: string) => {
@@ -1880,6 +2159,69 @@ export default function App() {
       }
     );
   };
+
+  /**
+   * Take a watching seat at a table rather than a playing one.
+   *
+   * Deliberately not routed through the join guard: `joinInFlightRef` exists
+   * so a second `join_room` on one socket cannot be refused as "room is
+   * already full" about the room being joined, and a watching seat is a
+   * different seat with a different refusal. The relay refuses a second seat
+   * of any kind on its own, which is where that rule belongs.
+   *
+   * No seat is named: which of the two watching seats you are in is a detail
+   * a viewer does not care about, so the relay takes whichever is free and
+   * refuses only when both are.
+   */
+  const handleWatchTable = (code: string, seat?: 2 | 3) => {
+    if (tourActive) return; // see handleCreateRoom
+    roomRequestRef.current = true;
+    let socket = ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      socket = connectWebSocket();
+    }
+    sendWhenOpen(socket, () => ({ type: 'spectate_room', roomId: code, seat, playerId }));
+  };
+
+  /**
+   * The ranked queue.
+   *
+   * Placed here rather than in MainMenu because the state machine is driven by
+   * relay messages and this is where the socket is — and because a player on
+   * the menu may have no socket at all yet, so joining has to be able to open
+   * one, exactly as creating a room does.
+   *
+   * Queue messages ride the RELAY, never `sendNetRef`: they are room
+   * management, so a DataChannel must not carry them (and `sendGame` refuses
+   * them anyway — see tests/protocolParity.test.ts).
+   */
+  const sendQueue = useCallback(
+    (msg: WSClientMessage) => {
+      let socket = wsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) socket = connectWebSocket();
+      sendWhenOpen(socket, () => msg);
+    },
+    [connectWebSocket]
+  );
+  const quickMatch = useQuickMatch({ send: sendQueue, rttMs: pingMs || undefined });
+  quickMatchRef.current = quickMatch;
+
+  /**
+   * A search is a seat on its way, so it counts as one for the tour.
+   *
+   * Being on the menu is not the same as having no room coming — the same
+   * reason `startTour` already refuses while a create or join is outstanding.
+   * A queue pairing lands as room_created/game_start, which under a running
+   * tour would put the player on a court the tour then walks away from,
+   * leaving the opponent alone on theirs.
+   */
+  useEffect(() => {
+    if (quickMatch.state.status === 'idle') return;
+    roomRequestRef.current = true;
+    return () => {
+      roomRequestRef.current = false;
+    };
+  }, [quickMatch.state.status]);
 
   /**
    * Follow an invitation link the moment the player has an identity to follow
@@ -1970,6 +2312,17 @@ export default function App() {
     setOpponentName(null);
     setOpponentId(null);
     setRoomConfig(null);
+    // Standing up. Cleared here rather than in a spectator-only exit, because
+    // every way out of a table goes through this function — a leave, a reap,
+    // the host closing the seats — and a stale `spectating` would leave the
+    // next match with no physics and a read-only court.
+    setSpectating(null);
+    spectatingRef.current = null;
+    setTableState(null);
+    watchedBallRef.current = null;
+    // A seating that never reached game_start would otherwise leave the lobby
+    // suppressed for the NEXT room this page opens.
+    queueSeatingRef.current = false;
     setMatchCountdown(null);
     setCountdownArmed(false);
     setLobbyReady([false, false]);
@@ -2190,9 +2543,27 @@ export default function App() {
       }
 
       // Idle while on the menu; split mode runs its own self-contained loop.
+      if (screenRef.current !== 'game' || modeRef.current === 'split') {
+        animId = requestAnimationFrame(gameLoop);
+        return;
+      }
+
+      // A watcher runs no physics at all: the court being drawn is somebody
+      // else's, and every truth about it arrives over the wire. All this does
+      // is carry the ball forward between the ~20Hz samples so it glides
+      // rather than steps. Ahead of the serving/winner gate below, because a
+      // watcher's `isServing` is set by score_update like a player's and would
+      // otherwise freeze the ball for the whole of the next point.
+      if (spectatingRef.current) {
+        const watched = ballRef.current;
+        if (watched.active && !tourFreezeRef.current) {
+          setBall({ ...watched, x: watched.x + watched.vx * dt, y: watched.y + watched.vy * dt });
+        }
+        animId = requestAnimationFrame(gameLoop);
+        return;
+      }
+
       if (
-        screenRef.current !== 'game' ||
-        modeRef.current === 'split' ||
         isServingRef.current ||
         // Held mid-frame by the onboarding tour, so the court a step is
         // describing is still exactly what it was when the card appeared.
@@ -2678,6 +3049,18 @@ export default function App() {
   };
 
   const quitToMenu = () => {
+    // Standing up costs a watcher nothing — no match, no abandon, no run — so
+    // the confirmation that guards a player's exit has nothing to warn about
+    // here, and "you will lose the match" would simply be false.
+    if (spectating) {
+      handleLeaveRoom();
+      // Back to the room they came from, not to the menu proper: standing up
+      // is leaving a table, and the next thing a watcher wants is the other
+      // tables. `lobbyVenue` still names the room, since it is set when they
+      // walked into it and nothing since has changed it.
+      if (lobbyVenue) setIsMultiplayerOpen(true);
+      return;
+    }
     if (mode === 'multiplayer') {
       // A live duel is worth a second look before walking out: leaving
       // mid-match is an abandon, and ranked repeats cost rating. A finished
@@ -2880,6 +3263,13 @@ export default function App() {
               ttlMs: TOAST_TTL.notice,
               content: t('room_expired_notice', currentLanguage),
               onDismiss: () => setToastRoomExpired(false),
+            },
+            toastTableEnded && {
+              id: 'toast-table-ended',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: t('table_ended_notice', currentLanguage),
+              onDismiss: () => setToastTableEnded(false),
             },
             toastOpponentLeft && {
               id: 'toast-opponent-left',
@@ -3121,6 +3511,7 @@ export default function App() {
         {screen === 'menu' ? (
           <motion.div key="menu" className="absolute inset-0 flex flex-col" {...screenMotion}>
           <MainMenu
+            quickMatch={quickMatch}
             theme={currentTheme}
             settings={settings}
             onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
@@ -3131,7 +3522,14 @@ export default function App() {
             onStartSolo={() => startMatch('solo')}
             onStartPractice={() => startMatch('practice')}
             onStartSplit={() => startMatch('split')}
-            onOpenMultiplayer={() => setIsMultiplayerOpen(true)}
+            onOpenMultiplayer={(venue) => {
+              // A PvP room sets the venue a created table lands in, and the
+              // browser the lobby shows. No venue means the bare invite flow.
+              venueRef.current = { roomId: venue ?? DEFAULT_VENUE_ROOM, visibility: 'private' };
+              setLobbyVenue(venue ?? null);
+              setVenueTables([]);
+              setIsMultiplayerOpen(true);
+            }}
             onOpenProfile={() => setIsProfileOpen(true)}
             onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
             onOpenAchievements={() => setIsAchievementsOpen(true)}
@@ -3176,6 +3574,19 @@ export default function App() {
           // leaves the ball mid-flight and the two steps after it talk about
           // it. Home stays available, and now puts the court back.
           canResetMatch={mode !== 'multiplayer' && tourStage !== 'match'}
+          // A watcher is told whose court they are looking at. The opponent
+          // name beside it is already right: it is the player on the far side
+          // of the net from the court being drawn, which is what the whole
+          // fan-out makes true for a watcher too.
+          watchingName={spectating ? tableState?.seats[spectating.side]?.playerName ?? null : null}
+          // Offered only when the other watching seat is actually free: the
+          // relay refuses a taken one, and a control that always refuses is
+          // worse than no control.
+          onSwapSide={
+            spectating && tableState?.seats[spectating.side === 0 ? 3 : 2]?.playerId === null
+              ? () => handleSwapSeat(spectating.side === 0 ? 3 : 2)
+              : undefined
+          }
           onQuitToMenu={quitToMenu}
           winningScore={activeConfig.winningScore}
           opponentName={mode === 'multiplayer' ? opponentName || 'Opponent' : `AI (${activeDifficulty})`}
@@ -3295,6 +3706,7 @@ export default function App() {
             language={currentLanguage}
             shakeTrigger={shakeTrigger}
             netLabel={mode === 'practice' ? t('return_line', currentLanguage) : undefined}
+            readOnly={!!spectating}
           />
         </main>
 
@@ -3338,11 +3750,27 @@ export default function App() {
               transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             >
               <h2
-                className={`text-hero ${winner === 'player' ? 'text-win' : 'text-loss'}`}
+                className={`text-hero ${
+                  spectating ? 'text-accent' : winner === 'player' ? 'text-win' : 'text-loss'
+                }`}
               >
-                {winner === 'player'
-                  ? t('victory', currentLanguage)
-                  : t('match_lost', currentLanguage)}
+                {/* A watcher won nothing and lost nothing. VICTORY here would
+                    be a claim about somebody else's match, so the winner is
+                    named instead. */}
+                {spectating
+                  ? t('watched_wins', currentLanguage, {
+                      // Read off the table rather than off `opponentName`,
+                      // which is only ever the far side: either seat can be
+                      // the one that won. 'Opponent' is the same untranslated
+                      // fallback the rest of the file uses for a missing name.
+                      name:
+                        tableState?.seats[
+                          winner === 'player' ? spectating.side : spectating.side === 0 ? 1 : 0
+                        ]?.playerName || 'Opponent',
+                    })
+                  : winner === 'player'
+                    ? t('victory', currentLanguage)
+                    : t('match_lost', currentLanguage)}
               </h2>
 
               {/* Paddle-coloured, because that is which score is yours. */}
@@ -3440,6 +3868,11 @@ export default function App() {
                 )}
 
               <div className="mt-1 flex w-full items-center gap-2">
+                {/* No rematch control for a watcher: a rematch is a vote, and
+                    a watcher has no vote to cast. The next match of the same
+                    table needs nothing from them either — game_start resets
+                    the court exactly as it does for a player. */}
+                {!spectating && (
                 <Button
                   id="btn-play-again"
                   variant="primary"
@@ -3475,6 +3908,7 @@ export default function App() {
                       : t('rematch', currentLanguage)
                     : t('play_again', currentLanguage)}
                 </Button>
+                )}
 
                 {/* Between-match navigation: back to the out-of-match hub */}
                 <Button
@@ -3554,6 +3988,14 @@ export default function App() {
           language={currentLanguage}
           p2pEnabled={p2pEnabled}
           onToggleP2P={setP2pEnabled}
+          venueRoomId={lobbyVenue}
+          tables={venueTables}
+          tablesLoading={tablesLoading}
+          onRefreshTables={() => refreshTables(lobbyVenue)}
+          onCreatePublicTable={() => handleCreateRoom({ visibility: 'public' })}
+          onWatchTable={handleWatchTable}
+          tableState={tableState}
+          onSwapSeat={handleSwapSeat}
         />
 
         {/* Player Profile & Stats Modal */}

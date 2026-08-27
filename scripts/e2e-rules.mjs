@@ -80,7 +80,8 @@ const openLadder = (page) =>
 
 // ---- 1. Rules panel and the ranked/unranked badge ------------------------
 const page = await newPlayer('Rules');
-await page.click('#menu-mode-solo');
+await page.click('#building-solo');
+await page.click('#room-rookie');
 await page.waitForSelector('#menu-rules-toggle', { timeout: 5000 });
 // "counts for rank" is a substring of half the UNRANKED lines too ("this
 // difficulty never counts for rank"), so the ranked test has to be the ranked
@@ -102,9 +103,9 @@ await openLadder(page);
 await page.reload({ waitUntil: 'networkidle' });
 await skipTour(page);
 await page.waitForSelector('#main-menu-screen', { timeout: 10000 });
-await page.click('#menu-mode-solo');
-await page.waitForSelector('#menu-diff-pro', { timeout: 5000 });
-await page.click('#menu-diff-pro');
+await page.click('#building-solo');
+await page.waitForSelector('#room-ai_pro', { timeout: 5000 });
+await page.click('#room-ai_pro');
 await page.waitForTimeout(300);
 status = (await page.textContent('#menu-rules-status')).trim();
 if (!RATES(status)) fail(`stock rules on Pro should read ranked, got "${status}"`);
@@ -139,8 +140,12 @@ ok('all six physics sliders and the presentation toggles render');
       viewportH: window.innerHeight,
       startReachable: !!(hit && hit.closest('#menu-start-solo')),
       bodyScrolls: body.scrollHeight > body.clientHeight,
-      // Every mode row behind the sheet keeps its full content height.
-      crushed: [...document.querySelectorAll('[id^="menu-mode-"]')]
+      // Every ROOM row behind the sheet keeps its full content height. This
+      // selector has to name what is actually on the menu: the rows behind
+      // the sheet are the Solo building's rooms now, and a prefix that
+      // matches nothing would make this whole assertion pass vacuously —
+      // which is the flex-collapse regression going unguarded.
+      crushed: [...document.querySelectorAll('[id^="room-"]')]
         .filter((el) => el.clientHeight + 1 < el.scrollHeight)
         .map((el) => `${el.id} ${el.clientHeight}/${el.scrollHeight}`),
     };
@@ -354,7 +359,8 @@ ok('space still serves');
 // PointerEvents cannot get two fingers onto this canvas at once.
 {
   const two = await newPlayer('TwoThumb');
-  await two.click('#menu-mode-solo');
+  await two.click('#building-solo');
+  await two.click('#room-rookie');
   await two.click('#menu-start-solo');
   await two.waitForSelector('#half-court-canvas', { timeout: 5000 });
   await two.click('#btn-show-stats-overlay');
@@ -445,7 +451,8 @@ if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
 //         indicators while it runs. Telemetry starts hidden. -------------
 {
   const solo = await newPlayer('Sonar');
-  await solo.click('#menu-mode-solo');
+  await solo.click('#building-solo');
+  await solo.click('#room-rookie');
   // The sonar is opt-in now, and opting in costs the match its rating — it
   // draws the half the whole game exists to hide. It used to be on by default,
   // which is why this suite never had to ask for it.
@@ -527,8 +534,18 @@ if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
   await solo.waitForSelector('#court-stats-overlay', { timeout: 3000 });
   ok('the player can open telemetry during the match');
   await solo.click('#btn-quit-to-menu');
+  // Quitting a solo match a point has been scored in is an abandon, and it
+  // asks first. Whether this scripted match HAS a point on the board by now
+  // depends on how many balls the AI got back, so the confirmation is walked
+  // through when it appears rather than assumed either way — it started
+  // appearing here when the AI ladder's floor came up.
+  await solo
+    .waitForSelector('#quit-confirm-modal', { timeout: 2000 })
+    .then(() => solo.click('#btn-quit-confirm'))
+    .catch(() => {});
   await solo.waitForSelector('#main-menu-screen', { timeout: 5000 });
-  await solo.click('#menu-mode-solo');
+  await solo.click('#building-solo');
+  await solo.click('#room-rookie');
   await solo.click('#menu-start-solo');
   await solo.waitForSelector('#half-court-canvas', { timeout: 5000 });
   if (await solo.$('#court-stats-overlay')) fail('telemetry stayed open into the next match');

@@ -394,14 +394,15 @@ describe('parent gating in play', () => {
       .toContain('ai_pro');
   });
 
-  it('will not open Cyber on one Pro win, and does open it on the climb', () => {
-    // The complaint this rung answers: Cyber arrived in a first session, off a
-    // single Pro win, before the player had any feel for the middle rung.
+  it('will not open Elite on one Pro win, and does open it on the climb', () => {
+    // The complaint this rung answers: the next rung used to arrive in a
+    // first session, off a single Pro win, before the player had any feel
+    // for the middle rung.
     init('g_cyber', 'GateCyber');
     solo('g_cyber', { difficulty: 'rookie' });
     solo('g_cyber', { difficulty: 'pro' });
     const early = db.getProfile('g_cyber');
-    expect(hasUnlock(early.achievements, 'difficulty', 'cyber')).toBe(false);
+    expect(hasUnlock(early.achievements, 'difficulty', 'elite')).toBe(false);
 
     // Ten Pro wins AND level 10. Ten wins alone arrive first; the gate holds
     // until the level does too.
@@ -409,7 +410,7 @@ describe('parent gating in play', () => {
     const after = db.getProfile('g_cyber');
     expect(after.proWins).toBeGreaterThanOrEqual(10);
     if (after.level < 10) {
-      expect(hasUnlock(after.achievements, 'difficulty', 'cyber')).toBe(false);
+      expect(hasUnlock(after.achievements, 'difficulty', 'elite')).toBe(false);
     }
     // Keep playing until the level lands; the rung then opens by itself.
     for (let i = 0; i < 40 && db.getProfile('g_cyber').level < 10; i++) {
@@ -418,7 +419,10 @@ describe('parent gating in play', () => {
     const climbed = db.getProfile('g_cyber');
     expect(climbed.level).toBeGreaterThanOrEqual(10);
     expect(climbed.achievements).toContain('ai_pro_10');
-    expect(hasUnlock(climbed.achievements, 'difficulty', 'cyber')).toBe(true);
+    expect(hasUnlock(climbed.achievements, 'difficulty', 'elite')).toBe(true);
+    // The rungs above stay shut: the ladder is climbed one rung at a time.
+    expect(hasUnlock(climbed.achievements, 'difficulty', 'cyber')).toBe(false);
+    expect(hasUnlock(climbed.achievements, 'difficulty', 'chaos')).toBe(false);
   });
 
   it('lets one result climb a chain when it genuinely satisfies every rung', () => {
@@ -445,11 +449,15 @@ describe('the tree gates the game', () => {
 
   it('opens the next rung of the ladder only by beating the one below', () => {
     expect(hasUnlock(['ai_rookie'], 'difficulty', 'pro')).toBe(true);
-    expect(hasUnlock(['ai_rookie'], 'difficulty', 'cyber')).toBe(false);
-    // A single Pro win is no longer enough — that used to hand a first-session
-    // player the hardest opponent in the game.
-    expect(hasUnlock(['ai_rookie', 'ai_pro'], 'difficulty', 'cyber')).toBe(false);
-    expect(hasUnlock(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'difficulty', 'cyber')).toBe(true);
+    expect(hasUnlock(['ai_rookie'], 'difficulty', 'elite')).toBe(false);
+    // A single win at a rung is never enough for the next-but-one — that used
+    // to hand a first-session player the hardest opponent in the game.
+    expect(hasUnlock(['ai_rookie', 'ai_pro'], 'difficulty', 'elite')).toBe(false);
+    expect(hasUnlock(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'difficulty', 'elite')).toBe(true);
+    expect(hasUnlock(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'difficulty', 'cyber')).toBe(false);
+    expect(hasUnlock(['ai_rookie', 'ai_pro', 'ai_pro_10', 'ai_elite', 'ai_elite_10'], 'difficulty', 'cyber')).toBe(true);
+    expect(hasUnlock(['ai_rookie', 'ai_pro', 'ai_pro_10', 'ai_elite', 'ai_elite_10'], 'difficulty', 'chaos')).toBe(false);
+    expect(hasUnlock(['cyber_10'], 'difficulty', 'chaos')).toBe(true);
   });
 
   it('opens longer matches as a career builds', () => {
@@ -460,7 +468,9 @@ describe('the tree gates the game', () => {
 
   it('can name the achievement that opens each locked thing', () => {
     expect(unlockedBy('difficulty', 'pro')!.id).toBe('ai_rookie');
-    expect(unlockedBy('difficulty', 'cyber')!.id).toBe('ai_pro_10');
+    expect(unlockedBy('difficulty', 'elite')!.id).toBe('ai_pro_10');
+    expect(unlockedBy('difficulty', 'cyber')!.id).toBe('ai_elite_10');
+    expect(unlockedBy('difficulty', 'chaos')!.id).toBe('cyber_10');
     expect(unlockedBy('winningScore', 15)!.id).toBe('veteran_10');
     // Nothing gates what is open from the start.
     expect(unlockedBy('difficulty', 'rookie')).toBeUndefined();
@@ -486,20 +496,35 @@ describe('the tree gates the game', () => {
     expect(reachable()).toEqual(['rookie']);
     earned = [...earned, 'ai_rookie'];
     expect(reachable()).toEqual(['rookie', 'pro']);
-    // Beating Pro once opens nothing further: the top rung is behind ten Pro
-    // wins AND level 10.
+    // Beating Pro once opens nothing further: every higher rung is behind
+    // ten wins at the rung below plus a progression gate.
     earned = [...earned, 'ai_pro'];
     expect(reachable()).toEqual(['rookie', 'pro']);
     earned = [...earned, 'ai_pro_10'];
-    expect(reachable()).toEqual(['rookie', 'pro', 'cyber']);
+    expect(reachable()).toEqual(['rookie', 'pro', 'elite']);
+    earned = [...earned, 'ai_elite', 'ai_elite_10'];
+    expect(reachable()).toEqual(['rookie', 'pro', 'elite', 'cyber']);
+    earned = [...earned, 'cyber_slayer', 'cyber_shutout', 'cyber_10'];
+    expect(reachable()).toEqual(['rookie', 'pro', 'elite', 'cyber', 'chaos']);
   });
 
-  it('makes the Cyber gate a real climb, not a first-session accident', () => {
-    const gate = unlockedBy('difficulty', 'cyber')!;
-    // Ten Pro wins is the trigger; level 10 is the gate on the same rung.
-    expect(gate.gate?.level).toBe(10);
-    expect(isUnlockable(gate.id, ['ai_pro'], { level: 9, tier: 'unranked' })).toBe(false);
-    expect(isUnlockable(gate.id, ['ai_pro'], { level: 10, tier: 'unranked' })).toBe(true);
+  it('makes each upper rung a real climb, not a first-session accident', () => {
+    // Ten Pro wins is the trigger for Elite; level 10 is the gate on it.
+    const eliteGate = unlockedBy('difficulty', 'elite')!;
+    expect(eliteGate.gate?.level).toBe(10);
+    expect(isUnlockable(eliteGate.id, ['ai_pro'], { level: 9, tier: 'unranked' })).toBe(false);
+    expect(isUnlockable(eliteGate.id, ['ai_pro'], { level: 10, tier: 'unranked' })).toBe(true);
+    // Cyber sits behind ten Elite wins at level 15.
+    const cyberGate = unlockedBy('difficulty', 'cyber')!;
+    expect(cyberGate.gate?.level).toBe(15);
+    expect(isUnlockable(cyberGate.id, ['ai_elite'], { level: 14, tier: 'unranked' })).toBe(false);
+    expect(isUnlockable(cyberGate.id, ['ai_elite'], { level: 15, tier: 'unranked' })).toBe(true);
+    // Chaos sits behind ten Cyber wins at Grandmaster — a TIER gate, so the
+    // top of the solo ladder demands a real rating, not just hours played.
+    const chaosGate = unlockedBy('difficulty', 'chaos')!;
+    expect(chaosGate.gate?.tier).toBe('grandmaster');
+    expect(isUnlockable(chaosGate.id, ['cyber_shutout'], { level: 40, tier: 'ace' })).toBe(false);
+    expect(isUnlockable(chaosGate.id, ['cyber_shutout'], { level: 40, tier: 'grandmaster' })).toBe(true);
   });
 });
 
@@ -564,7 +589,10 @@ describe('a playable setting is never a locked one', () => {
 
   it('leaves a difficulty alone once it has actually been earned', () => {
     expect(playableDifficulty(['ai_rookie'], 'pro')).toBe('pro');
-    expect(playableDifficulty(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'cyber')).toBe('cyber');
+    // A wanted rung above what is earned clamps to the best earned one.
+    expect(playableDifficulty(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'cyber')).toBe('elite');
+    expect(playableDifficulty(['ai_rookie', 'ai_pro', 'ai_pro_10', 'ai_elite', 'ai_elite_10'], 'cyber')).toBe('cyber');
+    expect(playableDifficulty(['cyber_10'], 'chaos')).toBe('chaos');
     // Never promotes: asking for less than you own gives you what you asked.
     expect(playableDifficulty(['ai_rookie', 'ai_pro', 'ai_pro_10'], 'rookie')).toBe('rookie');
   });

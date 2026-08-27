@@ -17,7 +17,7 @@ import { Sheet } from './Sheet';
 // overlay is what the finger actually hits.
 
 export interface LockBadgeProps {
-  /** The id the suites look for, e.g. 'menu-diff-pro-lock'. */
+  /** The id the suites look for, e.g. 'room-ai_pro-lock'. */
   id?: string;
   achievement: Achievement;
   /** Omit to render the marker without making it tappable. */

@@ -26,6 +26,7 @@ import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import {
   applyMatchSync,
+  clearSeatStreaks,
   clampInt,
   generateRoomCode,
   performanceWeight,
@@ -39,13 +40,68 @@ import {
   countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
-import { MatchEndPayload, RoomMatchConfig } from './src/types';
+import { MatchEndPayload, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
+import { Candidate, findPair } from './server/matchmaking';
+import {
+  DEFAULT_VENUE_ROOM,
+  MATCHMAKING_ROOM,
+  normalizeVenueRoomId,
+  roomAllowsSpectators,
+  roomById,
+  roomEntryVerdict,
+  roomsOf,
+} from './src/venues';
 import { validateUsername } from './src/profileRules';
 import { Rating, winProbability } from './src/rating';
 
 
+/**
+ * Which seat of a table a socket holds.
+ *
+ * A union rather than a pair of nullable indices: two nullables describe four
+ * states of which only three are legal, and the illegal one — playing and
+ * watching at once — is the orphaned-seat bug class CLAUDE.md §5 records. A
+ * union makes it unrepresentable, and it is what lets every existing
+ * `playerIndex !== null` guard refuse a watching socket without any of them
+ * being rewritten to know the word spectator.
+ */
+type Seat = { role: 'player'; index: 0 | 1 } | { role: 'spectator'; slot: 0 | 1 };
+
 const rooms = new Map<string, Room>();
+
+/**
+ * The ranked queue: everybody currently looking for a game.
+ *
+ * An in-process array beside the room map, and single-instance by design for
+ * the same reason — the relay is the only participant that can see both
+ * players, so pairing lives where the sockets are (CLAUDE.md §5, §10).
+ *
+ * Each entry carries `take`, a callback minted INSIDE the socket's own
+ * connection scope. A socket's seat is closure state (`currentRoomId`,
+ * `seat`), which nothing outside that closure can write — so the sweep does
+ * not try to: it builds the room and then asks each socket to take its seat.
+ */
+interface QueueEntry {
+  ws: WebSocket;
+  deviceId: string | null;
+  sessionId: string | null;
+  playerId: string;
+  playerName: string;
+  joinedAt: number;
+  rttMs: number | null;
+  take: (roomId: string, index: 0 | 1) => void;
+}
+
+const queue: QueueEntry[] = [];
+
+/** Drop this socket from the queue, however it came to be leaving. */
+function leaveQueue(ws: WebSocket): boolean {
+  const at = queue.findIndex((e) => e.ws === ws);
+  if (at === -1) return false;
+  queue.splice(at, 1);
+  return true;
+}
 
 /**
  * The duel run this device already has going. A rally streak carries between
@@ -62,10 +118,165 @@ function carriedStreak(deviceId: string | null): number {
   }
 }
 
+/**
+ * Everything the table's absolute state is made of, to everyone at it.
+ *
+ * Watchers included, and byte-identically: the score, the terms, the
+ * readiness, the rematch votes and a match starting are facts about the
+ * match rather than about a point of view, so a spectator gets the player's
+ * own copy and App.tsx's existing handlers work unmodified.
+ *
+ * Note what does NOT come through here and must not be added: `match_recorded`
+ * carries another player's XP, missions and rank direction, and `opponent_left`
+ * would report a departure to somebody who lost nobody. Both are sent to named
+ * sockets instead.
+ */
 function broadcast(room: Room, payload: unknown): void {
   const json = JSON.stringify(payload);
-  room.players.forEach((p) => {
+  for (const p of room.players) {
     if (p?.ws && p.ws.readyState === WebSocket.OPEN) p.ws.send(json);
+  }
+  for (const w of room.spectators) {
+    if (w?.ws && w.ws.readyState === WebSocket.OPEN) w.ws.send(json);
+  }
+}
+
+/**
+ * Everyone who sees seat `side`'s court from seat `side`'s point of view: the
+ * player sitting there, plus whoever is watching over their shoulder.
+ *
+ * The whole client design in one function. A spectator on side S receives the
+ * byte-identical copy of everything player S receives — pre-mirrored opponent
+ * paddle, sender-frame opponent ball, transformed ball_incoming — so App.tsx's
+ * existing handlers need no spectating branch at all. The only NEW frames are
+ * the ones about S's own court, which player S does not need because they are
+ * simulating it.
+ */
+function viewersOf(room: Room, side: 0 | 1): WebSocket[] {
+  const out: WebSocket[] = [];
+  const player = room.players[side];
+  if (player?.ws && player.ws.readyState === WebSocket.OPEN) out.push(player.ws);
+  const watcher = room.spectators[side];
+  if (watcher?.ws && watcher.ws.readyState === WebSocket.OPEN) out.push(watcher.ws);
+  return out;
+}
+
+/**
+ * The socket watching seat `side`'s own court, or null.
+ *
+ * What goes here is RAW — no mirror, no transform — because the watcher draws
+ * that player's court in that player's own coordinates. A stray `1 - x` here
+ * is the likeliest bug in the whole feature and is invisible against a
+ * symmetric fixture: a paddle at 0.5 looks right either way, which is why
+ * every test of it uses an asymmetric position.
+ */
+function watcherBeside(room: Room, side: 0 | 1): WebSocket | null {
+  const watcher = room.spectators[side];
+  if (!watcher?.ws || watcher.ws.readyState !== WebSocket.OPEN) return null;
+  return watcher.ws;
+}
+
+/**
+ * How the matchup looks, from each side's own point of view.
+ *
+ * Per-side rather than broadcast, and computed server-side, so neither client
+ * ever sees the other's hidden rating — only its own odds. A watcher gets the
+ * number belonging to the player they are sitting beside, which is the same
+ * rule as everything else in the fan-out.
+ */
+function sendMatchPrediction(room: Room): void {
+  const [a, b] = room.players;
+  if (!a || !b) return;
+  const r0 = db.getProfile(a.playerId);
+  const r1 = db.getProfile(b.playerId);
+  const p0 = winProbability({ mu: r0.mmrMu, sigma: r0.mmrSigma }, { mu: r1.mmrMu, sigma: r1.mmrSigma });
+  for (const side of [0, 1] as const) {
+    sendAll(viewersOf(room, side), {
+      type: 'match_prediction',
+      winProbability: side === 0 ? p0 : 1 - p0,
+    });
+  }
+}
+
+/** One serialization, however many recipients — as `broadcast` already does. */
+function sendAll(sockets: WebSocket[], payload: unknown): void {
+  if (sockets.length === 0) return;
+  const json = JSON.stringify(payload);
+  for (const socket of sockets) socket.send(json);
+}
+
+/** The wire seat a watching slot is addressed by: 0/1 play, 2/3 watch. */
+const spectatorSeat = (slot: 0 | 1): TableSeat => (slot === 0 ? 2 : 3);
+
+/**
+ * Who is sitting where, told to each socket separately.
+ *
+ * Per-socket rather than broadcast because `yourSeat` differs by recipient —
+ * and because that is the one field a client cannot work out for itself once
+ * seats can change hands. It names the table too: a watcher never receives
+ * `room_created` or `room_joined`, so this is the only message that tells
+ * them which room they are in.
+ */
+function broadcastTableState(room: Room): void {
+  const seats: TableSeatInfo[] = [
+    { seat: 0, playerId: room.players[0]?.playerId ?? null, playerName: room.players[0]?.playerName ?? null, enabled: true },
+    { seat: 1, playerId: room.players[1]?.playerId ?? null, playerName: room.players[1]?.playerName ?? null, enabled: true },
+    { seat: 2, playerId: room.spectators[0]?.playerId ?? null, playerName: room.spectators[0]?.playerName ?? null, enabled: room.config.spectators },
+    { seat: 3, playerId: room.spectators[1]?.playerId ?? null, playerName: room.spectators[1]?.playerName ?? null, enabled: room.config.spectators },
+  ];
+  const send = (ws: WebSocket | undefined, yourSeat: TableSeat | null): void => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'table_state', roomId: room.id, seats, yourSeat, spectatorsEnabled: room.config.spectators }));
+  };
+  room.players.forEach((p, i) => send(p?.ws, i as TableSeat));
+  room.spectators.forEach((w, i) => send(w?.ws, spectatorSeat(i as 0 | 1)));
+}
+
+/**
+ * Where the match already stands, for a watcher who has just sat down.
+ *
+ * The easy one to forget. A spectator arriving at 3-2 has missed `game_start`
+ * and every `score_update` since, and the relay is the only party that knows —
+ * so without this their court renders 0-0 until the next point happens to
+ * arrive. Sent on arrival, and again on a side flip.
+ */
+function sendSpectatorSync(room: Room, ws: WebSocket): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const snapshot: SpectatorSnapshot = {
+    p1Score: room.scores[0],
+    p2Score: room.scores[1],
+    servingPlayer: room.servingPlayer,
+    matchSeq: room.matchSeq,
+    inPlay: room.inPlay,
+    matchOver: room.matchOver,
+    config: room.config,
+    streaks: [room.streaks[0], room.streaks[1]],
+  };
+  ws.send(JSON.stringify({ type: 'spectator_sync', snapshot }));
+}
+
+/**
+ * Close every watching socket at a table that is going away.
+ *
+ * One function for both departures, for the same reason `vacateSeat` is one
+ * implementation for two: the reaper sweeps a table, and the last player
+ * leaving deletes one, and a watcher left attached to a room no longer in the
+ * map would sit on a court whose every message the relay silently drops.
+ *
+ * The slots are cleared as well as closed, because the room object can
+ * outlive this call — a reap hands the caller the room after deleting it, and
+ * the close handler that would otherwise clear the slot runs against a room
+ * `rooms.get` can no longer find.
+ */
+function ejectSpectators(room: Room, reason: string): void {
+  room.spectators.forEach((w, i) => {
+    if (!w) return;
+    room.spectators[i] = null;
+    try {
+      if (w.ws.readyState === WebSocket.OPEN) w.ws.close(1000, reason);
+    } catch {
+      /* already gone */
+    }
   });
 }
 
@@ -82,6 +293,170 @@ function startMatch(room: Room, servingPlayer: 0 | 1): void {
   // note on duelStartRatings.
   duelStartRatings(room);
   broadcast(room, payload);
+}
+
+/**
+ * The terms every queue match is played on, and they are not negotiable.
+ *
+ * Stock physics, sonar off, no watching seats, and the ranked auto-serve floor
+ * `normalizeRoomConfig` forces. That fixity is what makes skipping the ready
+ * handshake sound: the guest-ready step exists because a room's terms are the
+ * host's to change, and "a yes to old rules is not a yes to new ones". A queue
+ * table has no host and no editable terms, the searching UI states them before
+ * anybody joins, so QUEUEING IS THE YES. `set_room_config` is refused outright
+ * on one of these tables, which keeps that premise true by construction rather
+ * than by everyone remembering it.
+ */
+const queueRoomConfig = (): RoomMatchConfig =>
+  roomConfigFor(MATCHMAKING_ROOM, DEFAULT_ROOM_CONFIG);
+
+/** A queue entry as the pure pairing rules see it. */
+function queueCandidate(entry: QueueEntry): Candidate | null {
+  if (!entry.deviceId) return null;
+  const profile = db.getProfile(entry.deviceId);
+  return {
+    deviceId: entry.deviceId,
+    mu: profile.mmrMu,
+    sigma: profile.mmrSigma,
+    joinedAt: entry.joinedAt,
+    rttMs: entry.rttMs,
+  };
+}
+
+/**
+ * Seat a paired-up two and start their match, with no lobby in between.
+ *
+ * Everything a host's `start_match` does, done by the relay: the table is
+ * built in the hidden queue room, both sockets are told they have a seat in
+ * the ordinary `room_created`/`room_joined` shapes so their existing handlers
+ * work unchanged, and `startMatch` broadcasts the `game_start` that closes
+ * both lobbies. From the first serve it is an ordinary table under every rule
+ * in this file — including the per-phone 3-second countdown, which arms on
+ * `game_start` and runs when each player actually reaches the court.
+ */
+function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
+  let code = generateRoomCode();
+  let guard = 0;
+  while (rooms.has(code) && guard++ < 50) code = generateRoomCode();
+  if (rooms.has(code)) return; // absurd, but never overwrite a live table
+
+  const session = (entry: QueueEntry, index: 0 | 1): PlayerSession => ({
+    ws: entry.ws,
+    playerId: entry.playerId,
+    playerName: entry.playerName,
+    playerIndex: index,
+    deviceId: entry.deviceId,
+    sessionId: entry.sessionId,
+  });
+
+  const room: Room = {
+    id: code,
+    players: [session(a, 0), session(b, 1)],
+    scores: [0, 0],
+    streaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
+    bestStreaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
+    earnedStreaks: [0, 0],
+    earnedBests: [0, 0],
+    crossingsThisPoint: 0,
+    syncRev: 0,
+    servingPlayer: 0,
+    rematchVotes: [false, false],
+    config: queueRoomConfig(),
+    matchOver: false,
+    inPlay: false,
+    // Both seats consented by queueing, so the handshake is already done.
+    ready: [true, true],
+    matchSeq: 0,
+    lastActive: Date.now(),
+    // Both seats filled from the first instant: no unpaired clock to run.
+    soloSince: null,
+    startRatings: null,
+    startRatingsSeq: 0,
+    relayCounted: false,
+    venueRoomId: MATCHMAKING_ROOM,
+    // Never listed and never watched: a queue table is not a place, it is a
+    // pairing. `listable: false` on the room def already keeps it out of the
+    // browser; this keeps it out of the seats.
+    visibility: 'private',
+    spectators: [null, null],
+  };
+  rooms.set(code, room);
+
+  a.take(code, 0);
+  b.take(code, 1);
+
+  const publicOf = (entry: QueueEntry) =>
+    entry.deviceId ? db.getPublicProfile(entry.deviceId) : null;
+  const oppOf = [publicOf(b), publicOf(a)];
+
+  ([a, b] as const).forEach((entry, i) => {
+    const idx = i as 0 | 1;
+    const other = room.players[idx === 0 ? 1 : 0]!;
+    if (entry.ws.readyState !== WebSocket.OPEN) return;
+    entry.ws.send(JSON.stringify({ type: 'queue_state', status: 'found', opponent: oppOf[idx] }));
+    entry.ws.send(
+      JSON.stringify(
+        idx === 0
+          ? { type: 'room_created', roomId: code, playerIndex: 0 }
+          : {
+              type: 'room_joined',
+              roomId: code,
+              playerIndex: 1,
+              opponentName: other.playerName,
+              opponentId: other.playerId,
+            }
+      )
+    );
+    // Seat 0 learns who arrived the way a host does; seat 1 was told above.
+    if (idx === 0) {
+      entry.ws.send(
+        JSON.stringify({
+          type: 'opponent_joined',
+          opponentName: other.playerName,
+          opponentId: other.playerId,
+        })
+      );
+    }
+    entry.ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+  });
+
+  broadcastTableState(room);
+  sendMatchPrediction(room);
+  startMatch(room, 0);
+}
+
+/**
+ * One pass of the queue. Pairs as many as it can, then stops.
+ *
+ * A loop rather than one pair per tick: four people joining at once should not
+ * wait two sweeps for the second match. It stops the moment `findPair` says
+ * no, so a queue with nothing legal in it costs one comparison pass.
+ */
+function sweepQueue(now: number): void {
+  // A socket that died without a close event yet is not in the queue for our
+  // purposes: pairing against it would seat a phantom.
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].ws.readyState !== WebSocket.OPEN) queue.splice(i, 1);
+  }
+  for (;;) {
+    const byId = new Map<string, QueueEntry>();
+    const candidates: Candidate[] = [];
+    for (const entry of queue) {
+      const candidate = queueCandidate(entry);
+      // A cookieless socket has no rating to pair on and no profile to record
+      // onto. It can play a private duel; it cannot be matchmade.
+      if (!candidate || byId.has(candidate.deviceId)) continue;
+      byId.set(candidate.deviceId, entry);
+      candidates.push(candidate);
+    }
+    const pair = findPair(candidates, now);
+    if (!pair) return;
+    const a = byId.get(pair[0].deviceId)!;
+    const b = byId.get(pair[1].deviceId)!;
+    leaveQueue(a.ws);
+    leaveQueue(b.ws);
+    seatQueuePair(a, b);
+  }
 }
 
 interface LiveSocket {
@@ -192,6 +567,26 @@ function persistDuelStreaks(room: Room): void {
       console.error('duel streak record failed:', e);
     }
   }
+}
+
+/**
+ * The terms of a match, narrowed by the venue the table sits in.
+ *
+ * Whether a table may be WATCHED is the venue's answer, not the host's: the
+ * top three PvP brackets have no spectator seats, because a spectator sees
+ * the hidden half live with the sonar forced on and can simply describe it
+ * over a voice call — the sonar rule (CLAUDE.md §12) with a second person
+ * attached. Drawing that line by ROOM is what keeps every other match rating
+ * exactly as it always did: no per-match flag, no forceUnranked, no new
+ * unrankedReasons case.
+ *
+ * One function for both the create and the edit path, so a host cannot open
+ * seats a bracket forbids by asking twice.
+ */
+function roomConfigFor(venueRoomId: string, raw: Partial<RoomMatchConfig> | null | undefined): RoomMatchConfig {
+  const config = normalizeRoomConfig(raw);
+  if (!roomAllowsSpectators(venueRoomId)) config.spectators = false;
+  return config;
 }
 
 /**
@@ -339,6 +734,22 @@ function duelStartRatings(room: Room): Array<SeatRating | null> {
 function takeOverFromP2P(room: Room): void {
   if (room.relayCounted) return;
   room.relayCounted = true;
+  endP2P(room);
+}
+
+/**
+ * Ask both phones to come off their DataChannel, WITHOUT claiming the relay
+ * has counted anything.
+ *
+ * Split out of takeOverFromP2P because the two callers want different halves.
+ * A fallback wants both: the relay has counted an event, so it owns the match.
+ * A watcher sitting down at a table that is already peer-to-peer wants only
+ * the message — the relay has counted nothing, and setting `relayCounted`
+ * would make applyMatchSync discard the peers' true streaks and peaks (which
+ * are permanent, being maxima) to protect against a divergence that has not
+ * happened.
+ */
+function endP2P(room: Room): void {
   broadcast(room, { type: 'p2p_fallback' });
 }
 
@@ -611,6 +1022,53 @@ async function startServer() {
     res.json({ iceServers });
   });
 
+  /**
+   * The tables open in one venue room, for the browser.
+   *
+   * Registered BEFORE anything `/api/room/:roomId`-shaped, the same ordering
+   * care `/api/profile/:id` documents — a two-segment pattern registered first
+   * would swallow this one.
+   *
+   * Three filters, and each is load-bearing:
+   *  - the venue, so a bracket lists its own tables and no others;
+   *  - `visibility === 'public'`, which is the ENTIRE boundary protecting
+   *    today's invite-code tables. This is an unauthenticated read of live
+   *    room state, so a bug here makes every private room's 4-letter code
+   *    harvestable;
+   *  - has-a-live-player, which is what makes "empty tables are never listed"
+   *    true inside the 15-second window before the reaper sweeps one.
+   */
+  app.get('/api/rooms/:venueRoomId/tables', (req, res) => {
+    const venueRoomId = normalizeVenueRoomId(req.params.venueRoomId);
+    const def = roomById(venueRoomId);
+    // A room nothing may browse has no listing, rather than an empty one: the
+    // queue's room is excluded as DATA (listable: false), not by a special
+    // case here.
+    if (!def || def.listable === false) {
+      return res.status(404).json({ error: 'ROOM_NOT_LISTABLE' });
+    }
+    const tables = [];
+    for (const room of rooms.values()) {
+      if (room.venueRoomId !== venueRoomId) continue;
+      if (room.visibility !== 'public') continue;
+      const seated = room.players.filter((p) => p && p.ws.readyState === WebSocket.OPEN);
+      if (seated.length === 0) continue;
+      tables.push({
+        id: room.id,
+        hostName: room.players[0]?.playerName ?? null,
+        hostId: room.players[0]?.playerId ?? null,
+        playerCount: room.players.filter(Boolean).length,
+        isFull: room.players.filter(Boolean).length >= 2,
+        inPlay: room.inPlay,
+        config: room.config,
+        waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
+        spectatorCount: room.spectators.filter(Boolean).length,
+        spectatorsEnabled: room.config.spectators,
+      });
+    }
+    res.json({ venueRoomId, tables });
+  });
+
   // Room status check
   app.get('/api/room/:roomId', (req, res) => {
     const roomId = req.params.roomId.toUpperCase();
@@ -634,6 +1092,14 @@ async function startServer() {
       // been and gone. Beside inPlay for the same reason: a waiting room and a
       // live one are different things and this endpoint exists to say which.
       waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
+      // Added, never redefining playerCount/isFull above: existing clients and
+      // the browser suites read those and they still mean PLAYERS.
+      venueRoomId: room.venueRoomId,
+      visibility: room.visibility,
+      // Watchers, counted separately for the same reason: playerCount means
+      // PLAYERS and must keep meaning that.
+      spectatorCount: room.spectators.filter(Boolean).length,
+      spectatorsEnabled: room.config.spectators,
     });
   });
 
@@ -1298,9 +1764,30 @@ async function startServer() {
           if (seat && seat.ws.readyState === WebSocket.OPEN) seat.ws.close(1000, reason);
         }
       }
+      // Watchers, ALWAYS — including 'empty'. "An empty room has nothing
+      // attached by definition" was true when only players could attach, and
+      // `empty` now means no live PLAYER: a table watched by two people and
+      // played by nobody is exactly the case this branch used to skip.
+      ejectSpectators(room, reason);
       console.log(`room ${id} reaped: ${reason}`);
     }
   }, ROOM_SWEEP_MS).unref?.();
+
+  // The queue's own sweep. Faster than the room reaper because a player is
+  // sitting looking at a spinner: two seconds is the longest anybody waits
+  // past the moment a legal pairing exists, and `queue_join` sweeps
+  // immediately as well, so the timer only matters for a band that has just
+  // widened past a pair already waiting.
+  const QUEUE_SWEEP_MS = 2000;
+  setInterval(() => {
+    try {
+      sweepQueue(Date.now());
+    } catch (e) {
+      // A pairing that throws must not take the interval down with it: the
+      // queue would then be a place players enter and are never called from.
+      console.error('queue sweep failed:', e);
+    }
+  }, QUEUE_SWEEP_MS).unref?.();
 
   /**
    * Liveness, asked for rather than assumed.
@@ -1362,8 +1849,27 @@ async function startServer() {
     }
 
     let currentRoomId: string | null = null;
-    let playerIndex: 0 | 1 | null = null;
+    /**
+     * Which seat of `currentRoomId` this socket holds, if any.
+     *
+     * A discriminated union rather than two nullable numbers, because two
+     * nullables give four states of which only three are legal — and the
+     * illegal one, both set at once, is precisely the orphaned-seat bug class
+     * CLAUDE.md §5 already records (a socket that took a second seat while
+     * the first still believed it held one). Here it is unrepresentable.
+     *
+     * Everything downstream asks `playerIndex()`, which is null for a
+     * spectator — so every gameplay handler, every host-only guard and every
+     * seat-indexed write refuses a watching socket through a check that was
+     * already there rather than through a new one somebody has to remember.
+     * `match_sync` matters most: it can decide a match and trigger
+     * recordRoomMatch, and it is closed by that one rename.
+     */
+    let seat: Seat | null = null;
     let currentPlayerId: string = '';
+
+    /** The playing seat this socket holds — null for a spectator or nobody. */
+    const playerIndex = (): 0 | 1 | null => (seat?.role === 'player' ? seat.index : null);
 
     /**
      * Whether this socket may take a seat in a room.
@@ -1378,6 +1884,31 @@ async function startServer() {
      * refused. A socket with no cookie at all is the synthetic-id fallback
      * the load test and other tooling run on; it records nothing either way.
      */
+    /**
+     * Whether this socket's player may PLAY in a venue room.
+     *
+     * The menu draws these brackets, and the menu is the client — so the same
+     * predicate is asked here, exactly as DIFFICULTY_LOCKED is enforced behind
+     * /api/match/record rather than trusted to the picker. `roomEntryVerdict`
+     * lives in src/venues.ts and is imported by both, so they cannot drift.
+     *
+     * Deliberately NOT asked of a private table: an invite is an invite, and
+     * two friends in different brackets are exactly who the code flow exists
+     * for. A cookieless socket (the load test's path) is not judged either —
+     * it has no profile to judge.
+     */
+    const venueRefusal = (venueRoomId: string): string | null => {
+      if (!cookieDeviceId) return null;
+      const room = roomById(venueRoomId);
+      if (!room?.gate) return null;
+      const profile = db.getProfile(cookieDeviceId);
+      const verdict = roomEntryVerdict(room, profile);
+      if (verdict.ok) return null;
+      if (verdict.reason === 'level') return `This room needs level ${verdict.needLevel}.`;
+      if (verdict.reason === 'tier_low') return `This room needs ${verdict.needTier} or above.`;
+      return `This room is for ${verdict.maxTier} and below.`;
+    };
+
     const seatRefusal = (): string | null => {
       if (!cookieDeviceId) return null;
       return db.getProfile(cookieDeviceId).initialized
@@ -1389,7 +1920,17 @@ async function startServer() {
       try {
         const msg = JSON.parse(raw.toString());
 
-        if (msg.type === 'create_room' || msg.type === 'join_room') {
+        // An uninitialized profile takes no seat of ANY kind: a seat's display
+        // name is stamped at join time and never revisited, so a watcher would
+        // sit in the table state as Paddle-XXXX for the life of the room.
+        if (
+          msg.type === 'create_room' ||
+          msg.type === 'join_room' ||
+          msg.type === 'spectate_room' ||
+          msg.type === 'swap_seat' ||
+          // Queueing IS asking for a seat, just not yet at a named table.
+          msg.type === 'queue_join'
+        ) {
           const refusal = seatRefusal();
           if (refusal) {
             ws.send(JSON.stringify({ type: 'error', message: refusal }));
@@ -1398,12 +1939,21 @@ async function startServer() {
         }
 
         if (msg.type === 'create_room') {
+          const venueRoomId = normalizeVenueRoomId(msg.venueRoomId);
+          // Judged BEFORE the room is built and before vacateSeat runs: a
+          // refused create must not cost the player the seat they already
+          // hold, still less charge them an abandon for a match they are in.
+          const venueRefused = venueRefusal(venueRoomId);
+          if (venueRefused) {
+            ws.send(JSON.stringify({ type: 'error', message: venueRefused }));
+            return;
+          }
           let code = generateRoomCode();
           while (rooms.has(code)) {
             code = generateRoomCode();
           }
           // Taking a seat means giving up the one this socket already holds.
-          // The handlers below just overwrite currentRoomId/playerIndex, so
+          // The handlers below just overwrite currentRoomId and the seat, so
           // without this the old room keeps a PlayerSession whose socket has
           // moved on: when that socket eventually closes, vacateSeat only
           // reaches the newer room, and the older one is left with a seat no
@@ -1414,6 +1964,9 @@ async function startServer() {
           // checked: a room is always created, but a join can be refused, and
           // a refused join must not cost the seat the player already had —
           // still less charge them an abandon for a match they are still in.
+          // Taking a seat and holding a queue place are the same
+          // commitment, so taking one gives up the other.
+          leaveQueue(ws);
           vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
@@ -1446,7 +1999,7 @@ async function startServer() {
             syncRev: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],
-            config: normalizeRoomConfig(msg.config || DEFAULT_ROOM_CONFIG),
+            config: roomConfigFor(venueRoomId, msg.config || DEFAULT_ROOM_CONFIG),
             matchOver: false,
             inPlay: false,
             ready: [false, false],
@@ -1460,11 +2013,22 @@ async function startServer() {
             startRatings: null,
             startRatingsSeq: 0,
             relayCounted: false,
+            // Whitelisted, never free client text — the browser is keyed on
+            // this. An unnamed venue lands in the ungated default, which is
+            // what keeps the invite flow and old bundles working unchanged.
+            venueRoomId,
+            // PRIVATE unless the caller asks otherwise, for the same reason:
+            // a table created by anything that predates this is an
+            // invite-code table exactly as it always was.
+            visibility: msg.visibility === 'public' ? 'public' : 'private',
+            // Both watching seats start vacant. Whether they can be taken at
+            // all is config.spectators, a term of the match.
+            spectators: [null, null],
           };
 
           rooms.set(code, room);
           currentRoomId = code;
-          playerIndex = 0;
+          seat = { role: 'player', index: 0 };
 
           ws.send(
             JSON.stringify({
@@ -1474,6 +2038,7 @@ async function startServer() {
             })
           );
           ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+          broadcastTableState(room);
         } else if (msg.type === 'join_room') {
           const code = (msg.roomId || '').toUpperCase().trim();
           const room = rooms.get(code);
@@ -1484,11 +2049,16 @@ async function startServer() {
           }
 
           if (currentRoomId === code) {
-            // Already sitting in it. Refused rather than treated as a move,
-            // because the vacate below would empty this very room and delete
-            // it, and the seat would then be taken in an object no longer in
-            // the map — a room only its two sockets could reach.
-            ws.send(JSON.stringify({ type: 'error', message: 'You are already in this room.' }));
+            // Already at this table, in EITHER kind of seat. Refused rather
+            // than treated as a move, because the vacate below would empty
+            // this very room and delete it, and the seat would then be taken
+            // in an object no longer in the map — a room only its own sockets
+            // could reach. Moving between seats here is swap_seat's job, and
+            // it has guards of its own (the match lock above all) that a
+            // vacate-then-seat would walk straight past.
+            ws.send(
+              JSON.stringify({ type: 'error', message: 'You are already at this table — use a seat.' })
+            );
             return;
           }
 
@@ -1497,8 +2067,29 @@ async function startServer() {
             return;
           }
 
+          // A PUBLIC table is one this player browsed to, so the bracket that
+          // listed it applies to them as well as to its host. A PRIVATE table
+          // is an invitation, and an invitation is not bracketed: two friends
+          // in different brackets are exactly who the code flow exists for,
+          // and e2e-invite's guest is a brand-new level-1 player. Checked here
+          // rather than only at create, because the browser is polled and a
+          // table can be listed to somebody who then fails the gate.
+          //
+          // Above vacateSeat for the same reason as everything else here:
+          // nothing that can REFUSE may run after the old seat is given up.
+          if (room.visibility === 'public') {
+            const joinRefused = venueRefusal(room.venueRoomId);
+            if (joinRefused) {
+              ws.send(JSON.stringify({ type: 'error', message: joinRefused }));
+              return;
+            }
+          }
+
           // The destination is real and has room, so the old seat can go. See
           // the note in create_room: nothing above this line may fail.
+          // Taking a seat and holding a queue place are the same
+          // commitment, so taking one gives up the other.
+          leaveQueue(ws);
           vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
@@ -1519,7 +2110,7 @@ async function startServer() {
           // leaves, which is what a room going back to one player IS.
           room.soloSince = null;
           currentRoomId = code;
-          playerIndex = 1;
+          seat = { role: 'player', index: 1 };
 
           // Notify joining player
           ws.send(
@@ -1555,42 +2146,314 @@ async function startServer() {
           // Tell each phone how the matchup looks BEFORE the first serve.
           // Computed server-side so neither client ever sees the other's
           // hidden rating.
-          const seats = room.players;
-          if (seats[0] && seats[1]) {
-            const r0 = db.getProfile(seats[0].playerId);
-            const r1 = db.getProfile(seats[1].playerId);
-            const a: Rating = { mu: r0.mmrMu, sigma: r0.mmrSigma };
-            const b: Rating = { mu: r1.mmrMu, sigma: r1.mmrSigma };
-            const p0 = winProbability(a, b);
-            seats.forEach((p, idx) => {
-              if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(
-                  JSON.stringify({
-                    type: 'match_prediction',
-                    winProbability: idx === 0 ? p0 : 1 - p0,
-                  })
-                );
-              }
-            });
+          sendMatchPrediction(room);
+
+          // Anyone watching learns the second seat is filled the way the host
+          // does, and never through `opponent_left`-shaped news about people
+          // they were not playing.
+          broadcastTableState(room);
+
+        } else if (msg.type === 'spectate_room') {
+          const code = String(msg.roomId || '').toUpperCase();
+          const room = rooms.get(code);
+          if (!room) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Room not found.' }));
+            return;
+          }
+          if (!room.config.spectators) {
+            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            return;
           }
 
-        } else if (msg.type === 'paddle_move' && currentRoomId && playerIndex !== null) {
+          // A seat may be ASKED for, or left to the relay. Which of the two
+          // watching seats you are in is a detail a viewer does not care
+          // about — they care which side they are watching, and that is what
+          // swap_seat is for — so the browser names none and takes whichever
+          // is free. Naming one is still allowed: a swap names the side it wants.
+          //
+          // When one IS named it is strict enum membership, and deliberately
+          // NOT clampInt: that turns junk into `lo`, which in a seat namespace
+          // is seat 0 — the HOST seat. clampInt exists for bounded gameplay
+          // scalars, and for an enum it silently reinterprets garbage as a
+          // privileged request.
+          let slot: 0 | 1;
+          if (msg.seat === undefined || msg.seat === null) {
+            const free = room.spectators[0] === null ? 0 : room.spectators[1] === null ? 1 : null;
+            if (free === null) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Both seats are taken.' }));
+              return;
+            }
+            slot = free;
+          } else if (msg.seat === 2 || msg.seat === 3) {
+            slot = msg.seat === 2 ? 0 : 1;
+          } else {
+            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat you can watch from.' }));
+            return;
+          }
+
+          if (currentRoomId === code) {
+            // Already at this table. Refused rather than treated as a move for
+            // the same reason join_room refuses it: the vacate below would run
+            // against the very room being taken a seat in.
+            ws.send(JSON.stringify({ type: 'error', message: 'You are already at this table.' }));
+            return;
+          }
+          // Non-null, not non-live: a seat holding a socket that has died is
+          // occupied until its close handler clears it, and treating it as
+          // free orphans the session sitting in it.
+          if (room.spectators[slot] !== null) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            return;
+          }
+          // One account, one seat at a table. Without this an account
+          // displaced across two devices — which is a live state, not a
+          // hypothetical — could hold two of the four seats.
+          if (cookieDeviceId) {
+            const already =
+              room.players.some((p) => p?.deviceId === cookieDeviceId) ||
+              room.spectators.some((w) => w?.deviceId === cookieDeviceId);
+            if (already) {
+              ws.send(JSON.stringify({ type: 'error', message: 'You already have a seat at this table.' }));
+              return;
+            }
+          }
+
+          // Nothing above this line may fail. Same rule as create_room and
+          // join_room: a refused seat must never cost the one already held.
+          // Taking a seat and holding a queue place are the same
+          // commitment, so taking one gives up the other.
+          leaveQueue(ws);
+          vacateSeat();
+
+          currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
+          const watcherName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Spectator';
+          room.spectators[slot] = {
+            ws,
+            playerId: currentPlayerId,
+            playerName: watcherName,
+            // Derived from the slot taken, never read off the message: slot 0
+            // sits beside player 0.
+            side: slot,
+            deviceId: cookieDeviceId || null,
+            sessionId: cookieSessionId,
+          };
+          currentRoomId = code;
+          seat = { role: 'spectator', slot };
+
+          // Deliberately NOT touched: `soloSince`. Clearing it would exempt a
+          // one-player table from the only clock that can expire a busy one,
+          // so a host could park a table forever by having a friend sit down —
+          // which is the `pairedAt` leak that field was rewritten to close.
+          // `lastActive` is left alone for the same reason: watchers arriving
+          // and leaving must not hold a dead table past the idle clock.
+
+          ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+          broadcastTableState(room);
+          sendSpectatorSync(room, ws);
+          // The odds too, since a watcher missed the join that first sent them.
+          sendMatchPrediction(room);
+          // Belt and braces: rtc_signal is refused for a table with seats
+          // open, so this table should already be relayed — but a link that
+          // opened before the seats did would leave this watcher in front of
+          // a frozen court. Again endP2P, not takeOverFromP2P.
+          endP2P(room);
+
+        } else if (msg.type === 'queue_join') {
+          // A seat and a queue place are the same commitment, so nobody holds
+          // both: the relay would otherwise seat somebody who is already
+          // mid-duel, and the abandon would be charged to them for a match
+          // they never asked to leave.
+          if (currentRoomId && seat) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Leave your table before queueing.' }));
+            return;
+          }
+          if (!cookieDeviceId) {
+            // No profile means no rating to pair on and nothing to record
+            // onto. A cookieless socket can still play a private duel — that
+            // is the load test's path — but it cannot be matchmade.
+            ws.send(JSON.stringify({ type: 'error', message: 'Pick a username before queueing.' }));
+            return;
+          }
+          // Re-joining is not a reset: keeping the original joinedAt is what
+          // stops a client widening or narrowing its own band by rejoining.
+          const already = queue.find((e) => e.ws === ws);
+          const rttMs =
+            typeof msg.rttMs === 'number' && Number.isFinite(msg.rttMs) && msg.rttMs >= 0
+              ? Math.min(5000, Math.round(msg.rttMs))
+              : null;
+          if (already) {
+            already.rttMs = rttMs;
+          } else {
+            currentPlayerId = cookieDeviceId;
+            queue.push({
+              ws,
+              deviceId: cookieDeviceId,
+              sessionId: cookieSessionId,
+              playerId: cookieDeviceId,
+              playerName: db.getProfile(cookieDeviceId).username,
+              joinedAt: Date.now(),
+              rttMs,
+              // Minted here, inside this socket's own scope, because a seat is
+              // closure state and nothing outside this closure can write it.
+              take: (roomId, index) => {
+                currentRoomId = roomId;
+                seat = { role: 'player', index };
+              },
+            });
+          }
+          ws.send(JSON.stringify({ type: 'queue_state', status: 'searching' }));
+          // Answer immediately when there is already somebody waiting, rather
+          // than making the newcomer sit out a tick of the sweep.
+          sweepQueue(Date.now());
+        } else if (msg.type === 'queue_cancel') {
+          leaveQueue(ws);
+          ws.send(JSON.stringify({ type: 'queue_state', status: 'cancelled' }));
+        } else if (msg.type === 'swap_seat' && currentRoomId && seat) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+
+          // Strict enum membership again, and again NOT clampInt: `lo` here is
+          // seat 0, the host's.
+          const target = msg.seat;
+          if (target !== 0 && target !== 1 && target !== 2 && target !== 3) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat.' }));
+            return;
+          }
+          const here: TableSeat = seat.role === 'player' ? seat.index : spectatorSeat(seat.slot);
+          // Already there. Silently, with no broadcast and no re-seed: a
+          // repeated tap must not clear anybody's readiness or reset a run.
+          if (target === here) return;
+
+          const toPlayer = target === 0 || target === 1;
+          const targetIdx: 0 | 1 = (toPlayer ? target : target === 2 ? 0 : 1) as 0 | 1;
+
+          // Non-null, not non-live: a seat holding a socket that has died is
+          // occupied until its close handler clears it, and treating it as
+          // free would orphan the session sitting in it.
+          const occupied = toPlayer ? room.players[targetIdx] : room.spectators[targetIdx];
+          if (occupied !== null) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            return;
+          }
+          if (!toPlayer && !room.config.spectators) {
+            // Re-checked at claim time: the browser is polled, so a table
+            // listed as offering seats can be tapped after the host shut them.
+            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            return;
+          }
+
+          // The match lock, and it is deliberately STRICTER than
+          // set_room_config's `!inPlay || matchOver` — by exactly the
+          // countdown window, because `startRatings` is already sampled for
+          // this matchSeq by then and a swap would invalidate the pre-match
+          // pair both seats are rated against.
+          //
+          // A player may never become a spectator mid-match. The bookkeeping
+          // reason is the abandon path, but the real one is that "stand up,
+          // look at the hidden half, sit back down" is a two-second cheat in
+          // a game whose whole premise is the blind half-court. A watcher
+          // moving 2↔3 is exempt: it touches no playing seat.
+          const touchesPlayer = toPlayer || seat.role === 'player';
+          const midMatch = room.matchSeq > 0 && !room.matchOver;
+          if (touchesPlayer && midMatch) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Seats are locked until the match ends.' }));
+            return;
+          }
+
+          // A court cannot be emptied by standing up. `leave_room` is the only
+          // way out of a duel, and it is judged as an abandon.
+          if (seat.role === 'player' && !toPlayer) {
+            const other = room.players[seat.index === 0 ? 1 : 0];
+            if (!other) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Somebody has to be playing.' }));
+              return;
+            }
+          }
+
+          // Nothing below this line can fail, so nothing above it may move a
+          // seat. Node is single-threaded and nothing here awaits, so the
+          // occupancy checks above and these assignments are one step —
+          // carriedStreak is synchronous and must stay so.
+          const wasSide: 0 | 1 | null = seat.role === 'spectator' ? seat.slot : null;
+          if (seat.role === 'player') {
+            const leaving = seat.index;
+            room.players[leaving] = null;
+            room.ready[leaving] = false;
+            room.rematchVotes[leaving] = false;
+            // A run belongs to a player, not to a chair: startMatchStreaks
+            // opens bestStreaks ON streaks, so a value left behind becomes the
+            // next occupant's opening PEAK, and a peak is permanent.
+            //
+            // Deliberately NOT persistDuelStreaks. "A seat is emptying, write
+            // its run back" is a reasonable-looking instinct and is wrong
+            // here: nothing was ever taken from the store — the seat was
+            // SEEDED from it — so there is nothing to write back, and the
+            // player's own stored run is untouched and will seed them again.
+            clearSeatStreaks(room, leaving);
+          } else {
+            room.spectators[seat.slot] = null;
+          }
+
+          const who = {
+            ws,
+            playerId: currentPlayerId,
+            playerName: cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player',
+            deviceId: cookieDeviceId || null,
+            sessionId: cookieSessionId,
+          };
+          if (toPlayer) {
+            room.players[targetIdx] = { ...who, playerIndex: targetIdx };
+            room.streaks[targetIdx] = carriedStreak(cookieDeviceId);
+            room.bestStreaks[targetIdx] = room.streaks[targetIdx];
+            room.earnedStreaks[targetIdx] = 0;
+            room.earnedBests[targetIdx] = 0;
+          } else {
+            room.spectators[targetIdx] = { ...who, side: targetIdx };
+          }
+          seat = toPlayer
+            ? { role: 'player', index: targetIdx }
+            : { role: 'spectator', slot: targetIdx };
+
+          // A yes given against opponent A is not a yes against opponent B.
+          room.ready = [false, false];
+          room.rematchVotes = [false, false];
+          // The pre-match rating pair is about a pair of players; a different
+          // pair is a different sample.
+          room.startRatings = null;
+          room.startRatingsSeq = 0;
+          // The `??` is load-bearing: a lone host must not be able to restart
+          // the 30-minute unpaired TTL by swapping 0↔1 over and over.
+          room.soloSince = room.players[0] && room.players[1] ? null : (room.soloSince ?? Date.now());
+          // `lastActive` is deliberately NOT written — two watchers swapping
+          // back and forth would otherwise hold a dead table past the idle
+          // clock, and closing that by not writing the field beats closing it
+          // with a role check.
+
+          broadcast(room, { type: 'ready_state', ready: room.ready });
+          broadcast(room, { type: 'rematch_state', votes: room.rematchVotes });
+          broadcastTableState(room);
+          sendMatchPrediction(room);
+          // A watcher whose SIDE changed is looking at a different court, so
+          // it is re-seeded — including one who has just sat down to watch
+          // after playing.
+          if (seat.role === 'spectator' && seat.slot !== wasSide) sendSpectatorSync(room, ws);
+
+        } else if (msg.type === 'paddle_move' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            // Mirror coordinate for opponent perspective (1 - x)
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'opponent_paddle',
-                x: 1 - msg.x,
-              })
-            );
-          }
-        } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex !== null) {
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          // Mirrored for the far side of the net — the opponent and anyone
+          // watching over their shoulder get the identical bytes.
+          sendAll(viewersOf(room, oppIdx), { type: 'opponent_paddle', x: 1 - msg.x });
+          // RAW for the watcher on THIS side: they are drawing this player's
+          // own court in this player's own coordinates, so a mirror here would
+          // put the paddle on the wrong side of a screen nobody is mirroring.
+          const mine = watcherBeside(room, me);
+          if (mine) mine.send(JSON.stringify({ type: 'watched_paddle', x: msg.x }));
+        } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex() !== null) {
           // The sonar's ball feed: each phone streams its OWN half's ball at
           // ~15Hz so the other side's radar has something real to draw — a
           // duel has no local simulation of the opponent's court. Forwarded
@@ -1598,18 +2461,18 @@ async function startServer() {
           // the solo AI's half), clamped, and never stored: pure telemetry.
           const room = rooms.get(currentRoomId);
           if (!room) return;
-          const oppIdx = playerIndex === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'opponent_ball',
-                x: Math.max(0, Math.min(1, Number(msg.x) || 0)),
-                y: Math.max(0, Math.min(1, Number(msg.y) || 0)),
-              })
-            );
-          }
-        } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex !== null) {
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          const x = Math.max(0, Math.min(1, Number(msg.x) || 0));
+          const y = Math.max(0, Math.min(1, Number(msg.y) || 0));
+          sendAll(viewersOf(room, oppIdx), { type: 'opponent_ball', x, y });
+          // Again raw, and again the same sample: the watcher's own half IS
+          // this player's half. Deliberately not sent any faster than the
+          // ~20Hz the players already stream — raising it for a watched table
+          // would spend the players' bandwidth on somebody else's view.
+          const mine = watcherBeside(room, me);
+          if (mine) mine.send(JSON.stringify({ type: 'watched_ball', x, y }));
+        } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1618,7 +2481,7 @@ async function startServer() {
           // A ball over the net from this seat is that player's return — and
           // it belongs to their streak alone. The serve is not one, which is
           // the only thing crossingsThisPoint is consulted for.
-          countReturn(room, playerIndex);
+          countReturn(room, playerIndex());
           // The relay is counting this match now, so it owns where the run and
           // the point are — and both phones are told to come off P2P, because
           // this crossing reaches the other one as a ball_incoming that its
@@ -1636,19 +2499,18 @@ async function startServer() {
           // carries the revision already applied, which the `<=` check in
           // applyMatchSync rejects on its own.
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            const incomingBall = transformBallForOpponent(msg.ball);
-
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'ball_incoming',
-                ball: incomingBall,
-              })
-            );
-          }
-        } else if (msg.type === 'point_scored' && currentRoomId && playerIndex !== null) {
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          sendAll(viewersOf(room, oppIdx), {
+            type: 'ball_incoming',
+            ball: transformBallForOpponent(msg.ball),
+          });
+          // The ball has left this half. The watcher on this side has no
+          // physics to run it out with, so it is told outright rather than
+          // left drawing a ball that is no longer there.
+          const mine = watcherBeside(room, me);
+          if (mine) mine.send(JSON.stringify({ type: 'watched_ball_left' }));
+        } else if (msg.type === 'point_scored' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1687,7 +2549,7 @@ async function startServer() {
           // The score is out first — the DB write must never delay the point
           // both phones are waiting on — and the result follows it.
           if (decided) recordRoomMatch(room);
-        } else if (msg.type === 'match_sync' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'match_sync' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1704,60 +2566,66 @@ async function startServer() {
           const synced = applyMatchSync(room, msg);
           if (room.matchSeq !== seqBefore) duelStartRatings(room); // see the note there
           if (synced.decided) recordRoomMatch(room);
-        } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          const sender = room.players[playerIndex];
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          const sender = room.players[me];
           // Sender name from server-side session state only — a client
           // message can't impersonate another username.
-          const senderName = sender?.playerName || `Player ${playerIndex + 1}`;
+          const senderName = sender?.playerName || `Player ${me + 1}`;
 
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'quick_chat',
-                text: String(msg.text || '').slice(0, 100),
-                senderName,
-                senderIdx: playerIndex,
-              })
-            );
-          }
-        } else if (msg.type === 'rtc_signal' && currentRoomId && playerIndex !== null) {
+          // A bubble is a fact about the table, so everyone at it sees it —
+          // except the sender, who already drew their own.
+          sendAll([...viewersOf(room, oppIdx), watcherBeside(room, me)].filter(Boolean) as WebSocket[], {
+            type: 'quick_chat',
+            text: String(msg.text || '').slice(0, 100),
+            senderName,
+            senderIdx: me,
+          });
+        } else if (msg.type === 'rtc_signal' && currentRoomId && playerIndex() !== null) {
           // Pure pass-through: the server never inspects SDP or candidates,
           // it only ferries them between the two members of the room.
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex === 0 ? 1 : 0;
+          // A watched table is a RELAYED table, and this is the boundary that
+          // makes that true rather than hoped for. Peer-to-peer play never
+          // reaches the relay at all — paddles, balls and points all travel
+          // the DataChannel — so a watcher at a P2P table would sit in front
+          // of a frozen court. The client declines to offer a connection when
+          // seats are open, but a client is a hint; the relay is the ONLY
+          // signaling path, so refusing here is what a modified client cannot
+          // get past. Silent: the offer simply never arrives, which is the
+          // case p2p.ts already falls back from.
+          if (room.config.spectators) return;
+
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             opponent.ws.send(
-              JSON.stringify({
-                type: 'rtc_signal',
-                payload: msg.payload,
-                fromIdx: playerIndex,
-              })
+              JSON.stringify({ type: 'rtc_signal', payload: msg.payload, fromIdx: me })
             );
           }
-        } else if (msg.type === 'player_ready' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'player_ready' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
-          room.ready[playerIndex] = !!msg.ready;
+          room.ready[playerIndex()] = !!msg.ready;
           broadcast(room, { type: 'ready_state', ready: room.ready });
-        } else if (msg.type === 'start_match' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'start_match' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
           // Host-only, both seated, the guest has readied, and nothing has
           // been played yet — rematches go through the two-vote handshake.
           const canStart =
-            playerIndex === 0 &&
+            playerIndex() === 0 &&
             !!room.players[0] &&
             !!room.players[1] &&
             room.ready[1] &&
@@ -1765,7 +2633,7 @@ async function startServer() {
             !room.matchOver;
           if (!canStart) return;
           startMatch(room, 0);
-        } else if (msg.type === 'set_room_config' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'set_room_config' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
@@ -1773,25 +2641,41 @@ async function startServer() {
           // the guest cannot edit them, and neither side can change the ball
           // out from under a rally. Before the first serve and after the last
           // point, the settings are open.
+          // A queue table's terms are fixed and disclosed BEFORE anybody
+          // joins the queue, which is the whole reason skipping the ready
+          // handshake is sound there. Refusing here keeps that premise true by
+          // construction rather than by everyone remembering it.
           const between = !room.inPlay || room.matchOver;
-          if (playerIndex !== 0 || !between) {
+          if (room.venueRoomId === MATCHMAKING_ROOM || playerIndex() !== 0 || !between) {
             ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
             return;
           }
-          room.config = normalizeRoomConfig(msg.config);
+          const watchedBefore = room.config.spectators;
+          room.config = roomConfigFor(room.venueRoomId, msg.config);
           broadcast(room, { type: 'room_config', config: room.config });
+          // Closing the seats closes them on whoever is in them. The host owns
+          // the terms, and "no spectators" is not a term that can be true while
+          // two people are watching.
+          if (watchedBefore && !room.config.spectators) ejectSpectators(room, 'spectator seats closed');
+          // And OPENING them ends any peer-to-peer link, since a P2P match
+          // never reaches the relay and so cannot be watched. Deliberately
+          // endP2P and not takeOverFromP2P: the relay has counted nothing
+          // here, and claiming it had would make applyMatchSync discard the
+          // peers' true streaks and peaks — which are maxima, so permanent.
+          if (!watchedBefore && room.config.spectators) endP2P(room);
+          broadcastTableState(room);
           // The guest readied under the OLD terms; new terms need a new yes.
           if (room.ready[1]) {
             room.ready = [false, false];
             broadcast(room, { type: 'ready_state', ready: room.ready });
           }
-        } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex !== null) {
+        } else if (msg.type === 'rematch_request' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
           // A vote only means anything once the room agrees the match is done.
           if (!room.matchOver) return;
-          room.rematchVotes[playerIndex] = true;
+          room.rematchVotes[playerIndex()] = true;
 
           if (room.rematchVotes[0] && room.rematchVotes[1] && room.players[0] && room.players[1]) {
             // Both agreed: fresh match, the other side opens this time.
@@ -1825,14 +2709,40 @@ async function startServer() {
      * get a better outcome than one whose phone died.
      */
     const vacateSeat = (): void => {
-      if (!currentRoomId || playerIndex === null) return;
+      if (!currentRoomId || !seat) return;
       const room = rooms.get(currentRoomId);
       if (!room) return;
+
+      // A WATCHING seat leaves before any of the below is even computed, and
+      // the early return is the point rather than an optimisation.
+      //
+      // `abandoned` is bothSeated && inPlay && !matchOver && currentPlayerId,
+      // and every one of those four is true of a spectator closing a tab
+      // mid-rally. Folded in as another `&&` this would call recordRoomMatch
+      // with a watcher's SLOT standing in for a seat index: a real ranked
+      // LOSS written to a player who did nothing, plus an abandon charged to
+      // the watcher's own device. persistDuelStreaks does not save you from
+      // it either — its own guard is `!inPlay || matchOver`, so mid-rally it
+      // runs and writes both players' runs from a non-event.
+      //
+      // Nothing else here applies to a watcher: `ready` and `rematchVotes`
+      // are indexed by PLAYING seat, `opponent_left` is false (the players
+      // lost nobody), `soloSince` must not move (see below), and the table
+      // does not die because somebody stopped watching it.
+      if (seat.role === 'spectator') {
+        if (room.spectators[seat.slot]?.ws === ws) room.spectators[seat.slot] = null;
+        currentRoomId = null;
+        seat = null;
+        broadcastTableState(room);
+        return;
+      }
+
+      const mine = seat.index;
       // Guard against running twice: `leave_room` is followed by the client
       // closing its socket, so the close handler arrives moments later. The
       // seat is already empty by then, and re-running would count a second
       // abandon for one departure.
-      if (!room.players[playerIndex]) return;
+      if (!room.players[mine]) return;
 
       // A socket dying with a live, undecided ball is an abandon — the
       // opponent was denied a match they were in the middle of. Judged
@@ -1866,7 +2776,7 @@ async function startServer() {
           // record no match), and the shared matchKey keeps any racing client
           // POST a no-op.
           recordRoomMatch(room, {
-            winnerSeat: playerIndex === 0 ? 1 : 0,
+            winnerSeat: mine === 0 ? 1 : 0,
             forgivenLoss: verdict?.forgiven ?? false,
           });
           room.matchOver = true;
@@ -1880,23 +2790,28 @@ async function startServer() {
         // moment to keep them. Internally guarded to the live-match case.
         persistDuelStreaks(room);
       }
-      room.players[playerIndex] = null;
-      room.rematchVotes[playerIndex] = false;
-      room.ready[playerIndex] = false;
-      const oppIdx = playerIndex === 0 ? 1 : 0;
+      room.players[mine] = null;
+      room.rematchVotes[mine] = false;
+      room.ready[mine] = false;
+      const oppIdx = mine === 0 ? 1 : 0;
       const opp = room.players[oppIdx];
       if (opp?.ws && opp.ws.readyState === WebSocket.OPEN) {
         opp.ws.send(JSON.stringify({ type: 'opponent_left' }));
       }
       if (!room.players[0] && !room.players[1]) {
         rooms.delete(currentRoomId);
+        // The table is gone, so nobody is watching it. A watcher left attached
+        // to a room no longer in the map would sit on a court whose every
+        // message the relay silently drops.
+        ejectSpectators(room, 'table closed');
       } else {
         // One player left in it. That is a room with nobody to play against,
         // however busy the survivor keeps it, so the clock starts again.
         room.soloSince = Date.now();
+        broadcastTableState(room);
       }
       currentRoomId = null;
-      playerIndex = null;
+      seat = null;
     };
 
     ws.on('close', () => vacateSeat());

@@ -17,6 +17,7 @@ import {
   unrankedReasons,
   isRankedMatch,
   normalizeRules,
+  DEFAULT_ROOM_CONFIG,
   normalizeRoomConfig,
   RANKED_AUTO_SERVE_SECONDS,
 } from '../src/matchRules';
@@ -157,6 +158,29 @@ describe('match rules', () => {
     });
     expect(isRankedRules(sonarRoom.rules)).toBe(false);
     expect(sonarRoom.rules.autoServeSeconds).toBe(0);
+  });
+
+  it('takes the spectator flag as a term of the match, not as a rule', () => {
+    // Off unless asked for, and only the word yes counts as asking: a
+    // create_room from an old bundle or the invite flow says nothing here.
+    expect(normalizeRoomConfig({ winningScore: 5 }).spectators).toBe(false);
+    expect(DEFAULT_ROOM_CONFIG.spectators).toBe(false);
+    for (const junk of [1, 'true', {}, null, undefined]) {
+      const got = normalizeRoomConfig({ winningScore: 5, spectators: junk as never });
+      expect({ junk, spectators: got.spectators }).toEqual({ junk, spectators: false });
+    }
+    expect(normalizeRoomConfig({ winningScore: 5, spectators: true }).spectators).toBe(true);
+  });
+
+  it('does not let watching seats unrank a match', () => {
+    // The flag lives on the CONFIG, not in MatchRules, deliberately: rules
+    // feed isRankedRules and unrankedReasons, so a seat-availability flag put
+    // there would appear in the "what unranks this match" list as though it
+    // were physics. Whether a rated match may be watched at all is answered
+    // by the venue instead — the top three brackets have no spectator seats.
+    const watched = normalizeRoomConfig({ winningScore: 5, spectators: true });
+    expect(isRankedRules(watched.rules)).toBe(true);
+    expect(unrankedReasons({ rules: watched.rules, mode: 'multiplayer' })).toEqual([]);
   });
 
   it('keeps every ranked band a real window that contains stock', () => {

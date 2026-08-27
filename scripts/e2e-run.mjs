@@ -28,6 +28,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // find a Chromium it will never launch is a install step for nothing.
 const SUITES = [
   { name: 'profiles', ownsServer: false },
+  { name: 'venues', ownsServer: false },
   { name: 'gameplay', ownsServer: false },
   { name: 'rating', ownsServer: false },
   { name: 'rules', ownsServer: false },
@@ -36,6 +37,8 @@ const SUITES = [
   { name: 'duel', ownsServer: false },
   { name: 'invite', ownsServer: false },
   { name: 'lobby', ownsServer: false },
+  { name: 'spectate', ownsServer: false },
+  { name: 'queue', ownsServer: false },
   { name: 'split', ownsServer: false },
   { name: 'streak', ownsServer: false },
   { name: 'history', ownsServer: false },

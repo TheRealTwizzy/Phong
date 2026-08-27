@@ -101,7 +101,8 @@ console.log('A match banks its streak where it belongs, and carries it onward');
   }
   ok('a run survives the match it was built in, and a reload');
 
-  await carrier.click('#menu-mode-solo');
+  await carrier.click('#building-solo');
+  await carrier.click('#room-rookie');
   await carrier.waitForSelector('#menu-start-solo', { timeout: 8000 });
   await carrier.click('#menu-start-solo');
   await carrier.waitForSelector('#half-court-canvas', { timeout: 8000 });
@@ -192,8 +193,17 @@ console.log('A match banks its streak where it belongs, and carries it onward');
     }).then((r) => r.json())
   );
   await carrier.click('#btn-quit-to-menu');
+  // Quitting a solo match a point has been scored in is an abandon, and it
+  // asks first. Whether this scripted match has a point on the board depends
+  // on how many balls the AI got back, so walk the confirmation through when
+  // it appears rather than assuming either way.
+  await carrier
+    .waitForSelector('#quit-confirm-modal', { timeout: 2000 })
+    .then(() => carrier.click('#btn-quit-confirm'))
+    .catch(() => {});
   await carrier.waitForSelector('#main-menu-screen', { timeout: 8000 });
-  await carrier.click('#menu-mode-solo');
+  await carrier.click('#building-solo');
+  await carrier.click('#room-rookie');
   await carrier.waitForSelector('#menu-start-solo', { timeout: 8000 });
   await carrier.click('#menu-start-solo');
   await carrier.waitForSelector('#half-court-canvas', { timeout: 8000 });
@@ -214,8 +224,17 @@ console.log('A match banks its streak where it belongs, and carries it onward');
 
   // Modes keep their own runs: solo does not seed practice.
   await carrier.click('#btn-quit-to-menu');
+  // Quitting a solo match a point has been scored in is an abandon, and it
+  // asks first. Whether this scripted match has a point on the board depends
+  // on how many balls the AI got back, so walk the confirmation through when
+  // it appears rather than assuming either way.
+  await carrier
+    .waitForSelector('#quit-confirm-modal', { timeout: 2000 })
+    .then(() => carrier.click('#btn-quit-confirm'))
+    .catch(() => {});
   await carrier.waitForSelector('#main-menu-screen', { timeout: 8000 });
-  await carrier.click('#menu-mode-practice');
+  await carrier.click('#building-training');
+  await carrier.click('#room-practice');
   await carrier.waitForSelector('#menu-start-practice', { timeout: 8000 });
   await carrier.click('#menu-start-practice');
   await carrier.waitForSelector('#half-court-canvas', { timeout: 8000 });
@@ -229,7 +248,8 @@ console.log('A match banks its streak where it belongs, and carries it onward');
 
 const page = await newPlayer('Stk');
 
-await page.click('#menu-mode-solo');
+await page.click('#building-solo');
+await page.click('#room-rookie');
 await page.waitForSelector('#menu-start-solo', { timeout: 8000 });
 await page.click('#menu-start-solo');
 await page.waitForSelector('#half-court-canvas', { timeout: 8000 });

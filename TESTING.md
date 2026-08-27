@@ -36,7 +36,7 @@ coverage number.
 
 | Suite | Owns |
 |---|---|
-| `rating` `xp` `achievements` | TrueSkill, tiers, XP curve, the achievement tree and the unlocks it gates |
+| `rating` `xp` `achievements` | TrueSkill, tiers, the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `matchHistory` | History reads: one row per player per match, the `ranked` column, mode/ranked filters, paging, per-player retention |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
@@ -48,13 +48,19 @@ coverage number.
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
+| `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
+| `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
+| `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
+| `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
+| `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
-| `db-wipe` `taskReset` `placementRescue` | The one-shot migrations |
+| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` | The one-shot migrations |
 
 ### Browser layer
 
-`profiles` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` · `build-id`
+`profiles` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
+`lobby` · `spectate` · `queue` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` ·
+`build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -259,8 +265,83 @@ the suite for a reason that is not the rule), and the fix was to move the rule s
 could be stated — `src/game/streaks.ts` — rather than to loosen the assertion until it
 passed. `scripts/e2e-streak.mjs` keeps only what a browser can say without luck.
 
+**A test bound on a SAMPLED value is set from the sample, not from the rule.** The AI rolls
+its reads per rally, so every return rate is a draw. `tests/spin.test.ts` carried a `< 0.9`
+bound chosen when the competence clamp was 0.66; raising it to 0.78 moved the population up
+against that bound, and the suite passed locally and failed on CI reading `expected 0.9 to be
+less than 0.9`. Two things came out of that. `tests/physics.test.ts` now measures each rung
+ONCE at the larger sample and shares the result across every rule that reads it — cheaper than
+re-sampling per assertion, and more coherent, since the rules then talk about one measurement
+rather than independent draws that can disagree. And the two suites deliberately carry
+DIFFERENT bounds: `spin` drives an easier geometry (one shallow entry angle, where `physics`
+samples a fast bucket and a sharply angled one), so the same AI returns more balls there —
+0.873-0.968 against 0.880-0.906 at the same mu. The binding ceiling rule lives beside the
+harder sample; the easier one only catches a literal wall. Copying a bound between them would
+be reading one distribution's number off another's.
+
+**A private table must never appear in the listing.** `GET /api/rooms/:venue/tables` is an
+unauthenticated read of live room state, so `visibility` is not a display preference — it is
+the whole boundary protecting today's invite-code tables, whose 4-letter codes would otherwise
+be harvestable by anyone who can call the endpoint. `tests/tableBrowser.test.ts` asserts the
+absence across every venue, and was verified the way TESTING.md §6 asks: by deleting the
+filter and watching it go red.
+
+**The queue's band is a promise AND an expiry, and both halves need pinning.**
+`tests/matchmaking.test.ts` holds the promise — a coin flip for 30 seconds, the brief's own
+40-60 for the minute after — and the fact that it eventually gives, because a symmetric
+`winProbability` means a strict band leaves a lone queuer in a queue nobody ever leaves. The
+one test that matters most is the pair: the same two candidates are REFUSED early and PAIRED
+late, which is the whole trade in one assertion. Two more guard the shape rather than the
+numbers: the band only ever widens as the wait grows (a band that narrowed would strand
+somebody who had already waited), and it never inverts. `findPair` judges on the more-waited
+of the two on purpose — judging on the newcomer's own tight band would let a fresh arrival
+veto the very pairing the wait was widening toward — and `tests/queue.test.ts` proves the rest
+on a real relay: two sockets ask for a game and reach one court with no ready tap and no start
+button, on terms `set_room_config` then refuses to change. That refusal is not a nicety: it is
+what makes skipping the handshake sound, since queueing is the consent and consent given to
+fixed terms does not need re-asking.
+
+**A watcher must never move a player's record, and a symmetric fixture cannot tell.**
+`tests/spectators.test.ts` holds three rules that are each one line away from a real loss on
+somebody's profile. First, the fan-out's frames: `watched_paddle`/`watched_ball` are RAW,
+because the watcher is drawing that player's own court in that player's own coordinates, while
+`opponent_paddle` is pre-mirrored — and a paddle at 0.5 passes either way, so every position in
+that suite is asymmetric (0.17, 0.31, 0.22/0.71). Second, `vacateSeat`'s spectator branch is an
+early return placed BEFORE the abandon computation: `bothSeated && inPlay && !matchOver &&
+currentPlayerId` is true of a watcher closing a tab mid-rally, so folded in as another `&&` it
+writes a real ranked LOSS to a player who did nothing. Third, every gameplay message is refused
+by `playerIndex() !== null` — a guard that was already there — and `match_sync` is the one that
+matters, since it can decide a match outright. The second and third were verified the way §6
+asks: by breaking the guard (folding the branch in; letting `playerIndex()` return a watching
+slot) and watching the suite go red.
+
+**A bracket the menu draws is a bracket the server enforces.** The menu is the client, so
+`roomEntryVerdict` in `src/venues.ts` is written once and asked by both — the same reasoning
+that put `DIFFICULTY_LOCKED` behind `/api/match/record` rather than trusting the picker.
+`tests/venues.test.ts` pins the shape of that predicate, including the two cases a bracket
+gets wrong on its own: a ceiling as well as a floor (a Legend must not drop into the
+new-player room), and an UNPLACED player — who is below every floor and must not *also* be
+refused by a ceiling, or they would have nowhere to play. It also asserts the property that
+matters more than any individual bound: over every tier and a spread of levels, **some** PvP
+room is always open. A ladder with a hole in it is unrecoverable.
+
+**Solo must never be the cheap way up.** Two rules hold it, and both are pinned rather than
+remembered. The per-rung `SOLO_MU_CAPS` are DATA, each sitting under a tier floor, because the
+`anchor + AI_ADAPT_BAND` formula they replaced collapses at five rungs — it hands Elite, Cyber
+and Chaos one identical ceiling, so farming the Master-tier rung would reach Legend as fast as
+farming the hardest thing in the game; `tests/rating.test.ts` pins every value and the
+below-the-next-floor property. And solo XP carries momentum and fatigue, so a win streak is
+what pays rather than volume; `tests/xp.test.ts` pins the shape (ramp, diminishing increments,
+the constant cap, a loss on a long run paying more than an early one, harder-always-pays-more)
+and `tests/db.test.ts` pins the plumbing — the streak read BEFORE the match's own bump, and the
+day tally riding recordMatch's transaction and its idempotency.
+
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
-its suite in the same commit.
+its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test
+pinning `competenceForMu` bit-for-bit at and above the old Cyber anchor, written when the floor
+was raised on the explicit condition that the ceiling did not move. Raising the ceiling IS this
+change, so the test was not updated but removed, and the hard bound it protected (`no
+difficulty may ever return ≥88%`) restated at the new ceiling as `≥93%`.
 
 ## 6. Writing a new test here
 
