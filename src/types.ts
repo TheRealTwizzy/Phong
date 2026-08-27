@@ -667,7 +667,8 @@ export type WSClientMessage =
   | { type: 'join_room'; roomId: string; playerId: string }
   | { type: 'create_room'; playerId: string; config?: RoomMatchConfig; venueRoomId?: string; visibility?: 'public' | 'private' }
   | { type: 'set_room_config'; config: RoomMatchConfig }
-  | { type: 'spectate_room'; roomId: string; seat: number }
+  | { type: 'spectate_room'; roomId: string; seat?: number }
+  | { type: 'swap_seat'; seat: number }
   | { type: 'player_ready'; ready: boolean }
   | { type: 'start_match' }
   | { type: 'paddle_move'; x: number }
@@ -719,6 +720,14 @@ export type WSServerMessage =
   | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean }
   // Where the match already stands, for a watcher who has just sat down.
   | { type: 'spectator_sync'; snapshot: SpectatorSnapshot }
+  // The three frames only a WATCHER receives, all about the court of the
+  // player they are sitting beside — which that player never needs, because
+  // they are simulating it. RAW, in that player's own coordinates: no mirror
+  // and no transform, unlike opponent_paddle/opponent_ball/ball_incoming,
+  // which a watcher receives byte-identically to the player beside them.
+  | { type: 'watched_paddle'; x: number }
+  | { type: 'watched_ball'; x: number; y: number }
+  | { type: 'watched_ball_left' }
   // The relay refused this socket because the account is not held by this
   // session any more (transferred to another device, displaced by a newer
   // load, or minted under a previous deployment). Sent immediately before the

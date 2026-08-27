@@ -26,6 +26,7 @@ import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import {
   applyMatchSync,
+  clearSeatStreaks,
   clampInt,
   generateRoomCode,
   performanceWeight,
@@ -103,6 +104,70 @@ function broadcast(room: Room, payload: unknown): void {
   for (const w of room.spectators) {
     if (w?.ws && w.ws.readyState === WebSocket.OPEN) w.ws.send(json);
   }
+}
+
+/**
+ * Everyone who sees seat `side`'s court from seat `side`'s point of view: the
+ * player sitting there, plus whoever is watching over their shoulder.
+ *
+ * The whole client design in one function. A spectator on side S receives the
+ * byte-identical copy of everything player S receives — pre-mirrored opponent
+ * paddle, sender-frame opponent ball, transformed ball_incoming — so App.tsx's
+ * existing handlers need no spectating branch at all. The only NEW frames are
+ * the ones about S's own court, which player S does not need because they are
+ * simulating it.
+ */
+function viewersOf(room: Room, side: 0 | 1): WebSocket[] {
+  const out: WebSocket[] = [];
+  const player = room.players[side];
+  if (player?.ws && player.ws.readyState === WebSocket.OPEN) out.push(player.ws);
+  const watcher = room.spectators[side];
+  if (watcher?.ws && watcher.ws.readyState === WebSocket.OPEN) out.push(watcher.ws);
+  return out;
+}
+
+/**
+ * The socket watching seat `side`'s own court, or null.
+ *
+ * What goes here is RAW — no mirror, no transform — because the watcher draws
+ * that player's court in that player's own coordinates. A stray `1 - x` here
+ * is the likeliest bug in the whole feature and is invisible against a
+ * symmetric fixture: a paddle at 0.5 looks right either way, which is why
+ * every test of it uses an asymmetric position.
+ */
+function watcherBeside(room: Room, side: 0 | 1): WebSocket | null {
+  const watcher = room.spectators[side];
+  if (!watcher?.ws || watcher.ws.readyState !== WebSocket.OPEN) return null;
+  return watcher.ws;
+}
+
+/**
+ * How the matchup looks, from each side's own point of view.
+ *
+ * Per-side rather than broadcast, and computed server-side, so neither client
+ * ever sees the other's hidden rating — only its own odds. A watcher gets the
+ * number belonging to the player they are sitting beside, which is the same
+ * rule as everything else in the fan-out.
+ */
+function sendMatchPrediction(room: Room): void {
+  const [a, b] = room.players;
+  if (!a || !b) return;
+  const r0 = db.getProfile(a.playerId);
+  const r1 = db.getProfile(b.playerId);
+  const p0 = winProbability({ mu: r0.mmrMu, sigma: r0.mmrSigma }, { mu: r1.mmrMu, sigma: r1.mmrSigma });
+  for (const side of [0, 1] as const) {
+    sendAll(viewersOf(room, side), {
+      type: 'match_prediction',
+      winProbability: side === 0 ? p0 : 1 - p0,
+    });
+  }
+}
+
+/** One serialization, however many recipients — as `broadcast` already does. */
+function sendAll(sockets: WebSocket[], payload: unknown): void {
+  if (sockets.length === 0) return;
+  const json = JSON.stringify(payload);
+  for (const socket of sockets) socket.send(json);
 }
 
 /** The wire seat a watching slot is addressed by: 0/1 play, 2/3 watch. */
@@ -470,6 +535,22 @@ function duelStartRatings(room: Room): Array<SeatRating | null> {
 function takeOverFromP2P(room: Room): void {
   if (room.relayCounted) return;
   room.relayCounted = true;
+  endP2P(room);
+}
+
+/**
+ * Ask both phones to come off their DataChannel, WITHOUT claiming the relay
+ * has counted anything.
+ *
+ * Split out of takeOverFromP2P because the two callers want different halves.
+ * A fallback wants both: the relay has counted an event, so it owns the match.
+ * A watcher sitting down at a table that is already peer-to-peer wants only
+ * the message — the relay has counted nothing, and setting `relayCounted`
+ * would make applyMatchSync discard the peers' true streaks and peaks (which
+ * are permanent, being maxima) to protect against a divergence that has not
+ * happened.
+ */
+function endP2P(room: Room): void {
   broadcast(room, { type: 'p2p_fallback' });
 }
 
@@ -1627,7 +1708,12 @@ async function startServer() {
         // An uninitialized profile takes no seat of ANY kind: a seat's display
         // name is stamped at join time and never revisited, so a watcher would
         // sit in the table state as Paddle-XXXX for the life of the room.
-        if (msg.type === 'create_room' || msg.type === 'join_room' || msg.type === 'spectate_room') {
+        if (
+          msg.type === 'create_room' ||
+          msg.type === 'join_room' ||
+          msg.type === 'spectate_room' ||
+          msg.type === 'swap_seat'
+        ) {
           const refusal = seatRefusal();
           if (refusal) {
             ws.send(JSON.stringify({ type: 'error', message: refusal }));
@@ -1743,11 +1829,16 @@ async function startServer() {
           }
 
           if (currentRoomId === code) {
-            // Already sitting in it. Refused rather than treated as a move,
-            // because the vacate below would empty this very room and delete
-            // it, and the seat would then be taken in an object no longer in
-            // the map — a room only its two sockets could reach.
-            ws.send(JSON.stringify({ type: 'error', message: 'You are already in this room.' }));
+            // Already at this table, in EITHER kind of seat. Refused rather
+            // than treated as a move, because the vacate below would empty
+            // this very room and delete it, and the seat would then be taken
+            // in an object no longer in the map — a room only its own sockets
+            // could reach. Moving between seats here is swap_seat's job, and
+            // it has guards of its own (the match lock above all) that a
+            // vacate-then-seat would walk straight past.
+            ws.send(
+              JSON.stringify({ type: 'error', message: 'You are already at this table — use a seat.' })
+            );
             return;
           }
 
@@ -1832,24 +1923,7 @@ async function startServer() {
           // Tell each phone how the matchup looks BEFORE the first serve.
           // Computed server-side so neither client ever sees the other's
           // hidden rating.
-          const seats = room.players;
-          if (seats[0] && seats[1]) {
-            const r0 = db.getProfile(seats[0].playerId);
-            const r1 = db.getProfile(seats[1].playerId);
-            const a: Rating = { mu: r0.mmrMu, sigma: r0.mmrSigma };
-            const b: Rating = { mu: r1.mmrMu, sigma: r1.mmrSigma };
-            const p0 = winProbability(a, b);
-            seats.forEach((p, idx) => {
-              if (p?.ws && p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(
-                  JSON.stringify({
-                    type: 'match_prediction',
-                    winProbability: idx === 0 ? p0 : 1 - p0,
-                  })
-                );
-              }
-            });
-          }
+          sendMatchPrediction(room);
 
           // Anyone watching learns the second seat is filled the way the host
           // does, and never through `opponent_left`-shaped news about people
@@ -1868,16 +1942,31 @@ async function startServer() {
             return;
           }
 
-          // Strict enum membership, and deliberately NOT clampInt: that turns
-          // junk into `lo`, which in a seat namespace is seat 0 — the HOST
-          // seat. It exists for bounded gameplay scalars, and for an enum it
-          // silently reinterprets garbage as a privileged request.
-          const wanted = msg.seat;
-          if (wanted !== 2 && wanted !== 3) {
+          // A seat may be ASKED for, or left to the relay. Which of the two
+          // watching seats you are in is a detail a viewer does not care
+          // about — they care which side they are watching, and that is what
+          // swap_seat is for — so the browser names none and takes whichever
+          // is free. Naming one is still allowed: a swap names the side it wants.
+          //
+          // When one IS named it is strict enum membership, and deliberately
+          // NOT clampInt: that turns junk into `lo`, which in a seat namespace
+          // is seat 0 — the HOST seat. clampInt exists for bounded gameplay
+          // scalars, and for an enum it silently reinterprets garbage as a
+          // privileged request.
+          let slot: 0 | 1;
+          if (msg.seat === undefined || msg.seat === null) {
+            const free = room.spectators[0] === null ? 0 : room.spectators[1] === null ? 1 : null;
+            if (free === null) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Both seats are taken.' }));
+              return;
+            }
+            slot = free;
+          } else if (msg.seat === 2 || msg.seat === 3) {
+            slot = msg.seat === 2 ? 0 : 1;
+          } else {
             ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat you can watch from.' }));
             return;
           }
-          const slot: 0 | 1 = wanted === 2 ? 0 : 1;
 
           if (currentRoomId === code) {
             // Already at this table. Refused rather than treated as a move for
@@ -1935,23 +2024,159 @@ async function startServer() {
           ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
           broadcastTableState(room);
           sendSpectatorSync(room, ws);
+          // The odds too, since a watcher missed the join that first sent them.
+          sendMatchPrediction(room);
+          // Belt and braces: rtc_signal is refused for a table with seats
+          // open, so this table should already be relayed — but a link that
+          // opened before the seats did would leave this watcher in front of
+          // a frozen court. Again endP2P, not takeOverFromP2P.
+          endP2P(room);
+
+        } else if (msg.type === 'swap_seat' && currentRoomId && seat) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+
+          // Strict enum membership again, and again NOT clampInt: `lo` here is
+          // seat 0, the host's.
+          const target = msg.seat;
+          if (target !== 0 && target !== 1 && target !== 2 && target !== 3) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat.' }));
+            return;
+          }
+          const here: TableSeat = seat.role === 'player' ? seat.index : spectatorSeat(seat.slot);
+          // Already there. Silently, with no broadcast and no re-seed: a
+          // repeated tap must not clear anybody's readiness or reset a run.
+          if (target === here) return;
+
+          const toPlayer = target === 0 || target === 1;
+          const targetIdx: 0 | 1 = (toPlayer ? target : target === 2 ? 0 : 1) as 0 | 1;
+
+          // Non-null, not non-live: a seat holding a socket that has died is
+          // occupied until its close handler clears it, and treating it as
+          // free would orphan the session sitting in it.
+          const occupied = toPlayer ? room.players[targetIdx] : room.spectators[targetIdx];
+          if (occupied !== null) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            return;
+          }
+          if (!toPlayer && !room.config.spectators) {
+            // Re-checked at claim time: the browser is polled, so a table
+            // listed as offering seats can be tapped after the host shut them.
+            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            return;
+          }
+
+          // The match lock, and it is deliberately STRICTER than
+          // set_room_config's `!inPlay || matchOver` — by exactly the
+          // countdown window, because `startRatings` is already sampled for
+          // this matchSeq by then and a swap would invalidate the pre-match
+          // pair both seats are rated against.
+          //
+          // A player may never become a spectator mid-match. The bookkeeping
+          // reason is the abandon path, but the real one is that "stand up,
+          // look at the hidden half, sit back down" is a two-second cheat in
+          // a game whose whole premise is the blind half-court. A watcher
+          // moving 2↔3 is exempt: it touches no playing seat.
+          const touchesPlayer = toPlayer || seat.role === 'player';
+          const midMatch = room.matchSeq > 0 && !room.matchOver;
+          if (touchesPlayer && midMatch) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Seats are locked until the match ends.' }));
+            return;
+          }
+
+          // A court cannot be emptied by standing up. `leave_room` is the only
+          // way out of a duel, and it is judged as an abandon.
+          if (seat.role === 'player' && !toPlayer) {
+            const other = room.players[seat.index === 0 ? 1 : 0];
+            if (!other) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Somebody has to be playing.' }));
+              return;
+            }
+          }
+
+          // Nothing below this line can fail, so nothing above it may move a
+          // seat. Node is single-threaded and nothing here awaits, so the
+          // occupancy checks above and these assignments are one step —
+          // carriedStreak is synchronous and must stay so.
+          const wasSide: 0 | 1 | null = seat.role === 'spectator' ? seat.slot : null;
+          if (seat.role === 'player') {
+            const leaving = seat.index;
+            room.players[leaving] = null;
+            room.ready[leaving] = false;
+            room.rematchVotes[leaving] = false;
+            // A run belongs to a player, not to a chair: startMatchStreaks
+            // opens bestStreaks ON streaks, so a value left behind becomes the
+            // next occupant's opening PEAK, and a peak is permanent.
+            //
+            // Deliberately NOT persistDuelStreaks. "A seat is emptying, write
+            // its run back" is a reasonable-looking instinct and is wrong
+            // here: nothing was ever taken from the store — the seat was
+            // SEEDED from it — so there is nothing to write back, and the
+            // player's own stored run is untouched and will seed them again.
+            clearSeatStreaks(room, leaving);
+          } else {
+            room.spectators[seat.slot] = null;
+          }
+
+          const who = {
+            ws,
+            playerId: currentPlayerId,
+            playerName: cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player',
+            deviceId: cookieDeviceId || null,
+            sessionId: cookieSessionId,
+          };
+          if (toPlayer) {
+            room.players[targetIdx] = { ...who, playerIndex: targetIdx };
+            room.streaks[targetIdx] = carriedStreak(cookieDeviceId);
+            room.bestStreaks[targetIdx] = room.streaks[targetIdx];
+            room.earnedStreaks[targetIdx] = 0;
+            room.earnedBests[targetIdx] = 0;
+          } else {
+            room.spectators[targetIdx] = { ...who, side: targetIdx };
+          }
+          seat = toPlayer
+            ? { role: 'player', index: targetIdx }
+            : { role: 'spectator', slot: targetIdx };
+
+          // A yes given against opponent A is not a yes against opponent B.
+          room.ready = [false, false];
+          room.rematchVotes = [false, false];
+          // The pre-match rating pair is about a pair of players; a different
+          // pair is a different sample.
+          room.startRatings = null;
+          room.startRatingsSeq = 0;
+          // The `??` is load-bearing: a lone host must not be able to restart
+          // the 30-minute unpaired TTL by swapping 0↔1 over and over.
+          room.soloSince = room.players[0] && room.players[1] ? null : (room.soloSince ?? Date.now());
+          // `lastActive` is deliberately NOT written — two watchers swapping
+          // back and forth would otherwise hold a dead table past the idle
+          // clock, and closing that by not writing the field beats closing it
+          // with a role check.
+
+          broadcast(room, { type: 'ready_state', ready: room.ready });
+          broadcast(room, { type: 'rematch_state', votes: room.rematchVotes });
+          broadcastTableState(room);
+          sendMatchPrediction(room);
+          // A watcher whose SIDE changed is looking at a different court, so
+          // it is re-seeded — including one who has just sat down to watch
+          // after playing.
+          if (seat.role === 'spectator' && seat.slot !== wasSide) sendSpectatorSync(room, ws);
 
         } else if (msg.type === 'paddle_move' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex() === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            // Mirror coordinate for opponent perspective (1 - x)
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'opponent_paddle',
-                x: 1 - msg.x,
-              })
-            );
-          }
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          // Mirrored for the far side of the net — the opponent and anyone
+          // watching over their shoulder get the identical bytes.
+          sendAll(viewersOf(room, oppIdx), { type: 'opponent_paddle', x: 1 - msg.x });
+          // RAW for the watcher on THIS side: they are drawing this player's
+          // own court in this player's own coordinates, so a mirror here would
+          // put the paddle on the wrong side of a screen nobody is mirroring.
+          const mine = watcherBeside(room, me);
+          if (mine) mine.send(JSON.stringify({ type: 'watched_paddle', x: msg.x }));
         } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex() !== null) {
           // The sonar's ball feed: each phone streams its OWN half's ball at
           // ~15Hz so the other side's radar has something real to draw — a
@@ -1960,17 +2185,17 @@ async function startServer() {
           // the solo AI's half), clamped, and never stored: pure telemetry.
           const room = rooms.get(currentRoomId);
           if (!room) return;
-          const oppIdx = playerIndex() === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'opponent_ball',
-                x: Math.max(0, Math.min(1, Number(msg.x) || 0)),
-                y: Math.max(0, Math.min(1, Number(msg.y) || 0)),
-              })
-            );
-          }
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          const x = Math.max(0, Math.min(1, Number(msg.x) || 0));
+          const y = Math.max(0, Math.min(1, Number(msg.y) || 0));
+          sendAll(viewersOf(room, oppIdx), { type: 'opponent_ball', x, y });
+          // Again raw, and again the same sample: the watcher's own half IS
+          // this player's half. Deliberately not sent any faster than the
+          // ~20Hz the players already stream — raising it for a watched table
+          // would spend the players' bandwidth on somebody else's view.
+          const mine = watcherBeside(room, me);
+          if (mine) mine.send(JSON.stringify({ type: 'watched_ball', x, y }));
         } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -1998,18 +2223,17 @@ async function startServer() {
           // carries the revision already applied, which the `<=` check in
           // applyMatchSync rejects on its own.
 
-          const oppIdx = playerIndex() === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            const incomingBall = transformBallForOpponent(msg.ball);
-
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'ball_incoming',
-                ball: incomingBall,
-              })
-            );
-          }
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          sendAll(viewersOf(room, oppIdx), {
+            type: 'ball_incoming',
+            ball: transformBallForOpponent(msg.ball),
+          });
+          // The ball has left this half. The watcher on this side has no
+          // physics to run it out with, so it is told outright rather than
+          // left drawing a ball that is no longer there.
+          const mine = watcherBeside(room, me);
+          if (mine) mine.send(JSON.stringify({ type: 'watched_ball_left' }));
         } else if (msg.type === 'point_scored' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -2071,23 +2295,21 @@ async function startServer() {
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex() === 0 ? 1 : 0;
-          const opponent = room.players[oppIdx];
-          const sender = room.players[playerIndex()];
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
+          const sender = room.players[me];
           // Sender name from server-side session state only — a client
           // message can't impersonate another username.
-          const senderName = sender?.playerName || `Player ${playerIndex() + 1}`;
+          const senderName = sender?.playerName || `Player ${me + 1}`;
 
-          if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
-            opponent.ws.send(
-              JSON.stringify({
-                type: 'quick_chat',
-                text: String(msg.text || '').slice(0, 100),
-                senderName,
-                senderIdx: playerIndex(),
-              })
-            );
-          }
+          // A bubble is a fact about the table, so everyone at it sees it —
+          // except the sender, who already drew their own.
+          sendAll([...viewersOf(room, oppIdx), watcherBeside(room, me)].filter(Boolean) as WebSocket[], {
+            type: 'quick_chat',
+            text: String(msg.text || '').slice(0, 100),
+            senderName,
+            senderIdx: me,
+          });
         } else if (msg.type === 'rtc_signal' && currentRoomId && playerIndex() !== null) {
           // Pure pass-through: the server never inspects SDP or candidates,
           // it only ferries them between the two members of the room.
@@ -2095,15 +2317,23 @@ async function startServer() {
           if (!room) return;
           room.lastActive = Date.now();
 
-          const oppIdx = playerIndex() === 0 ? 1 : 0;
+          // A watched table is a RELAYED table, and this is the boundary that
+          // makes that true rather than hoped for. Peer-to-peer play never
+          // reaches the relay at all — paddles, balls and points all travel
+          // the DataChannel — so a watcher at a P2P table would sit in front
+          // of a frozen court. The client declines to offer a connection when
+          // seats are open, but a client is a hint; the relay is the ONLY
+          // signaling path, so refusing here is what a modified client cannot
+          // get past. Silent: the offer simply never arrives, which is the
+          // case p2p.ts already falls back from.
+          if (room.config.spectators) return;
+
+          const me = playerIndex() as 0 | 1;
+          const oppIdx = me === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
             opponent.ws.send(
-              JSON.stringify({
-                type: 'rtc_signal',
-                payload: msg.payload,
-                fromIdx: playerIndex(),
-              })
+              JSON.stringify({ type: 'rtc_signal', payload: msg.payload, fromIdx: me })
             );
           }
         } else if (msg.type === 'player_ready' && currentRoomId && playerIndex() !== null) {
@@ -2147,6 +2377,12 @@ async function startServer() {
           // the terms, and "no spectators" is not a term that can be true while
           // two people are watching.
           if (watchedBefore && !room.config.spectators) ejectSpectators(room, 'spectator seats closed');
+          // And OPENING them ends any peer-to-peer link, since a P2P match
+          // never reaches the relay and so cannot be watched. Deliberately
+          // endP2P and not takeOverFromP2P: the relay has counted nothing
+          // here, and claiming it had would make applyMatchSync discard the
+          // peers' true streaks and peaks — which are maxima, so permanent.
+          if (!watchedBefore && room.config.spectators) endP2P(room);
           broadcastTableState(room);
           // The guest readied under the OLD terms; new terms need a new yes.
           if (room.ready[1]) {

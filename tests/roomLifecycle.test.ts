@@ -178,7 +178,9 @@ describe('a socket that takes a second seat', () => {
   it('refuses a join to the room it is already sitting in', async () => {
     // Not a move: the vacate would empty this very room and delete it, and
     // the seat would then be taken in an object no longer in the map — a room
-    // reachable only by the sockets already holding it.
+    // reachable only by the sockets already holding it. Moving between seats
+    // at a table is swap_seat's job, and it carries guards — the match lock
+    // above all — that a vacate-then-seat would walk straight past.
     const a = await relay.newDevice('RoomLifeG');
     const pa = await relay.openPhone(a);
 
@@ -187,7 +189,7 @@ describe('a socket that takes a second seat', () => {
 
     pa.clear();
     pa.send({ type: 'join_room', roomId: mine, playerId: a.id });
-    expect((await pa.await('error')).message).toMatch(/already in this room/i);
+    expect((await pa.await('error')).message).toMatch(/already at this table/i);
     await sleep(200);
     expect(await roomStatus(mine)).toBe(200);
     expect(await activeRooms()).toBe(1);

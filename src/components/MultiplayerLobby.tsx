@@ -3,10 +3,11 @@ import { ThemeConfig } from '../game/themes';
 import { isLinkableId } from '../profileRules';
 import { t } from '../i18n/translations';
 import { Button, Panel, QrBlock, Sheet, SegmentedControl, UnlockHintSheet } from './ui';
-import { Achievement, LanguageCode, MatchRules, RoomMatchConfig } from '../types';
+import { Achievement, LanguageCode, MatchRules, RoomMatchConfig, TableSeat, TableSeatInfo } from '../types';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { DEFAULT_ROOM_CONFIG, WINNING_SCORES, normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
+import { DEFAULT_VENUE_ROOM, roomAllowsSpectators } from '../venues';
 import {
   Copy,
   Check,
@@ -18,6 +19,7 @@ import {
   Play,
   User,
   RefreshCw,
+  Eye,
 } from 'lucide-react';
 
 interface MultiplayerLobbyProps {
@@ -66,6 +68,12 @@ interface MultiplayerLobbyProps {
   onRefreshTables?: () => void;
   /** Create a table others can find, rather than one shared by code. */
   onCreatePublicTable?: () => void;
+  /** Take a watching seat at a table rather than a playing one. */
+  onWatchTable?: (roomId: string) => void;
+  /** Who is sitting where at the table this player is at, or null. */
+  tableState?: { seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean } | null;
+  /** Move to another seat at this table. Refused server-side once a match is on. */
+  onSwapSeat?: (seat: TableSeat) => void;
 }
 
 /** One row of the table browser, as GET /api/rooms/:venue/tables returns it. */
@@ -77,6 +85,9 @@ export interface TableSummary {
   isFull: boolean;
   inPlay: boolean;
   waitingMs: number | null;
+  /** Whether this table opens its two watching seats at all. */
+  spectatorsEnabled?: boolean;
+  spectatorCount?: number;
 }
 
 export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
@@ -108,6 +119,9 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   tablesLoading = false,
   onRefreshTables,
   onCreatePublicTable,
+  onWatchTable,
+  tableState = null,
+  onSwapSeat,
 }) => {
   const playerName = currentUsername || 'Player';
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
@@ -412,6 +426,55 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
               </span>
             )}
 
+            {/* Who is sitting where, and the way to move.
+                A free seat is a tap target and an occupied one is not: a swap
+                is only ever a MOVE to an empty chair, never an exchange with
+                somebody who did not ask. The relay refuses everything else —
+                a seat taken, a table with no watching seats, and above all any
+                move touching a playing seat once the match is on, because
+                "stand up, look at the hidden half, sit back down" is a
+                two-second cheat in a game whose whole premise is the blind
+                half-court. */}
+            {tableState && onSwapSeat && (
+              <div id="lobby-seats" className="flex flex-col gap-1.5">
+                <span className="text-kicker text-ink-dim uppercase">{t('lobby_seats', language)}</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {tableState.seats.map((info) => {
+                    const mine = tableState.yourSeat === info.seat;
+                    const free = info.playerId === null;
+                    const watchSeat = info.seat >= 2;
+                    return (
+                      <button
+                        key={info.seat}
+                        id={`seat-${info.seat}`}
+                        data-mine={mine ? 'true' : 'false'}
+                        data-free={free ? 'true' : 'false'}
+                        disabled={!info.enabled || !free || mine}
+                        onClick={() => onSwapSeat(info.seat)}
+                        className={`flex min-w-0 flex-col items-start rounded-card border px-2 py-1.5 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
+                          mine
+                            ? 'border-accent/50 bg-accent/12'
+                            : info.enabled && free
+                              ? 'border-line bg-surface-2'
+                              : 'border-line bg-surface-1 opacity-60'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1 text-2xs font-normal tracking-normal text-ink-dim uppercase">
+                          {watchSeat ? <Eye className="h-3 w-3" /> : <User className="h-3 w-3" />}
+                          {watchSeat ? t('watch_table', language) : `P${info.seat + 1}`}
+                        </span>
+                        <span className="w-full truncate text-2xs text-ink">
+                          {!info.enabled
+                            ? '—'
+                            : info.playerName || t('lobby_seat_free', language)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* The room's terms. Set here, by the host, while the other phone
                 is still on its way — and readable by the guest, so nobody
                 walks into a match whose rules they have not seen. */}
@@ -455,6 +518,31 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                   }))}
                 />
               </div>
+
+              {/* Whether anybody may watch. A term of the match beside the
+                  winning score rather than a MatchRule, so it never appears in
+                  the "what unranks this match" list — and offered only where
+                  the VENUE allows it, since the top three brackets have no
+                  watching seats at all and a toggle there would look live and
+                  do nothing. */}
+              {roomAllowsSpectators(venueRoomId || DEFAULT_VENUE_ROOM) && (
+                <label
+                  id="toggle-spectators"
+                  data-readonly={isHost ? 'false' : 'true'}
+                  className={`flex items-center justify-between gap-2 text-2xs font-normal tracking-normal text-ink-muted select-none ${
+                    isHost ? 'cursor-pointer' : 'opacity-60'
+                  }`}
+                >
+                  <span>{t('lobby_spectators', language)}</span>
+                  <input
+                    type="checkbox"
+                    checked={config.spectators}
+                    disabled={!isHost}
+                    onChange={(e) => onUpdateRoomConfig?.({ spectators: e.target.checked })}
+                    className="h-4 w-4 accent-accent"
+                  />
+                </label>
+              )}
 
               <MatchRulesPanel
                 rules={config.rules}
@@ -504,7 +592,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 ) : (
                   <ul id="lobby-tables" className="flex flex-col gap-1.5">
                     {tables.map((table) => (
-                      <li key={table.id}>
+                      <li key={table.id} className="flex items-stretch gap-1.5">
                         <button
                           id={`table-${table.id}`}
                           data-full={table.isFull ? 'true' : 'false'}
@@ -528,6 +616,31 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                             {table.playerCount}/2
                           </span>
                         </button>
+                        {/* A separate control, not a mode of the row: joining
+                            and watching are different intents, and a full
+                            table is still worth watching — which is exactly
+                            when the row itself is disabled. */}
+                        {onWatchTable && table.spectatorsEnabled && (
+                          <button
+                            id={`table-${table.id}-watch`}
+                            data-full={(table.spectatorCount ?? 0) >= 2 ? 'true' : 'false'}
+                            disabled={(table.spectatorCount ?? 0) >= 2}
+                            title={
+                              (table.spectatorCount ?? 0) >= 2
+                                ? t('seat_watch_full', language)
+                                : t('watch_table', language)
+                            }
+                            onClick={() => onWatchTable(table.id)}
+                            className={`flex shrink-0 items-center gap-1 rounded-card border border-line px-2.5 text-2xs transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
+                              (table.spectatorCount ?? 0) >= 2
+                                ? 'bg-surface-1 text-ink-dim opacity-60'
+                                : 'bg-surface-2 text-ink-muted'
+                            }`}
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            {t('watch_table', language)}
+                          </button>
+                        )}
                       </li>
                     ))}
                   </ul>

@@ -50,13 +50,14 @@ coverage number.
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
+| `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` | The one-shot migrations |
 
 ### Browser layer
 
 `profiles` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` · `build-id`
+`lobby` · `spectate` · `split` · `streak` · `history` · `tutorial` · `delete` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -281,6 +282,20 @@ the whole boundary protecting today's invite-code tables, whose 4-letter codes w
 be harvestable by anyone who can call the endpoint. `tests/tableBrowser.test.ts` asserts the
 absence across every venue, and was verified the way TESTING.md §6 asks: by deleting the
 filter and watching it go red.
+
+**A watcher must never move a player's record, and a symmetric fixture cannot tell.**
+`tests/spectators.test.ts` holds three rules that are each one line away from a real loss on
+somebody's profile. First, the fan-out's frames: `watched_paddle`/`watched_ball` are RAW,
+because the watcher is drawing that player's own court in that player's own coordinates, while
+`opponent_paddle` is pre-mirrored — and a paddle at 0.5 passes either way, so every position in
+that suite is asymmetric (0.17, 0.31, 0.22/0.71). Second, `vacateSeat`'s spectator branch is an
+early return placed BEFORE the abandon computation: `bothSeated && inPlay && !matchOver &&
+currentPlayerId` is true of a watcher closing a tab mid-rally, so folded in as another `&&` it
+writes a real ranked LOSS to a player who did nothing. Third, every gameplay message is refused
+by `playerIndex() !== null` — a guard that was already there — and `match_sync` is the one that
+matters, since it can decide a match outright. The second and third were verified the way §6
+asks: by breaking the guard (folding the branch in; letting `playerIndex()` return a watching
+slot) and watching the suite go red.
 
 **A bracket the menu draws is a bracket the server enforces.** The menu is the client, so
 `roomEntryVerdict` in `src/venues.ts` is written once and asked by both — the same reasoning
