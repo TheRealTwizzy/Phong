@@ -44,6 +44,7 @@ import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/ma
 import {
   DEFAULT_VENUE_ROOM,
   normalizeVenueRoomId,
+  roomAllowsSpectators,
   roomById,
   roomEntryVerdict,
   roomsOf,
@@ -199,6 +200,26 @@ function persistDuelStreaks(room: Room): void {
       console.error('duel streak record failed:', e);
     }
   }
+}
+
+/**
+ * The terms of a match, narrowed by the venue the table sits in.
+ *
+ * Whether a table may be WATCHED is the venue's answer, not the host's: the
+ * top three PvP brackets have no spectator seats, because a spectator sees
+ * the hidden half live with the sonar forced on and can simply describe it
+ * over a voice call — the sonar rule (CLAUDE.md §12) with a second person
+ * attached. Drawing that line by ROOM is what keeps every other match rating
+ * exactly as it always did: no per-match flag, no forceUnranked, no new
+ * unrankedReasons case.
+ *
+ * One function for both the create and the edit path, so a host cannot open
+ * seats a bracket forbids by asking twice.
+ */
+function roomConfigFor(venueRoomId: string, raw: Partial<RoomMatchConfig> | null | undefined): RoomMatchConfig {
+  const config = normalizeRoomConfig(raw);
+  if (!roomAllowsSpectators(venueRoomId)) config.spectators = false;
+  return config;
 }
 
 /**
@@ -1536,7 +1557,7 @@ async function startServer() {
             syncRev: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],
-            config: normalizeRoomConfig(msg.config || DEFAULT_ROOM_CONFIG),
+            config: roomConfigFor(venueRoomId, msg.config || DEFAULT_ROOM_CONFIG),
             matchOver: false,
             inPlay: false,
             ready: [false, false],
@@ -1897,7 +1918,7 @@ async function startServer() {
             ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
             return;
           }
-          room.config = normalizeRoomConfig(msg.config);
+          room.config = roomConfigFor(room.venueRoomId, msg.config);
           broadcast(room, { type: 'room_config', config: room.config });
           // The guest readied under the OLD terms; new terms need a new yes.
           if (room.ready[1]) {

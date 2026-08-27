@@ -399,11 +399,13 @@ export default function App() {
     // the player has tuned their own would demonstrate a serve at their serve
     // power, a paddle at their paddle size — and, if they have turned the
     // sonar off, a radar step pointing at an element that is not rendered.
+    // `spectators: false` in both non-duel arms: a watching seat is a seat at
+    // a relay TABLE, and a solo, practice or split match has no room to sit in.
     tourStage === 'match'
-      ? { winningScore: TOUR_WINNING_SCORE, rules: DEFAULT_MATCH_RULES }
+      ? { winningScore: TOUR_WINNING_SCORE, rules: DEFAULT_MATCH_RULES, spectators: false }
       : mode === 'multiplayer' && roomConfig
         ? roomConfig
-        : { winningScore: settings.winningScore, rules: settings.rules };
+        : { winningScore: settings.winningScore, rules: settings.rules, spectators: false };
   /** Who the AI is playing as — see activeConfig for why the tour overrides. */
   const activeDifficulty: AIDifficulty = tourStage === 'match' ? TOUR_DIFFICULTY : settings.difficulty;
 

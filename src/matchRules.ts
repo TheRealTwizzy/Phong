@@ -197,6 +197,9 @@ export const MATCH_START_COUNTDOWN_SECONDS = 3;
 export const DEFAULT_ROOM_CONFIG: RoomMatchConfig = {
   winningScore: DEFAULT_WINNING_SCORE,
   rules: DEFAULT_MATCH_RULES,
+  // Off by default: a table nobody asked to be watched is not watched, and
+  // a create_room from an old bundle or the invite flow says nothing here.
+  spectators: false,
 };
 
 /**
@@ -221,6 +224,10 @@ export function normalizeRoomConfig(
   return {
     winningScore: normalizeWinningScore(raw.winningScore),
     rules,
+    // Strict `=== true`, so anything a client sends that is not the word yes
+    // is no. The relay narrows it further: a venue that forbids watching
+    // forces this false whatever the host asked for.
+    spectators: raw.spectators === true,
   };
 }
 

@@ -599,6 +599,21 @@ export interface RTCSignalPayload {
 export interface RoomMatchConfig {
   winningScore: number;
   rules: MatchRules;
+  /**
+   * Whether this table opens its two watching seats.
+   *
+   * A term of the match beside the winning score, and deliberately NOT a
+   * MatchRule: MatchRules feed isRankedRules and unrankedReasons, so a
+   * seat-availability flag put there would show up in the "what unranks this
+   * match" list as though it were physics. It is not — whether a rated match
+   * may be watched at all is answered by the VENUE (src/venues.ts), which is
+   * why the top three brackets simply have no spectator seats and everything
+   * below them rates exactly as it always did.
+   *
+   * Being a config field means it rides room_config and game_start for free
+   * and is already locked during play by set_room_config's own guard.
+   */
+  spectators: boolean;
 }
 
 // WebSocket Messages
