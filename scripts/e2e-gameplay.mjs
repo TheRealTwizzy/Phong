@@ -170,6 +170,10 @@ const guest = await newPage();
   console.log('room code:', code);
   await guestJoin(guest, code);
 
+  // The link comes up on `opponent_joined`, but the badge that REPORTS it
+  // lives in the in-match HUD — and holding a seat no longer puts anybody on a
+  // court, so there is no HUD to read until the match starts. Start it first.
+  await startDuel(host, guest);
   const hostP2P = await waitBadge(host, 'P2P', 12000);
   const guestP2P = await waitBadge(guest, 'P2P', 12000);
   if (!hostP2P || !guestP2P) fail(`P2P link did not establish (host=${hostP2P} guest=${guestP2P})`);
@@ -185,7 +189,6 @@ const guest = await newPage();
 // point 2;
 // the pre-fix freeze bug times out here).
 {
-  await startDuel(host, guest);
   await host.waitForSelector('#half-court-canvas');
   await guest.waitForSelector('#half-court-canvas');
 
@@ -233,6 +236,10 @@ const guest = await newPage();
   const g2 = await newPage();
   const code = await hostCreateRoom(h2, { p2p: false });
   await guestJoin(g2, code);
+  // Again the badge is in-match furniture, so the match has to exist. The
+  // toggle was set before the room was created either way, which is the thing
+  // being tested — this only gives the badge somewhere to be read from.
+  await startDuel(h2, g2);
   await h2.waitForTimeout(2500);
   const txt = await h2.$eval('#link-status-badge', (el) => el.textContent.trim());
   // Strict equality, not startsWith. The badge used to append the ping to its
