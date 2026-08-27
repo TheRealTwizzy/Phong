@@ -89,13 +89,12 @@ await host.click('#building-pvp');
 await host.click('#room-casual');
 await host.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host.click('#btn-create-room');
-await host.waitForSelector('#btn-copy-link', { timeout: 8000 });
+await host.waitForSelector('#lobby-table', { timeout: 8000 });
 const code = await host.evaluate(() => {
   // Read the code from its own element rather than regexing the panel's
   // text for an English label — that coupled the suite to copy that is now
   // translated, and to the label sitting immediately before the code.
-  const el = document.querySelector('#lobby-room-code');
-  const t = (el?.textContent || '').trim();
+  const t = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
   return /^[A-Z0-9]{4}$/.test(t) ? t : null;
 });
 if (!code) fail('host never got a room code');
@@ -188,8 +187,8 @@ await host2.click('#building-pvp');
 await host2.click('#room-casual');
 await host2.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host2.click('#btn-create-room');
-await host2.waitForSelector('#btn-copy-link', { timeout: 8000 });
-const code2 = await host2.evaluate(() => document.querySelector('#lobby-room-code')?.textContent?.trim() || null);
+await host2.waitForSelector('#lobby-table', { timeout: 8000 });
+const code2 = await host2.evaluate(() => document.querySelector('#lobby-table')?.getAttribute('data-room-id') || null);
 if (!code2) fail('the second host never got a room code');
 ok(`${host2Name} opened room ${code2}`);
 

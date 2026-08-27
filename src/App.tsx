@@ -327,6 +327,9 @@ export default function App() {
     seats: TableSeatInfo[];
     yourSeat: TableSeat | null;
     spectatorsEnabled: boolean;
+    /** Whether this table is locked, and the key that opens it if it is. */
+    isPrivate: boolean;
+    joinKey: string | null;
   } | null>(null);
   // The room's terms, as the server last broadcast them. Null until a room
   // exists. In a duel this — never the local menu — decides how long the match
@@ -1639,6 +1642,8 @@ export default function App() {
           seats: msg.seats,
           yourSeat: msg.yourSeat,
           spectatorsEnabled: msg.spectatorsEnabled,
+          isPrivate: msg.isPrivate,
+          joinKey: msg.joinKey,
         });
         const watchingSeat = msg.yourSeat !== null && msg.yourSeat >= 2;
         if (watchingSeat) {
@@ -3688,6 +3693,14 @@ export default function App() {
           onWatchTable={handleWatchTable}
           tableState={tableState}
           onSwapSeat={handleSwapSeat}
+          isPrivate={!!tableState?.isPrivate}
+          joinKey={tableState?.joinKey ?? null}
+          // Turning the lock ON always mints a FRESH key, so a key already
+          // shared stops working — which is the whole point of a lock you can
+          // re-set. The relay does the minting; this only asks.
+          onSetPrivate={(isPrivate) =>
+            sendWhenOpen(ws, () => ({ type: 'set_table_visibility', private: isPrivate }))
+          }
         />
 
         {/* Player Profile & Stats Modal */}

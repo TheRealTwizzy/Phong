@@ -205,6 +205,49 @@ function sendAll(sockets: WebSocket[], payload: unknown): void {
   for (const socket of sockets) socket.send(json);
 }
 
+/**
+ * A fresh key for a table being locked, unique against every live table's id
+ * AND every other live key.
+ *
+ * Both namespaces, because a code typed into the join box is resolved against
+ * both: a key that collided with a room id would open a table its holder was
+ * never given.
+ */
+function mintJoinKey(): string {
+  for (let i = 0; i < 200; i++) {
+    const key = generateRoomCode();
+    if (rooms.has(key)) continue;
+    let taken = false;
+    for (const room of rooms.values()) {
+      if (room.joinKey === key) { taken = true; break; }
+    }
+    if (!taken) return key;
+  }
+  // 32^4 codes against a single-instance room map: unreachable in practice,
+  // and a null key is refused rather than silently opening the table.
+  return '';
+}
+
+/**
+ * The table a typed code addresses, or null.
+ *
+ * A PUBLIC table answers to its id — that is what the browser hands out. A
+ * PRIVATE one answers ONLY to its current key: its id is still how the relay
+ * indexes it and is still visible on `GET /api/room/:id`, so letting the id
+ * open the door would make the key decorative.
+ */
+function roomForCode(code: string): Room | null {
+  const direct = rooms.get(code);
+  if (direct && direct.visibility !== 'private') return direct;
+  for (const room of rooms.values()) {
+    if (room.joinKey && room.joinKey === code) return room;
+  }
+  // An unlisted table that never had a key set — an old bundle, the invite
+  // flow, the harness — is still reachable by its id, exactly as before.
+  if (direct && direct.joinKey === null) return direct;
+  return null;
+}
+
 /** The wire seat a watching slot is addressed by: 0/1 play, 2/3 watch. */
 const spectatorSeat = (slot: 0 | 1): TableSeat => (slot === 0 ? 2 : 3);
 
@@ -226,7 +269,19 @@ function broadcastTableState(room: Room): void {
   ];
   const send = (ws: WebSocket | undefined, yourSeat: TableSeat | null): void => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'table_state', roomId: room.id, seats, yourSeat, spectatorsEnabled: room.config.spectators }));
+    ws.send(
+      JSON.stringify({
+        type: 'table_state',
+        roomId: room.id,
+        seats,
+        yourSeat,
+        spectatorsEnabled: room.config.spectators,
+        isPrivate: room.visibility === 'private',
+        // Only ever sent to sockets already AT this table, which is the whole
+        // point of a key: you get it by being let in, or by being told it.
+        joinKey: room.joinKey,
+      })
+    );
   };
   room.players.forEach((p, i) => send(p?.ws, i as TableSeat));
   room.spectators.forEach((w, i) => send(w?.ws, spectatorSeat(i as 0 | 1)));
@@ -374,6 +429,9 @@ function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
     startRatingsSeq: 0,
     relayCounted: false,
     venueRoomId: MATCHMAKING_ROOM,
+    // A queue table is never shared, never browsed and never locked: the relay
+    // seats both players itself, so there is nobody to hand a key to.
+    joinKey: null,
     // Never listed and never watched: a queue table is not a place, it is a
     // pairing. `listable: false` on the room def already keeps it out of the
     // browser; this keeps it out of the seats.
@@ -2011,6 +2069,10 @@ async function startServer() {
             // a table created by anything that predates this is an
             // invite-code table exactly as it always was.
             visibility: msg.visibility === 'public' ? 'public' : 'private',
+            // Locked tables get their key when the host turns the lock on;
+            // an unlisted one created without ever touching that toggle (an
+            // old bundle, the harness) is addressed by its id as it always was.
+            joinKey: null,
             // Both watching seats start vacant. Whether they can be taken at
             // all is config.spectators, a term of the match.
             spectators: [null, null],
@@ -2031,14 +2093,16 @@ async function startServer() {
           broadcastTableState(room);
         } else if (msg.type === 'join_room') {
           const code = (msg.roomId || '').toUpperCase().trim();
-          const room = rooms.get(code);
+          // A public table answers to its id; a locked one answers only to its
+          // current key. See roomForCode.
+          const room = roomForCode(code);
 
           if (!room) {
             ws.send(JSON.stringify({ type: 'error', message: 'Room not found. Check the 4-letter code.' }));
             return;
           }
 
-          if (currentRoomId === code) {
+          if (currentRoomId === room.id) {
             // Already at this table, in EITHER kind of seat. Refused rather
             // than treated as a move, because the vacate below would empty
             // this very room and delete it, and the seat would then be taken
@@ -2099,14 +2163,14 @@ async function startServer() {
           // Two players: the solo clock stops. It restarts if either of them
           // leaves, which is what a room going back to one player IS.
           room.soloSince = null;
-          currentRoomId = code;
+          currentRoomId = room.id;
           seat = { role: 'player', index: 1 };
 
           // Notify joining player
           ws.send(
             JSON.stringify({
               type: 'room_joined',
-              roomId: code,
+              roomId: room.id,
               playerIndex: 1,
               opponentName: room.players[0]?.playerName || 'Player 1',
               opponentId: room.players[0]?.playerId || 'p1',
@@ -2145,7 +2209,9 @@ async function startServer() {
 
         } else if (msg.type === 'spectate_room') {
           const code = String(msg.roomId || '').toUpperCase();
-          const room = rooms.get(code);
+          // Same lock as join_room: a locked table is not watchable by its id
+          // either, or the key would be a door with a window beside it.
+          const room = roomForCode(code);
           if (!room) {
             ws.send(JSON.stringify({ type: 'error', message: 'Room not found.' }));
             return;
@@ -2181,7 +2247,7 @@ async function startServer() {
             return;
           }
 
-          if (currentRoomId === code) {
+          if (currentRoomId === room.id) {
             // Already at this table. Refused rather than treated as a move for
             // the same reason join_room refuses it: the vacate below would run
             // against the very room being taken a seat in.
@@ -2227,7 +2293,7 @@ async function startServer() {
             deviceId: cookieDeviceId || null,
             sessionId: cookieSessionId,
           };
-          currentRoomId = code;
+          currentRoomId = room.id;
           seat = { role: 'spectator', slot };
 
           // Deliberately NOT touched: `soloSince`. Clearing it would exempt a
@@ -2248,6 +2314,30 @@ async function startServer() {
           // a frozen court. Again endP2P, not takeOverFromP2P.
           endP2P(room);
 
+        } else if (msg.type === 'set_table_visibility' && currentRoomId && playerIndex() === 0) {
+          const room = rooms.get(currentRoomId);
+          if (!room) return;
+          // The host owns the lock, and only between matches — the same window
+          // set_room_config uses, and for the same reason: the terms of a
+          // table are not something either phone changes mid-rally.
+          if (room.inPlay && !room.matchOver) return;
+          // A queue table is nobody's to lock: the relay seated the pair and
+          // there is no third person it could be shared with.
+          if (room.venueRoomId === MATCHMAKING_ROOM) return;
+
+          if (msg.private) {
+            room.visibility = 'private';
+            // A FRESH key every time the lock is turned on, even if it was
+            // already on. That is what makes sharing a key a decision that can
+            // be taken back: whoever was given the old one is now locked out.
+            room.joinKey = mintJoinKey();
+          } else {
+            room.visibility = 'public';
+            // No key while the table is open — it is in the room's browser,
+            // and a key nobody needs is one somebody can still be given.
+            room.joinKey = null;
+          }
+          broadcastTableState(room);
         } else if (msg.type === 'queue_join') {
           // A seat and a queue place are the same commitment, so nobody holds
           // both: the relay would otherwise seat somebody who is already

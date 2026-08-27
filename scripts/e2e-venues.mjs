@@ -212,8 +212,8 @@ if (await shown(browser1, '#btn-create-public-table')) {
 await browser1.click('#btn-create-room');
 const code = await browser1
   .waitForFunction(() => {
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
-    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
 
@@ -225,22 +225,63 @@ ok(`a public table is findable from the room browser (${code}) with no code type
 
 // And joining it seats them: the browser is a way IN, not just a list.
 await browser2.click(`#table-${code}`);
-await browser2.waitForSelector('#lobby-room-code', { timeout: 8000 });
-const seated = await browser2.textContent('#lobby-room-code');
+await browser2.waitForSelector('#lobby-table', { timeout: 8000 });
+const seated = await browser2.getAttribute('#lobby-table', 'data-room-id');
 if (seated.trim() !== code) fail(`joining from the browser landed in ${seated.trim()}, not ${code}`);
 ok('tapping a table seats the player at it');
 
-// The one table is reachable BOTH ways: browsed to above, and still carrying
-// the 4-letter code and the QR, so an invitation works exactly as it did.
+// The one table is open by default: listed in its room, and carrying no code
+// to share, because there is nothing to share — anyone in the bracket can sit
+// down from the browser.
 const listedNow = await browser1.evaluate(async () => {
   const r = await fetch('/api/rooms/casual/tables');
   return (await r.json()).tables.map((t) => t.id);
 });
 if (!listedNow.includes(code)) fail(`the created table (${code}) is not in its room's listing`);
-for (const sel of ['#lobby-room-code', '#btn-copy-link', '#btn-toggle-qr']) {
-  if (!(await shown(browser1, sel))) fail(`the room key survived in name only: ${sel} is gone`);
+if (await shown(browser1, '#lobby-room-code')) fail('an OPEN table is showing a key to share');
+for (const gone of ['#btn-copy-link', '#btn-toggle-qr', '#lobby-qr']) {
+  if (await shown(browser1, gone)) fail(`the link/QR share surface is still here: ${gone}`);
 }
-ok(`one table, findable in the room AND shareable by its key (${code})`);
+ok(`one table, open and findable in the room (${code}), with no link to hand out`);
+
+// ---- 7b. The lock, and the key it mints ---------------------------------
+// Turning Private on takes the table out of the listing and mints a
+// 4-character key. The key is the ONLY way in: the room id still indexes the
+// table and still answers GET /api/room/:id, and it must not open the door.
+await browser1.click('#toggle-private input');
+await browser1.waitForSelector('#lobby-room-code', { timeout: 8000 });
+const key1 = (await browser1.textContent('#lobby-room-code')).trim();
+if (!/^[A-HJ-NP-Z2-9]{4}$/.test(key1)) fail(`locking the table minted no key, got "${key1}"`);
+if (key1 === code) fail('the key is just the room id — locking it changed nothing');
+
+const listedLocked = await browser1.evaluate(async () => {
+  const r = await fetch('/api/rooms/casual/tables');
+  return (await r.json()).tables.map((t) => t.id);
+});
+if (listedLocked.includes(code)) fail(`a locked table (${code}) is still in the room's listing`);
+ok(`locking mints a key (${key1}) and takes the table out of the listing`);
+
+// Re-locking RE-KEYS it, which is what makes sharing a key revocable.
+await browser1.click('#toggle-private input'); // off
+await browser1.waitForFunction(() => !document.querySelector('#lobby-room-code'), { timeout: 8000 });
+await browser1.click('#toggle-private input'); // on again
+await browser1.waitForSelector('#lobby-room-code', { timeout: 8000 });
+const key2 = (await browser1.textContent('#lobby-room-code')).trim();
+if (key2 === key1) fail('re-locking reused the old key — a shared key can never be taken back');
+ok(`turning the lock again re-keys it (${key1} -> ${key2})`);
+
+// And the key is offered as FOUR CHARACTERS, not as a link.
+if (!(await shown(browser1, '#btn-copy-key'))) fail('no way to copy the key');
+const copyOnly = await browser1.evaluate(async () => {
+  let captured = null;
+  const real = navigator.clipboard?.writeText?.bind(navigator.clipboard);
+  navigator.clipboard.writeText = async (v) => { captured = v; return real ? undefined : undefined; };
+  document.querySelector('#btn-copy-key').click();
+  await new Promise((r) => setTimeout(r, 150));
+  return captured;
+});
+if (copyOnly !== key2) fail(`copying put "${copyOnly}" on the clipboard, not the bare key ${key2}`);
+ok('copying puts the four characters on the clipboard and nothing else');
 
 // And its watching seats start SHUT. Not cosmetic: open seats force the match
 // onto the relay, because rtc_signal is refused for a watched table — a P2P

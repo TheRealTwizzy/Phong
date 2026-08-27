@@ -90,8 +90,8 @@ await host.click('#toggle-p2p input, #toggle-p2p');
 await host.click('#btn-create-room');
 const code = await host
   .waitForFunction(() => {
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
-    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
   }, { timeout: 5000 })
   .then((h) => h.jsonValue());
 

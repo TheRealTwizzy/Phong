@@ -218,6 +218,20 @@ export interface Room {
    */
   visibility: 'public' | 'private';
   /**
+   * The lock on a PRIVATE table: a 4-character key, and the only way in.
+   *
+   * Null while the table is public, because a public table needs no key — it
+   * is in the room's browser and anyone in the bracket can sit down.
+   *
+   * A private table is deliberately NOT joinable by its room id. The id is
+   * how the relay indexes the table and it appears in `GET /api/room/:id`;
+   * if it also opened the door, the key would be decorative. Re-generated
+   * every time the host turns Private on, so sharing a key is a decision that
+   * can be taken back: the old one stops working the moment the lock is
+   * re-set.
+   */
+  joinKey: string | null;
+  /**
    * The two watching seats: slot 0 sits beside player 0, slot 1 beside
    * player 1.
    *

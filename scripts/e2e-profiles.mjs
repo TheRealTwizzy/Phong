@@ -188,7 +188,7 @@ const code = await alice
   .waitForFunction(() => {
     // The code has its own element; hunting for it by a styling class meant
     // any restyle of the lobby silently broke the lookup.
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    const txt = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
     return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
   }, { timeout: 5000 })
   .then((h) => h.jsonValue());
@@ -200,7 +200,7 @@ await bob.fill('#input-room-code', code);
 await bob.click('#btn-join-room-submit');
 // A seat, not a match — so the room code is what says the join landed. The
 // scoreboard belongs to the match and does not exist until one starts.
-await bob.waitForSelector('#lobby-room-code', { timeout: 8000 });
+await bob.waitForSelector('#lobby-table', { timeout: 8000 });
 
 // The lobby handshake: bob (guest) readies, which is what enables alice's
 // (host's) start button; her start closes both lobbies.

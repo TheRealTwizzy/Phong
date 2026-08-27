@@ -662,6 +662,9 @@ export type WSClientMessage =
   | { type: 'set_room_config'; config: RoomMatchConfig }
   | { type: 'spectate_room'; roomId: string; seat?: number }
   | { type: 'swap_seat'; seat: number }
+  // Host-only, pre-match: lock this table, or open it up. Turning the lock ON
+  // mints a FRESH key every time, so a key already shared stops working.
+  | { type: 'set_table_visibility'; private: boolean }
   // The ranked queue. `rttMs` is the client's own last round-trip reading —
   // a tiebreak hint and never a gate, so its being self-reported costs
   // nothing: forging it buys a marginally better-connected opponent.
@@ -715,7 +718,7 @@ export type WSServerMessage =
   // recipient. A spectator is told about a seat change the way a player is
   // told about `opponent_joined` — never with `opponent_left`, which would
   // report a departure to somebody who lost nobody.
-  | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean }
+  | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean; isPrivate: boolean; joinKey: string | null }
   // Where the match already stands, for a watcher who has just sat down.
   | { type: 'spectator_sync'; snapshot: SpectatorSnapshot }
   // Where the search stands. `found` is followed immediately by the ordinary

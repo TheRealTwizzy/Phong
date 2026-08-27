@@ -91,8 +91,8 @@ await host.waitForSelector('#lobby-tables-empty', { timeout: 8000 });
 await host.click('#btn-create-room');
 const code = await host
   .waitForFunction(() => {
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
-    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
 const hostName = NAMES.get(host);
@@ -224,8 +224,8 @@ await h2.waitForSelector('#toggle-spectators', { timeout: 8000 });
 await h2.click('#toggle-spectators input');
 const code2 = await h2
   .waitForFunction(() => {
-    const txt = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
-    return /^[A-HJ-NP-Z2-9]{4}$/.test(txt) ? txt : null;
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
 

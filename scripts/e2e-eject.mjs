@@ -86,7 +86,7 @@ const code = await host
   // The code has its own element; hunting for it by a styling class meant any
   // restyle of the lobby silently broke the lookup.
   .waitForFunction(() => {
-    const t = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    const t = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
     return /^[A-HJ-NP-Z2-9]{4}$/.test(t) ? t : null;
   }, { timeout: 5000 })
   .then((h) => h.jsonValue());
@@ -150,7 +150,7 @@ if (!lonerHome) {
     .evaluate(() => ({
       lobby: !!document.querySelector('#multiplayer-lobby-modal'),
       court: !!document.querySelector('#half-court-canvas'),
-      code: document.querySelector('#lobby-room-code')?.textContent?.trim() || null,
+      code: document.querySelector('#lobby-table')?.getAttribute('data-room-id') || null,
       expired: !!document.querySelector('#toast-room-expired'),
       ejected: !!document.querySelector('#toast-ejected'),
     }))

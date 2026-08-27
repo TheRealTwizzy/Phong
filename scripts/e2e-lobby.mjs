@@ -74,8 +74,8 @@ await solo.click('#building-pvp');
 await solo.click('#room-casual');
 await solo.waitForSelector('#btn-create-room', { timeout: 8000 });
 await solo.click('#btn-create-room');
-await solo.waitForSelector('#btn-copy-link', { timeout: 8000 });
-const doomed = (await solo.textContent('#lobby-room-code'))?.trim();
+await solo.waitForSelector('#lobby-table', { timeout: 8000 });
+const doomed = (await solo.getAttribute('#lobby-table', 'data-room-id'))?.trim();
 if (!/^[A-Z0-9]{4}$/.test(doomed || '')) fail('host never got a room code');
 if ((await fetch(`${BASE}/api/room/${doomed}`)).status !== 200) fail(`room ${doomed} was never open`);
 
@@ -124,7 +124,7 @@ console.log('\nSetting up is not playing');
   await setup.click('#room-casual');
   await setup.waitForSelector('#btn-create-room', { timeout: 8000 });
   await setup.click('#btn-create-room');
-  await setup.waitForSelector('#lobby-room-code', { timeout: 8000 });
+  await setup.waitForSelector('#lobby-table', { timeout: 8000 });
   // Settle first. The screen swap is animated, so reading the DOM the instant
   // the code appears finds no court even when one is on its way — which is a
   // check that passes the very regression it exists to catch. Verified by
@@ -159,12 +159,12 @@ await host.click('#building-pvp');
 await host.click('#room-casual');
 await host.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host.click('#btn-create-room');
-await host.waitForSelector('#btn-copy-link', { timeout: 8000 });
+await host.waitForSelector('#lobby-table', { timeout: 8000 });
 const code = await host.evaluate(() => {
   // Read the code from its own element rather than regexing the panel's text
   // for an English label — that coupled the suite to copy that is now
   // translated, and to the label sitting immediately before the code.
-  const t = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+  const t = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
   return /^[A-Z0-9]{4}$/.test(t) ? t : null;
 });
 if (!code) fail('host never got a room code');
@@ -192,7 +192,7 @@ await sleep(2500);
 const loneState = await lone.evaluate(() => ({
   court: !!document.querySelector('#half-court-canvas'),
   lobby: !!document.querySelector('#multiplayer-lobby-modal'),
-  code: (document.querySelector('#lobby-room-code')?.textContent || '').trim(),
+  code: (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim(),
   leave: !!document.querySelector('#btn-leave-room'),
 }));
 if (!loneState.code) fail('the create never landed at all — wrong bug reproduced');
@@ -221,7 +221,7 @@ await sleep(2500);
 // room code can: it is only ever rendered for a seat that was actually given.
 const state = await guest.evaluate(() => ({
   court: !!document.querySelector('#half-court-canvas'),
-  code: (document.querySelector('#lobby-room-code')?.textContent || '').trim(),
+  code: (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim(),
   lobby: !!document.querySelector('#multiplayer-lobby-modal'),
   ready: !!document.querySelector('#btn-ready-play'),
 }));
@@ -263,7 +263,7 @@ await host2.waitForSelector('#btn-create-room', { timeout: 8000 });
 await host2.click('#btn-create-room');
 const code2 = await host2
   .waitForFunction(() => {
-    const t = (document.querySelector('#lobby-room-code')?.textContent || '').trim();
+    const t = (document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '').trim();
     return /^[A-HJ-NP-Z2-9]{4}$/.test(t) ? t : null;
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
