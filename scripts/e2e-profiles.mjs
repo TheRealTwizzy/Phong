@@ -158,7 +158,14 @@ ok('640×400 source auto-cropped to a served 256×256 PNG');
 // ---- 3. Rename inside the 365-day lock is refused ------------------------
 await alice.click('#edit-username-btn');
 await alice.fill('#profile-modal-container input[type="text"]', 'RenameTry');
-await alice.click('#profile-modal-container button.bg-cyan-500');
+// Selected by id, not by colour class. This line used to read
+// `button.bg-cyan-500` and broke the moment the shell moved onto design
+// tokens — the same mistake SegmentedControl already carries a comment about
+// ("selection is exposed via data-selected, explicitly not via a Tailwind
+// class, because the e2e suite used to sniff className.includes(...)"). A
+// suite that asserts on a colour is a suite that fails when the colour is the
+// thing being changed, which is precisely when it is least useful.
+await alice.click('#btn-save-username');
 await alice.waitForSelector('#username-edit-error', { timeout: 5000 });
 const lockMsg = await alice.textContent('#username-edit-error');
 if (!/locked/i.test(lockMsg)) fail(`expected lock message, got: ${lockMsg}`);

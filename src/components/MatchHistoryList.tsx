@@ -291,7 +291,7 @@ export const MatchHistoryList: React.FC<MatchHistoryListProps> = ({
                         </>
                       ) : (
                         <>
-                          <Cpu className="h-3 w-3 text-violet-400" />
+                          <Cpu className="h-3 w-3 text-rank-steady" />
                           {t('history_mode_solo', language, {
                             difficulty: match.difficulty || 'AI',
                           })}

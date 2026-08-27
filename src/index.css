@@ -8,7 +8,43 @@
    palette classes like `bg-emerald-500/15`, and a `--color-*: initial` reset
    would blank every one of them silently, with no build error. So: new names
    only. The old classes keep working while the shell migrates onto these.
+
+   AND THEY ARE DEFAULTS, NOT CONSTANTS. Every colour token below is republished
+   at runtime by `cosmeticVars()` (src/game/cosmetics.ts) as an inline style on
+   #app-root-container, so the equipped cosmetic paints the whole shell and not
+   just the court. Two consequences for anyone editing this block:
+
+     - A NEW COLOUR TOKEN NEEDS AN ENTRY IN `cosmeticVars` TOO. One added here
+       and not there is a colour that silently refuses to follow the cosmetic —
+       it will look correct for the default and wrong for the other nineteen.
+     - Do not express one token in terms of another (`var(--color-ink)` inside
+       a shadow, say). Custom properties are substituted once, where they are
+       declared, so such a token resolves against THIS block and never follows an
+       override. That is why the elevation tokens below are rebuilt in
+       `cosmeticVars` rather than derived here.
+
+   These values and the `neon` cosmetic's shell are the same thirteen literals,
+   pinned to each other on purpose: neon is the ONLY catalogue entry that
+   authors its shell instead of deriving one, so that a deploy adding cosmetics
+   repaints nothing for a player who never opens the picker.
 --------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   `cos-light:` — the escape hatch for a LIGHT cosmetic.
+
+   The token utilities above follow the equipped cosmetic on their own, but
+   around six hundred literal palette classes (`text-zinc-300`, TIER_STYLE's
+   nine tier badges) do not, and cannot: a tier's colour is its identity, not
+   chrome, so it must keep its hue rather than become the accent. On a dark
+   ground those literals are merely off-palette. On a LIGHT one a pale-300 ink
+   is invisible, which is a different kind of problem.
+
+   So the mode is published as an attribute and this variant reads it, letting a
+   site that genuinely needs a different value on light say so in place —
+   `text-emerald-300 cos-light:text-emerald-700` — instead of every one of them
+   being migrated onto tokens they should not be on.
+--------------------------------------------------------------------------- */
+@custom-variant cos-light (&:where([data-mode='light'], [data-mode='light'] *));
+
 @theme {
   /* -- Surface ramp. Never pure #000: OLED black smears when the page pans. */
   --color-surface-0: #05070c;   /* scrims, gutters, below everything         */
@@ -19,10 +55,13 @@
   --color-line: #222a3a;        /* hairline                                  */
   --color-line-strong: #303a4d; /* a divider that has to be seen             */
 
-  /* -- Ink. Contrast ratios measured against --color-surface-2. ----------- */
-  --color-ink: #f3f6fb;         /* 16.8:1                                    */
-  --color-ink-muted: #9aa5b8;   /*  6.1:1 — the floor for body text          */
-  --color-ink-dim: #6b7688;     /*  3.3:1 — >=18px or decorative ONLY        */
+  /* -- Ink. Ratios are against --color-surface-2, and they are a FLOOR every
+        cosmetic has to clear, not a property of this palette: the numbers here
+        are the defaults, and tests/cosmetics.test.ts holds the floor for all
+        twenty. ------------------------------------------------------------ */
+  --color-ink: #f3f6fb;         /* 16.8:1 — floor 7:1                        */
+  --color-ink-muted: #9aa5b8;   /*  6.1:1 — floor 4.5:1, body text           */
+  --color-ink-dim: #6b7688;     /*  3.3:1 — floor 3:1, >=18px or decorative  */
   --color-ink-on-accent: #04121a;
 
   /* -- ONE accent. Every other colour has to earn it semantically. -------- */
@@ -123,11 +162,6 @@
     --sa-b: env(safe-area-inset-bottom, 0px);
     --sa-l: env(safe-area-inset-left, 0px);
 
-    /* The EQUIPPED COURT THEME's accent, published exactly once by App.tsx
-       onto #app-root-container. The shell reads it through a variable rather
-       than concatenating two hex digits of alpha onto a colour at forty
-       separate call sites. */
-    --theme-accent: var(--color-accent);
   }
 
   html,

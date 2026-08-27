@@ -44,7 +44,8 @@ coverage number.
 | `streaks` | A rally streak: whose it is, what ends it, and what it carries into |
 | `room` | The relay's room rules, the reaper, and the adversarial `match_sync` guards |
 | `matchRules` | Ranked bands, normalization, `duelMatchKey` |
-| `themes` | All 20 themes × every route that unlocks them |
+| `cosmetics` | All 20 cosmetics × every unlock route, the contrast floor, and the distinctness floor |
+| `color` | The colour maths both those floors stand on |
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
@@ -58,8 +59,9 @@ coverage number.
 
 ### Browser layer
 
-`profiles` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` · `duel` · `invite` ·
-`lobby` · `spectate` · `queue` · `split` · `streak` · `history` · `delete` · `eject` · `build-id`
+`profiles` · `cosmetics` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` ·
+`duel` · `invite` · `lobby` · `spectate` · `queue` · `split` · `streak` · `history` · `delete` ·
+`eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -72,7 +74,7 @@ V8 coverage measures **in-process execution only**. Two consequences that will m
 
 - **`server.ts` reads 0%.** It is not untested — `duelRecord`, `deviceSession` and
   `accountRecovery` spawn it,
-  and all twelve browser suites drive it. The instrumentation cannot see across a process
+  and all nineteen browser suites drive it. The instrumentation cannot see across a process
   boundary.
 - **Every `.tsx` reads 0%,** for the same reason. Playwright covers them.
 

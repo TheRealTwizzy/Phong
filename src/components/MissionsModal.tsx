@@ -80,7 +80,7 @@ export const MissionsModal: React.FC<Props> = ({
       case 'rally':
         return <Zap className="h-5 w-5 text-win" />;
       case 'multiplayer':
-        return <Smartphone className="h-5 w-5 text-fuchsia-400" />;
+        return <Smartphone className="h-5 w-5 text-fuchsia-400 cos-light:text-fuchsia-700" />;
       case 'points_scored':
         return <Target className="h-5 w-5 text-loss" />;
       default:

@@ -3,8 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
-import type { CourtTheme, MatchEndPayload, PlayerProfile } from '../src/types';
-import { THEMES, isThemeUnlocked } from '../src/game/themes';
+import type { CosmeticId, MatchEndPayload, PlayerProfile } from '../src/types';
+import { COSMETICS, isCosmeticUnlocked } from '../src/game/cosmetics';
 import {
   MISSION_POOL,
   ELITE_POOL,
@@ -796,13 +796,13 @@ describe('permanent unlocks reach the themes', () => {
 
   it('gates every elite theme behind its own mission', () => {
     for (const mission of ELITE_POOL) {
-      const themeId = mission.unlocks as CourtTheme;
-      expect(THEMES[themeId]).toBeTruthy();
-      expect(isThemeUnlocked(themeId, base())).toBe(false);
-      expect(isThemeUnlocked(themeId, base({ eliteUnlocks: [mission.unlocks!] }))).toBe(true);
+      const themeId = mission.unlocks as CosmeticId;
+      expect(COSMETICS[themeId]).toBeTruthy();
+      expect(isCosmeticUnlocked(themeId, base())).toBe(false);
+      expect(isCosmeticUnlocked(themeId, base({ eliteUnlocks: [mission.unlocks!] }))).toBe(true);
       // Owning one elite unlock must not open another's theme.
       const other = ELITE_POOL.find((m) => m.id !== mission.id)!;
-      expect(isThemeUnlocked(themeId, base({ eliteUnlocks: [other.unlocks!] }))).toBe(false);
+      expect(isCosmeticUnlocked(themeId, base({ eliteUnlocks: [other.unlocks!] }))).toBe(false);
     }
   });
 
@@ -813,14 +813,14 @@ describe('permanent unlocks reach the themes', () => {
       ['legend-aurora', 'legend_tier'],
       ['fixture-bronze', 'veteran_200'],
     ] as const) {
-      expect(isThemeUnlocked(themeId, base())).toBe(false);
-      expect(isThemeUnlocked(themeId, base({ achievements: [achId] }))).toBe(true);
+      expect(isCosmeticUnlocked(themeId, base())).toBe(false);
+      expect(isCosmeticUnlocked(themeId, base({ achievements: [achId] }))).toBe(true);
     }
   });
 
   it('leaves the starter themes open to everyone', () => {
-    for (const themeId of ['neon', 'retro-crt', 'midnight', 'cyberpunk', 'tennis'] as const) {
-      expect(isThemeUnlocked(themeId, base())).toBe(true);
+    for (const themeId of ['neon', 'retro-crt', 'midnight', 'cyberpunk', 'arena-pro'] as const) {
+      expect(isCosmeticUnlocked(themeId, base())).toBe(true);
     }
   });
 
@@ -849,7 +849,7 @@ describe('permanent unlocks reach the themes', () => {
     db.claimMission('t_profile', elite.id, new Date('2026-08-21T12:00:00Z'));
     const profile = db.getProfile('t_profile');
     expect(profile.eliteUnlocks).toContain(elite.unlocks);
-    expect(isThemeUnlocked(elite.unlocks as CourtTheme, profile)).toBe(true);
+    expect(isCosmeticUnlocked(elite.unlocks as CosmeticId, profile)).toBe(true);
   });
 });
 

@@ -67,7 +67,7 @@ const Panel: React.FC<{ children: React.ReactNode; wide?: boolean; id?: string; 
       initial={{ opacity: 0, y: 15 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4 }}
-      className={`relative w-full ${wide ? 'max-w-md' : 'max-w-sm'} bg-slate-900/90 border border-cyan-500/30 rounded-3xl p-8 shadow-2xl shadow-cyan-950/40 backdrop-blur-xl flex flex-col items-center text-center`}
+      className={`relative w-full ${wide ? 'max-w-md' : 'max-w-sm'} bg-slate-900/90 border border-cyan-500/30 rounded-3xl p-8 shadow-2xl shadow-surface-0/60 backdrop-blur-xl flex flex-col items-center text-center`}
     >
       {children}
     </motion.div>
@@ -99,7 +99,7 @@ export const MobileGatekeeper: React.FC<MobileGatekeeperProps> = ({ children, la
   if (mode === 'rotate') {
     return (
       <Panel>
-        <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-500/10">
+        <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-accent/10">
           <RotateCcw className="w-8 h-8 animate-spin" style={{ animationDuration: '6s' }} />
         </div>
         <h1 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase mb-2">
@@ -112,7 +112,7 @@ export const MobileGatekeeper: React.FC<MobileGatekeeperProps> = ({ children, la
 
   return (
     <Panel wide id="device-gate" device={device}>
-      <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-500/10">
+      <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-accent/10">
         <Smartphone className="w-8 h-8" />
       </div>
       <h1 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase mb-2">

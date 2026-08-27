@@ -1,8 +1,8 @@
 ---
 name: phong-ui
 description: >-
-  Putting something on Phong's screen — the shared primitives, and the four cross-file rules
-  that are not written anywhere near the file you would be editing. Use this whenever the work
+  Putting something on Phong's screen — the shared primitives, and the five cross-file rules
+  that are not written near the file you would be editing. Use this whenever the work
   adds or changes a component, a modal or sheet, a toast or transient notice, a scroll region,
   an overlay on the live court, or anything with a colour or a z-index, and whenever the user
   asks for a new panel, a banner, a confirmation, a settings row or a notification. There is no
@@ -20,22 +20,18 @@ actually cost shipped bugs.
 
 ## Read these three headers first
 
-1. **`src/components/ui/index.ts`** opens with the rule: *"The shell's shared primitives. Import
-   from here, not from the files."* `Sheet` · `Button` · `Panel` · `ProgressBar` · `StatTile` ·
-   `SegmentedControl` · `RankBadge` · `Pagination` · `ToastHost` · `LockBadge` · `useMotion`.
-   Reach for one before hand-rolling; the barrel is deliberately partial, so an absence means
-   the primitive has not earned its API yet, not that you should inline a new pattern.
+1. **`src/components/ui/index.ts`** — *"Import from here, not from the files."* `Sheet` ·
+   `Button` · `Panel` · `ProgressBar` · `StatTile` · `SegmentedControl` · `RankBadge` ·
+   `Pagination` · `ToastHost` · `LockBadge` · `useMotion`. The barrel is deliberately partial,
+   so an absence means the primitive has not earned its API yet — not that you inline a new one.
 2. **`src/components/ui/Sheet.tsx`** carries the `LAYER` map (`:30`) and the reason
    `backdrop: 'solid'` exists — a `backdrop-filter` recompositing a 60fps canvas every frame is
    the worst perf hazard available to this app. Every modal is a `Sheet`: `shrink-0` header,
    `scroll-y min-h-0 flex-1` body, `shrink-0` footer.
-3. **`src/index.css`** carries the token contract with measured contrast ratios —
-   `--color-ink-muted` at 6.1:1 is *the floor for body text*, `--color-ink-dim` at 3.3:1 is
-   *≥18px or decorative only*, `--color-xp` is *level and XP only, never a generic highlight* —
-   plus the iOS `vh` story behind `max-h-sheet` (`:214`) and why `touch-action` sits on the
-   three play surfaces rather than on `body` (`:145`). The tokens are **additive by
-   construction**: a `--color-*: initial` reset would silently blank the twenty-odd components
-   still shipping literal palette classes, with no build error.
+3. **`src/index.css`** carries the token contract — the ink ratios (`ink-muted` 4.5:1 is the
+   floor for body text, `ink-dim` 3:1 is ≥18px or decorative), `--color-xp` being *level and XP
+   only*, the iOS `vh` story behind `max-h-sheet` (`:214`), and why `touch-action` sits on the
+   three play surfaces rather than on `body` (`:145`).
 
 ## A flex child with clipped overflow has a minimum size of zero
 
@@ -82,17 +78,27 @@ timer and the tap target.** A call site supplies `ttlMs` and `onDismiss` and not
 - The two exceptions are overheads, not notifications: the quick-chat bubbles and the
   match-start countdown are `pointer-events-none` so the paddle stays drivable.
 
+## Colour follows the equipped cosmetic, and a literal does not
+
+`cosmeticVars()` republishes every `--color-*` per cosmetic, so `bg-surface-2` follows what the
+player equipped — including inside `PublicProfileModal`, which paints in somebody ELSE's.
+- **A new token needs an entry in `cosmeticVars` too.** Without it, correct for the default
+  cosmetic and wrong for the other nineteen.
+- **A literal palette class follows nothing.** `text-zinc-300` is off-palette on a dark cosmetic
+  and *invisible* on a light one: use a token, or `cos-light:` where the hue is the point.
+- **Never define a token in terms of another.** Custom properties are substituted where declared,
+  so it resolves against `:root` once and never follows an override.
+
 ## Verifying, in a repo that bet against component tests
 
 ```bash
 npm run build && node scripts/e2e-run.mjs rules split achievements
-npx vitest run tests/themes.test.ts
+npx vitest run tests/cosmetics.test.ts
 ```
 
 TESTING.md §1 is explicit that there is no jsdom, no testing-library and no component tests, and
-that this is a choice — *do not add a component-test framework to chase a coverage number*. So
-the only layout assertion in the repo is in `scripts/e2e-rules.mjs`: it measures
-`#menu-start-solo` against the viewport, confirms `elementFromPoint` actually lands on it, and
-asserts no `[id^="room-"]` row has `clientHeight < scrollHeight`. Its own comment warns that a
-selector matching nothing makes the whole thing pass vacuously — so if you extend it, check that
-your selector matches something before you trust the green.
+that this is a choice — *do not add a component-test framework to chase a coverage number*. So the
+only layout assertion in the repo is in `scripts/e2e-rules.mjs`: it measures `#menu-start-solo`
+against the viewport, confirms `elementFromPoint` lands on it, and asserts no `[id^="room-"]` row
+is clipped. Its own comment warns that a selector matching nothing passes vacuously — so if you
+extend it, check your selector matches something before you trust the green.

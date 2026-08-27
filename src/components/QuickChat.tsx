@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LanguageCode } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { sound } from '../audio/soundEffects';
 import { MessageSquare, X, Send, Sparkles } from 'lucide-react';
@@ -17,7 +17,7 @@ export interface ChatMessage {
 interface QuickChatProps {
   onSendMessage: (text: string) => void;
   activeMessages: ChatMessage[];
-  theme: ThemeConfig;
+  theme: Cosmetic;
   language: LanguageCode;
   disabled?: boolean;
 }
@@ -71,14 +71,14 @@ export const QuickChat: React.FC<QuickChatProps> = ({
               transition={{ type: 'spring', damping: 20, stiffness: 300 }}
               className={`px-3.5 py-1.5 rounded-full backdrop-blur-md shadow-xl flex items-center gap-2 border text-xs font-bold ${
                 msg.isSelf
-                  ? 'bg-cyan-950/90 text-cyan-200 border-cyan-500/50 shadow-cyan-950/50'
-                  : 'bg-slate-900/90 text-amber-200 border-amber-500/50 shadow-amber-950/50'
+                  ? 'bg-accent/90 text-accent border-accent/50 shadow-surface-0/60'
+                  : 'bg-surface-2/90 text-warn border-warn/50 shadow-surface-0/60'
               }`}
             >
-              <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-ink-muted">
                 {msg.senderName}:
               </span>
-              <span className="text-white text-sm">{msg.text}</span>
+              <span className="text-ink text-sm">{msg.text}</span>
             </motion.div>
           ))}
         </AnimatePresence>
@@ -93,8 +93,8 @@ export const QuickChat: React.FC<QuickChatProps> = ({
           title={t('quick_chat_title', language)}
           className={`p-2.5 rounded-full border shadow-lg backdrop-blur-md transition-all flex items-center justify-center ${
             isOpen
-              ? 'bg-cyan-500 text-slate-950 border-cyan-400 scale-105'
-              : 'bg-slate-900/80 text-cyan-400 border-cyan-500/30 hover:bg-slate-800 hover:border-cyan-400/60 active:scale-95'
+              ? 'bg-accent text-ink-on-accent border-accent scale-105'
+              : 'bg-surface-2/80 text-accent border-accent/30 hover:bg-surface-3 hover:border-accent/60 active:scale-95'
           }`}
         >
           {isOpen ? <X className="w-5 h-5" /> : <MessageSquare className="w-5 h-5" />}
@@ -108,11 +108,11 @@ export const QuickChat: React.FC<QuickChatProps> = ({
               animate={{ opacity: 1, scale: 1, y: 0, x: 0 }}
               exit={{ opacity: 0, scale: 0.85, y: 10, x: 10 }}
               transition={{ type: 'spring', damping: 22, stiffness: 350 }}
-              className="absolute bottom-12 right-0 w-64 p-3 bg-slate-900/95 border border-slate-700/90 rounded-2xl shadow-2xl backdrop-blur-lg flex flex-col gap-1.5"
+              className="absolute bottom-12 right-0 w-64 p-3 bg-surface-2/95 border border-line-strong/90 rounded-2xl shadow-2xl backdrop-blur-lg flex flex-col gap-1.5"
             >
-              <div className="flex items-center justify-between pb-1.5 border-b border-slate-800 text-[11px] font-mono text-slate-400 font-bold px-1">
+              <div className="flex items-center justify-between pb-1.5 border-b border-line text-[11px] font-mono text-ink-muted font-bold px-1">
                 <span>{t('quick_chat_title', language)}</span>
-                <span className="text-cyan-400 text-[10px]">TAP TO SEND</span>
+                <span className="text-accent text-[10px]">TAP TO SEND</span>
               </div>
 
               <div className="grid grid-cols-2 gap-1.5 max-h-48 scroll-y pt-1">
@@ -123,7 +123,7 @@ export const QuickChat: React.FC<QuickChatProps> = ({
                       key={key}
                       onClick={() => handleSelect(key)}
                       disabled={cooldown}
-                      className="px-2.5 py-2 text-left text-xs font-semibold bg-slate-800/80 hover:bg-cyan-500/20 text-slate-200 hover:text-cyan-300 border border-slate-700/60 hover:border-cyan-500/40 rounded-xl transition-all active:scale-95 flex items-center justify-between leading-snug"
+                      className="px-2.5 py-2 text-left text-xs font-semibold bg-surface-3/80 hover:bg-accent/20 text-ink hover:text-accent border border-line-strong/60 hover:border-accent/40 rounded-xl transition-all active:scale-95 flex items-center justify-between leading-snug"
                     >
                       <span className="truncate">{label}</span>
                     </button>

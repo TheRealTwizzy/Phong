@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { LanguageCode, PlayerProfile, UsernameCheckResponse } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { Sheet } from './ui';
 import { validateUsername, USERNAME_MAX } from '../profileRules';
@@ -15,7 +15,7 @@ import { Check, ExternalLink, ImagePlus, KeyRound, Loader2, Play, ShieldCheck, X
 // initializing or restoring an existing profile with a recovery code.
 interface OnboardingModalProps {
   isOpen: boolean;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   language: LanguageCode;
   /**
    * This player arrived on an invitation link. It matters because that link is
@@ -231,10 +231,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               >
                 <KeyRound className="w-6 h-6" />
               </div>
-              <h2 className="text-lg font-black tracking-wider uppercase text-white">
+              <h2 className="text-lg font-black tracking-wider uppercase text-ink">
                 {t('onboarding_code_title', language)}
               </h2>
-              <p className="text-[11px] font-mono text-zinc-400 leading-relaxed">
+              <p className="text-[11px] font-mono text-ink-muted leading-relaxed">
                 {t('onboarding_code_body', language)}
               </p>
             </div>
@@ -246,19 +246,19 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 setCodeCopied(true);
                 setTimeout(() => setCodeCopied(false), 2000);
               }}
-              className="w-full py-4 rounded-2xl bg-slate-950 border border-dashed text-2xl font-black font-mono tracking-[0.3em] text-center active:scale-[0.99] transition"
+              className="w-full py-4 rounded-2xl bg-surface-0 border border-dashed text-2xl font-black font-mono tracking-[0.3em] text-center active:scale-[0.99] transition"
               style={{ color: theme.accentColor, borderColor: theme.accentColor + '60' }}
             >
               {savedProfile.recoveryCode || '····-····'}
             </button>
-            <p className="text-[10px] font-mono text-zinc-500 text-center -mt-2">
+            <p className="text-[10px] font-mono text-ink-muted text-center -mt-2">
               {codeCopied ? t('lobby_copied', language) : t('onboarding_code_copy', language)}
             </p>
 
             <button
               id="btn-onboarding-code-continue"
               onClick={() => onInitialized(savedProfile)}
-              className="w-full py-3.5 rounded-2xl font-mono text-sm font-black tracking-widest uppercase bg-cyan-500 hover:bg-cyan-400 text-zinc-950 transition active:scale-95 shadow-lg flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-2xl font-mono text-sm font-black tracking-widest uppercase bg-accent hover:bg-accent text-ink-on-accent transition active:scale-95 shadow-lg flex items-center justify-center gap-2"
             >
               <Play className="w-4 h-4" />
               {t('onboarding_code_continue', language)}
@@ -281,20 +281,20 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           <h2 className="text-lg font-black font-mono tracking-wide">
             {t('onboarding_title', language)}
           </h2>
-          <p className="text-[11px] text-zinc-400 leading-relaxed max-w-xs">
+          <p className="text-[11px] text-ink-muted leading-relaxed max-w-xs">
             {t('onboarding_subtitle', language)}
           </p>
         </div>
 
         {/* Avatar picker (optional) */}
-        <div className="flex items-center gap-3 p-3 rounded-2xl bg-zinc-900/70 border border-zinc-800">
+        <div className="flex items-center gap-3 p-3 rounded-2xl bg-surface-2/70 border border-line">
           <AvatarImage size={64} className="rounded-2xl" previewUrl={previewUrl} />
           <div className="flex flex-col gap-1.5 min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <button
                 id="btn-onboarding-avatar"
                 onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-mono font-bold bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-zinc-700 transition active:scale-95"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-mono font-bold bg-surface-3 hover:bg-surface-4 text-accent border border-line-strong transition active:scale-95"
               >
                 <ImagePlus className="w-3.5 h-3.5" />
                 {previewUrl ? t('change_avatar', language) : t('upload_avatar', language)}
@@ -309,14 +309,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       return null;
                     });
                   }}
-                  className="p-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 border border-zinc-700 transition"
+                  className="p-1.5 rounded-xl bg-surface-3 hover:bg-surface-4 text-ink-muted border border-line-strong transition"
                   title={t('remove_avatar', language)}
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
-            <p className="text-[10px] text-zinc-500 leading-tight">
+            <p className="text-[10px] text-ink-muted leading-tight">
               {t('avatar_hint', language)} · {t('avatar_optional', language)}
             </p>
           </div>
@@ -336,7 +336,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         {invited && (
           <p
             id="onboarding-other-browser-note"
-            className="text-[11px] font-mono text-cyan-300/80 leading-relaxed bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3"
+            className="text-[11px] font-mono text-accent/80 leading-relaxed bg-accent/5 border border-accent/20 rounded-xl p-3"
           >
             {inApp
               ? t('onboarding_in_app_browser', language, { app: inApp })
@@ -352,7 +352,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <a
               id="btn-open-real-browser"
               href={handOff}
-              className="w-full py-3 rounded-2xl font-mono text-xs font-black tracking-widest uppercase bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 text-center active:scale-[0.98] transition flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-2xl font-mono text-xs font-black tracking-widest uppercase bg-accent/15 border border-accent/40 text-accent text-center active:scale-[0.98] transition flex items-center justify-center gap-2"
             >
               <ExternalLink className="w-3.5 h-3.5" />
               {t('onboarding_open_real_browser', language)}
@@ -365,7 +365,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 setLinkCopied(true);
                 setTimeout(() => setLinkCopied(false), 2500);
               }}
-              className="w-full py-3 rounded-2xl font-mono text-xs font-black tracking-widest uppercase bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 active:scale-[0.98] transition flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-2xl font-mono text-xs font-black tracking-widest uppercase bg-accent/15 border border-accent/40 text-accent active:scale-[0.98] transition flex items-center justify-center gap-2"
             >
               <ExternalLink className="w-3.5 h-3.5" />
               {linkCopied ? t('lobby_copied', language) : t('onboarding_copy_link', language)}
@@ -375,7 +375,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
         {/* Username (required, unique, 365-day lock) */}
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] font-mono font-bold text-zinc-300">
+          <label className="text-[11px] font-mono font-bold text-ink">
             {t('choose_username', language)}
           </label>
           <input
@@ -392,33 +392,33 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               if (e.key === 'Enter') handleSubmit();
             }}
             placeholder="NeonSmasher"
-            className="w-full bg-slate-950 text-slate-100 text-base font-bold font-mono py-2.5 px-3 rounded-xl border border-slate-700 focus:border-cyan-400 focus:outline-none transition"
+            className="w-full bg-surface-0 text-ink text-base font-bold font-mono py-2.5 px-3 rounded-xl border border-line-strong focus:border-accent focus:outline-none transition"
           />
           <div className="min-h-4 text-[10px] font-mono flex items-center gap-1">
             {nameStatus.kind === 'checking' && (
-              <span className="text-zinc-400 flex items-center gap-1">
+              <span className="text-ink-muted flex items-center gap-1">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 {t('username_checking', language)}
               </span>
             )}
             {nameStatus.kind === 'available' && (
-              <span id="username-status-available" className="text-emerald-400 flex items-center gap-1">
+              <span id="username-status-available" className="text-win flex items-center gap-1">
                 <Check className="w-3 h-3" />
                 {t('username_available', language)}
               </span>
             )}
             {nameStatus.kind === 'taken' && (
-              <span id="username-status-taken" className="text-rose-400">
+              <span id="username-status-taken" className="text-loss">
                 {t('username_taken', language)}
               </span>
             )}
             {nameStatus.kind === 'invalid' && (
-              <span id="username-status-invalid" className="text-amber-400">
+              <span id="username-status-invalid" className="text-warn">
                 {t(nameStatus.reasonKey, language)}
               </span>
             )}
             {(nameStatus.kind === 'idle' || nameStatus.kind === 'invalid') && (
-              <span className="text-zinc-500">
+              <span className="text-ink-muted">
                 {nameStatus.kind === 'idle' ? t('username_rules', language) : ''}
               </span>
             )}
@@ -426,13 +426,13 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         </div>
 
         {nameStatus.kind === 'taken' && (
-          <p id="username-taken-restore-hint" className="text-[11px] font-mono text-amber-300/90 text-center leading-relaxed">
+          <p id="username-taken-restore-hint" className="text-[11px] font-mono text-warn/90 text-center leading-relaxed">
             {t('username_taken_restore', language)}
           </p>
         )}
 
         {submitError && (
-          <p className="text-[11px] font-mono text-rose-400 text-center">
+          <p className="text-[11px] font-mono text-loss text-center">
             {t(submitError, language)}
           </p>
         )}
@@ -441,18 +441,18 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           id="btn-onboarding-submit"
           onClick={handleSubmit}
           disabled={!canSubmit}
-          className="w-full py-3.5 rounded-2xl font-mono text-sm font-black tracking-widest uppercase bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 transition active:scale-95 shadow-lg flex items-center justify-center gap-2"
+          className="w-full py-3.5 rounded-2xl font-mono text-sm font-black tracking-widest uppercase bg-accent hover:bg-accent disabled:bg-surface-3 disabled:text-ink-muted text-ink-on-accent transition active:scale-95 shadow-lg flex items-center justify-center gap-2"
         >
           {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
           {t('lock_in_start', language)}
         </button>
 
         {/* Restore an existing profile instead (recovery code bypass) */}
-        <div className="border-t border-zinc-800/80 pt-3 flex flex-col gap-2">
+        <div className="border-t border-line/80 pt-3 flex flex-col gap-2">
           <button
             id="btn-onboarding-show-restore"
             onClick={() => setShowRestore((v) => !v)}
-            className="text-[11px] font-mono text-zinc-400 hover:text-cyan-300 transition flex items-center justify-center gap-1.5"
+            className="text-[11px] font-mono text-ink-muted hover:text-accent transition flex items-center justify-center gap-1.5"
           >
             <KeyRound className="w-3.5 h-3.5" />
             {t('have_recovery_code', language)}
@@ -466,20 +466,20 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 maxLength={9}
                 onChange={(e) => setClaimCode(e.target.value.toUpperCase())}
                 placeholder="XXXX-XXXX"
-                className="flex-1 bg-slate-950 text-slate-100 text-base font-bold font-mono py-2.5 px-3 rounded-xl border border-slate-700 focus:border-cyan-400 focus:outline-none transition tracking-widest"
+                className="flex-1 bg-surface-0 text-ink text-base font-bold font-mono py-2.5 px-3 rounded-xl border border-line-strong focus:border-accent focus:outline-none transition tracking-widest"
               />
               <button
                 id="btn-onboarding-claim"
                 onClick={handleClaim}
                 disabled={claimBusy || !claimCode.trim()}
-                className="px-3 py-2.5 rounded-xl font-mono text-[11px] font-bold bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-cyan-300 border border-zinc-700 transition active:scale-95"
+                className="px-3 py-2.5 rounded-xl font-mono text-[11px] font-bold bg-surface-3 hover:bg-surface-4 disabled:opacity-50 text-accent border border-line-strong transition active:scale-95"
               >
                 {claimBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t('restore_profile', language)}
               </button>
             </div>
           )}
           {claimError && (
-            <p className="text-[10px] font-mono text-rose-400 text-center">{claimError}</p>
+            <p className="text-[10px] font-mono text-loss text-center">{claimError}</p>
           )}
         </div>
         </>

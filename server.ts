@@ -1205,12 +1205,12 @@ async function startServer() {
     }
   });
 
-  // Rename (365-day lock). XP is never accepted from the client: mission
-  // rewards are claimed by id at /api/missions/claim and paid from the server's
-  // own definition table.
+  // Rename (365-day lock), and equip a cosmetic. XP is never accepted from the
+  // client: mission rewards are claimed by id at /api/missions/claim and paid
+  // from the server's own definition table.
   app.put('/api/profile/me', requireActiveSession, (req, res) => {
     try {
-      const { username } = req.body ?? {};
+      const { username, cosmetic } = req.body ?? {};
       let profile = null;
 
       if (username !== undefined) {
@@ -1222,6 +1222,23 @@ async function startServer() {
           const status =
             result.code === 'USERNAME_INVALID' ? 400 : result.code === 'USERNAME_TAKEN' ? 409 : 403;
           return res.status(status).json({ error: result.code, unlockAt: result.unlockAt });
+        }
+        profile = result.profile;
+      }
+
+      if (cosmetic !== undefined) {
+        if (typeof cosmetic !== 'string') {
+          return res.status(400).json({ error: 'COSMETIC_INVALID' });
+        }
+        // db.setCosmetic re-derives the unlock from the profile this server
+        // holds. The picker never draws a locked cosmetic, but the picker is
+        // the client — this is the half that decides, the same way
+        // DIFFICULTY_LOCKED sits behind /api/match/record rather than being
+        // trusted to the menu.
+        const result = db.setCosmetic(req.deviceId!, cosmetic);
+        if (!result.ok) {
+          const status = result.code === 'COSMETIC_INVALID' || result.code === 'COSMETIC_UNKNOWN' ? 400 : 403;
+          return res.status(status).json({ error: result.code });
         }
         profile = result.profile;
       }

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { BallState } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { LanguageCode } from '../types';
 import { t } from '../i18n/translations';
 import { Radio } from 'lucide-react';
@@ -20,7 +20,7 @@ interface RadarPreviewProps {
   oppBallRef: React.MutableRefObject<BallState | null>;
   oppPaddleXRef: React.MutableRefObject<number>;
   paddleWidthRatio: number;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   active: boolean;
   /** Tailwind top-* class. A duel passes a lower slot: the P2P/RELAY link
       badge owns the top-right corner there, and the two never coexisted

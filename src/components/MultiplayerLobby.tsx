@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import { isLinkableId } from '../profileRules';
 import { t } from '../i18n/translations';
 import { Button, Panel, Sheet, SegmentedControl, UnlockHintSheet } from './ui';
@@ -25,7 +25,7 @@ import {
 interface MultiplayerLobbyProps {
   isOpen: boolean;
   onClose: () => void;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   roomId: string | null;
   playerIndex: 0 | 1 | null;
   opponentName: string | null;
@@ -351,7 +351,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                     </span>
                     <div
                       id="lobby-room-code"
-                      className="text-numeral tnum tracking-[0.2em] text-(--theme-accent)"
+                      className="text-numeral tnum tracking-[0.2em] text-accent"
                     >
                       {joinKey || '····'}
                     </div>

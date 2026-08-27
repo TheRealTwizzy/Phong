@@ -14,6 +14,7 @@ import {
   RankDirection,
   GameMode,
   DailyMission,
+  CosmeticId,
 } from '../src/types';
 import {
   validateUsername,
@@ -23,6 +24,7 @@ import {
 } from '../src/profileRules';
 import { isRankedRules } from '../src/matchRules';
 import { ALL_ACHIEVEMENTS, achievementById, isUnlockable } from '../src/achievements';
+import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
 import {
   Rating,
   Tier,
@@ -200,6 +202,17 @@ export const PLAYER_KEYED_TABLES = [
 // Result of any operation that (re)names a profile. Optional fields rather
 // than a discriminated union — strictNullChecks is off in this repo, so
 // union narrowing wouldn't apply at the call sites.
+/**
+ * Matches UsernameResult's shape rather than being a discriminated union: this
+ * project does not compile with `strict`, so narrowing on a literal `ok: true`
+ * does not hold and the caller cannot reach `.code`.
+ */
+export interface CosmeticResult {
+  ok: boolean;
+  profile?: PlayerProfile;
+  code?: string;
+}
+
 export interface UsernameResult {
   ok: boolean;
   profile?: PlayerProfile;
@@ -284,6 +297,7 @@ interface PlayerRow {
   recoveryCode: string | null;
   initializedAt: string | null;
   usernameChangedAt: string | null;
+  cosmetic: string | null;
   // From the LEFT JOIN on avatars; NULL when the player has no avatar.
   avatarUpdatedAt?: string | null;
 }
@@ -308,6 +322,7 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
     chaosWins: row.chaosWins || 0,
     abandons: row.abandons || 0,
     achievements: JSON.parse(row.achievements || '[]'),
+    cosmetic: normalizeCosmeticId(row.cosmetic),
     recoveryCode: row.recoveryCode || undefined,
     initializedAt: row.initializedAt || undefined,
     usernameChangedAt: row.usernameChangedAt || undefined,
@@ -402,7 +417,8 @@ class GameDatabase {
         initializedAt TEXT,
         usernameChangedAt TEXT,
         activeSessionId TEXT,
-        activeSessionAt TEXT
+        activeSessionAt TEXT,
+        cosmetic TEXT
       );
       CREATE TABLE IF NOT EXISTS matches (
         id TEXT PRIMARY KEY,
@@ -720,6 +736,11 @@ class GameDatabase {
     addColumn('chaosWins', 'chaosWins INTEGER NOT NULL DEFAULT 0');
     addColumn('abandons', 'abandons INTEGER NOT NULL DEFAULT 0');
     // One account, one live session. Which one is recorded here.
+    // Nullable with no default: a row written before cosmetics existed reads
+    // back null, which rowToProfile resolves to the shipped default rather than
+    // to nothing. Never NOT NULL — an ALTER cannot backfill a value whose
+    // spelling this column's own module owns.
+    addColumn('cosmetic', 'cosmetic TEXT');
     addColumn('activeSessionId', 'activeSessionId TEXT');
     addColumn('activeSessionAt', 'activeSessionAt TEXT');
     this.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_players_recovery ON players(recoveryCode)');
@@ -965,8 +986,8 @@ class GameDatabase {
         `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins,
            winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, eliteWins, cyberWins, chaosWins, abandons, dailyStreak, lastDailyDate,
-           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt, cosmetic)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
@@ -984,7 +1005,7 @@ class GameDatabase {
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive,
            recoveryCode=excluded.recoveryCode, initializedAt=excluded.initializedAt,
-           usernameChangedAt=excluded.usernameChangedAt`
+           usernameChangedAt=excluded.usernameChangedAt, cosmetic=excluded.cosmetic`
       )
       .run(
         p.id,
@@ -1020,7 +1041,8 @@ class GameDatabase {
         p.lastActive,
         p.recoveryCode ?? null,
         p.initializedAt ?? null,
-        p.usernameChangedAt ?? null
+        p.usernameChangedAt ?? null,
+        p.cosmetic ?? null
       );
   }
 
@@ -1202,6 +1224,32 @@ class GameDatabase {
       return { ok: false, code: 'USERNAME_TAKEN' };
     }
     return { ok: true, profile: this.readProfile(id)! };
+  }
+
+  /**
+   * Equip a cosmetic.
+   *
+   * The unlock is re-derived HERE, from the profile this server holds, and not
+   * trusted from the caller — the same rule `/api/match/record` applies to a
+   * locked difficulty. The picker only draws what a player owns, but the picker
+   * is the client: a POST naming a cosmetic nobody has earned has to be refused
+   * by the thing that owns the answer, or the gate is decoration.
+   *
+   * Unknown ids are refused rather than normalized to the default. Normalizing
+   * is right when READING a value somebody already had — an old row, a stale
+   * localStorage blob — and wrong when accepting a new one, where it would
+   * answer "equipped" to a request that equipped something else.
+   */
+  public setCosmetic(id: string, cosmetic: string): CosmeticResult {
+    const profile = this.getProfile(id);
+    if (!profile.initializedAt) return { ok: false, code: 'PROFILE_NOT_INITIALIZED' };
+    if (!(cosmetic in COSMETICS)) return { ok: false, code: 'COSMETIC_UNKNOWN' };
+    const next = cosmetic as CosmeticId;
+    if (!isCosmeticUnlocked(next, profile)) return { ok: false, code: 'COSMETIC_LOCKED' };
+    if (profile.cosmetic === next) return { ok: true, profile }; // no-op
+    const updated = { ...profile, cosmetic: next };
+    this.upsertProfile(updated);
+    return { ok: true, profile: updated };
   }
 
   // Client-trusted XP grant (daily mission rewards). Clamped small so the
@@ -2124,6 +2172,9 @@ class GameDatabase {
       totalAces: p.totalAces,
       multiplayerWins: p.multiplayerWins || 0,
       eliteUnlocks: this.eliteUnlocks(p.id),
+      // The point of the whole feature: a viewer renders this card in the
+      // OWNER's cosmetic, so the owner's choice has to leave the server.
+      cosmetic: p.cosmetic,
       dailyStreak: p.dailyStreak,
       tier: p.tier,
       rankedGames: p.rankedGames,

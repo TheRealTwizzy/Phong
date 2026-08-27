@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameSettings, LanguageCode } from '../types';
-import { ThemeConfig } from '../game/themes';
+import { Cosmetic } from '../game/cosmetics';
 import {
   PADDLE_Y,
   PADDLE_HEIGHT,
@@ -21,7 +21,7 @@ import { RefreshCw, Home } from 'lucide-react';
 // store — this mode is deliberately offline and unranked.
 interface SplitScreenMatchProps {
   settings: GameSettings;
-  theme: ThemeConfig;
+  theme: Cosmetic;
   /**
    * The room-or-menu derived target, per CLAUDE.md §9.7: match code reads
    * activeConfig, never settings. For a split match the two are the same value
@@ -567,7 +567,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={resetAll}
-              className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-zinc-950 font-mono font-bold text-xs active:scale-95 transition"
+              className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-ink-on-accent font-mono font-bold text-xs active:scale-95 transition"
             >
               {t('play_again', lang)}
             </button>
