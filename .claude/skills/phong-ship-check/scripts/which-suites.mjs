@@ -78,8 +78,12 @@ const RULES = [
   { re: /^src\/i18n\//, suites: [], why: 'tests/i18n.test.ts states this completely — the browser adds nothing' },
   { re: /^src\/audio\//, suites: [], why: 'procedural audio; no suite asserts sound' },
 
-  { re: /^src\/App\.tsx$/, suites: ['gameplay', 'duel', 'lobby', 'rules', 'streak', 'spectate'],
-    why: 'the controller — every screen, socket handler and match lifecycle' },
+  // App.tsx is not a component among components: it is the whole controller —
+  // both screens, every socket handler, the game loop, the match lifecycle and
+  // the state every modal reads. Naming a subset here is guessing which flows a
+  // 4,000-line controller touches, and the honest answer is all of them.
+  { re: /^src\/App\.tsx$/, suites: ['*'],
+    why: 'the controller — every screen, socket handler, match lifecycle and modal reads from it' },
   { re: /^src\/components\/CourtCanvas\.tsx$/, suites: ['gameplay', 'rules', 'spectate'], why: 'the court, the joystick, the indicators' },
   { re: /^src\/components\/MainMenu\.tsx$/, suites: ['venues', 'rules', 'achievements'], why: 'buildings, rooms and the pre-match sheet' },
   { re: /^src\/components\/MultiplayerLobby\.tsx$/, suites: ['lobby', 'duel', 'invite', 'spectate', 'queue'], why: 'the lobby, the table browser and the invite box' },
