@@ -17,7 +17,7 @@ Two carry executable tooling:
 
 ```bash
 node .claude/skills/phong-ship-check/scripts/which-suites.mjs            # changed files → E2E suites
-node .claude/skills/phong-ship-check/scripts/which-suites.mjs --verify   # is that map still true?
+npm run lint:suites                                                     # is that map still true? (CI runs it)
 node .claude/skills/phong-i18n/scripts/locale-key.mjs audit              # dictionary ↔ product, both ways
 ```
 

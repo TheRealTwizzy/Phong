@@ -316,6 +316,7 @@ npm run dev      # tsx watch server.ts — app + relay with hot reload on :3000
 npm run build    # vite build (client) + esbuild bundle (server) → dist/
 npm start        # node dist/server.cjs (production)
 npm run lint     # tsc --noEmit
+npm run lint:suites # is .claude/skills' file→E2E-suite map still true? (CI runs it)
 npm test         # vitest run (tests/)
 npm run test:coverage # the same suites plus the per-module coverage floors CI enforces
 npm run test:e2e # browser E2E — needs `npm run build` first (see below)
@@ -334,7 +335,15 @@ from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. `verify`
 `test:coverage` rather than a bare `npm test`: per-module floors on the shared pure logic,
 set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
 components are Playwright's job, and one number would either fail on that bet or be set low
-enough to measure nothing. **A suite that
+enough to measure nothing. It also opens with `lint:suites`, before `npm ci`, because that
+one needs no dependencies and costs seconds: `.claude/skills/phong-ship-check` maps a changed
+file to the browser suites it puts at risk, and a hand-written map of eighteen suites is
+exactly the kind of claim that rots — it drifted four times on its first day, always toward
+selecting too FEW, which is the direction that lets a targeted run report success while
+skipping the flow the change actually broke. The check regenerates the floor from what the
+suites really drive (every `#id` each one uses, resolved back to the files defining it) and
+fails when a rule sits below it, so the map cannot go stale in the gaps between somebody
+remembering to look. **A suite that
 asserts old behaviour is a suite that will be deleted rather than read** — when a rule
 changes, change the suite in the same commit.
 

@@ -56,16 +56,21 @@ that suite; a named base ref git cannot resolve is an error, not a silent fallba
 ## Keeping the map honest
 
 ```bash
-node .claude/skills/phong-ship-check/scripts/which-suites.mjs --verify
+npm run lint:suites     # what CI runs; same as which-suites.mjs --verify
 ```
+
+**CI runs this**, first in the `verify` job and before `npm ci`, so drift fails the build
+rather than waiting to be noticed. If it goes red on your change, a rule you touched now
+selects fewer suites than the derivation found — or you added a component a suite drives and
+no rule covers it.
 
 The map is a claim about this repo, and a hand-written claim about eighteen suites drifts —
 this one drifted three times on its first day, always toward selecting too few, which is the
 direction that lets a targeted run report success while skipping the broken flow.
 
-`--verify` derives a **floor** from evidence instead of memory: every `#id` each suite drives,
+It derives a **floor** from evidence instead of memory: every `#id` each suite drives,
 resolved back to the source files that define it. A rule selecting fewer suites than the
-derivation found is reported, and the check exits non-zero. Run it whenever you touch `RULES`.
+derivation found is reported, and the check exits non-zero. Run it whenever you touch `RULES` — CI will anyway.
 
 It is a floor, not the map. It sees DOM coupling only, so a file a suite depends on
 *behaviourally* never appears — that is what the reasoned `why` on each rule is for. Widening

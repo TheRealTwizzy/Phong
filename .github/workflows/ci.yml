@@ -16,6 +16,19 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      # Before `npm ci`, because it needs no dependencies and this is the
+      # cheapest check in the repo — seconds, and it fails before anything is
+      # installed. `.claude/skills/phong-ship-check` maps a changed file to the
+      # browser suites it puts at risk, and that map is a hand-written claim
+      # about eighteen suites: it drifted four times on its first day, always
+      # toward selecting too FEW, which is the direction that lets a targeted
+      # run report success while skipping the flow the change actually broke.
+      # This regenerates the floor from what the suites really drive and fails
+      # when a rule sits below it, so the map cannot rot unnoticed between the
+      # moments somebody remembers to check it.
+      - name: Suite map still true
+        run: npm run lint:suites
+
       - name: Install dependencies
         run: npm ci
 
