@@ -116,6 +116,19 @@ first-class host. It is one monolithic plugin that also ships `PreToolUse`/`Post
 running shell on every Write, Edit and Bash call, and there is no way to take the skill without
 them. `skillOverrides` does not help — the docs are explicit that plugin skills are outside it.
 
+**`wshobson/agents` → `tailwind-design-system` was refused despite being right about Tailwind.** It
+is genuine v4 CSS-first, which is why it looks like a match and why this is written down. But its
+vocabulary is shadcn's — `background`, `foreground`, `primary`, `destructive`, `ring` — against our
+`surface-0..4`, `ink*`, `accent`, `line*`. The one name they share, `--color-accent`, it defines as
+a near-white muted hover surface where ours is the brand cyan `--color-ink-on-accent` exists to sit
+on: redefining the single shared token is worse than sharing none. And it themes with `@theme` plus
+a `.dark` class — two modes swapped by a class, with runtime publishing mentioned nowhere — where we
+publish twenty palettes from `cosmeticVars()` as an inline style and `PublicProfileModal` paints a
+different one on a subtree. It covers the case we do not have, omits the one we do, and walks into
+convention 13's trap; `phong-ui` already owns this and gets it right. Its three siblings ship in the
+same plugin and cannot be disabled separately — `react-state-management` opens on Zustand against
+runtime deps of exactly `express` and `ws`.
+
 **Do not re-run the search for these.** `anthropics/claude-plugins-official` carries 272 entries and
 zero game plugins. Nothing public exists for skill rating or matchmaking, rollback netcode, WebRTC
 DataChannel transport, or React render-loop performance; `phong-progression` and `phong-protocol`
