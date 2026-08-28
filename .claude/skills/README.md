@@ -16,7 +16,7 @@ into the rest. The others stand alone when you already know what you are editing
 | `phong-session` | A new route, socket path or way to earn. Which gate it sits behind, and why a gameplay path needs the check twice. |
 | `phong-progression` | What a match pays or moves. XP curve, level bands, reward budgets, the TrueSkill update and the per-rung solo caps. |
 | `phong-streaks` | Rally runs. Which of the three numbers to read, who owns the run, and how two writes about it are ordered. |
-| `phong-ui` | Anything on screen. The shared primitives, and the four cross-file rules that are not written near the file you are editing. |
+| `phong-ui` | Anything on screen. The shared primitives, and the five cross-file rules that are not written near the file you are editing. |
 | `phong-i18n` | Any user-facing string. All seven locales or it does not ship — and both failure modes are silent. |
 | `phong-e2e` | Writing a test. Which layer it belongs in, and the browser mechanics that cost time to discover. |
 | `phong-docs` | Keeping CLAUDE.md and TESTING.md true, in their own bug-first voice. |
