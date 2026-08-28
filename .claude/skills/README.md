@@ -79,3 +79,45 @@ firing alone means building in the right order having never asked whether it is 
 for f in .claude/skills/*/SKILL.md; do printf "%-46s %3s lines %s H2 %s H3\n" \
   "$(basename $(dirname $f))" "$(wc -l < $f)" "$(grep -c '^## ' $f)" "$(grep -c '^### ' $f)"; done
 ```
+
+## What is installed from outside, and what was refused
+
+Three plugins from `sponticelli/gamedev-claude-plugins`, declared in `.claude/settings.json` so the
+set travels with the repo rather than with whoever installed it: **`web-games`** (its
+`canvas-optimization-expert` is dirty rects, layered and offscreen canvases, `willReadFrequently`
+and `desynchronized`, devicePixelRatio — the things `CourtCanvas` actually does), **`multiplayer`**
+(`netcode-specialist` covers prediction, reconciliation, interpolation and lag compensation, none
+of which this game has), and **`juice`**. Twelve agents and twelve commands; no hooks, no MCP
+server, nothing that executes.
+
+**They are agents and slash commands, not `SKILL.md` files, and that is why they are safe here.** A
+skill competes for triggers by its description; an agent is invoked deliberately. So none of these
+can fire in place of one of the twelve.
+
+**The house skill wins, always.** On build order, the release gate, which test layer a check belongs
+in, or what a match pays, the answer is `phong-feature`, `phong-ship-check`, `phong-e2e` and
+`phong-progression` — not an import. An outside pack is worse than a house skill getting it wrong,
+because it is trusted for looking authoritative while carrying none of this repo's history. Its
+`game-design` plugin is left uninstalled for exactly that reason: `phong-progression` knows
+`SOLO_MU_CAPS` and why the solo cap has been wrong twice in opposite directions, and a generic
+balance agent does not.
+
+**`superpowers` and `gstack` were refused on their trigger text, not on taste.**
+`superpowers:brainstorming` fires on *"any creative work — creating features, building components,
+adding functionality"* and opens *"Start by classifying how much process the request needs"* — which
+is `phong-feature`'s description and its first verb. `verification-before-completion` fires *"before
+committing or creating PRs"*, which is `phong-ship-check` word for word. `systematic-debugging`
+demands root cause on any test failure, where `phong-ship-check` rules that a red **measured**
+assertion is often a draw and must never be tuned away. Both would fire, in opposite directions.
+
+**`0xDarkMatter/claude-mods` was refused for a different reason**, worth recording because the skill
+inside it is good: its `sqlite-ops` is the only public SQLite skill that treats `node:sqlite` as a
+first-class host. It is one monolithic plugin that also ships `PreToolUse`/`PostToolUse` hooks
+running shell on every Write, Edit and Bash call, and there is no way to take the skill without
+them. `skillOverrides` does not help — the docs are explicit that plugin skills are outside it.
+
+**Do not re-run the search for these.** `anthropics/claude-plugins-official` carries 272 entries and
+zero game plugins. Nothing public exists for skill rating or matchmaking, rollback netcode, WebRTC
+DataChannel transport, or React render-loop performance; `phong-progression` and `phong-protocol`
+are already more specific than anything published. Engine packs — Godot, Unity, Unreal, Bevy — are
+most of what is published in this space and none of it applies to a hand-rolled canvas.

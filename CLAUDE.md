@@ -84,6 +84,9 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 │                              #   a rally streak, anything on screen, a locale, a
 │                              #   test, a doc update, and the pre-push gate.
 │                              #   See .claude/skills/README.md
+├── .claude/settings.json      # Three gamedev plugins (agents + commands, nothing
+│                              #   that executes). Agents don't compete for triggers,
+│                              #   so the twelve still own every ruling they own.
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
 ├── DEPLOYMENT.md              # KVM/docker-compose runbook (+ Render alternative)
 ├── Dockerfile                 # Multi-stage build → slim runtime (express+ws only)

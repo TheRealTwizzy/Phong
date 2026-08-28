@@ -1,0 +1,15 @@
+{
+  "extraKnownMarketplaces": {
+    "gamedev-claude-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "sponticelli/gamedev-claude-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "web-games@gamedev-claude-plugins": true,
+    "multiplayer@gamedev-claude-plugins": true,
+    "juice@gamedev-claude-plugins": true
+  }
+}
