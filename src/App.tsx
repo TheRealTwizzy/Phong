@@ -84,10 +84,10 @@ import { MultiplayerLobby } from './components/MultiplayerLobby';
 import { MainMenu } from './components/MainMenu';
 import { SplitScreenMatch } from './components/SplitScreenMatch';
 import { ProfileModal } from './components/ProfileModal';
-import { LeaderboardList } from './components/LeaderboardList';
+import { RanksPage } from './components/RanksPage';
 import { AchievementsTree } from './components/AchievementsTree';
 import { AchievementCard, LevelUpCard } from './components/AchievementCard';
-import { MatchHistoryList } from './components/MatchHistoryList';
+import { HistoryPage } from './components/HistoryPage';
 import { StatsOverlay } from './components/StatsOverlay';
 import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
@@ -3360,11 +3360,10 @@ export default function App() {
             // run — no fetch, no state, nothing.
             pages={{
               leaderboard: (
-                <LeaderboardList
+                <RanksPage
                   language={currentLanguage}
                   currentPlayerId={playerId}
                   onViewProfile={openPublicProfile}
-                  active
                 />
               ),
               achievements: (
@@ -3377,12 +3376,10 @@ export default function App() {
                 />
               ),
               history: (
-                <MatchHistoryList
+                <HistoryPage
                   language={currentLanguage}
-                  perspectiveId={playerId}
-                  source={{ kind: 'me' }}
+                  playerId={playerId}
                   onViewProfile={openPublicProfile}
-                  idPrefix="history"
                 />
               ),
               settings: (
