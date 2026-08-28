@@ -354,6 +354,19 @@ the constant cap, a loss on a long run paying more than an early one, harder-alw
 and `tests/db.test.ts` pins the plumbing — the streak read BEFORE the match's own bump, and the
 day tally riding recordMatch's transaction and its idempotency.
 
+**A refetch never blanks what is already on screen.** `isLoading && list.length === 0`, never a
+bare `isLoading` — the rule `MatchHistoryList` carried alone until the pager made it load-bearing
+for the other two. The menu's window mounts three pages, so a page that stays mounted refetches
+whenever it becomes current, and against a bare `isLoading` that swapped the board for a spinner
+on *every* arrival: staleness traded for a flash, which is the worse half of the trade. It costs
+nothing to hold and it fixes the category and bots toggles flashing too. `scripts/e2e-menu.mjs`
+holds it — one leg counts `/api/leaderboard` calls across two separate arrivals on a page that
+never unmounts, and the next holds the response open with `page.route` and asserts the rows are
+still in the DOM while the request is in flight. That second leg is the one to read before
+copying: intercepting proves the request LEFT, not that React has painted the loading state, and
+sampled immediately it reads the pre-refresh paint and goes green however the branch is written.
+It was measured exactly that way. The wait after interception is what makes it a test.
+
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test
 pinning `competenceForMu` bit-for-bit at and above the old Cyber anchor, written when the floor

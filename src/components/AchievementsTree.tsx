@@ -4,6 +4,7 @@ import { BRANCHES, isBranchRevealed, isRevealed, isUnlockable } from '../achieve
 import { Tier } from '../rating';
 import { t } from '../i18n/translations';
 import { ProgressBar } from './ui';
+import { useArrivalRefetch } from './useArrivalRefetch';
 import {
   Award,
   Zap,
@@ -52,6 +53,17 @@ export interface AchievementsTreeProps {
   tier: Tier;
   /** On screen and fetching. The modal passes isOpen; a page passes "am I current". */
   active: boolean;
+  /**
+   * The page the pager is SHOWING, as opposed to one it merely has mounted —
+   * which the three-slot window makes a different question. Arriving refetches.
+   *
+   * The two other pages spend the `reloadKey` their own refresh button already
+   * owns; this tree has no refresh button (noted, deliberately not built here),
+   * so the counter lives inline rather than in a TROPHIES wrapper. RanksPage
+   * and HistoryPage exist because they carry real chrome — a title, a refresh,
+   * a footer, tiles — and a component holding only a counter earns nothing.
+   */
+  isCurrent: boolean;
 }
 
 export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
@@ -60,10 +72,14 @@ export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
   level,
   tier,
   active,
+  isCurrent,
 }) => {
   const [achievements, setAchievements] = useState<Achievement[]>([]);
   const [branch, setBranch] = useState<AchievementBranch>('foundation');
   const [isLoading, setIsLoading] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useArrivalRefetch(isCurrent, () => setReloadKey((k) => k + 1));
 
   useEffect(() => {
     if (!active || !playerId) return;
@@ -81,7 +97,7 @@ export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [active, playerId]);
+  }, [active, playerId, reloadKey]);
 
   const unlockedCount = achievements.filter((a) => a.unlockedAt).length;
   const earned = achievements.filter((a) => a.unlockedAt).map((a) => a.id);
@@ -170,7 +186,15 @@ export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
         })}
       </div>
 
-      {isLoading ? (
+      {/* `achievements.length === 0`, not a bare `isLoading`: a refetch must
+          never blank what is already on screen. Arriving on this page
+          refetches every time, so the bare form swapped the tree for a spinner
+          on every arrival — staleness traded for a flash, and the flash is
+          worse. Measured against the FETCHED list rather than `rows`, which
+          is one branch's walk of it: an open branch that happened to hold
+          nothing would otherwise read as still loading. Same rule
+          `MatchHistoryList` has carried all along. */}
+      {isLoading && achievements.length === 0 ? (
         <div className="shrink-0 py-12 text-center text-2xs font-normal tracking-normal text-ink-muted">Loading trophies...</div>
       ) : !branchOpen(branch) ? (
         <div

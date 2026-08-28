@@ -23,6 +23,13 @@
 //     up: a notification shade must not turn the page.
 //  9. Every page's scroll region actually scrolls its own overflow, so the
 //     flex-collapse class of bug cannot return on four new ones.
+// 10. A second flick inside the settle keeps the first turn.
+// 11. A page REFETCHES when it becomes current. The window mounts three slots,
+//     so a page fetches when it becomes a NEIGHBOUR and never again — leave the
+//     menu on PLAY and swipe to RANKS ten minutes later and you get the
+//     snapshot taken when RANKS slid into the window.
+// 12. A refetch never blanks what is already on screen, which is what makes
+//     leg 11 an improvement rather than a flash on every arrival.
 //
 // WHAT THIS SUITE CANNOT DO, stated so nobody reads more into a green run than
 // is there: it cannot test `touch-action`. That is enforced by the compositor
@@ -307,6 +314,117 @@ if (afterRapid !== 'achievements') {
   fail(`two rapid flicks from play landed on ${afterRapid}, not achievements`);
 }
 ok('a flick starting inside the settle finishes the previous turn rather than eating it');
+
+// ---- 11. A page refetches when it becomes current -----------------------
+// The pager mounts [prev, current, next], so a page inside that window stays
+// MOUNTED. Every one of these pages fetches from an effect that fires on mount
+// and on its own filters and nothing else, so the fetch happened when the page
+// became a NEIGHBOUR and never again: the board a player swipes to is the
+// snapshot taken whenever RANKS last slid into the window.
+//
+// The mount-time fetch for a page one swipe away is NOT the bug and is
+// deliberately kept — it is what makes a dragged-to page show content instead
+// of a spinner — so this counts it and then counts the arrivals on top of it.
+let boardCalls = 0;
+page.on('request', (r) => {
+  if (new URL(r.url()).pathname === '/api/leaderboard') boardCalls += 1;
+});
+
+// Start two pages away, so RANKS is outside the window and its mount is the
+// first call this leg sees rather than something an earlier leg left behind.
+await page.click('#menu-nav-history');
+await settle();
+if (await page.$('#menu-page-leaderboard')) fail('RANKS is still mounted from HISTORY — the window is wrong, so the count below would be meaningless');
+boardCalls = 0;
+
+await page.click('#menu-nav-play');
+await settle();
+if (!(await page.$('#menu-page-leaderboard'))) fail('RANKS did not mount as PLAY\'s neighbour');
+// EXACTLY one, which is a claim about the production bundle the runner serves
+// (`e2e-run.mjs` sets NODE_ENV=production). Pointed at a dev server it would
+// read 2: `src/main.tsx` renders under StrictMode, so React runs an effect
+// setup → cleanup → setup on mount. That is the same hazard `useArrivalRefetch`
+// is written around — it compares the previous VALUE rather than counting runs,
+// so a mount is a non-transition under both invocations — and the arrivals
+// below stay at one call each in dev, which is what that guard buys.
+if (boardCalls !== 1) fail(`RANKS mounting as a neighbour fetched ${boardCalls} times, expected exactly 1`);
+
+await page.click('#menu-nav-leaderboard');
+await settle();
+if (boardCalls !== 2) {
+  fail(`arriving on RANKS did not refetch (${boardCalls} calls, expected 2) — a mounted page is serving whatever it fetched as a neighbour`);
+}
+
+// Away and back WITHOUT leaving the window: PLAY and RANKS are adjacent, so
+// the page stays mounted and a second arrival cannot be explained by a remount.
+await page.click('#menu-nav-play');
+await settle();
+if (!(await page.$('#menu-page-leaderboard'))) fail('RANKS unmounted on the way back to PLAY, so the third call would just be another mount');
+if (boardCalls !== 2) fail(`LEAVING a page refetched it (${boardCalls} calls) — only arriving should`);
+await page.click('#menu-nav-leaderboard');
+await settle();
+if (boardCalls !== 3) {
+  fail(`the second arrival on RANKS did not refetch (${boardCalls} calls, expected 3) — one lucky mount order is not the rule`);
+}
+ok('a page refetches every time it becomes current, mounted or not');
+
+// ---- 12. A refetch never blanks what is already on screen ---------------
+// Leg 11 is a visible REGRESSION without this: every arrival would swap the
+// board for a spinner. `MatchHistoryList` has always had the rule
+// (`isLoading && rows.length === 0`); this is it on the leaderboard.
+//
+// Deterministic by holding the response open rather than by racing it: the
+// route handler firing is itself the proof the fetch is in flight, since the
+// component sets `isLoading` synchronously before calling fetch.
+const boardRows = () => page.$$eval('[id^="leaderboard-row-"]', (els) => els.length);
+const rowsBefore = await boardRows();
+if (rowsBefore === 0) {
+  fail('the leaderboard has no rows, so "the refetch did not blank it" would pass vacuously');
+}
+
+let releaseBoard = null;
+let intercepted = false;
+// `unroute` must not overtake the handler: releasing only schedules the
+// `route.continue()`, and unrouting before it lands makes Playwright handle
+// the route itself — the handler's own continue then throws "already handled"
+// and takes the run down. So the handler says when it is finished.
+let handlerDone = null;
+const handled = new Promise((resolve) => {
+  handlerDone = resolve;
+});
+await page.route('**/api/leaderboard*', async (route) => {
+  intercepted = true;
+  await new Promise((resolve) => {
+    releaseBoard = resolve;
+  });
+  await route.continue();
+  handlerDone();
+});
+
+await page.click('#btn-refresh-leaderboard');
+for (let i = 0; i < 50 && !intercepted; i += 1) await page.waitForTimeout(20);
+if (!intercepted) fail('the refresh button issued no request, so this leg proves nothing');
+// The interception proves the request LEFT; it does not prove React has
+// painted the loading state yet, and it has not. `setIsLoading(true)` runs in
+// the effect that calls fetch, so its render commits a beat AFTER the request
+// reaches Playwright — sampled immediately, this leg reads the pre-refresh
+// paint and passes however the branch is written. Measured exactly that way:
+// with the bare `isLoading` restored it read 8 rows and went green. Waiting is
+// free and cannot race, because the response is held open below until we
+// release it, so nothing can arrive and repopulate the list in the meantime.
+await settle();
+
+const rowsDuring = await boardRows();
+if (rowsDuring !== rowsBefore) {
+  fail(`a refetch blanked the board mid-flight: ${rowsBefore} rows before, ${rowsDuring} while loading`);
+}
+
+releaseBoard();
+await handled;
+await page.unroute('**/api/leaderboard*');
+await settle();
+if ((await boardRows()) === 0) fail('the board never came back after the held response was released');
+ok('a refetch leaves the rows on screen while it is in flight');
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 await browser.close();
