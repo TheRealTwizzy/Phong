@@ -3391,34 +3391,44 @@ export default function App() {
             onOpenProfile={() => setIsProfileOpen(true)}
             onOpenMissions={() => setIsMissionsOpen(true)}
             // The four destinations that are not PLAY. Built here because the
-            // data is here; mounted by the pager, three at a time. Creating an
-            // element costs nothing, so the two the pager is not showing never
-            // run — no fetch, no state, nothing.
+            // data is here; mounted by the pager, three at a time.
+            //
+            // RENDER FUNCTIONS rather than elements, and `isCurrent` is the
+            // whole reason: the pager's window holds three slots, so a page
+            // can be mounted without being the one on screen — and a page that
+            // stays mounted fetches when it becomes a NEIGHBOUR and never
+            // again. Three of these ask the server for something that moves,
+            // so each needs to know when it has actually arrived. Settings
+            // takes the argument and ignores it; a uniform type beats a
+            // special case waiting to be forgotten.
             pages={{
-              leaderboard: (
+              leaderboard: (isCurrent) => (
                 <RanksPage
                   language={currentLanguage}
                   currentPlayerId={playerId}
                   onViewProfile={openPublicProfile}
+                  isCurrent={isCurrent}
                 />
               ),
-              achievements: (
+              achievements: (isCurrent) => (
                 <AchievementsTree
                   language={currentLanguage}
                   playerId={playerId}
                   level={profile?.level || 1}
                   tier={profile?.tier || 'unranked'}
                   active
+                  isCurrent={isCurrent}
                 />
               ),
-              history: (
+              history: (isCurrent) => (
                 <HistoryPage
                   language={currentLanguage}
                   playerId={playerId}
                   onViewProfile={openPublicProfile}
+                  isCurrent={isCurrent}
                 />
               ),
-              settings: (
+              settings: () => (
                 <SettingsPanel
                   settings={settings}
                   onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}

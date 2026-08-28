@@ -168,7 +168,14 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
         />
       </label>
 
-      {isLoading ? (
+      {/* `entries.length === 0`, not a bare `isLoading`: a refetch must never
+          blank what is already on screen. Arriving on the RANKS page refetches
+          every time, so the bare form swapped the board for a spinner on every
+          arrival — staleness traded for a flash, and the flash is worse. It
+          fixes switching category and toggling bots for free, which threw the
+          rows away and rebuilt them the same way. Same rule
+          `MatchHistoryList` has carried all along. */}
+      {isLoading && entries.length === 0 ? (
         <div className="flex shrink-0 items-center justify-center gap-2 py-12 text-2xs font-normal tracking-normal text-ink-muted">
           <RefreshCw className="w-4 h-4 animate-spin text-warn" data-motion-essential />
           <span>{t('board_loading', language)}</span>

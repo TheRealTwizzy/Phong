@@ -130,14 +130,21 @@ interface MainMenuProps {
    * and the menu keeps the surface — the division the `quickMatch` prop above
    * already describes.
    *
-   * These are ELEMENTS, not rendered output: creating one costs nothing, and
-   * only the three the pager currently mounts ever run.
+   * RENDER FUNCTIONS, not elements, and the argument is the reason: the pager
+   * mounts three slots, so a page can be in the document without being the one
+   * on screen, and a page that stays mounted fetches once — when it became a
+   * NEIGHBOUR — and never again. `isCurrent` is what lets a page notice its own
+   * arrival and ask the server again (`useArrivalRefetch`).
+   *
+   * All four take it, `settings` included, which ignores it: a uniform type is
+   * worth more here than a special case that has to be remembered the next time
+   * a page grows a fetch.
    */
   pages: {
-    leaderboard: React.ReactNode;
-    achievements: React.ReactNode;
-    history: React.ReactNode;
-    settings: React.ReactNode;
+    leaderboard: (isCurrent: boolean) => React.ReactNode;
+    achievements: (isCurrent: boolean) => React.ReactNode;
+    history: (isCurrent: boolean) => React.ReactNode;
+    settings: (isCurrent: boolean) => React.ReactNode;
   };
 }
 
@@ -392,7 +399,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 
   const pageBody = (id: string) => {
     if (id === 'play') return playPage;
-    const node =
+    const render =
       id === 'leaderboard'
         ? pages.leaderboard
         : id === 'achievements'
@@ -400,6 +407,9 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           : id === 'history'
             ? pages.history
             : pages.settings;
+    // The page's own answer to "am I the one on screen", which is a different
+    // question from "am I mounted" the moment the window holds three slots.
+    const node = render(id === pageAt(pageIndex));
     // `h-full min-h-0` and nothing else structural: three of these were BLOCK
     // containers in their sheets and stay block containers here. Making them
     // flex columns to match Settings would change how their rows lay out and

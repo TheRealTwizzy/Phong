@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { LanguageCode, MatchRecord } from '../types';
 import { t } from '../i18n/translations';
 import { MatchHistoryList } from './MatchHistoryList';
+import { useArrivalRefetch } from './useArrivalRefetch';
 import { StatTile } from './ui';
 import { Flame, RefreshCw } from 'lucide-react';
 
@@ -22,20 +23,30 @@ import { Flame, RefreshCw } from 'lucide-react';
 //    came back because `tests/i18n.test.ts` reported `history_record` and
 //    `history_peak_rally` as keys the product had stopped asking for, which is
 //    the dead-weight check doing a job it was not written for.
+//
+// The refresh key does double duty: a pager page stays mounted while it is a
+// neighbour, so its fetch fired when it slid into the window and never again.
+// Arriving on the page is simply another press of that button.
 
 export interface HistoryPageProps {
   language: LanguageCode;
   playerId: string;
   onViewProfile?: (id: string) => void;
+  /** The page the pager is showing, not merely one it has mounted. */
+  isCurrent: boolean;
 }
 
 export const HistoryPage: React.FC<HistoryPageProps> = ({
   language,
   playerId,
   onViewProfile,
+  isCurrent,
 }) => {
   const [pageRows, setPageRows] = useState<MatchRecord[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
+  const refresh = () => setReloadKey((k) => k + 1);
+
+  useArrivalRefetch(isCurrent, refresh);
 
   // Summary over the page on screen — the tiles describe what the player is
   // looking at, filters included, not a fixed "last 10" that the tabs would
@@ -53,7 +64,7 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({
         <h2 className="text-title truncate">{t('match_history_title', language)}</h2>
         <button
           id="btn-refresh-match-history"
-          onClick={() => setReloadKey((k) => k + 1)}
+          onClick={refresh}
           title={t('history_refresh', language)}
           aria-label={t('history_refresh', language)}
           className="shrink-0 rounded-ctl border border-line bg-surface-3 p-2 text-ink-muted transition-colors hover:text-ink"
