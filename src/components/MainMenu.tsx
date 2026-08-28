@@ -315,12 +315,25 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   const xpForThisLevel = Math.max(1, (profile?.xpNext ?? 1) - levelFloor);
   const xpFraction = Math.min(1, xpIntoLevel / xpForThisLevel);
 
+  // The five destinations. SETTINGS holds the slot PROFILE used to, which is
+  // now the header pill alone — a tab bar entry and a header button for the
+  // same modal were two doors to one room, and the pill is the one every suite
+  // and every player already reaches for.
+  //
+  // Two strings here are load-bearing in a way that looks like tidiness debt
+  // and is not. `tests/i18n.test.ts` fails on a key nothing references, and it
+  // decides "references" by looking for the key name quoted ANYWHERE in src —
+  // so `id: 'leaderboard'` is the only thing keeping the `leaderboard` key
+  // alive across all seven locales (the label rendered here is `menu_tab_ranks`),
+  // and `labelKey: 'settings'` is now the only reference to `settings` at all,
+  // since the header gear that used to carry it as an aria-label is gone.
+  // Rename either and seven dictionaries lose an entry apiece.
   const tabs: { id: string; icon: React.ReactNode; labelKey: string; onClick?: () => void }[] = [
     { id: 'play', icon: <Play className="h-4 w-4" />, labelKey: 'menu_tab_play' },
     { id: 'leaderboard', icon: <Trophy className="h-4 w-4" />, labelKey: 'menu_tab_ranks', onClick: onOpenLeaderboard },
     { id: 'achievements', icon: <Award className="h-4 w-4" />, labelKey: 'achievements', onClick: onOpenAchievements },
     { id: 'history', icon: <History className="h-4 w-4" />, labelKey: 'history', onClick: onOpenHistory },
-    { id: 'profile', icon: <User className="h-4 w-4" />, labelKey: 'profile', onClick: onOpenProfile },
+    { id: 'settings', icon: <Settings className="h-4 w-4" />, labelKey: 'settings', onClick: onOpenSettings },
   ];
 
   const railMissions = missions.filter((m) => !m.claimed).slice(0, 3);
@@ -396,14 +409,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               {unclaimedMissionsCount}
             </span>
           )}
-        </button>
-        <button
-          id="menu-nav-settings"
-          onClick={onOpenSettings}
-          aria-label={t('settings', lang)}
-          className="rounded-ctl border border-line bg-surface-2 p-2 text-ink-muted transition-colors active:scale-95 motion-reduce:active:scale-100"
-        >
-          <Settings className="h-4 w-4" />
         </button>
       </header>
 
