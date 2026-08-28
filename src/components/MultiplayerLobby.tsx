@@ -23,6 +23,9 @@ import {
 } from 'lucide-react';
 
 interface MultiplayerLobbyProps {
+  /** Position in App's open-sheet stack; forwarded to Sheet. See Sheet's `stack`. */
+  stack?: { index: number; count: number };
+
   isOpen: boolean;
   onClose: () => void;
   theme: Cosmetic;
@@ -127,6 +130,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   isPrivate = false,
   joinKey = null,
   onSetPrivate,
+  stack,
 }) => {
   const playerName = currentUsername || 'Player';
   const [copied, setCopied] = useState<boolean>(false);
@@ -227,6 +231,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   return (
     <>
     <Sheet
+      stack={stack}
       id="multiplayer-lobby-modal"
       isOpen={isOpen}
       onClose={onClose}

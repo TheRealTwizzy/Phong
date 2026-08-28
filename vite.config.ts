@@ -29,6 +29,12 @@ const FLOORS = {
   // as open is a room the server has to seat, so this is cheap to test and
   // expensive to get wrong — the same bet as matchRules.ts beside it.
   'src/venues.ts': { statements: 95, branches: 85 },
+  // Thirty lines of arithmetic that decides every page change on the menu, and
+  // the ONLY place the swipe thresholds are asserted at all: `touch-action` is
+  // enforced by the compositor hit-test, and CDP's Input.dispatchTouchEvent
+  // injects downstream of it (measured — it scrolls a `touch-action: none`
+  // element), so the browser layer can prove the wiring and never the rules.
+  'src/gestures.ts': { statements: 95, branches: 95 },
   'src/game/physics.ts': { statements: 90, branches: 88 },
   'src/game/cosmetics.ts': { statements: 95, branches: 95 },
   // Forty lines of arithmetic that the contrast and distinctness floors both

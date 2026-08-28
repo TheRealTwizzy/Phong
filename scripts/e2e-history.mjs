@@ -165,7 +165,7 @@ for (const page of [host, guest]) {
   await page.click('#btn-menu-from-win');
   await page.waitForSelector('#main-menu-screen', { timeout: 5000 });
   await page.click('#menu-nav-history');
-  await page.waitForSelector('#match-history-container', { timeout: 5000 });
+  await page.waitForSelector('#menu-page-history', { timeout: 5000 });
   await page.waitForSelector('[id^="history-record-"]', { timeout: 5000 });
 }
 const countRows = (page, prefix) =>
@@ -252,8 +252,11 @@ ok('practice session listed under its tab, with no W/L verdict');
 // Quitting a match you are losing used to record nothing at all, so a player
 // who quit every losing solo match kept a 100% win rate. A match a point has
 // been scored in is a match that happened.
-await host.click('#btn-close-match-history');
-await host.waitForSelector('#main-menu-screen', { timeout: 5000 });
+// History is a PAGE now, not a sheet over the menu, so there is no close
+// button — you leave it by going somewhere else. Back to PLAY, which is where
+// the rooms are.
+await host.click('#menu-nav-play');
+await host.waitForSelector('#menu-pager[data-page="play"]', { timeout: 5000 });
 const lossesBefore = (await api(host, '/api/profile/me')).matchesLost;
 
 await host.click('#building-solo');
@@ -339,7 +342,7 @@ ok('quitting at 0-0 asks nothing and records nothing');
 
 // Re-open history for the public-profile leg below.
 await host.click('#menu-nav-history');
-await host.waitForSelector('#match-history-container', { timeout: 5000 });
+await host.waitForSelector('#menu-page-history', { timeout: 5000 });
 
 // ---- 5. Public history on the opponent's profile -------------------------
 await host.click('#history-tab-pvp');

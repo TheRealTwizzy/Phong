@@ -50,6 +50,7 @@ coverage number.
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
+| `gestures` | The swipe thresholds, the axis lock, the release velocity and the page-settle rule — the ONLY place these are stated (see §5) |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
@@ -59,9 +60,9 @@ coverage number.
 
 ### Browser layer
 
-`profiles` · `cosmetics` · `venues` · `gameplay` · `rating` · `rules` · `achievements` · `elite` ·
-`duel` · `invite` · `lobby` · `spectate` · `queue` · `split` · `streak` · `history` · `delete` ·
-`eject` · `build-id`
+`profiles` · `cosmetics` · `venues` · `menu` · `gameplay` · `rating` · `rules` ·
+`achievements` · `elite` · `duel` · `invite` · `lobby` · `spectate` · `queue` · `split` ·
+`streak` · `history` · `delete` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. `npm run build` is
@@ -74,7 +75,7 @@ V8 coverage measures **in-process execution only**. Two consequences that will m
 
 - **`server.ts` reads 0%.** It is not untested — `duelRecord`, `deviceSession` and
   `accountRecovery` spawn it,
-  and all nineteen browser suites drive it. The instrumentation cannot see across a process
+  and all twenty browser suites drive it. The instrumentation cannot see across a process
   boundary.
 - **Every `.tsx` reads 0%,** for the same reason. Playwright covers them.
 
@@ -258,6 +259,29 @@ cannot be relied on to produce one (a first-to-5 against Rookie goes 5-0 often e
 the suite for a reason that is not the rule), and the fix was to move the rule somewhere it
 could be stated — `src/game/streaks.ts` — rather than to loosen the assertion until it
 passed. `scripts/e2e-streak.mjs` keeps only what a browser can say without luck.
+
+**Some rules this environment cannot observe AT ALL, and the suite says so rather than
+implying otherwise.** `touch-action` is enforced by the compositor's hit-test and CDP's
+`Input.dispatchTouchEvent` injects downstream of it: a three-case probe — control, nested,
+strict `none` — built precisely so a null result could not be mistaken for a broken harness,
+scrolled a `touch-action: none` element 348px, and `Input.synthesizeScrollGesture` moved a
+provably scrollable element zero pixels in either direction. So `scripts/e2e-menu.mjs` proves
+the JS axis lock and the wiring, and NOT that the browser leaves the horizontal gesture alone;
+its header says which, because a leg asserting "a vertical drag does not page" otherwise passes
+VACUOUSLY — the hazard `scripts/e2e-rules.mjs` already warns about for a selector matching
+nothing, one layer down. The thresholds live in `tests/gestures.test.ts`, the one layer that
+can state them, and are deliberately not restated in the browser.
+
+**A pointer gesture proven with a mouse is not proven.** Both defects in the menu pager were
+invisible to `page.mouse` and fatal under a finger: `getCoalescedEvents()` returns `[]` rather
+than nullish when nothing coalesced, so a `?? [native]` fallback never fires and the axis never
+locks; and `setPointerCapture` on a touch pointer TRANSFERS the implicit capture it already
+holds, firing a bubbling `lostpointercapture` that aborts the drag being claimed. Every mouse
+leg passed through both. `scripts/e2e-menu.mjs` drives its cancel and vertical legs through CDP
+touch for that reason — and its cancel leg asserts `data-dragging="true"` BEFORE cancelling,
+because without that it passed with `onPointerCancel` deleted outright: `release` returns early
+for a pointer it does not own, so a cancel aimed at the wrong id proves nothing. Verified the
+way §6 asks, by breaking it and watching `FAIL: a cancelled drag committed to leaderboard`.
 
 **A test bound on a SAMPLED value is set from the sample, not from the rule.** The AI rolls
 its reads per rally, so every return rate is a draw. `tests/spin.test.ts` carried a `< 0.9`

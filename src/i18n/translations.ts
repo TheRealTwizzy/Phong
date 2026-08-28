@@ -471,9 +471,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     history_next_page: 'Next page',
     public_history_section: 'Recent Matches',
     profile_tab_stats: 'Career Statistics',
-    history_subtitle: 'Chronological performance & combat log',
     history_refresh: 'Refresh match records',
-    history_close: 'Close match history',
     history_record: 'Record',
     history_peak_rally: 'Peak Rally',
     history_loading: 'Fetching combat records from server...',
@@ -492,8 +490,6 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Leaderboard
     board_title: 'Global Leaderboard',
-    board_subtitle: 'Live rankings and competitive player records',
-    board_close: 'Close leaderboard',
     board_category: 'Leaderboard category',
     board_cat_elo: 'Skill Tier',
     board_cat_level: 'Level / XP',
@@ -963,9 +959,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     history_next_page: 'Página siguiente',
     public_history_section: 'Partidas recientes',
     profile_tab_stats: 'Estadísticas de carrera',
-    history_subtitle: 'Registro cronológico de rendimiento y combate',
     history_refresh: 'Actualizar los registros',
-    history_close: 'Cerrar el historial',
     history_record: 'Balance',
     history_peak_rally: 'Peloteo máximo',
     history_loading: 'Obteniendo los registros del servidor...',
@@ -984,8 +978,6 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Leaderboard
     board_title: 'Clasificación global',
-    board_subtitle: 'Clasificación en vivo y registros de jugadores',
-    board_close: 'Cerrar la clasificación',
     board_category: 'Categoría de la clasificación',
     board_cat_elo: 'Rango de habilidad',
     board_cat_level: 'Nivel / XP',
@@ -1455,9 +1447,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     history_next_page: '次のページ',
     public_history_section: '最近の試合',
     profile_tab_stats: '通算成績',
-    history_subtitle: '時系列のパフォーマンスと戦績ログ',
     history_refresh: '対戦記録を更新',
-    history_close: '対戦履歴を閉じる',
     history_record: '戦績',
     history_peak_rally: '最高ラリー',
     history_loading: 'サーバーから戦績を取得しています…',
@@ -1476,8 +1466,6 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Leaderboard
     board_title: 'グローバルランキング',
-    board_subtitle: 'リアルタイムの順位と競技記録',
-    board_close: 'ランキングを閉じる',
     board_category: 'ランキングの種類',
     board_cat_elo: 'スキルティア',
     board_cat_level: 'レベル / XP',
@@ -1947,9 +1935,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     history_next_page: 'Nächste Seite',
     public_history_section: 'Letzte Spiele',
     profile_tab_stats: 'Karriere-Statistiken',
-    history_subtitle: 'Chronologisches Leistungs- und Kampfprotokoll',
     history_refresh: 'Spielaufzeichnungen aktualisieren',
-    history_close: 'Spielverlauf schließen',
     history_record: 'Bilanz',
     history_peak_rally: 'Längster Ballwechsel',
     history_loading: 'Kampfaufzeichnungen werden vom Server geladen …',
@@ -1968,8 +1954,6 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Leaderboard
     board_title: 'Globale Rangliste',
-    board_subtitle: 'Live-Rangliste und Spielerbilanzen',
-    board_close: 'Rangliste schließen',
     board_category: 'Ranglisten-Kategorie',
     board_cat_elo: 'Skill-Stufe',
     board_cat_level: 'Level / XP',
@@ -2439,9 +2423,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     history_next_page: 'Page suivante',
     public_history_section: 'Matchs récents',
     profile_tab_stats: 'Statistiques de carrière',
-    history_subtitle: 'Journal chronologique des performances et des duels',
     history_refresh: 'Actualiser les enregistrements',
-    history_close: 'Fermer l’historique',
     history_record: 'Bilan',
     history_peak_rally: 'Meilleur échange',
     history_loading: 'Récupération des enregistrements depuis le serveur…',
@@ -2460,8 +2442,6 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Leaderboard
     board_title: 'Classement mondial',
-    board_subtitle: 'Classement en direct et records des joueurs',
-    board_close: 'Fermer le classement',
     board_category: 'Catégorie de classement',
     board_cat_elo: 'Palier de niveau',
     board_cat_level: 'Niveau / XP',
@@ -2931,9 +2911,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     history_next_page: 'Próxima página',
     public_history_section: 'Partidas recentes',
     profile_tab_stats: 'Estatísticas de carreira',
-    history_subtitle: 'Registro cronológico de desempenho e combate',
     history_refresh: 'Atualizar registros de partidas',
-    history_close: 'Fechar histórico',
     history_record: 'Retrospecto',
     history_peak_rally: 'Melhor troca',
     history_loading: 'Buscando registros de combate no servidor...',
@@ -2952,8 +2930,6 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Leaderboard
     board_title: 'Classificação global',
-    board_subtitle: 'Classificação ao vivo e recordes dos jogadores',
-    board_close: 'Fechar classificação',
     board_category: 'Categoria da classificação',
     board_cat_elo: 'Nível de habilidade',
     board_cat_level: 'Nível / XP',
@@ -3422,9 +3398,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     history_next_page: '下一页',
     public_history_section: '近期比赛',
     profile_tab_stats: '生涯数据',
-    history_subtitle: '按时间排列的表现与对战日志',
     history_refresh: '刷新对战记录',
-    history_close: '关闭对战记录',
     history_record: '战绩',
     history_peak_rally: '最高回合',
     history_loading: '正在从服务器获取对战记录…',
@@ -3443,8 +3417,6 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
 
     // Leaderboard
     board_title: '全球排行榜',
-    board_subtitle: '实时排名与玩家竞技记录',
-    board_close: '关闭排行榜',
     board_category: '排行榜类别',
     board_cat_elo: '技术段位',
     board_cat_level: '等级 / XP',

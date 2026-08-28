@@ -30,6 +30,7 @@ const SUITES = [
   { name: 'profiles', ownsServer: false },
   { name: 'cosmetics', ownsServer: false },
   { name: 'venues', ownsServer: false },
+  { name: 'menu', ownsServer: false },
   { name: 'gameplay', ownsServer: false },
   { name: 'rating', ownsServer: false },
   { name: 'rules', ownsServer: false },

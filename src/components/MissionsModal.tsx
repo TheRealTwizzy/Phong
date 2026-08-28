@@ -19,6 +19,9 @@ import {
 } from 'lucide-react';
 
 interface Props {
+  /** Position in App's open-sheet stack; forwarded to Sheet. See Sheet's `stack`. */
+  stack?: { index: number; count: number };
+
   isOpen: boolean;
   onClose: () => void;
   missions: DailyMission[];
@@ -37,6 +40,7 @@ export const MissionsModal: React.FC<Props> = ({
   onReroll,
   rerolls,
   language,
+  stack,
 }) => {
   const m = useMotion();
   const [claimingId, setClaimingId] = useState<string | null>(null);
@@ -174,6 +178,7 @@ export const MissionsModal: React.FC<Props> = ({
 
   return (
     <Sheet
+      stack={stack}
       cardId="missions-modal-container"
       isOpen={isOpen}
       onClose={onClose}

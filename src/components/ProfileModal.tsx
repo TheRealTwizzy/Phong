@@ -7,6 +7,7 @@ import { PLACEMENT_GAMES, xpForLevel } from '../rating';
 import { processAvatarFile, uploadAvatar, deleteAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
 import { MatchHistoryList } from './MatchHistoryList';
+import { AccountDangerZone } from './AccountDangerZone';
 import { TierBadge } from './TierBadge';
 import { t } from '../i18n/translations';
 import { Sheet, ProgressBar } from './ui';
@@ -25,6 +26,9 @@ import {
 } from 'lucide-react';
 
 interface Props {
+  /** Position in App's open-sheet stack; forwarded to Sheet. See Sheet's `stack`. */
+  stack?: { index: number; count: number };
+
   isOpen: boolean;
   onClose: () => void;
   profile: PlayerProfile | null;
@@ -37,6 +41,14 @@ interface Props {
   equippedCosmetic: CosmeticId;
   onEquipCosmetic: (id: CosmeticId) => void;
   language?: LanguageCode;
+  /**
+   * Deleting the account, offered only when it is safe to offer.
+   *
+   * Absent means not offered, and App passes it only while `screen === 'menu'`
+   * — this modal opens from the in-match HUD too, and deleting mid-duel would
+   * charge an abandon to an account that no longer exists.
+   */
+  onDeleteAccount?: (username: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
@@ -131,6 +143,8 @@ export const ProfileModal: React.FC<Props> = ({
   equippedCosmetic,
   onEquipCosmetic,
   language = 'en',
+  onDeleteAccount,
+  stack,
 }) => {
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -484,6 +498,7 @@ export const ProfileModal: React.FC<Props> = ({
 
   return (
     <Sheet
+      stack={stack}
       cardId="profile-modal-container"
       isOpen={isOpen}
       onClose={onClose}
@@ -686,6 +701,16 @@ export const ProfileModal: React.FC<Props> = ({
                     </div>
                   </div>
                 )}
+
+                {/* Last in the tab, deliberately: everything above it is
+                    reversible and this is the only thing here that is not.
+                    Absent entirely mid-match — see the onDeleteAccount prop. */}
+                <AccountDangerZone
+                  isOpen={isOpen}
+                  profile={profile}
+                  language={language}
+                  onDeleteAccount={onDeleteAccount}
+                />
               </div>
             ) : (
               // The shared list — the same tabs, filters, pagination and row

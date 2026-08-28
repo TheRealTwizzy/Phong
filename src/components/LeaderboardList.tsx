@@ -1,19 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { LeaderboardEntry, LanguageCode } from '../types';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
-import { Sheet, Button, Panel } from './ui';
-import { X, Trophy, Crown, Medal, RefreshCw } from 'lucide-react';
+import { Panel } from './ui';
+import { Crown, Medal, RefreshCw } from 'lucide-react';
 
-interface Props {
-  isOpen: boolean;
-  onClose: () => void;
-  currentPlayerId: string;
-  // Tapping any row opens that player's public profile.
-  onViewProfile?: (id: string) => void;
-  language: LanguageCode;
-}
+// The leaderboard itself — the category strip, the bots toggle and the rows —
+// with no chrome of its own, so the same list serves the modal it grew up in
+// and the RANKS page it is becoming. `MatchHistoryList` is the pattern: the
+// filters are LIST state, so they belong to the list rather than to whichever
+// header happens to be above it.
+//
+// Deliberately no `idPrefix` (which MatchHistoryList does need): only ever one
+// leaderboard is on screen, where a history list renders three times at once —
+// the player's own, the profile sheet's tab, and somebody else's public view.
+// An unused prefix would just be untested surface, and it would make
+// `#leaderboard-row-*` a computed string that the browser suites already name
+// literally.
 
 type SortCategory = 'elo' | 'level' | 'rally' | 'wins';
 
@@ -28,12 +32,30 @@ const CATEGORIES: { id: SortCategory; labelKey: string }[] = [
   { id: 'wins', labelKey: 'board_cat_wins' },
 ];
 
-export const LeaderboardModal: React.FC<Props> = ({
-  isOpen,
-  onClose,
+export interface LeaderboardListProps {
+  language: LanguageCode;
+  currentPlayerId: string;
+  /** Tapping any row opens that player's public profile. */
+  onViewProfile?: (id: string) => void;
+  /**
+   * Whether this list is actually on screen and should be fetching.
+   *
+   * The modal passes its `isOpen`. A pager page passes whether it is the
+   * CURRENT page — which is the distinction that stops mattering silently once
+   * a page can be mounted without being visible: three off-screen pages
+   * refetching on every filter change is bandwidth nobody asked for.
+   */
+  active: boolean;
+  /** Bump to refetch the current view (a host's refresh button). */
+  reloadKey?: number;
+}
+
+export const LeaderboardList: React.FC<LeaderboardListProps> = ({
+  language,
   currentPlayerId,
   onViewProfile,
-  language,
+  active,
+  reloadKey = 0,
 }) => {
   const [category, setCategory] = useState<SortCategory>('elo');
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
@@ -44,22 +66,25 @@ export const LeaderboardModal: React.FC<Props> = ({
   // being invited to climb had nothing on it. The toggle still hides them.
   const [showBots, setShowBots] = useState(true);
 
-  const fetchLeaderboard = (cat: SortCategory, bots: boolean) => {
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
     setIsLoading(true);
-    fetch(`/api/leaderboard?sort=${cat}&limit=50${bots ? '&bots=1' : ''}`)
+    fetch(`/api/leaderboard?sort=${category}&limit=50${showBots ? '&bots=1' : ''}`)
       .then((res) => res.json())
       .then((data) => {
-        setEntries(data.leaderboard || []);
+        if (!cancelled) setEntries(data.leaderboard || []);
       })
       .catch(console.error)
-      .finally(() => setIsLoading(false));
-  };
-
-  useEffect(() => {
-    if (isOpen) {
-      fetchLeaderboard(category, showBots);
-    }
-  }, [isOpen, category, showBots]);
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    // A page can be unmounted mid-flight by a swipe, where the modal could only
+    // be closed; setting state after that is a warning and a leak.
+    return () => {
+      cancelled = true;
+    };
+  }, [active, category, showBots, reloadKey]);
 
   // Gold, silver and bronze are the content here, not chrome — a medal that
   // took the shell's accent would stop reading as a medal.
@@ -99,34 +124,13 @@ export const LeaderboardModal: React.FC<Props> = ({
     );
   };
 
-  const header = (
-    <div className="shrink-0 relative border-b border-line bg-gradient-to-r from-warn/12 via-surface-2 to-surface-2 p-4">
-      <button
-        id="close-leaderboard-btn"
-        onClick={onClose}
-        aria-label={t('board_close', language)}
-        className="absolute top-3 right-3 rounded-ctl p-2 text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
-      >
-        <X className="w-5 h-5" />
-      </button>
-
-      <div className="flex items-center gap-3">
-        <div className="rounded-card border border-warn/30 bg-warn/10 p-2.5 text-warn">
-          <Trophy className="w-6 h-6" />
-        </div>
-        <div>
-          <h2 className="text-title">{t('board_title', language)}</h2>
-          <p className="text-2xs font-normal tracking-normal text-ink-muted">
-            {t('board_subtitle', language)}
-          </p>
-        </div>
-      </div>
-
+  return (
+    <>
       {/* Filter tabs */}
       <div
         role="tablist"
         aria-label={t('board_category', language)}
-        className="mt-4 grid grid-cols-4 gap-1 rounded-card border border-line bg-surface-1 p-1"
+        className="grid shrink-0 grid-cols-4 gap-1 rounded-card border border-line bg-surface-1 p-1"
       >
         {CATEGORIES.map((c) => {
           const selected = category === c.id;
@@ -153,7 +157,7 @@ export const LeaderboardModal: React.FC<Props> = ({
       {/* Bots are ranked separately and never change a human player's rank. */}
       <label
         id="toggle-show-bots"
-        className="mt-2.5 flex cursor-pointer select-none items-center justify-between px-1 text-2xs font-normal tracking-normal text-ink-muted"
+        className="flex shrink-0 cursor-pointer select-none items-center justify-between px-1 text-2xs font-normal tracking-normal text-ink-muted"
       >
         <span>{t('board_show_bots', language)}</span>
         <input
@@ -163,43 +167,14 @@ export const LeaderboardModal: React.FC<Props> = ({
           className="h-4 w-4 accent-violet-500"
         />
       </label>
-    </div>
-  );
 
-  const footer = (
-    <>
-      <span className="flex-1 text-2xs font-normal tracking-normal text-ink-muted">
-        {t('board_footer', language)}
-      </span>
-      <Button
-        size="sm"
-        variant="secondary"
-        icon={<RefreshCw className="w-3.5 h-3.5" />}
-        onClick={() => fetchLeaderboard(category, showBots)}
-      >
-        {t('board_refresh', language)}
-      </Button>
-    </>
-  );
-
-  return (
-    <Sheet
-      cardId="leaderboard-modal-container"
-      isOpen={isOpen}
-      onClose={onClose}
-      size="lg"
-      accent="warn"
-      header={header}
-      footer={footer}
-      bodyClassName="p-3 space-y-2"
-    >
       {isLoading ? (
-        <div className="flex items-center justify-center gap-2 py-12 text-2xs font-normal tracking-normal text-ink-muted">
+        <div className="flex shrink-0 items-center justify-center gap-2 py-12 text-2xs font-normal tracking-normal text-ink-muted">
           <RefreshCw className="w-4 h-4 animate-spin text-warn" data-motion-essential />
           <span>{t('board_loading', language)}</span>
         </div>
       ) : entries.length === 0 ? (
-        <div className="py-12 text-center text-2xs font-normal tracking-normal text-ink-dim">
+        <div className="shrink-0 py-12 text-center text-2xs font-normal tracking-normal text-ink-dim">
           {t('board_empty', language)}
         </div>
       ) : (
@@ -212,7 +187,7 @@ export const LeaderboardModal: React.FC<Props> = ({
               variant={isMe ? 'raised' : 'flat'}
               accent={isMe ? 'warn' : 'neutral'}
               padded={false}
-              className={isMe ? 'bg-warn/10' : ''}
+              className={`shrink-0 ${isMe ? 'bg-warn/10' : ''}`}
             >
               <button
                 id={`leaderboard-row-${entry.id}`}
@@ -296,6 +271,6 @@ export const LeaderboardModal: React.FC<Props> = ({
           );
         })
       )}
-    </Sheet>
+    </>
   );
 };

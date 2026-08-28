@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'motion/react';
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   BallState,
   AIDifficulty,
@@ -79,14 +79,15 @@ import { CourtCanvas } from './components/CourtCanvas';
 import { ScoreBoard } from './components/ScoreBoard';
 import { RadarPreview } from './components/RadarPreview';
 import { SettingsModal } from './components/SettingsModal';
+import { SettingsPanel } from './components/SettingsPanel';
 import { MultiplayerLobby } from './components/MultiplayerLobby';
 import { MainMenu } from './components/MainMenu';
 import { SplitScreenMatch } from './components/SplitScreenMatch';
 import { ProfileModal } from './components/ProfileModal';
-import { LeaderboardModal } from './components/LeaderboardModal';
-import { AchievementsModal } from './components/AchievementsModal';
+import { RanksPage } from './components/RanksPage';
+import { AchievementsTree } from './components/AchievementsTree';
 import { AchievementCard, LevelUpCard } from './components/AchievementCard';
-import { MatchHistoryModal } from './components/MatchHistoryModal';
+import { HistoryPage } from './components/HistoryPage';
 import { StatsOverlay } from './components/StatsOverlay';
 import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
@@ -229,13 +230,45 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isMultiplayerOpen, setIsMultiplayerOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
-  const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
-  const [isAchievementsOpen, setIsAchievementsOpen] = useState<boolean>(false);
-  const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
-  // Any tapped username opens this player's public profile (z-[60], above
-  // whichever modal spawned it). null = closed.
+  // Any tapped username opens this player's public profile — last in
+  // `sheetStack` below, so it draws above whatever spawned it. null = closed.
   const [publicProfileId, setPublicProfileId] = useState<string | null>(null);
+
+  /**
+   * The open sheets App owns, bottom to top.
+   *
+   * Derived rather than pushed and popped, because `isMultiplayerOpen` is
+   * driven by relay messages — `room_joined` and `room_created` reopen it, and
+   * CLAUDE.md §1 records why that is load-bearing — so turning it into a stack
+   * entry would mean rewiring those handlers in a change about the menu.
+   *
+   * The cost is that the order is fixed by declaration rather than by the order
+   * the player opened them. For every pair that actually occurs — a public
+   * profile over the leaderboard page, over the lobby, over a profile; a
+   * profile over the in-match settings — the declared order IS the order they
+   * can be opened in, so the two agree.
+   *
+   * It also ends a live undefined behaviour: `isSettingsOpen` and
+   * `isProfileOpen` are independent, both openable from the in-match HUD, and
+   * both were `z-50`. Two open at once resolved by DOM order, which nobody had
+   * chosen.
+   */
+  const sheetStack = useMemo(
+    () =>
+      [
+        isMissionsOpen && 'missions',
+        isMultiplayerOpen && 'lobby',
+        isSettingsOpen && 'settings',
+        isProfileOpen && 'profile',
+        publicProfileId && 'public-profile',
+      ].filter(Boolean) as string[],
+    [isMissionsOpen, isMultiplayerOpen, isSettingsOpen, isProfileOpen, publicProfileId]
+  );
+  const stackOf = (key: string) => {
+    const index = sheetStack.indexOf(key);
+    return index < 0 ? undefined : { index, count: sheetStack.length };
+  };
   // Server-computed odds for the current PvP match (never exposes the
   // opponent's hidden rating to this client).
   const [matchPrediction, setMatchPrediction] = useState<number | null>(null);
@@ -3314,6 +3347,7 @@ export default function App() {
 
         {/* Public profile viewer — opened by tapping any username */}
         <PublicProfileModal
+          stack={stackOf('public-profile')}
           playerId={publicProfileId}
           onClose={() => setPublicProfileId(null)}
           language={currentLanguage}
@@ -3355,11 +3389,44 @@ export default function App() {
               setIsMultiplayerOpen(true);
             }}
             onOpenProfile={() => setIsProfileOpen(true)}
-            onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
-            onOpenAchievements={() => setIsAchievementsOpen(true)}
-            onOpenHistory={() => setIsHistoryOpen(true)}
             onOpenMissions={() => setIsMissionsOpen(true)}
-            onOpenSettings={() => setIsSettingsOpen(true)}
+            // The four destinations that are not PLAY. Built here because the
+            // data is here; mounted by the pager, three at a time. Creating an
+            // element costs nothing, so the two the pager is not showing never
+            // run — no fetch, no state, nothing.
+            pages={{
+              leaderboard: (
+                <RanksPage
+                  language={currentLanguage}
+                  currentPlayerId={playerId}
+                  onViewProfile={openPublicProfile}
+                />
+              ),
+              achievements: (
+                <AchievementsTree
+                  language={currentLanguage}
+                  playerId={playerId}
+                  level={profile?.level || 1}
+                  tier={profile?.tier || 'unranked'}
+                  active
+                />
+              ),
+              history: (
+                <HistoryPage
+                  language={currentLanguage}
+                  playerId={playerId}
+                  onViewProfile={openPublicProfile}
+                />
+              ),
+              settings: (
+                <SettingsPanel
+                  settings={settings}
+                  onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
+                  onTriggerShake={() => setShakeTrigger(Date.now())}
+                  indicatorsLockedBySonar={!indicatorsAllowed}
+                />
+              ),
+            }}
           />
           </motion.div>
         ) : (
@@ -3747,6 +3814,7 @@ export default function App() {
 
         {/* Daily Missions Modal */}
         <MissionsModal
+          stack={stackOf('missions')}
           isOpen={isMissionsOpen}
           onClose={() => setIsMissionsOpen(false)}
           missions={missions}
@@ -3759,23 +3827,19 @@ export default function App() {
         {/* Settings & Customization Modal (device preferences only —
             match settings live on the main menu, pre-match) */}
         <SettingsModal
+          stack={stackOf('settings')}
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
           profile={profile}
-          // Menu only: from a live court it
-          // would walk the player out of a match — and out of a DUEL, leaving
-          // an opponent alone in a room that was never told anybody had gone.
-          // The relay would charge the abandon and the account it charged
-          // would already be deleted.
-          onDeleteAccount={screen === 'menu' ? handleDeleteAccount : undefined}
           onTriggerShake={() => setShakeTrigger(Date.now())}
           indicatorsLockedBySonar={!indicatorsAllowed}
         />
 
         {/* 2-Phone Multiplayer Lobby */}
         <MultiplayerLobby
+          stack={stackOf('lobby')}
           isOpen={isMultiplayerOpen}
           onClose={requestLeaveLobby}
           theme={currentTheme}
@@ -3824,6 +3888,7 @@ export default function App() {
 
         {/* Player Profile & Stats Modal */}
         <ProfileModal
+          stack={stackOf('profile')}
           isOpen={isProfileOpen}
           onClose={() => setIsProfileOpen(false)}
           profile={profile}
@@ -3834,35 +3899,22 @@ export default function App() {
           equippedCosmetic={equippedCosmeticId}
           onEquipCosmetic={(id) => void handleEquipCosmetic(id)}
           language={currentLanguage}
+          // Menu only, and this modal is why the rule needs restating rather
+          // than moving: SettingsModal had one door and this has TWO — the
+          // menu's header pill and the in-match HUD's #btn-open-profile, the
+          // same instance both times. From a live court, deleting would walk
+          // the player out of a match — and out of a DUEL, leaving an opponent
+          // alone in a room that was never told anybody had gone. The relay
+          // would charge the abandon and the account it charged would already
+          // be deleted.
+          onDeleteAccount={screen === 'menu' ? handleDeleteAccount : undefined}
         />
 
-        {/* Global Leaderboard Modal */}
-        <LeaderboardModal
-          isOpen={isLeaderboardOpen}
-          onClose={() => setIsLeaderboardOpen(false)}
-          currentPlayerId={playerId}
-          onViewProfile={openPublicProfile}
-          language={currentLanguage}
-        />
-
-        {/* Achievements & Trophies Modal */}
-        <AchievementsModal
-          isOpen={isAchievementsOpen}
-          onClose={() => setIsAchievementsOpen(false)}
-          playerId={playerId}
-          level={profile?.level || 1}
-          tier={profile?.tier || 'unranked'}
-          language={currentLanguage}
-        />
-
-        {/* Match History Modal */}
-        <MatchHistoryModal
-          isOpen={isHistoryOpen}
-          onClose={() => setIsHistoryOpen(false)}
-          playerId={playerId}
-          onViewProfile={openPublicProfile}
-          language={currentLanguage}
-        />
+        {/* Ranks, Trophies and History are PAGES now, not modals — each had
+            exactly one entry point (the tab that is now the page), so there was
+            no second door left to keep a sheet open for. Settings is the one
+            exception and its modal survives below, because the in-match HUD
+            opens it and a live court has no pager to put a page on. */}
       </div>
       </SessionGuard>
     </MobileGatekeeper>
