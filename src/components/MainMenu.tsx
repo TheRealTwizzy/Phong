@@ -21,6 +21,7 @@ import { normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { QuickMatch } from '../net/useQuickMatch';
+import { wrapIndex } from '../gestures';
 import {
   BUILDINGS,
   BuildingId,
@@ -116,11 +117,26 @@ interface MainMenuProps {
   /** `venue` is the PvP room walked in from, or undefined for the bare flow. */
   onOpenMultiplayer: (venue?: string) => void;
   onOpenProfile: () => void;
-  onOpenLeaderboard: () => void;
-  onOpenAchievements: () => void;
-  onOpenHistory: () => void;
   onOpenMissions: () => void;
-  onOpenSettings: () => void;
+  /**
+   * The four destinations that are not PLAY, already wired up by App.
+   *
+   * A seam rather than four more data props: this component has eighteen of
+   * them, and threading a leaderboard's player id, an achievement tree's tier
+   * and a settings panel's shake callback through it would make the menu the
+   * owner of four things it does not otherwise know about. App keeps the state
+   * and the menu keeps the surface — the division the `quickMatch` prop above
+   * already describes.
+   *
+   * These are ELEMENTS, not rendered output: creating one costs nothing, and
+   * only the three the pager currently mounts ever run.
+   */
+  pages: {
+    leaderboard: React.ReactNode;
+    achievements: React.ReactNode;
+    history: React.ReactNode;
+    settings: React.ReactNode;
+  };
 }
 
 /** Buildings name their icon; the component owns the drawing. */
@@ -148,11 +164,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   onStartSplit,
   onOpenMultiplayer,
   onOpenProfile,
-  onOpenLeaderboard,
-  onOpenAchievements,
-  onOpenHistory,
   onOpenMissions,
-  onOpenSettings,
+  pages,
 }) => {
   const lang = settings.language || 'en';
   // Which mode's pre-match sheet is open. A duel's lives in App (the lobby
@@ -202,6 +215,13 @@ export const MainMenu: React.FC<MainMenuProps> = ({
    * it anyway: there is only ever one list on screen.
    */
   const [revealLocked, setRevealLocked] = useState(false);
+
+  // Which of the five the player is on. The tab bar reads it, and once the
+  // gesture lands the drag will too — one number, so the bar can never
+  // disagree with what is on screen. `current = !tab.onClick` used to stand in
+  // for this and meant "the tab with no handler", which is why PLAY was
+  // permanently highlighted and did nothing when tapped.
+  const [pageIndex, setPageIndex] = useState(0);
   const revealed = revealLocked;
 
   const MODE_META: {
@@ -328,96 +348,67 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // and `labelKey: 'settings'` is now the only reference to `settings` at all,
   // since the header gear that used to carry it as an aria-label is gone.
   // Rename either and seven dictionaries lose an entry apiece.
-  const tabs: { id: string; icon: React.ReactNode; labelKey: string; onClick?: () => void }[] = [
+  const tabs: { id: string; icon: React.ReactNode; labelKey: string }[] = [
     { id: 'play', icon: <Play className="h-4 w-4" />, labelKey: 'menu_tab_play' },
-    { id: 'leaderboard', icon: <Trophy className="h-4 w-4" />, labelKey: 'menu_tab_ranks', onClick: onOpenLeaderboard },
-    { id: 'achievements', icon: <Award className="h-4 w-4" />, labelKey: 'achievements', onClick: onOpenAchievements },
-    { id: 'history', icon: <History className="h-4 w-4" />, labelKey: 'history', onClick: onOpenHistory },
-    { id: 'settings', icon: <Settings className="h-4 w-4" />, labelKey: 'settings', onClick: onOpenSettings },
+    { id: 'leaderboard', icon: <Trophy className="h-4 w-4" />, labelKey: 'menu_tab_ranks' },
+    { id: 'achievements', icon: <Award className="h-4 w-4" />, labelKey: 'achievements' },
+    { id: 'history', icon: <History className="h-4 w-4" />, labelKey: 'history' },
+    { id: 'settings', icon: <Settings className="h-4 w-4" />, labelKey: 'settings' },
   ];
+
+  // The tab bar and the pager read ONE ordered list, so a tab can never name a
+  // page the pager does not have. `wrapIndex` closes the loop arithmetically,
+  // which is what lets the strip have no ends without cloning any page into a
+  // second copy of every id inside it.
+  const pageAt = (i: number) => tabs[wrapIndex(i, tabs.length)].id;
+
+  /**
+   * Each page scrolls itself, and these are the `bodyClassName` strings the
+   * Sheets handed their bodies — the same padding and the same rhythm, with the
+   * horizontal half swapped for `px-safe`. A sheet is inset from the screen
+   * edge by its own card, and a page is not, so `p-3` would put the leaderboard
+   * under a rounded corner on a notched phone.
+   *
+   * Settings' `flex flex-col gap-4` is carried across verbatim and is not to be
+   * tidied: its children carry no `shrink-0`, and it works today only because
+   * none of them clip. That is one `overflow-hidden` away from the collapse the
+   * header comment above describes.
+   */
+  const PAGE_SCROLL_CLASS: Record<string, string> = {
+    leaderboard: 'py-3 px-safe space-y-2',
+    achievements: 'py-3 px-safe space-y-2.5',
+    history: 'py-3 px-safe',
+    settings: 'py-4 px-safe flex flex-col gap-4',  // the one flex column, as it was
+  };
+
+  const pageBody = (id: string) => {
+    if (id === 'play') return playPage;
+    const node =
+      id === 'leaderboard'
+        ? pages.leaderboard
+        : id === 'achievements'
+          ? pages.achievements
+          : id === 'history'
+            ? pages.history
+            : pages.settings;
+    // `h-full min-h-0` and nothing else structural: three of these were BLOCK
+    // containers in their sheets and stay block containers here. Making them
+    // flex columns to match Settings would change how their rows lay out and
+    // hand every child the automatic-zero-minimum-size hazard for free.
+    return <div className={`scroll-y h-full min-h-0 ${PAGE_SCROLL_CLASS[id]}`}>{node}</div>;
+  };
 
   const railMissions = missions.filter((m) => !m.claimed).slice(0, 3);
 
-  return (
+  // The PLAY page: what the menu has always been, now one page of five.
+  // Unchanged inside — the scroll contract and every `shrink-0` on its
+  // children come across verbatim, because that is the flex-collapse bug
+  // and it does not care that the region moved.
+  const playPage = (
     <div
-      id="main-menu-screen"
-      className="relative flex h-full w-full flex-col overflow-hidden bg-surface-1 text-ink select-none"
+      id="menu-page-play-scroll"
+      className="scroll-y flex h-full min-h-0 flex-col gap-3 px-safe pb-3"
     >
-      {/* This used to be the ONLY place the equipped theme reached the shell —
-          "a wash at low alpha over the surface ramp, so twenty themes cannot
-          turn the menu into twenty different designs". That restraint was right
-          while a theme was loose colours with nothing checking them: twenty
-          hand-authored shells would have been twenty designs to maintain, and
-          the first to drift would have been an unreadable one.
-
-          Both halves of that are now enforced rather than trusted. A cosmetic's
-          shell is DERIVED from its own court palette (shellFrom), so it cannot
-          become an unrelated design, and a measured contrast floor over all
-          twenty means it cannot become an illegible one. So the menu takes the
-          whole palette through the tokens, and this is just the accent bloom on
-          top of it. */}
-      <div
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background: `radial-gradient(circle at 50% 14%, ${theme.accentColor}14 0%, transparent 60%)`,
-        }}
-      />
-
-      <header className="relative z-10 flex shrink-0 items-center gap-2 px-safe pt-safe pb-2">
-        <button
-          id="menu-profile-pill"
-          onClick={onOpenProfile}
-          className="flex min-w-0 items-center gap-2 rounded-card border border-line bg-surface-2 p-1 pr-2.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
-        >
-          <div className="relative shrink-0">
-            <AvatarImage
-              playerId={profile?.id}
-              hasAvatar={profile?.hasAvatar}
-              avatarVersion={profile?.avatarVersion}
-              size={30}
-              className="rounded-ctl border border-line-strong"
-            />
-            <span
-              className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface-2 ${
-                playerStatus === 'online'
-                  ? 'bg-win'
-                  : playerStatus === 'idle'
-                    ? 'bg-warn'
-                    : 'bg-locked'
-              }`}
-            />
-          </div>
-          <span className="max-w-[110px] truncate text-2xs text-ink">
-            {profile?.username || 'Player'}
-          </span>
-          <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
-            LV{profile?.level || 1}
-          </span>
-        </button>
-
-        <span className="flex-1" />
-
-        <button
-          id="menu-nav-missions"
-          onClick={onOpenMissions}
-          aria-label={t('daily_missions', lang)}
-          className="relative rounded-ctl border border-line bg-surface-2 p-2 text-accent transition-colors active:scale-95 motion-reduce:active:scale-100"
-        >
-          <Target className="h-4 w-4" />
-          {unclaimedMissionsCount > 0 && (
-            <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface-1 bg-loss px-1 text-2xs text-ink">
-              {unclaimedMissionsCount}
-            </span>
-          )}
-        </button>
-      </header>
-
-      {/* The one scrolling region. Every direct child is `shrink-0`: this is a
-          flex column, and a flex item is free to be squashed below its content
-          the moment its own overflow is not `visible` (a card that clips, a
-          rail that scrolls sideways). Squashed children never overflow, and a
-          region with nothing to overflow does not scroll. */}
-      <main className="scroll-y relative z-10 flex min-h-0 flex-1 flex-col gap-3 px-safe pb-3">
         {/* Rank is the hero: the ladder always shows its next rung. */}
         <Panel id="menu-rank-card" variant="raised" className="flex shrink-0 items-center gap-4">
           <RankBadge
@@ -646,7 +637,126 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           </>
         )}
 
-      </main>
+    </div>
+  );
+
+  return (
+    <div
+      id="main-menu-screen"
+      className="relative flex h-full w-full flex-col overflow-hidden bg-surface-1 text-ink select-none"
+    >
+      {/* This used to be the ONLY place the equipped theme reached the shell —
+          "a wash at low alpha over the surface ramp, so twenty themes cannot
+          turn the menu into twenty different designs". That restraint was right
+          while a theme was loose colours with nothing checking them: twenty
+          hand-authored shells would have been twenty designs to maintain, and
+          the first to drift would have been an unreadable one.
+
+          Both halves of that are now enforced rather than trusted. A cosmetic's
+          shell is DERIVED from its own court palette (shellFrom), so it cannot
+          become an unrelated design, and a measured contrast floor over all
+          twenty means it cannot become an illegible one. So the menu takes the
+          whole palette through the tokens, and this is just the accent bloom on
+          top of it. */}
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background: `radial-gradient(circle at 50% 14%, ${theme.accentColor}14 0%, transparent 60%)`,
+        }}
+      />
+
+      <header className="relative z-10 flex shrink-0 items-center gap-2 px-safe pt-safe pb-2">
+        <button
+          id="menu-profile-pill"
+          onClick={onOpenProfile}
+          className="flex min-w-0 items-center gap-2 rounded-card border border-line bg-surface-2 p-1 pr-2.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
+        >
+          <div className="relative shrink-0">
+            <AvatarImage
+              playerId={profile?.id}
+              hasAvatar={profile?.hasAvatar}
+              avatarVersion={profile?.avatarVersion}
+              size={30}
+              className="rounded-ctl border border-line-strong"
+            />
+            <span
+              className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface-2 ${
+                playerStatus === 'online'
+                  ? 'bg-win'
+                  : playerStatus === 'idle'
+                    ? 'bg-warn'
+                    : 'bg-locked'
+              }`}
+            />
+          </div>
+          <span className="max-w-[110px] truncate text-2xs text-ink">
+            {profile?.username || 'Player'}
+          </span>
+          <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
+            LV{profile?.level || 1}
+          </span>
+        </button>
+
+        <span className="flex-1" />
+
+        <button
+          id="menu-nav-missions"
+          onClick={onOpenMissions}
+          aria-label={t('daily_missions', lang)}
+          className="relative rounded-ctl border border-line bg-surface-2 p-2 text-accent transition-colors active:scale-95 motion-reduce:active:scale-100"
+        >
+          <Target className="h-4 w-4" />
+          {unclaimedMissionsCount > 0 && (
+            <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface-1 bg-loss px-1 text-2xs text-ink">
+              {unclaimedMissionsCount}
+            </span>
+          )}
+        </button>
+      </header>
+
+      {/* The one scrolling region. Every direct child is `shrink-0`: this is a
+          flex column, and a flex item is free to be squashed below its content
+          the moment its own overflow is not `visible` (a card that clips, a
+          rail that scrolls sideways). Squashed children never overflow, and a
+          region with nothing to overflow does not scroll. */}
+      {/* The pager. Three slots, never five: `prev`, `current`, `next`, so the
+          loop needs no cloned page — which in a repo where every browser
+          assertion is an `#id` would put a second element carrying each one
+          into the document. A page that leaves the window unmounts and its
+          view state resets, which is the intended "fresh page on arrival".
+
+          NO `touch-action` here, deliberately. An ancestor cannot be widened
+          by a descendant (src/index.css:167-193), so `none` or `pan-x` on this
+          box would withdraw vertical panning from every `scroll-y` inside
+          every page — with no build error and no red test. The pages carry
+          their own `pan-y` and that is the whole of it. */}
+      <div
+        id="menu-pager"
+        data-page={pageAt(pageIndex)}
+        className="relative z-10 min-h-0 flex-1 overflow-hidden"
+      >
+        <div id="menu-pager-track" className="absolute inset-0 flex" style={{ transform: 'translateX(-100%)' }}>
+          {[pageIndex - 1, pageIndex, pageIndex + 1].map((i) => {
+            const id = pageAt(i);
+            const isCurrent = i === pageIndex;
+            return (
+              <div
+                key={id}
+                id={`menu-page-${id}`}
+                data-current={isCurrent ? 'true' : 'false'}
+                // The two off-screen pages are in the document and must not be
+                // reachable: without `inert` a Playwright click "succeeds" on a
+                // button one viewport away and a suite passes on a broken pager.
+                inert={!isCurrent}
+                aria-hidden={!isCurrent}
+                className="h-full w-full shrink-0 overflow-hidden"
+              >
+                {pageBody(id)}
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       {/* A flex sibling, not position:fixed — dvh changes as mobile browser
           chrome collapses, and a fixed bar would jump mid-scroll. */}
@@ -654,14 +764,19 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         id="menu-tabbar"
         className="relative z-10 grid shrink-0 grid-cols-5 border-t border-line bg-surface-2 px-safe pb-safe"
       >
-        {tabs.map((tab) => {
-          const current = !tab.onClick;
+        {tabs.map((tab, i) => {
+          // A real comparison. This read `!tab.onClick` — "current" meaning
+          // "the tab with no handler" — so PLAY was the current tab because it
+          // was the one that did nothing, and giving it a handler would have
+          // silently taken its highlight away.
+          const current = i === pageIndex;
           return (
             <button
               key={tab.id}
               id={`menu-nav-${tab.id}`}
-              onClick={tab.onClick}
+              onClick={() => setPageIndex(i)}
               aria-current={current ? 'page' : undefined}
+              data-selected={current ? 'true' : 'false'}
               className={`flex flex-col items-center gap-1 py-2.5 transition-colors ${
                 current ? 'text-accent' : 'text-ink-muted'
               }`}

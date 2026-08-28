@@ -174,7 +174,7 @@ ok('the level-gated branch opened once the level was there');
 await page.click('#ach-branch-ladder');
 await page.waitForTimeout(400);
 if (!(await page.$('#ach-row-cyber_slayer'))) fail('ladder branch did not render its rows');
-const body = await page.textContent('#achievements-modal-container');
+const body = await page.textContent('#menu-page-achievements');
 if (!/\?\?\?/.test(body)) fail('no hidden achievements concealed');
 ok('tree renders per branch, with deep rungs concealed');
 

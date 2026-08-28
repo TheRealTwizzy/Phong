@@ -264,8 +264,8 @@ await alice.waitForSelector('#quit-confirm-modal', { timeout: 4000 });
 await alice.click('#btn-quit-confirm');
 await alice.waitForSelector('#main-menu-screen', { timeout: 5000 });
 await alice.click('#menu-nav-leaderboard');
-await alice.waitForSelector('#leaderboard-modal-container', { timeout: 5000 });
-await alice.click('#leaderboard-modal-container button:has-text("PlayerTwo")');
+await alice.waitForSelector('#menu-page-leaderboard', { timeout: 5000 });
+await alice.click('#menu-page-leaderboard button:has-text("PlayerTwo")');
 await alice.waitForSelector('#public-profile-username', { timeout: 5000 });
 ok('leaderboard row tap opens the public profile');
 

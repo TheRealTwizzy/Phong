@@ -79,14 +79,15 @@ import { CourtCanvas } from './components/CourtCanvas';
 import { ScoreBoard } from './components/ScoreBoard';
 import { RadarPreview } from './components/RadarPreview';
 import { SettingsModal } from './components/SettingsModal';
+import { SettingsPanel } from './components/SettingsPanel';
 import { MultiplayerLobby } from './components/MultiplayerLobby';
 import { MainMenu } from './components/MainMenu';
 import { SplitScreenMatch } from './components/SplitScreenMatch';
 import { ProfileModal } from './components/ProfileModal';
-import { LeaderboardModal } from './components/LeaderboardModal';
-import { AchievementsModal } from './components/AchievementsModal';
+import { LeaderboardList } from './components/LeaderboardList';
+import { AchievementsTree } from './components/AchievementsTree';
 import { AchievementCard, LevelUpCard } from './components/AchievementCard';
-import { MatchHistoryModal } from './components/MatchHistoryModal';
+import { MatchHistoryList } from './components/MatchHistoryList';
 import { StatsOverlay } from './components/StatsOverlay';
 import { MissionsModal } from './components/MissionsModal';
 import { QuickChat, ChatMessage } from './components/QuickChat';
@@ -229,9 +230,6 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isMultiplayerOpen, setIsMultiplayerOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
-  const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
-  const [isAchievementsOpen, setIsAchievementsOpen] = useState<boolean>(false);
-  const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
   // Any tapped username opens this player's public profile (z-[60], above
   // whichever modal spawned it). null = closed.
@@ -3355,11 +3353,47 @@ export default function App() {
               setIsMultiplayerOpen(true);
             }}
             onOpenProfile={() => setIsProfileOpen(true)}
-            onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
-            onOpenAchievements={() => setIsAchievementsOpen(true)}
-            onOpenHistory={() => setIsHistoryOpen(true)}
             onOpenMissions={() => setIsMissionsOpen(true)}
-            onOpenSettings={() => setIsSettingsOpen(true)}
+            // The four destinations that are not PLAY. Built here because the
+            // data is here; mounted by the pager, three at a time. Creating an
+            // element costs nothing, so the two the pager is not showing never
+            // run — no fetch, no state, nothing.
+            pages={{
+              leaderboard: (
+                <LeaderboardList
+                  language={currentLanguage}
+                  currentPlayerId={playerId}
+                  onViewProfile={openPublicProfile}
+                  active
+                />
+              ),
+              achievements: (
+                <AchievementsTree
+                  language={currentLanguage}
+                  playerId={playerId}
+                  level={profile?.level || 1}
+                  tier={profile?.tier || 'unranked'}
+                  active
+                />
+              ),
+              history: (
+                <MatchHistoryList
+                  language={currentLanguage}
+                  perspectiveId={playerId}
+                  source={{ kind: 'me' }}
+                  onViewProfile={openPublicProfile}
+                  idPrefix="history"
+                />
+              ),
+              settings: (
+                <SettingsPanel
+                  settings={settings}
+                  onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
+                  onTriggerShake={() => setShakeTrigger(Date.now())}
+                  indicatorsLockedBySonar={!indicatorsAllowed}
+                />
+              ),
+            }}
           />
           </motion.div>
         ) : (
@@ -3764,12 +3798,6 @@ export default function App() {
           settings={settings}
           onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
           profile={profile}
-          // Menu only: from a live court it
-          // would walk the player out of a match — and out of a DUEL, leaving
-          // an opponent alone in a room that was never told anybody had gone.
-          // The relay would charge the abandon and the account it charged
-          // would already be deleted.
-          onDeleteAccount={screen === 'menu' ? handleDeleteAccount : undefined}
           onTriggerShake={() => setShakeTrigger(Date.now())}
           indicatorsLockedBySonar={!indicatorsAllowed}
         />
@@ -3834,35 +3862,22 @@ export default function App() {
           equippedCosmetic={equippedCosmeticId}
           onEquipCosmetic={(id) => void handleEquipCosmetic(id)}
           language={currentLanguage}
+          // Menu only, and this modal is why the rule needs restating rather
+          // than moving: SettingsModal had one door and this has TWO — the
+          // menu's header pill and the in-match HUD's #btn-open-profile, the
+          // same instance both times. From a live court, deleting would walk
+          // the player out of a match — and out of a DUEL, leaving an opponent
+          // alone in a room that was never told anybody had gone. The relay
+          // would charge the abandon and the account it charged would already
+          // be deleted.
+          onDeleteAccount={screen === 'menu' ? handleDeleteAccount : undefined}
         />
 
-        {/* Global Leaderboard Modal */}
-        <LeaderboardModal
-          isOpen={isLeaderboardOpen}
-          onClose={() => setIsLeaderboardOpen(false)}
-          currentPlayerId={playerId}
-          onViewProfile={openPublicProfile}
-          language={currentLanguage}
-        />
-
-        {/* Achievements & Trophies Modal */}
-        <AchievementsModal
-          isOpen={isAchievementsOpen}
-          onClose={() => setIsAchievementsOpen(false)}
-          playerId={playerId}
-          level={profile?.level || 1}
-          tier={profile?.tier || 'unranked'}
-          language={currentLanguage}
-        />
-
-        {/* Match History Modal */}
-        <MatchHistoryModal
-          isOpen={isHistoryOpen}
-          onClose={() => setIsHistoryOpen(false)}
-          playerId={playerId}
-          onViewProfile={openPublicProfile}
-          language={currentLanguage}
-        />
+        {/* Ranks, Trophies and History are PAGES now, not modals — each had
+            exactly one entry point (the tab that is now the page), so there was
+            no second door left to keep a sheet open for. Settings is the one
+            exception and its modal survives below, because the in-match HUD
+            opens it and a live court has no pager to put a page on. */}
       </div>
       </SessionGuard>
     </MobileGatekeeper>
