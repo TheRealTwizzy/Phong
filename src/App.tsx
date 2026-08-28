@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'motion/react';
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   BallState,
   AIDifficulty,
@@ -231,9 +231,44 @@ export default function App() {
   const [isMultiplayerOpen, setIsMultiplayerOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
-  // Any tapped username opens this player's public profile (z-[60], above
-  // whichever modal spawned it). null = closed.
+  // Any tapped username opens this player's public profile — last in
+  // `sheetStack` below, so it draws above whatever spawned it. null = closed.
   const [publicProfileId, setPublicProfileId] = useState<string | null>(null);
+
+  /**
+   * The open sheets App owns, bottom to top.
+   *
+   * Derived rather than pushed and popped, because `isMultiplayerOpen` is
+   * driven by relay messages — `room_joined` and `room_created` reopen it, and
+   * CLAUDE.md §1 records why that is load-bearing — so turning it into a stack
+   * entry would mean rewiring those handlers in a change about the menu.
+   *
+   * The cost is that the order is fixed by declaration rather than by the order
+   * the player opened them. For every pair that actually occurs — a public
+   * profile over the leaderboard page, over the lobby, over a profile; a
+   * profile over the in-match settings — the declared order IS the order they
+   * can be opened in, so the two agree.
+   *
+   * It also ends a live undefined behaviour: `isSettingsOpen` and
+   * `isProfileOpen` are independent, both openable from the in-match HUD, and
+   * both were `z-50`. Two open at once resolved by DOM order, which nobody had
+   * chosen.
+   */
+  const sheetStack = useMemo(
+    () =>
+      [
+        isMissionsOpen && 'missions',
+        isMultiplayerOpen && 'lobby',
+        isSettingsOpen && 'settings',
+        isProfileOpen && 'profile',
+        publicProfileId && 'public-profile',
+      ].filter(Boolean) as string[],
+    [isMissionsOpen, isMultiplayerOpen, isSettingsOpen, isProfileOpen, publicProfileId]
+  );
+  const stackOf = (key: string) => {
+    const index = sheetStack.indexOf(key);
+    return index < 0 ? undefined : { index, count: sheetStack.length };
+  };
   // Server-computed odds for the current PvP match (never exposes the
   // opponent's hidden rating to this client).
   const [matchPrediction, setMatchPrediction] = useState<number | null>(null);
@@ -3312,6 +3347,7 @@ export default function App() {
 
         {/* Public profile viewer — opened by tapping any username */}
         <PublicProfileModal
+          stack={stackOf('public-profile')}
           playerId={publicProfileId}
           onClose={() => setPublicProfileId(null)}
           language={currentLanguage}
@@ -3778,6 +3814,7 @@ export default function App() {
 
         {/* Daily Missions Modal */}
         <MissionsModal
+          stack={stackOf('missions')}
           isOpen={isMissionsOpen}
           onClose={() => setIsMissionsOpen(false)}
           missions={missions}
@@ -3790,6 +3827,7 @@ export default function App() {
         {/* Settings & Customization Modal (device preferences only —
             match settings live on the main menu, pre-match) */}
         <SettingsModal
+          stack={stackOf('settings')}
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
@@ -3801,6 +3839,7 @@ export default function App() {
 
         {/* 2-Phone Multiplayer Lobby */}
         <MultiplayerLobby
+          stack={stackOf('lobby')}
           isOpen={isMultiplayerOpen}
           onClose={requestLeaveLobby}
           theme={currentTheme}
@@ -3849,6 +3888,7 @@ export default function App() {
 
         {/* Player Profile & Stats Modal */}
         <ProfileModal
+          stack={stackOf('profile')}
           isOpen={isProfileOpen}
           onClose={() => setIsProfileOpen(false)}
           profile={profile}

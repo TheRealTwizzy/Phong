@@ -9,6 +9,9 @@ import { X, Sliders } from 'lucide-react';
 // winning score) are chosen on the main menu BEFORE a match starts, and
 // paddle width / ball speed are fixed constants — never editable here.
 interface SettingsModalProps {
+  /** Position in App's open-sheet stack; forwarded to Sheet. See Sheet's `stack`. */
+  stack?: { index: number; count: number };
+
   isOpen: boolean;
   onClose: () => void;
   settings: GameSettings;
@@ -41,6 +44,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   profile = null,
   onTriggerShake,
   indicatorsLockedBySonar = false,
+  stack,
 }) => {
   const lang = settings.language || 'en';
 
@@ -67,6 +71,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <Sheet
+      stack={stack}
       id="settings-modal-overlay"
       isOpen={isOpen}
       onClose={onClose}

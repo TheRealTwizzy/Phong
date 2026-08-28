@@ -9,9 +9,14 @@ import { Sheet, Panel, StatTile } from './ui';
 import { Trophy, Flame, Activity, Target, Award, Bot, Loader2 } from 'lucide-react';
 
 // World-readable profile card — opens when any username is tapped anywhere
-// in the UI. Sits above the z-50 modals (leaderboard, history…) that spawn
-// it. Data comes from GET /api/profile/:id, which the server sanitizes.
+// in the UI. It is the topmost entry in App's sheet stack, because every
+// route into it is a username tapped on something else — a leaderboard row, a
+// history card, the lobby, the in-match opponent — so whatever spawned it is
+// underneath. Data comes from GET /api/profile/:id, which the server sanitizes.
 interface PublicProfileModalProps {
+  /** Position in App's open-sheet stack; forwarded to Sheet. See Sheet's `stack`. */
+  stack?: { index: number; count: number };
+
   playerId: string | null;
   onClose: () => void;
   language: LanguageCode;
@@ -28,6 +33,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
   onClose,
   language,
   onViewProfile,
+  stack,
 }) => {
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'missing'>('loading');
@@ -85,6 +91,7 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
 
   return (
     <Sheet
+      stack={stack}
       id="public-profile-modal-overlay"
       isOpen={Boolean(playerId)}
       onClose={onClose}

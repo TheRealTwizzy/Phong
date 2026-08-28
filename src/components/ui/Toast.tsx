@@ -96,8 +96,9 @@ const ToastItem: React.FC<{ spec: ToastSpec }> = ({ spec }) => {
 };
 
 export const ToastHost: React.FC<{ toasts: ToastSpec[] }> = ({ toasts }) => (
-  // z-[75] clears every Sheet layer (50/60/70) and stays under the onboarding
-  // tour's 80. At z-50 this stack sat EARLIER in the DOM than the modals, so
+  // z-[75] clears every Sheet: the bands are 50/60/70 and a stacked sheet adds
+  // its depth, capped at four, so 74 is the highest one can reach. Stays under
+  // the onboarding tour's 80. At z-50 this stack sat EARLIER in the DOM than the modals, so
   // the theme-unlock notice was painted over by the very Missions sheet that
   // raised it — invisible until the player closed it, and now that it expires
   // on a timer, invisible for good.

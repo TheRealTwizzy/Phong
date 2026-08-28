@@ -214,6 +214,47 @@ await bob.waitForSelector('#lobby-table', { timeout: 8000 });
 await bob.waitForSelector('#btn-ready-play', { timeout: 8000 });
 await bob.click('#btn-ready-play');
 await alice.waitForSelector('#btn-ready-play:not([disabled])', { timeout: 8000 });
+
+// ---- Sheets cascade rather than collide -------------------------------
+// Two App-owned sheets open at once: the public profile over the lobby that
+// spawned it, with the guest seated so their name is a link.
+//
+// The z ORDER is deliberately NOT the assertion — `over` (60) already sat
+// above `default` (50), so a leg reading only that passes on the old code and
+// proves nothing. What is new is what being COVERED does: the sheet beneath
+// goes inert, dims, and stops painting a second backdrop, instead of two
+// full-screen modals both live and resolved by document order.
+await alice.waitForSelector('#btn-lobby-view-opponent-2', { timeout: 8000 });
+await alice.click('#btn-lobby-view-opponent-2');
+await alice.waitForSelector('#public-profile-username', { timeout: 8000 });
+
+await alice
+  .waitForFunction(() => {
+    const lobby = document.querySelector('#multiplayer-lobby-modal');
+    const card = lobby && lobby.querySelector('[role="dialog"]');
+    return Boolean(lobby && card && lobby.hasAttribute('inert') && Number(getComputedStyle(card).opacity) < 0.9);
+  }, null, { timeout: 5000 })
+  .catch(() => fail('the lobby stayed live and undimmed under the public profile'));
+const zs = await alice.evaluate(() => ({
+  lobby: Number(getComputedStyle(document.querySelector('#multiplayer-lobby-modal')).zIndex),
+  pub: Number(getComputedStyle(document.querySelector('#public-profile-modal-overlay')).zIndex),
+}));
+if (!(zs.pub > zs.lobby)) fail(`the public profile (${zs.pub}) does not sit above the lobby (${zs.lobby})`);
+ok(`the covered lobby goes inert and dims beneath the public profile (${zs.lobby} -> ${zs.pub})`);
+
+// Closing the top REVEALS the one beneath — that animation back to rest is the
+// whole reveal, so this is the half that would silently stop working.
+await alice.click('#btn-close-public-profile');
+await alice.waitForSelector('#public-profile-card', { state: 'detached', timeout: 5000 });
+await alice
+  .waitForFunction(() => {
+    const lobby = document.querySelector('#multiplayer-lobby-modal');
+    const card = lobby && lobby.querySelector('[role="dialog"]');
+    return Boolean(lobby && card && !lobby.hasAttribute('inert') && Number(getComputedStyle(card).opacity) > 0.95);
+  }, null, { timeout: 5000 })
+  .catch(() => fail('closing the public profile did not restore the lobby beneath it'));
+ok('closing the top sheet reveals the one beneath');
+
 await alice.click('#btn-ready-play');
 await alice.waitForSelector('#multiplayer-lobby-modal', { state: 'detached', timeout: 5000 });
 await alice.waitForSelector('#scoreboard-header', { timeout: 8000 });

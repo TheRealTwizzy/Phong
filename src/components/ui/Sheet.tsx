@@ -26,12 +26,26 @@ const SIZE = {
   lg: 'max-w-lg',
 } as const;
 
-// Maps onto the ladder the app already uses — no new z-indices.
-const LAYER = {
-  default: 'z-50',
-  over: 'z-[60]', // sits over another sheet (public profile, quit confirm)
-  gate: 'z-[70]', // unclosable gates (onboarding)
+// Bands rather than rungs, because a stack has a depth and Tailwind cannot
+// generate a runtime z-index from one.
+//
+// Depth cannot be left to DOM order: two elements at the same z paint in
+// document order, so the sheet written later in App wins — which is not the one
+// the player opened last. That is the same trap the theme-unlock toast fell
+// into (see phong-ui), one level up.
+//
+// The cap is FIVE per band, not an arbitrary headroom number: the binding
+// constraint is that the top of the `gate` band must stay under `ToastHost` at
+// 75, so `gate` may reach 74 and no further. App's stack is five sheets, which
+// fits exactly. A sixth would clamp two of them onto one z and hand the
+// decision back to DOM order — so a deeper stack means RE-SPACING the bands
+// (and the toast above them), never raising this cap.
+const LAYER_BASE = {
+  default: 50,
+  over: 60, // sits over another sheet (public profile, quit confirm)
+  gate: 70, // unclosable gates (onboarding)
 } as const;
+const STACK_MAX = 4;
 
 const ACCENT = {
   neutral: 'border-line-strong',
@@ -61,7 +75,16 @@ export interface SheetProps {
   onClose?: () => void;
   size?: keyof typeof SIZE;
   variant?: 'center' | 'bottom';
-  layer?: keyof typeof LAYER;
+  layer?: keyof typeof LAYER_BASE;
+  /**
+   * Where this sheet sits in the open-sheet stack, when there is one.
+   *
+   * `index` is 0 at the bottom, `count` is how many are open. Absent means a
+   * lone sheet, which is every sheet not owned by App's stack. A covered sheet
+   * is pushed back rather than offset — it scales down and dims in place, so
+   * it reads as depth without an offset card running off a narrow phone.
+   */
+  stack?: { index: number; count: number };
   /**
    * `solid` exists for sheets that render over the live court. A
    * backdrop-filter recompositing a 60fps canvas every frame is the worst
@@ -100,6 +123,7 @@ export const Sheet: React.FC<SheetProps> = ({
   size = 'md',
   variant = 'center',
   layer = 'default',
+  stack,
   backdrop = 'blur',
   accent = 'neutral',
   title,
@@ -115,17 +139,34 @@ export const Sheet: React.FC<SheetProps> = ({
   children,
 }) => {
   const m = useMotion();
-  const canDismiss = Boolean(onClose) && dismissOnBackdrop;
+  // How many sheets sit on top of this one. Capped at two steps of depth, or a
+  // third sheet would push the first one to nothing.
+  const above = stack ? Math.max(0, stack.count - 1 - stack.index) : 0;
+  const covered = above > 0;
+  const depth = Math.min(above, 2);
+  const zIndex = LAYER_BASE[layer] + Math.min(stack?.index ?? 0, STACK_MAX);
+  // Only the top sheet dismisses on its scrim, and only the top sheet PAINTS
+  // one: two stacked `bg-surface-0/80 backdrop-blur-md` layers is double dim
+  // and double blur, and the result reads as mud rather than as a cascade. The
+  // top sheet's scrim already covers the screen for all of them.
+  const canDismiss = Boolean(onClose) && dismissOnBackdrop && !covered;
+  const cardMotion = variant === 'bottom' ? m.bottomCard : m.card;
 
   return (
     <AnimatePresence>
       {isOpen && (
         <motion.div
           id={id}
-          className={`fixed inset-0 ${LAYER[layer]} flex ${
+          style={{ zIndex }}
+          inert={covered}
+          className={`fixed inset-0 flex ${
             variant === 'bottom' ? 'items-end' : 'items-center'
           } justify-center p-4 pt-safe pb-safe ${
-            backdrop === 'blur' ? 'bg-surface-0/80 backdrop-blur-md' : 'bg-surface-0/94'
+            covered
+              ? ''
+              : backdrop === 'blur'
+                ? 'bg-surface-0/80 backdrop-blur-md'
+                : 'bg-surface-0/94'
           }`}
           {...m.backdrop}
           // Pointer-down rather than click, and only when the press actually
@@ -146,7 +187,16 @@ export const Sheet: React.FC<SheetProps> = ({
             role="dialog"
             aria-modal="true"
             className={`w-full ${SIZE[size]} max-h-sheet flex flex-col overflow-hidden rounded-sheet border ${ACCENT[accent]} bg-surface-2 text-ink shadow-sheet ${cardClassName}`}
-            {...(variant === 'bottom' ? m.bottomCard : m.card)}
+            {...cardMotion}
+            // Transform and opacity only — motion.ts is explicit that nothing
+            // here animates width, height, filter or shadow. Closing the top
+            // sheet animates the one beneath from `covered` back to rest, and
+            // THAT animation is the reveal: no extra machinery.
+            animate={
+              covered
+                ? { ...(cardMotion.animate as object), scale: 1 - depth * 0.03, opacity: 0.72 }
+                : cardMotion.animate
+            }
           >
             {header ??
               (title != null && (

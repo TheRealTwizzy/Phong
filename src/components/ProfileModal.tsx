@@ -26,6 +26,9 @@ import {
 } from 'lucide-react';
 
 interface Props {
+  /** Position in App's open-sheet stack; forwarded to Sheet. See Sheet's `stack`. */
+  stack?: { index: number; count: number };
+
   isOpen: boolean;
   onClose: () => void;
   profile: PlayerProfile | null;
@@ -141,6 +144,7 @@ export const ProfileModal: React.FC<Props> = ({
   onEquipCosmetic,
   language = 'en',
   onDeleteAccount,
+  stack,
 }) => {
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -494,6 +498,7 @@ export const ProfileModal: React.FC<Props> = ({
 
   return (
     <Sheet
+      stack={stack}
       cardId="profile-modal-container"
       isOpen={isOpen}
       onClose={onClose}
