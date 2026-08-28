@@ -87,23 +87,36 @@ Three plugins from `sponticelli/gamedev-claude-plugins`, declared in `.claude/se
 `canvas-optimization-expert` is dirty rects, layered and offscreen canvases, `willReadFrequently`
 and `desynchronized`, devicePixelRatio — the things `CourtCanvas` actually does), **`multiplayer`**
 (`netcode-specialist` covers prediction, reconciliation, interpolation and lag compensation, none
-of which this game has), and **`juice`**. Twelve agents and twelve commands; no hooks, no MCP
-server, nothing that executes.
+of which this game has), and **`juice`**. Twelve agents and twelve commands; no MCP server, and no
+hooks of their own — the one hook in `.claude/settings.json` is ours, and it is what installs them.
 
 **The declaration is not the install, and that catches everyone once.** A plugin from an external
-source that only the project's settings enable does not load until it is installed on that machine —
-Claude Code reports it as not installed and prints the command. So on a new machine, a new clone, or
-a fresh cloud session, run this once:
+source that only the project's settings enable does not load until it is installed on that machine:
+the files live in `~/.claude/plugins/cache`, which is per-machine, so a new clone, a new machine or
+a fresh cloud session gets three plugins that are declared, marked enabled, and absent.
 
-```bash
-for p in web-games multiplayer juice; do
-  claude plugin install "$p@gamedev-claude-plugins" --scope project
-done
-```
+**Which is why it is a hook now and not an instruction.** `.claude/hooks/session-start.sh` fetches
+the marketplace, installs the three at project scope and runs `npm install`, on every SessionStart,
+idempotently — CLAUDE.md §8 carries the timings and the never-fatal posture. Run it by hand if you
+want it sooner.
 
-It re-reads `.claude/settings.json` and leaves it unchanged, so this dirties nothing. To check it
-took: type `/web-games:` and see whether its five commands complete, or open `/plugin` → Installed
-(and its Errors tab). `/reload-plugins` applies an install to the session you are already in.
+**The manual loop it replaced was wrong twice over**, and both failures were invisible to the person
+following it. It was missing a step: `extraKnownMarketplaces` makes the marketplace known by NAME
+but never fetches its contents, so on a fresh machine every install answered `Plugin "web-games" not
+found in marketplace "gamedev-claude-plugins"` — the loop as printed had never once worked on the
+machine it was written for, and the three plugins stayed declared, enabled and absent exactly as if
+nobody had run it. `claude plugin marketplace add sponticelli/gamedev-claude-plugins` is the missing
+line. And it claimed to re-read `.claude/settings.json` and leave it unchanged, "so this dirties
+nothing": in fact `claude plugin install` REWRITES that file, lifting `enabledPlugins` above
+`extraKnownMarketplaces`, so following the instructions left the working tree modified every time.
+The file is now committed in the order the CLI writes — stable across installs, checked by
+installing twice — which is what makes "dirties nothing" true rather than merely claimed.
+**Never hand-reorder `.claude/settings.json`**: the next install puts it back, and the diff lands in
+somebody's unrelated commit.
+
+To check it took: `claude plugin list` names all three, or open `/plugin` → Installed (and its
+Errors tab). `/reload-plugins` applies an install to the session you are already in, which matters
+because a plugin the hook installed is not guaranteed to be loaded into the session that ran it.
 Worth doing in the same pass: `/context`, to confirm the twelve still have their descriptions — on
 overflow the listing drops them starting with the least-invoked skill, and nothing goes red.
 

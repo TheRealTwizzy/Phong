@@ -84,9 +84,12 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 │                              #   a rally streak, anything on screen, a locale, a
 │                              #   test, a doc update, and the pre-push gate.
 │                              #   See .claude/skills/README.md
-├── .claude/settings.json      # Three gamedev plugins (agents + commands, nothing
-│                              #   that executes). Agents don't compete for triggers,
-│                              #   so the twelve still own every ruling they own.
+├── .claude/settings.json      # Three gamedev plugins (agents + commands), and the
+│                              #   SessionStart hook that installs them. Agents don't
+│                              #   compete for triggers, so the twelve still own every
+│                              #   ruling they own.
+├── .claude/hooks/             # session-start.sh — fetches the plugin marketplace,
+│                              #   installs the three, runs npm install. Never fatal.
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
 ├── DEPLOYMENT.md              # KVM/docker-compose runbook (+ Render alternative)
 ├── Dockerfile                 # Multi-stage build → slim runtime (express+ws only)
@@ -338,6 +341,26 @@ npm run test:e2e # browser E2E — needs `npm run build` first (see below)
 ```
 
 Environment: `PORT` (default 3000), `DATA_DIR` (default `./data`). See `.env.example`.
+
+**A session installs its own tooling, and that is a hook rather than a note to remember.**
+`.claude/hooks/session-start.sh` runs on every SessionStart: it fetches the plugin marketplace,
+installs the three gamedev plugins at project scope, and runs `npm install` when `node_modules` is
+missing or older than the lockfile. It is idempotent — a warm container takes 0.7s and a cold one
+about 11s — and it **never exits non-zero**, because a session that cannot reach GitHub is still a
+usable session and these plugins are agents and slash commands invoked deliberately, so their
+absence degrades nothing on its own. It warns on stdout instead, which is where to look. What it
+replaced was a paragraph in `.claude/skills/README.md` asking a human to run the loop by hand,
+which failed twice over: nobody reads a setup note in a file they opened for something else, and
+the loop it printed had never worked on a fresh machine anyway (see that file for the missing
+step). **A fresh clone therefore needs no manual setup, and anything that does belongs in the
+hook rather than in a sentence somebody has to find.**
+
+**What the hook cannot do for itself is load a plugin into the session that installed it.**
+Whether an install lands in time for the listing that session was built from is not something a
+SessionStart hook can guarantee, so if `/web-games:` completes nothing, the fix is
+`/reload-plugins` — which applies an install to a session already open — and not a second
+install. The next session starts warm regardless, since the container image is cached after the
+hook completes.
 
 **CI** (`.github/workflows/ci.yml`) runs on every push to `main` and every PR, as two
 parallel jobs. `verify` is the fast one — typecheck, `npm run test:coverage`, build — and `e2e` drives

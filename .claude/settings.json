@@ -1,4 +1,9 @@
 {
+  "enabledPlugins": {
+    "web-games@gamedev-claude-plugins": true,
+    "multiplayer@gamedev-claude-plugins": true,
+    "juice@gamedev-claude-plugins": true
+  },
   "extraKnownMarketplaces": {
     "gamedev-claude-plugins": {
       "source": {
@@ -7,9 +12,16 @@
       }
     }
   },
-  "enabledPlugins": {
-    "web-games@gamedev-claude-plugins": true,
-    "multiplayer@gamedev-claude-plugins": true,
-    "juice@gamedev-claude-plugins": true
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
   }
 }
