@@ -797,10 +797,25 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       </div>
 
       {/* A flex sibling, not position:fixed — dvh changes as mobile browser
-          chrome collapses, and a fixed bar would jump mid-scroll. */}
+          chrome collapses, and a fixed bar would jump mid-scroll.
+
+          `touch-pan-y` RESERVES the horizontal gesture here, and this is the
+          one place in the menu where that is both needed and safe. Needed:
+          the bar advertises a swipe, and at the default `auto` the browser may
+          claim a horizontal drag and answer with `pointercancel` — which the
+          handler deliberately treats as "not a page turn", so the advertised
+          gesture would work under a mouse and fail under a thumb. Safe:
+          nothing inside this bar scrolls. It is five buttons in a grid.
+
+          The identical declaration on `#menu-pager` would be a BUG, and the
+          two look the same, so read this before copying it: a descendant
+          cannot widen what an ancestor restricted, and the pager IS an
+          ancestor of AchievementsTree's `scroll-x` branch strip, whose own
+          `touch-action: pan-x` would simply stop applying. Silently — no build
+          error, no red test, just a strip that had stopped scrolling. */}
       <nav
         id="menu-tabbar"
-        className="relative z-10 grid shrink-0 grid-cols-5 border-t border-line bg-surface-2 px-safe pb-safe"
+        className="relative z-10 grid shrink-0 touch-pan-y grid-cols-5 border-t border-line bg-surface-2 px-safe pb-safe"
         {...swipe.handlers}
       >
         {tabs.map((tab, i) => {

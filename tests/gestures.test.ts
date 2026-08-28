@@ -4,8 +4,10 @@ import {
   SWIPE_CLAIM_PX,
   SWIPE_COMMIT_FRACTION,
   SWIPE_FLING_VW_PER_S,
+  SWIPE_VELOCITY_STALE_MS,
   pageSettle,
   swipeIntent,
+  trailVelocity,
   wrapIndex,
 } from '../src/gestures';
 
@@ -173,5 +175,56 @@ describe('wrapIndex', () => {
     expect(wrapIndex(3, 0)).toBe(0);
     expect(wrapIndex(3, -1)).toBe(0);
     expect(wrapIndex(NaN, 5)).toBe(0);
+  });
+});
+
+describe('trailVelocity', () => {
+  it('has no velocity to report from fewer than two samples', () => {
+    expect(trailVelocity([], 10)).toBe(0);
+    expect(trailVelocity([{ t: 0, x: 0 }], 10)).toBe(0);
+  });
+
+  it('is px/ms across the window, signed like the drag', () => {
+    expect(trailVelocity([{ t: 0, x: 0 }, { t: 50, x: 100 }], 60)).toBe(2);
+    expect(trailVelocity([{ t: 0, x: 0 }, { t: 50, x: -100 }], 60)).toBe(-2);
+  });
+
+  /**
+   * The bug this function exists to hold, and the reason it left the hook.
+   *
+   * A finger held still fires no `pointermove`, so the trail simply stops
+   * growing. Measured against its own last sample it goes on reporting the
+   * flick that ENDED it — so flick hard, rest, and lift, and a drag that never
+   * came near `SWIPE_COMMIT_FRACTION` turns the page anyway. The window has to
+   * be measured from the RELEASE.
+   */
+  it('reports nothing once the newest sample is itself stale', () => {
+    // 60px of a 390px viewport is 15% — under SWIPE_COMMIT_FRACTION — so this
+    // drag can only commit on its fling. The SAME trail, read either side of
+    // the stale window, is the whole bug in one pair of assertions.
+    const flick = [{ t: 0, x: 0 }, { t: 50, x: -100 }];
+
+    expect(trailVelocity(flick, 60)).toBe(-2);
+    expect(pageSettle(-60, 390, trailVelocity(flick, 60))).toBe(1);
+
+    expect(trailVelocity(flick, 50 + SWIPE_VELOCITY_STALE_MS + 1)).toBe(0);
+    expect(pageSettle(-60, 390, trailVelocity(flick, 2050))).toBe(0);
+  });
+
+  it('still reads a real flick, where the lift follows the last move closely', () => {
+    const flick = [{ t: 0, x: 0 }, { t: 16, x: -30 }, { t: 32, x: -62 }, { t: 48, x: -96 }];
+    expect(trailVelocity(flick, 56)).toBeCloseTo(-2, 5);
+    expect(pageSettle(-96, 390, trailVelocity(flick, 56))).toBe(1);
+  });
+
+  it('drops samples that fall out of the back of the window', () => {
+    // The t=0 sample is 210ms old at release and must not drag the secant
+    // toward a movement that happened before the flick.
+    const trail = [{ t: 0, x: 0 }, { t: 150, x: 10 }, { t: 200, x: 110 }];
+    expect(trailVelocity(trail, 210)).toBe(2);
+  });
+
+  it('is zero when every fresh sample shares one timestamp', () => {
+    expect(trailVelocity([{ t: 100, x: 0 }, { t: 100, x: 50 }], 110)).toBe(0);
   });
 });

@@ -65,6 +65,47 @@ export const SWIPE_FLING_VW_PER_S = 1.1;
  */
 export const SWIPE_VELOCITY_STALE_MS = 100;
 
+/** One sampled point of a live drag: the event's own timestamp and `clientX`. */
+export interface SwipeSample {
+  t: number;
+  x: number;
+}
+
+/**
+ * px/ms over the ~100ms before `now`, or 0 once the drag has gone still.
+ *
+ * `pageSettle` below states that its caller must zero a stale velocity. This is
+ * that half, moved here so it can be STATED — it lived in the hook, where this
+ * repo has no layer that can test a React hook, and it was wrong there.
+ *
+ * The window is measured from `now`, the RELEASE, and never from the newest
+ * sample. That is the whole point: a finger held still fires no `pointermove`
+ * at all, so the trail simply stops growing — and a trail measured against its
+ * own last sample therefore reports the flick that ENDED it, however long ago
+ * that was. Flick hard, hold for two seconds, lift, and a drag that never came
+ * near the distance threshold turns the page.
+ *
+ * Not the last two samples either: fingers decelerate and roll before they
+ * lift, so the final pair of a genuinely fast flick often reads near zero or
+ * reverses sign, and the fling branch would quietly never fire.
+ */
+export function trailVelocity(trail: readonly SwipeSample[], now: number): number {
+  if (trail.length < 2) return 0;
+  const last = trail[trail.length - 1];
+  if (now - last.t > SWIPE_VELOCITY_STALE_MS) return 0;
+  // `last` is inside the window by the check above, so this scan always lands
+  // on something and needs no fallback — which would be an unreachable branch
+  // under a 95% floor. Walk back while the samples still qualify.
+  let oldest = last;
+  for (let i = trail.length - 2; i >= 0; i--) {
+    if (now - trail[i].t > SWIPE_VELOCITY_STALE_MS) break;
+    oldest = trail[i];
+  }
+  const dt = last.t - oldest.t;
+  if (dt <= 0) return 0;
+  return (last.x - oldest.x) / dt;
+}
+
 /** Undecided, until one axis clears `SWIPE_CLAIM_PX`. The caller latches it. */
 export type SwipeIntent = 'none' | 'horizontal' | 'vertical';
 

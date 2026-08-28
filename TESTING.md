@@ -50,7 +50,7 @@ coverage number.
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
-| `gestures` | The swipe thresholds, the axis lock and the page-settle rule — the ONLY place these are stated (see §5) |
+| `gestures` | The swipe thresholds, the axis lock, the release velocity and the page-settle rule — the ONLY place these are stated (see §5) |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |

@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import {
-  SWIPE_VELOCITY_STALE_MS,
   SwipeIntent,
+  SwipeSample,
   pageSettle,
   swipeIntent,
+  trailVelocity,
   wrapIndex,
 } from '../gestures';
 import { DURATION } from './ui/motion';
@@ -75,7 +76,7 @@ export function useMenuSwipe({ count, index, onCommit, reduced }: Options) {
   const idRef = useRef<number | null>(null);
   const startRef = useRef({ x: 0, y: 0 });
   /** A short trail of {t, x}, so velocity is a window rather than two samples. */
-  const trailRef = useRef<{ t: number; x: number }[]>([]);
+  const trailRef = useRef<SwipeSample[]>([]);
   /** Latched: a gesture read as vertical must never become horizontal. */
   const intentRef = useRef<SwipeIntent>('none');
   /** True once the pager owns the gesture — read by the click suppressor. */
@@ -212,26 +213,6 @@ export function useMenuSwipe({ count, index, onCommit, reduced }: Options) {
   };
 
   /**
-   * px/ms over a ~100ms window, from the event's own timestamps.
-   *
-   * Not the last two samples: fingers decelerate and roll before they lift, so
-   * the final pair of a genuinely fast flick very often reads near zero or
-   * reverses sign — the velocity branch would then almost never fire and the
-   * pager would silently degrade to distance alone. `e.timeStamp` rather than
-   * `performance.now()` because the latter is when the main thread got around
-   * to the handler, which with a render loop running is exactly the noise.
-   */
-  const velocity = () => {
-    const trail = trailRef.current;
-    if (trail.length < 2) return 0;
-    const last = trail[trail.length - 1];
-    const old = trail.find((s) => last.t - s.t <= SWIPE_VELOCITY_STALE_MS) ?? trail[0];
-    const dt = last.t - old.t;
-    if (dt <= 0) return 0;
-    return (last.x - old.x) / dt;
-  };
-
-  /**
    * A lifted finger settles onto a page; a CANCELLED one never does.
    *
    * `pointercancel` is the browser saying it took the gesture — a vertical pan
@@ -244,7 +225,12 @@ export function useMenuSwipe({ count, index, onCommit, reduced }: Options) {
     if (idRef.current !== e.pointerId) return;
     const horizontal = intentRef.current === 'horizontal';
     const dx = e.clientX - startRef.current.x;
-    const v = velocity();
+    // The release timestamp, not the last sample's: a still finger fires no
+    // pointermove, so a trail measured against itself reports the flick that
+    // ended it however long ago that was. `e.timeStamp` rather than
+    // `performance.now()`, which is when the main thread reached the handler —
+    // with a render loop running, exactly the noise.
+    const v = trailVelocity(trailRef.current, e.timeStamp);
     const width = widthRef.current;
 
     try {
