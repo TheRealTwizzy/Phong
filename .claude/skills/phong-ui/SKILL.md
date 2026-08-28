@@ -24,10 +24,15 @@ actually cost shipped bugs.
    `Button` · `Panel` · `ProgressBar` · `StatTile` · `SegmentedControl` · `RankBadge` ·
    `Pagination` · `ToastHost` · `LockBadge` · `useMotion`. The barrel is deliberately partial,
    so an absence means the primitive has not earned its API yet — not that you inline a new one.
-2. **`src/components/ui/Sheet.tsx`** carries the `LAYER` map (`:30`) and the reason
-   `backdrop: 'solid'` exists — a `backdrop-filter` recompositing a 60fps canvas every frame is
-   the worst perf hazard available to this app. Every modal is a `Sheet`: `shrink-0` header,
-   `scroll-y min-h-0 flex-1` body, `shrink-0` footer.
+2. **`src/components/ui/Sheet.tsx`** carries the `LAYER_BASE` bands (`:38`), the `stack`
+   prop that cascades them, and the reason `backdrop: 'solid'` exists — a `backdrop-filter`
+   recompositing a 60fps canvas every frame is the worst perf hazard available to this app.
+   Every modal is a `Sheet`: `shrink-0` header, `scroll-y min-h-0 flex-1` body, `shrink-0`
+   footer. The bands are NUMBERS rather than Tailwind class strings because a stack index is
+   added to them at runtime and Tailwind cannot generate a class it never saw; a sheet given
+   `stack` and covered by another scales back, dims, goes `inert`, and stops painting its
+   backdrop, so only the top one paints. Pass `stack` only for a sheet App owns — a lone sheet
+   leaves it undefined and behaves exactly as it always did.
 3. **`src/index.css`** carries the token contract — the ink ratios (`ink-muted` 4.5:1 is the
    floor for body text, `ink-dim` 3:1 is ≥18px or decorative), `--color-xp` being *level and XP
    only*, the iOS `vh` story behind `max-h-sheet` (`:214`), and why `touch-action` sits on the
@@ -55,7 +60,8 @@ make clicks land on the footer instead of the row underneath.
 
 Two elements at the same stacking level are painted in document order, so a later sibling wins.
 The theme-unlock toast sat at `z-50` and was painted over by the very Missions sheet that raised
-it. `ToastHost` is `z-[75]`, above every `Sheet` layer (50 default, 60 over, 70 gate), and that
+it. `ToastHost` is `z-[75]`, above every `Sheet` — the bands are 50 default, 60 over, 70 gate,
+plus a stacked sheet's own depth capped at four, so 74 is the ceiling — and that
 is load-bearing rather than decorative — now that the notice expires on a timer, being painted
 over would make it invisible for good rather than merely late.
 

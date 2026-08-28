@@ -109,10 +109,18 @@ nobody had run it. `claude plugin marketplace add sponticelli/gamedev-claude-plu
 line. And it claimed to re-read `.claude/settings.json` and leave it unchanged, "so this dirties
 nothing": in fact `claude plugin install` REWRITES that file, lifting `enabledPlugins` above
 `extraKnownMarketplaces`, so following the instructions left the working tree modified every time.
-The file is now committed in the order the CLI writes — stable across installs, checked by
-installing twice — which is what makes "dirties nothing" true rather than merely claimed.
-**Never hand-reorder `.claude/settings.json`**: the next install puts it back, and the diff lands in
-somebody's unrelated commit.
+The file is now committed in the order the CLI writes, which is what makes "dirties nothing" true
+rather than merely claimed. That claim was made once already and was two-thirds true, in the way
+that is worth recording: it was checked by installing TWICE and diffing, which only ever compares
+the keys the installer had already agreed about — and `hooks`, added by the very commit making the
+claim, sat at the bottom of the file where the CLI writes it FIRST. So every session reordered it,
+every session opened with a dirty `git status` on a file nobody had touched, and the check said
+nothing, because two installs agree with each other perfectly while both disagree with the repo.
+The rule is that **the stored bytes must match what the installer emits**, and the check that
+actually states it is a diff against ONE real install: run `claude plugin install`, then
+`git diff .claude/settings.json` and expect nothing. Reordering the file by hand TOWARD that order
+is the fix, and is how this was fixed; reordering it away is what puts the churn back, and the diff
+then lands in somebody's unrelated commit.
 
 To check it took: `claude plugin list` names all three, or open `/plugin` → Installed (and its
 Errors tab). `/reload-plugins` applies an install to the session you are already in, which matters

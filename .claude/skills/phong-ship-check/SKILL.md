@@ -6,14 +6,14 @@ description: >-
   push or open a PR in the Phong repo, and whenever the user says "run the tests", "verify
   this", "check it works", "is this ready to ship" or asks what needs re-running after an
   edit. Reach for it even when the change looks small: `npm test` is seven seconds and covers
-  none of the flows, and the nineteen browser suites that do cover them are the ones people
+  none of the flows, and the twenty browser suites that do cover them are the ones people
   skip.
 ---
 
 # Shipping a change in Phong
 
 `npm test` is the fast layer and it is genuinely fast, but it covers rules, not flows. The
-flows live in nineteen Playwright suites that each boot their own server — minutes, not
+flows live in twenty Playwright suites that each boot their own server — minutes, not
 seconds.
 
 ## The order, and why it is an order
