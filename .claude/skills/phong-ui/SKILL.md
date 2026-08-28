@@ -15,7 +15,7 @@ description: >-
 
 The shell has shared primitives and a semantic token system, and both document themselves well
 in the file you would have open. This skill does not restate them — it points at them once, and
-then carries the four rules that bite from somewhere else entirely, which are the ones that have
+then carries the five rules that bite from somewhere else entirely, which are the ones that have
 actually cost shipped bugs.
 
 ## Read these three headers first

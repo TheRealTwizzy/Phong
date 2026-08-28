@@ -6,14 +6,14 @@ description: >-
   push or open a PR in the Phong repo, and whenever the user says "run the tests", "verify
   this", "check it works", "is this ready to ship" or asks what needs re-running after an
   edit. Reach for it even when the change looks small: `npm test` is seven seconds and covers
-  none of the flows, and the eighteen browser suites that do cover them are the ones people
+  none of the flows, and the nineteen browser suites that do cover them are the ones people
   skip.
 ---
 
 # Shipping a change in Phong
 
 `npm test` is the fast layer and it is genuinely fast, but it covers rules, not flows. The
-flows live in eighteen Playwright suites that each boot their own server — minutes, not
+flows live in nineteen Playwright suites that each boot their own server — minutes, not
 seconds.
 
 ## The order, and why it is an order
@@ -53,12 +53,12 @@ debugging — not for deciding what a change needs before you push.
 That is a deliberate conclusion, not laziness, and it is worth knowing why so nobody spends
 another day rediscovering it. **A file→suite map was built for exactly this and deleted.** It
 mapped each changed file to the suites that could break, so a small change ran three suites
-instead of eighteen. Over six review rounds every rule that anybody actually checked turned
+instead of nineteen. Over six review rounds every rule that anybody actually checked turned
 out to be wrong, and always in the same direction — naming too few suites, which is the
 direction that lets a targeted run report success while skipping the flow the change broke:
 
 - `server.ts` omitted every route-driven suite, though `e2e-elite` drives `/api/missions/reroll`.
-- `MainMenu.tsx` named 3 suites; 16 of 18 drive an id it defines, because every suite starts
+- `MainMenu.tsx` named 3 suites; 18 of 19 drive an id it defines, because every suite starts
   at the menu.
 - `server/transform.ts` named `gameplay` — whose relay scenario asserts the badge reads
   `RELAY` and never crosses the net. The one suite that could not catch a broken mirror.
@@ -69,7 +69,7 @@ coupling that matters — *which suites play a match, or a relayed point* — is
 from ids, imports, or anything else static. It is behavioural. A hand-written map of it is a
 claim that looks precise, is trusted because it looks precise, and is wrong.
 
-Eighteen suites cost minutes. Being quiet about a broken flow costs a release. If you are
+Nineteen suites cost minutes. Being quiet about a broken flow costs a release. If you are
 tempted to rebuild the map, the honest version of it is this section.
 
 ## Reading a failure
@@ -90,3 +90,9 @@ A suite that asserts old behaviour gets **changed in the same commit as the rule
 for later — a stale suite is one nobody reads, they just delete it. And if you added a check,
 prove it can fail: break the thing on purpose, watch it go red, put it back, and say so in the
 commit. `TESTING.md` §6 is the standing guide; read it before adding a suite.
+
+The converse is the one that gets skipped. **A green run is not coverage for a change nothing
+asserts on.** A mechanical sweep — a rename, a palette migration — has no test behind most of
+its sites, so the diff *is* the check: read your own, hunk by hunk, before pushing. The palette
+sweep passed all nineteen suites with eight shadows silently turned into glows, because one
+regex had collapsed a near-black tint and a bright accent onto the same token.
