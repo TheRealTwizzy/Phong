@@ -156,6 +156,17 @@ await viewer.waitForSelector(`#leaderboard-row-${ownerId}`, { timeout: 8000 })
   .catch(() => fail('the owner never appeared on the leaderboard'));
 await viewer.click(`#leaderboard-row-${ownerId}`);
 await viewer.waitForSelector('#public-profile-card', { timeout: 8000 });
+// The card MOUNTS before it knows whose it is: `isOpen={Boolean(playerId)}`,
+// while the palette comes from `profile?.cosmetic` fetched afterwards, and
+// `normalizeCosmeticId(undefined)` is the DEFAULT cosmetic. So between the tap
+// and the response the card legitimately paints #19e3ff, and reading the accent
+// on existence alone is a race — one that loopback wins and a CI runner does
+// not. `#public-profile-username` renders only on `state === 'ready' && profile`,
+// so it is the arrival signal, and it is a DIFFERENT signal from the thing
+// being asserted: waiting for the accent itself would just be waiting until the
+// assertion passes.
+await viewer.waitForSelector('#public-profile-username', { timeout: 8000 })
+  .catch(() => fail('the public profile never finished loading'));
 
 const cardAccent = await cssVar(viewer, '#public-profile-card', '--color-accent');
 const rootWhileOpen = await cssVar(viewer, '#app-root-container', '--color-accent');
