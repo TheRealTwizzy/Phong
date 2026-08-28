@@ -83,12 +83,29 @@ for f in .claude/skills/*/SKILL.md; do printf "%-46s %3s lines %s H2 %s H3\n" \
 ## What is installed from outside, and what was refused
 
 Three plugins from `sponticelli/gamedev-claude-plugins`, declared in `.claude/settings.json` so the
-set travels with the repo rather than with whoever installed it: **`web-games`** (its
+*choice* travels with the repo rather than with whoever made it: **`web-games`** (its
 `canvas-optimization-expert` is dirty rects, layered and offscreen canvases, `willReadFrequently`
 and `desynchronized`, devicePixelRatio — the things `CourtCanvas` actually does), **`multiplayer`**
 (`netcode-specialist` covers prediction, reconciliation, interpolation and lag compensation, none
 of which this game has), and **`juice`**. Twelve agents and twelve commands; no hooks, no MCP
 server, nothing that executes.
+
+**The declaration is not the install, and that catches everyone once.** A plugin from an external
+source that only the project's settings enable does not load until it is installed on that machine —
+Claude Code reports it as not installed and prints the command. So on a new machine, a new clone, or
+a fresh cloud session, run this once:
+
+```bash
+for p in web-games multiplayer juice; do
+  claude plugin install "$p@gamedev-claude-plugins" --scope project
+done
+```
+
+It re-reads `.claude/settings.json` and leaves it unchanged, so this dirties nothing. To check it
+took: type `/web-games:` and see whether its five commands complete, or open `/plugin` → Installed
+(and its Errors tab). `/reload-plugins` applies an install to the session you are already in.
+Worth doing in the same pass: `/context`, to confirm the twelve still have their descriptions — on
+overflow the listing drops them starting with the least-invoked skill, and nothing goes red.
 
 **They are agents and slash commands, not `SKILL.md` files, and that is why they are safe here.** A
 skill competes for triggers by its description; an agent is invoked deliberately. So none of these
