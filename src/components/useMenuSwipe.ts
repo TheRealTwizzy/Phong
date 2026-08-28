@@ -84,6 +84,8 @@ export function useMenuSwipe({ count, index, onCommit, reduced }: Options) {
   /** Read once at claim: a per-move layout read is 120 reflows a second. */
   const widthRef = useRef(0);
   const commitTimerRef = useRef<number | null>(null);
+  /** The body of a settle that has not run yet, so it can be finished early. */
+  const commitPendingRef = useRef<(() => void) | null>(null);
   const indexRef = useRef(index);
   indexRef.current = index;
 
@@ -106,11 +108,37 @@ export function useMenuSwipe({ count, index, onCommit, reduced }: Options) {
     paint(0, false);
   }, [index, paint]);
 
+  /**
+   * Drop a pending page turn without performing it. Unmount only — see
+   * `flushCommit` for why every other caller has to finish it instead.
+   */
   const clearCommitTimer = () => {
     if (commitTimerRef.current !== null) {
       window.clearTimeout(commitTimerRef.current);
       commitTimerRef.current = null;
     }
+    commitPendingRef.current = null;
+  };
+
+  /**
+   * Perform a pending page turn NOW, so a new drag can start from the page the
+   * last one actually landed on.
+   *
+   * The settle timer is the only path to `onCommit`, so cancelling it discarded
+   * the turn outright: the track sat at the adjacent page while `index` never
+   * moved, and the next `paint` — which is absolute, `-100% + dx` — recomputed
+   * from the OLD resting slot and snapped back. Two quick flicks advanced one
+   * page, or none.
+   *
+   * Finishing it rather than refusing the new pointer is deliberate. Refusing
+   * for the 180ms of the animation makes a fast second flick do nothing at all,
+   * which is the same complaint from the other side; finishing costs at most a
+   * part-frame jump forward, during a moment the player is already moving.
+   */
+  const flushCommit = () => {
+    const pending = commitPendingRef.current;
+    clearCommitTimer();
+    pending?.();
   };
 
   /** Forget the drag without committing anything. Safe to call twice. */
@@ -148,7 +176,7 @@ export function useMenuSwipe({ count, index, onCommit, reduced }: Options) {
   const onPointerDown = (e: React.PointerEvent) => {
     if (idRef.current !== null) return; // one pointer owns the drag
     if ((e.target as HTMLElement).closest?.(SWIPE_OPT_OUT)) return;
-    clearCommitTimer();
+    flushCommit();
     idRef.current = e.pointerId;
     startRef.current = { x: e.clientX, y: e.clientY };
     trailRef.current = [{ t: e.timeStamp, x: e.clientX }];
@@ -251,15 +279,16 @@ export function useMenuSwipe({ count, index, onCommit, reduced }: Options) {
     paint(delta * -width, true);
     // A timer rather than `transitionend`: a zero-duration transition (reduced
     // motion) never fires that event, and the commit would simply never happen.
-    commitTimerRef.current = window.setTimeout(
-      () => {
-        commitTimerRef.current = null;
-        claimedRef.current = false;
-        if (delta !== 0) onCommit(wrapIndex(indexRef.current + delta, count));
-        else paint(0, false);
-      },
-      reduced ? 0 : DURATION.enter * 1000
-    );
+    // Held as a callable too, so a pointer arriving mid-settle can finish it.
+    const commit = () => {
+      commitTimerRef.current = null;
+      commitPendingRef.current = null;
+      claimedRef.current = false;
+      if (delta !== 0) onCommit(wrapIndex(indexRef.current + delta, count));
+      else paint(0, false);
+    };
+    commitPendingRef.current = commit;
+    commitTimerRef.current = window.setTimeout(commit, reduced ? 0 : DURATION.enter * 1000);
   };
 
   return {

@@ -272,6 +272,42 @@ for (const id of PAGES) {
 }
 ok('all five pages scroll their own overflow, and nothing is crushed');
 
+// ---- 10. A second flick inside the settle keeps the first turn ----------
+// `onCommit` is reachable ONLY from the settle timer, so a pointer arriving
+// during the 180ms animation used to cancel the turn outright: the track sat
+// at the adjacent page while `index` never moved, and the next paint —
+// absolute, `-100% + dx` — recomputed from the OLD resting slot and snapped
+// back. Two quick flicks advanced one page, or none.
+//
+// Deliberately NO settle between the two drags: the wait is the bug's hiding
+// place, and every other drag in this suite waits.
+await page.click('#menu-nav-play');
+await settle();
+if ((await currentPage()) !== 'play') fail(`could not get back to play to start the rapid-flick leg`);
+
+const rapidBox = await (await page.$('#menu-pager')).boundingBox();
+const rapidY = rapidBox.y + rapidBox.height / 2;
+const flick = async () => {
+  await page.mouse.move(rapidBox.x + rapidBox.width * 0.8, rapidY);
+  await page.mouse.down();
+  await page.mouse.move(rapidBox.x + rapidBox.width * 0.2, rapidY, { steps: 6 });
+  await page.mouse.up();
+};
+await flick();
+await flick();
+await settle();
+
+// play -> leaderboard -> achievements. Landing on `leaderboard` is the bug:
+// the second flick discarded the first turn and repainted from play.
+const afterRapid = await currentPage();
+if (afterRapid === 'leaderboard') {
+  fail('a second flick inside the settle discarded the first page turn (landed on leaderboard, not achievements)');
+}
+if (afterRapid !== 'achievements') {
+  fail(`two rapid flicks from play landed on ${afterRapid}, not achievements`);
+}
+ok('a flick starting inside the settle finishes the previous turn rather than eating it');
+
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 await browser.close();
 console.log('menu E2E passed');
