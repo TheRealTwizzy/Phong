@@ -22,6 +22,7 @@ import { hasUnlock, unlockedBy } from '../achievements';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { QuickMatch } from '../net/useQuickMatch';
 import { wrapIndex } from '../gestures';
+import { useMenuSwipe } from './useMenuSwipe';
 import {
   BUILDINGS,
   BuildingId,
@@ -40,6 +41,7 @@ import {
   SegmentedControl,
   Sheet,
   UnlockHintSheet,
+  useMotion,
 } from './ui';
 import {
   Bot,
@@ -222,6 +224,13 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   // for this and meant "the tab with no handler", which is why PLAY was
   // permanently highlighted and did nothing when tapped.
   const [pageIndex, setPageIndex] = useState(0);
+  const { reduced } = useMotion();
+  const swipe = useMenuSwipe({
+    count: 5,
+    index: pageIndex,
+    onCommit: setPageIndex,
+    reduced,
+  });
   const revealed = revealLocked;
 
   const MODE_META: {
@@ -614,7 +623,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         {railMissions.length > 0 && (
           <>
             <SectionLabel>{t('menu_section_today', lang)}</SectionLabel>
-            <div id="menu-daily-rail" className="scroll-x flex shrink-0 gap-2 pb-1">
+            <div id="menu-daily-rail" data-swipe="off" className="scroll-x flex shrink-0 gap-2 pb-1">
               {railMissions.map((mi) => (
                 <button
                   key={mi.id}
@@ -733,9 +742,16 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       <div
         id="menu-pager"
         data-page={pageAt(pageIndex)}
+        data-dragging={swipe.dragging ? 'true' : 'false'}
         className="relative z-10 min-h-0 flex-1 overflow-hidden"
+        {...swipe.handlers}
       >
-        <div id="menu-pager-track" className="absolute inset-0 flex" style={{ transform: 'translateX(-100%)' }}>
+        <div
+          id="menu-pager-track"
+          ref={swipe.trackRef}
+          className="absolute inset-0 flex"
+          style={{ transform: 'translate3d(-100%, 0, 0)' }}
+        >
           {[pageIndex - 1, pageIndex, pageIndex + 1].map((i) => {
             const id = pageAt(i);
             const isCurrent = i === pageIndex;
@@ -763,6 +779,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       <nav
         id="menu-tabbar"
         className="relative z-10 grid shrink-0 grid-cols-5 border-t border-line bg-surface-2 px-safe pb-safe"
+        {...swipe.handlers}
       >
         {tabs.map((tab, i) => {
           // A real comparison. This read `!tab.onClick` — "current" meaning
