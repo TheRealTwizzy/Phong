@@ -222,6 +222,27 @@ if ((await page.getAttribute('#menu-pager', 'data-dragging')) !== 'false') {
 }
 ok('a cancelled drag engages, then commits nothing')
 
+// ---- 8b. Every task dealt today is on PLAY, with nothing to scroll ------
+// This was a scroll-x rail of at most three UNCLAIMED tasks, so the elite one
+// — the permanent unlock — could sit off-screen behind a sideways scroll, and
+// the row shortened through the day as tasks were claimed.
+await page.click('#menu-nav-play');
+await settle();
+await page.waitForSelector('#menu-daily-grid', { timeout: 5000 });
+const tasks = await page.$$eval('#menu-daily-grid [id^="menu-daily-"]', (els) =>
+  els.map((e) => ({ id: e.id, tier: e.getAttribute('data-tier') }))
+);
+if (tasks.length !== 4) {
+  fail(`PLAY shows ${tasks.length} tasks, not the 4 dealt (3 regular + 1 elite)`);
+}
+if (!tasks.some((t) => t.tier === 'elite')) {
+  fail('the elite task is not among the tasks shown on PLAY');
+}
+const gridScrolls = await page.$eval('#menu-daily-grid', (el) => el.scrollWidth > el.clientWidth + 1);
+if (gridScrolls) fail('the task grid scrolls sideways, so not all of it is visible at once');
+if (await page.$('#menu-nav-missions')) fail('the header Tasks button is still there');
+ok('all four dealt tasks are on PLAY, elite included, with nothing to scroll');
+
 // ---- 9. Every page scrolls its own overflow -----------------------------
 // Four new scroll regions, each a chance for the flex-collapse bug: a flex
 // item whose overflow is not `visible` has an automatic minimum size of ZERO,

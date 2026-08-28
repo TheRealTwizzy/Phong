@@ -49,7 +49,6 @@ import {
   Users,
   Smartphone,
   Swords,
-  Target,
   Trophy,
   Award,
   History,
@@ -60,6 +59,7 @@ import {
   Flame,
   ChevronRight,
   Lock,
+  Sparkles,
 } from 'lucide-react';
 
 // Out-of-match hub. Reads top-down as WHO YOU ARE → WHAT YOU PLAY → WHAT'S
@@ -407,7 +407,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     return <div className={`scroll-y h-full min-h-0 ${PAGE_SCROLL_CLASS[id]}`}>{node}</div>;
   };
 
-  const railMissions = missions.filter((m) => !m.claimed).slice(0, 3);
 
   // The PLAY page: what the menu has always been, now one page of five.
   // Unchanged inside — the scroll contract and every `shrink-0` on its
@@ -620,22 +619,61 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           );
         })}
 
-        {railMissions.length > 0 && (
+        {missions.length > 0 && (
           <>
-            <SectionLabel>{t('menu_section_today', lang)}</SectionLabel>
-            <div id="menu-daily-rail" data-swipe="off" className="scroll-x flex shrink-0 gap-2 pb-1">
-              {railMissions.map((mi) => (
+            <div className="flex shrink-0 items-center gap-2">
+              <SectionLabel>{t('menu_section_today', lang)}</SectionLabel>
+              {unclaimedMissionsCount > 0 && (
+                <span
+                  id="menu-daily-unclaimed"
+                  className="rounded-chip bg-loss px-1.5 text-2xs text-ink"
+                >
+                  {unclaimedMissionsCount}
+                </span>
+              )}
+            </div>
+            {/* Every task dealt today, all of them visible at once — three
+                regular and one elite. This was a `scroll-x` rail of at most
+                three UNCLAIMED ones, which hid the elite task (the permanent
+                unlock, the one worth planning a session around) behind a
+                sideways scroll, and shortened itself through the day as tasks
+                were claimed.
+
+                It is also the last `touch-action: pan-x` region that was nested
+                inside the pager. A grid scrolls nowhere, so it needs no
+                `data-swipe="off"` and a drag across it turns the page like
+                anywhere else — the gesture got simpler, not more special-cased.
+
+                No `!claimed` filter: claiming auto-rerolls the slot server-side,
+                free and unlimited (CLAUDE.md §7), so the replacement arrives by
+                itself and the count stays at four all day. */}
+            <div
+              id="menu-daily-grid"
+              aria-label={t('daily_missions', lang)}
+              className="grid shrink-0 grid-cols-2 gap-2"
+            >
+              {missions.map((mi) => (
                 <button
                   key={mi.id}
                   id={`menu-daily-${mi.id}`}
+                  data-tier={mi.tier}
                   onClick={onOpenMissions}
-                  className="flex w-40 shrink-0 flex-col gap-1.5 rounded-card border border-line bg-surface-2 p-2.5 text-left transition-colors active:scale-[0.99] motion-reduce:active:scale-100"
+                  className={`flex min-w-0 flex-col gap-1.5 rounded-card border p-2.5 text-left transition-colors active:scale-[0.99] motion-reduce:active:scale-100 ${
+                    mi.tier === 'elite'
+                      ? 'border-xp/40 bg-xp/10'
+                      : 'border-line bg-surface-2'
+                  }`}
                 >
-                  <span className="truncate text-2xs text-ink">{t(mi.titleKey, lang)}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {mi.tier === 'elite' && (
+                      <Sparkles className="h-3 w-3 shrink-0 text-xp" />
+                    )}
+                    <span className="truncate text-2xs text-ink">{t(mi.titleKey, lang)}</span>
+                  </span>
                   <ProgressBar
                     height="sm"
                     value={mi.current / mi.target}
-                    tone={mi.current >= mi.target ? 'win' : 'accent'}
+                    tone={mi.claimed ? 'win' : mi.current >= mi.target ? 'win' : 'accent'}
                   />
                   <span className="text-2xs tnum font-normal tracking-normal text-ink-dim">
                     {mi.current}/{mi.target} · +{mi.xpReward} XP
@@ -704,22 +742,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
           <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
             LV{profile?.level || 1}
           </span>
-        </button>
-
-        <span className="flex-1" />
-
-        <button
-          id="menu-nav-missions"
-          onClick={onOpenMissions}
-          aria-label={t('daily_missions', lang)}
-          className="relative rounded-ctl border border-line bg-surface-2 p-2 text-accent transition-colors active:scale-95 motion-reduce:active:scale-100"
-        >
-          <Target className="h-4 w-4" />
-          {unclaimedMissionsCount > 0 && (
-            <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface-1 bg-loss px-1 text-2xs text-ink">
-              {unclaimedMissionsCount}
-            </span>
-          )}
         </button>
       </header>
 
