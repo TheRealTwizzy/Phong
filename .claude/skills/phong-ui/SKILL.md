@@ -88,7 +88,11 @@ for the whole of a match, so the bar that comes back is a fresh mount. The key m
 (`menu-xp:{level}`, `rank:{tier}`) because a level-up drops the fraction from 0.95 to 0.05 —
 resumed from the old band, gaining a level animates as a long slide leftward. And two bars mounted
 at once must never share a key: each would write the other's origin. The store is
-`src/components/ui/meterMemory.ts`, pure and held by `tests/meterMemory.test.ts`.
+`src/components/ui/meterMemory.ts`, pure and held by `tests/meterMemory.test.ts` — and it is
+module scope, so it outlives an identity swap the way `carryRef` and the on-device match
+queue do. `App.startFreshIdentity` calls `resetMeterMemory()` beside those two, or a brand
+new account (level 1, unplaced — the ordinary case) inherits the previous player's bands and
+watches its placement meter slide DOWN from their 4/5.
 
 ## A call site never arms its own timer
 

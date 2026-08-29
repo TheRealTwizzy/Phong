@@ -112,6 +112,7 @@ import {
   StatTile,
   ToastHost,
   TOAST_TTL,
+  resetMeterMemory,
   useMotion,
   type ToastSpec,
 } from './components/ui';
@@ -692,6 +693,16 @@ export default function App() {
       // account's match — XP, rating, achievements, streaks — to a player
       // who never played it.
       clearPendingMatches();
+      // And a third, which is the cheap one and on the list for a structural
+      // reason rather than for its stake: the meter origins (components/ui/
+      // meterMemory.ts) are module scope too, so they outlive an identity swap
+      // exactly as the two above do. Nothing is paid or rated on them — a bar
+      // animates from the wrong place, and that is the whole cost. But a fresh
+      // account is level 1 and unplaced, which is the ORDINARY case rather than
+      // an exotic one, so it would inherit `menu-xp:1` and `rank:placement`
+      // from the account just given up and watch its placement meter slide
+      // DOWN from the previous player's 4/5 on the first paint.
+      resetMeterMemory();
       setProfile(res.profile);
       setPlayerId(res.profile.id);
     }
@@ -704,16 +715,17 @@ export default function App() {
    * by the time this runs; the server checks the name again, because the two
    * steps in front of it live in a client.
    *
-   * The two pieces of stale per-browser state startFreshIdentity has to clear
-   * apply here for the same reasons, and one of them is handled differently.
+   * The three pieces of stale per-browser state startFreshIdentity has to clear
+   * apply here for the same reasons, and only one of them is handled here.
    * The on-device match queue (net/matchRecord.ts) is a flat localStorage key
    * with no idea which account was active when an entry was parked, so a match
    * that failed to record before the deletion would be flushed onto the fresh
    * profile this browser is about to be given — XP, rating and achievements
    * paid to an account that never played it. That is cleared here. `carryRef`
-   * needs no such call only because this path RELOADS: the whole page goes,
-   * and with it every ref, which is also what puts the player on the
-   * onboarding modal a brand-new device sees.
+   * and the meter origins need no such call only because this path RELOADS:
+   * the whole page goes, and with it every ref and every module-scope store,
+   * which is also what puts the player on the onboarding modal a brand-new
+   * device sees.
    */
   const handleDeleteAccount = useCallback(
     async (username: string): Promise<{ ok: boolean; error?: string }> => {
