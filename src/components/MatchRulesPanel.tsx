@@ -42,6 +42,11 @@ interface Props {
   readOnly?: boolean;
   /** Keeps ids unique when the lobby renders over the menu. */
   idPrefix?: string;
+  /**
+   * Duel only: the venue the TABLE sits in. Casual does not move the visible
+   * ladder, so a duel no longer rates on its rules alone.
+   */
+  venueRoomId?: string | null;
 }
 
 const SLIDERS: { key: PhysicsRuleKey; labelKey: string }[] = [
@@ -66,6 +71,8 @@ const UNRANKED_COPY_KEY = (reason: UnrankedReason | undefined): string => {
       return 'rules_unranked_mode';
     case 'difficulty':
       return 'rules_unranked_difficulty';
+    case 'venue':
+      return 'rules_unranked_venue';
     case 'sonar':
       return 'rules_unranked_sonar';
     default:
@@ -81,11 +88,12 @@ export const MatchRulesPanel: React.FC<Props> = ({
   difficulty,
   readOnly = false,
   idPrefix = 'menu',
+  venueRoomId = null,
 }) => {
   const [open, setOpen] = useState(false);
   // Everything standing between this match and the ladder, not just the
   // sliders: the mode, the difficulty and the sonar count too.
-  const blockers = unrankedReasons({ rules, mode, difficulty });
+  const blockers = unrankedReasons({ rules, mode, difficulty, venueRoomId });
   const ranked = blockers.length === 0;
   const sonarUnranks = blockers.includes('sonar');
 

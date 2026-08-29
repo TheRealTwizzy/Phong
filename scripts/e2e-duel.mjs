@@ -85,13 +85,24 @@ async function pickShortMatch(page, points = 3) {
   await page.waitForSelector('#prematch-modal', { state: 'detached', timeout: 4000 });
 }
 
+/**
+ * Beginner, not Casual, and that is not cosmetic.
+ *
+ * A Casual table no longer moves the visible ladder, so every ranked verdict
+ * below would be answered "Casual table — XP only, no rank" whatever the
+ * sliders said: the sonar and paddle-band legs would fail outright, and the
+ * band-edge leg — which asserts the status does NOT read "Past ranked" —
+ * would pass VACUOUSLY, which is the failure this suite's own header warns
+ * about. Beginner is open to an unplaced player (`tierMax` cannot refuse
+ * somebody with no tier yet), and every leg here mints a fresh one.
+ */
 async function hostCreateRoom(page, { p2p, points = 3 }) {
   await page.goto(BASE, { waitUntil: 'networkidle' });
   await passGatekeeper(page);
   await onboard(page, 'RmHost');
   await pickShortMatch(page, points);
   await page.click('#building-pvp');
-  await page.click('#room-casual');
+  await page.click('#room-beginner');
   await page.waitForSelector('#btn-create-room', { timeout: 5000 });
   if (!p2p) await page.click('#toggle-p2p input, #toggle-p2p');
   await page.click('#btn-create-room');
@@ -114,7 +125,7 @@ async function guestJoin(page, code, points = 3) {
   await onboard(page, 'RmGuest');
   await pickShortMatch(page, points);
   await page.click('#building-pvp');
-  await page.click('#room-casual');
+  await page.click('#room-beginner');
   await page.waitForSelector('#btn-join-room-submit', { timeout: 5000 });
   // Regression guard for the "match starts zoomed" bug: iOS Safari zooms the
   // page when an input under 16px is focused and STAYS zoomed afterwards —
@@ -220,6 +231,16 @@ const rankTile = (page) =>
   });
 
 async function checkRankArrows(host, guest, label) {
+  // The strip renders from the frame the overlay mounts, with the arrow slot
+  // held empty until the record lands — so read it only once it has settled,
+  // or this races the very thing that stops the layout jumping.
+  for (const [page, who] of [[host, 'host'], [guest, 'guest']]) {
+    const settled = await page
+      .waitForFunction(() => !document.querySelector('#rank-move-pending'), { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!settled) fail(`${label}: ${who}'s rank tile never left its pending state`);
+  }
   const [a, b] = [await rankTile(host), await rankTile(guest)];
   if (!a || !b) fail(`${label}: a phone reached the overlay with no rank tile on it`);
 

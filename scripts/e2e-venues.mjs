@@ -217,6 +217,17 @@ const code = await browser1
   }, { timeout: 8000 })
   .then((h) => h.jsonValue());
 
+// Casual does not move the visible ladder, and the lobby has to say so before
+// anybody plays. Its own description has promised this in seven locales since
+// the room shipped while the server rated it like any other bracket.
+const casualStatus = await browser1
+  .$eval('#lobby-rules-status', (el) => (el.textContent || '').trim())
+  .catch(() => '');
+if (!/no rank/i.test(casualStatus)) {
+  fail(`a Casual table should say it does not count for rank, got "${casualStatus}"`);
+}
+ok(`the Casual lobby says the ladder is not on the line ("${casualStatus}")`);
+
 const browser2 = await newPlayer('Finder');
 await browser2.click('#building-pvp');
 await browser2.click('#room-casual');
@@ -243,6 +254,49 @@ for (const gone of ['#btn-copy-link', '#btn-toggle-qr', '#lobby-qr']) {
   if (await shown(browser1, gone)) fail(`the link/QR share surface is still here: ${gone}`);
 }
 ok(`one table, open and findable in the room (${code}), with no link to hand out`);
+
+// ---- 7a. The badge follows the TABLE, not the room you came from --------
+// The divergence the venue rides table_state for. A guest who walked into a
+// different bracket and typed a Casual table's code has a BROWSE venue of
+// `beginner` while sitting at a `casual` table — so a lobby reading the room
+// the player came from tells them the opposite of the truth about the match
+// they are about to play. Its own table, so it takes nobody's seat.
+const casualHost = await newPlayer('CasHost');
+await casualHost.click('#building-pvp');
+await casualHost.click('#room-casual');
+await casualHost.waitForSelector('#btn-create-room', { timeout: 8000 });
+await casualHost.click('#btn-create-room');
+const casualCode = await casualHost
+  .waitForFunction(() => {
+    const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+    return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
+  }, { timeout: 8000 })
+  .then((h) => h.jsonValue());
+
+const keyJoiner = await newPlayer('CodeJoin');
+await keyJoiner.click('#building-pvp');
+await keyJoiner.click('#room-beginner');
+await keyJoiner.waitForSelector('#btn-join-room-submit', { timeout: 8000 });
+await (await keyJoiner.$('#input-room-code')).fill(casualCode);
+await keyJoiner.click('#btn-join-room-submit');
+await keyJoiner.waitForSelector('#lobby-table', { timeout: 8000 });
+const joinerStatus = await keyJoiner
+  .waitForFunction(
+    () => {
+      const el = document.querySelector('#lobby-rules-status');
+      return el && /no rank/i.test(el.textContent || '') ? el.textContent.trim() : null;
+    },
+    { timeout: 8000 }
+  )
+  .then((h) => h.jsonValue())
+  .catch(() => null);
+if (!joinerStatus) {
+  const got = await keyJoiner.textContent('#lobby-rules-status').catch(() => '(none)');
+  fail(`a guest who typed a Casual code from another bracket was told "${got}"`);
+}
+ok(`the badge follows the table the guest is AT, not the room they came from ("${joinerStatus}")`);
+await keyJoiner.context().close();
+await casualHost.context().close();
 
 // ---- 7b. The lock, and the key it mints ---------------------------------
 // Turning Private on takes the table out of the listing and mints a

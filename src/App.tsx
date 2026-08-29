@@ -429,6 +429,15 @@ export default function App() {
     /** Whether this table is locked, and the key that opens it if it is. */
     isPrivate: boolean;
     joinKey: string | null;
+    /**
+     * The venue this TABLE is in — not the room the player was browsing.
+     *
+     * They differ for anybody who arrived on a join key rather than by tapping
+     * a listed table, and Casual does not move the ladder, so a lobby reading
+     * the browse venue would tell a guest the opposite of the truth about the
+     * match they are about to play.
+     */
+    venueRoomId: string;
   } | null>(null);
   // The room's terms, as the server last broadcast them. Null until a room
   // exists. In a duel this — never the local menu — decides how long the match
@@ -1870,6 +1879,7 @@ export default function App() {
           spectatorsEnabled: msg.spectatorsEnabled,
           isPrivate: msg.isPrivate,
           joinKey: msg.joinKey,
+          venueRoomId: msg.venueRoomId,
         });
         const watchingSeat = msg.yourSeat !== null && msg.yourSeat >= 2;
         if (watchingSeat) {
@@ -3371,6 +3381,9 @@ export default function App() {
                   rules: activeConfig.rules,
                   mode,
                   difficulty: settings.difficulty,
+                  // The table's own venue, so a Casual duel is not threatened
+                  // with a rank it was never going to move.
+                  venueRoomId: tableState?.venueRoomId ?? null,
                 }).length === 0
                   ? 'quit_confirm_ranked'
                   : 'quit_confirm_unranked',

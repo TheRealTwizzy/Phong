@@ -488,6 +488,83 @@ describe('recording a duel', () => {
     p2.close();
   }, 45000);
 
+  it('pays a casual duel in XP and hidden MMR, and never in rank', async () => {
+    // Casual's own description has said so in seven locales since the room
+    // shipped — "Any rank welcome. Play for the game, not the ladder." — while
+    // the server rated it like any other bracket. Gated the way a Rookie solo
+    // is, not the way Practice is: hidden MMR still learns from the match, so
+    // the pre-match odds and the queue stay honest, and only the visible tier
+    // stands still. Driven through the relay, which is the only thing that
+    // knows a table's venue: a client never names one.
+    const host = await newDevice('CasualWin');
+    const guest = await newDevice('CasualLose');
+
+    const p1 = await relay.openPhone(host);
+    p1.send({
+      type: 'create_room',
+      playerId: host.id,
+      venueRoomId: 'casual',
+      config: { winningScore: 3, rules: {} },
+    });
+    const created = await p1.await('room_created');
+    const p2 = await relay.openPhone(guest);
+    p2.send({ type: 'join_room', roomId: created.roomId, playerId: guest.id });
+    await p2.await('room_joined');
+    p2.send({ type: 'player_ready', ready: true });
+    await p1.await('ready_state');
+    p1.send({ type: 'start_match' });
+    const start = await p1.await('game_start');
+    await p2.await('game_start');
+
+    p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 3, p2Score: 1 });
+    const hostRecord = await p1.await('match_recorded');
+    const guestRecord = await p2.await('match_recorded');
+
+    // The ladder did not move, and the overlay says so with the one glyph it
+    // has for "nothing happened here".
+    expect(hostRecord.result.rankDirection).toBe('none');
+    expect(guestRecord.result.rankDirection).toBe('none');
+    expect(hostRecord.result.rankMagnitude).toBe('none');
+
+    for (const [device, won] of [[host, true], [guest, false]] as const) {
+      const p = await getProfile(device);
+      expect(p.rankMu).toBe(25);
+      expect(p.rankSigma).toBeCloseTo(25 / 3, 6);
+      expect(p.rankedGames).toBe(0);
+      expect(p.tier).toBe('unranked');
+      // But it was a real match: it played, it paid, and the hidden estimator
+      // learned from it.
+      expect(p.matchesPlayed).toBe(1);
+      expect(won ? p.matchesWon : p.matchesLost).toBe(1);
+      expect(p.xp).toBeGreaterThan(0);
+      expect(p.mmrMu).not.toBe(25);
+    }
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('still rates a duel in a bracketed room, and in one with no venue at all', async () => {
+    // The other half, and the one that would have gone quietly wrong: casual
+    // used to BE the default venue, so making it unranked without splitting
+    // the two would have taken the ladder from every invite-code table and
+    // every older bundle as well. seatDuel names no venue, exactly as those
+    // callers do not.
+    const host = await newDevice('DefaultVenueW');
+    const guest = await newDevice('DefaultVenueL');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 3, p2Score: 0 });
+    await p1.await('match_recorded');
+    await p2.await('match_recorded');
+
+    expect((await getProfile(host)).rankedGames).toBe(1);
+    expect((await getProfile(guest)).rankedGames).toBe(1);
+    expect((await getProfile(host)).rankMu).toBeGreaterThan(25);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
   it('moves exactly one seat up the ladder and the other down', async () => {
     // The direct regression assertion for "both arrows were red". The rank
     // tile draws MatchEndResult.rankDirection, so a decided ranked duel has to

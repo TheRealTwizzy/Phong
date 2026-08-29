@@ -87,7 +87,10 @@ await passGatekeeper(host);
 await onboard(host, 'HistHost');
 await pickShortMatch(host, 3);
 await host.click('#building-pvp');
-await host.click('#room-casual');
+// Beginner rather than Casual: a Casual table records `ranked: 0`, and the
+// Ranked sub-filter leg below asserts this very duel survives it. Beginner is
+// open to an unplaced player, which both of these are.
+await host.click('#room-beginner');
 await host.waitForSelector('#btn-create-room', { timeout: 5000 });
 // Relay transport keeps the scoring on the server, which is the recording
 // path this suite is about; P2P has its own suite.
@@ -105,7 +108,7 @@ await guest.goto(BASE, { waitUntil: 'networkidle' });
 await passGatekeeper(guest);
 await onboard(guest, 'HistGuest');
 await guest.click('#building-pvp');
-await guest.click('#room-casual');
+await guest.click('#room-beginner');
 await guest.waitForSelector('#input-room-code', { timeout: 5000 });
 await guest.fill('#input-room-code', code);
 await guest.click('#btn-join-room-submit');

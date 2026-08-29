@@ -49,9 +49,10 @@ makes the badge lie:
    phone) and past it pays XP but moves nothing.
 2. **`isRankedRules()`** — the server re-derives this in `recordMatch` from the rules
    themselves. A client-set `ranked` flag is ignored, always.
-3. **`unrankedReasons()`** — the whole verdict in one ordered list: mode, then difficulty,
-   then sonar, then the physics keys. This is a **display** predicate; the server still
-   derives its own half from `isRankedRules` plus `soloCountsForRank` and never trusts it.
+3. **`unrankedReasons()`** — the whole verdict in one ordered list: mode, then **venue**,
+   then difficulty, then sonar, then the physics keys. This is a **display** predicate; the
+   server still derives its own half from `isRankedRules`, `soloCountsForRank` and
+   `roomCountsForRank` and never trusts it.
 4. **`normalizeRules()`** — clamp and snap it, because it arrives from a client and from
    storage.
 5. **`MatchRulesPanel`** so it can be set, in the pre-match sheet *and* the duel lobby (same
@@ -75,8 +76,17 @@ match is not threatened with a rank it was never going to move.
 ## What never costs the rating
 
 Telemetry, quick chat and auto-serve. They do not touch the ball and they do not touch the
-hidden half. The sonar is the **only** non-physics rule that unranks — if you are adding a
+hidden half. The sonar is the **only** non-physics RULE that unranks — if you are adding a
 second one, that is a deliberate change to the shape of the rule set, not a detail.
+
+**A room can unrank a match without being a rule at all.** `RoomDef.ranked` in
+`src/venues.ts` is false for `casual` alone, and `roomCountsForRank` is the predicate both
+the badge and `recordMatch` ask. It gates `ranksThisMatch` and not `ranked`, so it is the
+Rookie shape rather than the Practice one: hidden MMR still learns from the match and only
+the visible tier stands still. The venue reaches `recordMatch` from the live ROOM and never
+from a payload — a client-named `casual` would be a free way to dodge a rating loss.
+Note that `DEFAULT_VENUE_ROOM` is `_default` and not `casual`, precisely so a table created
+without a venue (the invite flow, an old bundle, the test harness) keeps rating.
 
 ## Verifying
 

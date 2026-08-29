@@ -30,8 +30,17 @@ export const MATCHMAKING_ROOM = '_queue';
  * harness all call `create_room` with no venue, and this default must be a
  * room whose gate can never refuse anybody — otherwise those callers start
  * being turned away by a bracket they never asked to enter.
+ *
+ * It used to be `casual`, and that had to stop the moment Casual became the
+ * room that does not rate. The name was carrying two unrelated jobs — "the
+ * ungated PvP bracket" and "where a table with no venue lives" — and making
+ * one of them unranked would have taken the ladder away from the other: every
+ * invite-code duel, every old bundle, every table the test harness seats.
+ * Casual is somewhere a player WALKS INTO and chooses; this is where a table
+ * lands when nobody chose at all, which is a private match two people arranged
+ * between themselves, and those rate exactly as they always have.
  */
-export const DEFAULT_VENUE_ROOM = 'casual';
+export const DEFAULT_VENUE_ROOM = '_default';
 
 export interface BuildingDef {
   id: BuildingId;
@@ -94,11 +103,33 @@ export interface RoomDef {
    * spectator/ranked question: a spectator watches the hidden half live with
    * sonar forced on and can simply describe it over a voice call, which is
    * the sonar rule (CLAUDE.md §12) with a second person attached. Drawing the
-   * line by ROOM rather than per-match means no sticky per-match flag, no
-   * forceUnranked, and no new unrankedReasons case — a match in a room that
-   * permits spectators rates exactly as it always did.
+   * line by ROOM rather than per-match is still what keeps that off the match
+   * itself: there is no sticky per-match flag, no forceUnranked, and nothing
+   * in MatchRules, and a match in a room that permits watching rates exactly
+   * as it always did.
+   *
+   * What has changed is the claim that came after it — that this needed no
+   * new `unrankedReasons` case. `ranked` below is one, added deliberately and
+   * for a DIFFERENT question. The room now answers two: who may watch, and
+   * whether the ladder moves. They are separate answers that happen to be
+   * given by the same object, and `spectators` is still not one of the things
+   * that unranks a match.
    */
   spectators?: boolean;
+  /**
+   * Whether a match played at a table here moves the VISIBLE ladder.
+   *
+   * Absent means yes — the same shape as `listable`, where a room states the
+   * exception rather than the rule. (Note that `spectators` two fields up is
+   * read as `=== true` instead; the asymmetry is deliberate, since a room that
+   * forgets to say is safer closed for watching and safer rated for playing.)
+   *
+   * FALSE in `casual` alone, whose own description has promised exactly this
+   * in seven locales since the room shipped — "Any rank welcome. Play for the
+   * game, not the ladder." — while the server rated it like any other bracket.
+   * The copy was right and the code disagreed with it.
+   */
+  ranked?: boolean;
   /** Whether the room browser lists this room at all. */
   listable?: boolean;
 }
@@ -118,6 +149,11 @@ export const ROOMS: RoomDef[] = [
     building: 'pvp',
     labelKey: 'room_casual',
     descKey: 'room_casual_desc',
+    // Play for the game, not the ladder — which is what room_casual_desc has
+    // said all along. Gated like a Rookie solo rather than like Practice:
+    // hidden MMR still learns from the match, so the pre-match odds and the
+    // queue stay honest, and only the visible tier stands still.
+    ranked: false,
     spectators: true,
     listable: true,
   },
@@ -169,6 +205,12 @@ export const ROOMS: RoomDef[] = [
   // The queue's own room. Not in the PvP building's browser and not listable:
   // a pair is seated here by the relay, never walked into.
   { id: MATCHMAKING_ROOM, building: 'pvp', spectators: false, listable: false },
+  // Where a table with no venue lives. Not listed and not walked into — it is
+  // reached only by a caller that named nothing, so it needs no gate and no
+  // browser. Spectators stay ALLOWED because the lobby asks
+  // roomAllowsSpectators(venueRoomId || DEFAULT_VENUE_ROOM) while seated, and
+  // closing them here would take the watching toggle off every invite table.
+  { id: DEFAULT_VENUE_ROOM, building: 'pvp', spectators: true, listable: false },
 
   // ---- SOLO AI: one room per rung. Gated by the achievement chain, not by
   // a RoomGate — the ladder is walked through UNLOCKS in achievements.ts, and
@@ -212,6 +254,24 @@ export function normalizeVenueRoomId(value: unknown): string {
 /** Whether tables in this venue may open spectator seats. */
 export const roomAllowsSpectators = (venueRoomId: string): boolean =>
   roomById(normalizeVenueRoomId(venueRoomId))?.spectators === true;
+
+/**
+ * Whether a match at a table in this venue moves the visible ladder.
+ *
+ * Deliberately NOT built on `normalizeVenueRoomId`, which falls back to
+ * DEFAULT_VENUE_ROOM for anything it does not recognise. This predicate is
+ * asked by `recordMatch`, which sees solo and practice results too — and those
+ * have no venue at all. Normalized, every one of them would resolve to the
+ * default room and be judged by whatever that room happens to say, which is a
+ * long way from "this match was not played at a table".
+ *
+ * So: no venue means yes, and an id this build does not know means yes. Both
+ * are the same rule — only a room that says otherwise takes the ladder away.
+ */
+export function roomCountsForRank(venueRoomId: string | null | undefined): boolean {
+  if (typeof venueRoomId !== 'string' || !venueRoomId.trim()) return true;
+  return roomById(venueRoomId.trim().toLowerCase())?.ranked !== false;
+}
 
 // ---------------------------------------------------------------------------
 // Entry

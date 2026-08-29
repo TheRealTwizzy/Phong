@@ -8,6 +8,7 @@ import {
   normalizeVenueRoomId,
   roomAllowsSpectators,
   roomById,
+  roomCountsForRank,
   roomEntryVerdict,
   roomsOf,
 } from '../src/venues';
@@ -49,9 +50,54 @@ describe('the venue catalogue', () => {
     for (const id of ['advanced', 'elite', 'pro', MATCHMAKING_ROOM]) {
       expect({ id, spectators: roomAllowsSpectators(id) }).toEqual({ id, spectators: false });
     }
-    for (const id of ['casual', 'beginner', 'intermediate']) {
+    for (const id of ['casual', 'beginner', 'intermediate', DEFAULT_VENUE_ROOM]) {
       expect({ id, spectators: roomAllowsSpectators(id) }).toEqual({ id, spectators: true });
     }
+    // DEFAULT_VENUE_ROOM is on that list deliberately: the lobby asks
+    // roomAllowsSpectators(venueRoomId || DEFAULT_VENUE_ROOM) while seated, so
+    // closing seats there would take the watching toggle off every table
+    // created without a venue — the whole invite flow.
+  });
+});
+
+describe('which venues move the visible ladder', () => {
+  // Casual's own description has promised this in seven locales since the room
+  // shipped — "Any rank welcome. Play for the game, not the ladder." — while
+  // the server rated it like any other bracket. The copy was right.
+
+  it('takes the ladder away from casual and from nothing else', () => {
+    expect(roomCountsForRank('casual')).toBe(false);
+    for (const id of ['beginner', 'intermediate', 'advanced', 'elite', 'pro']) {
+      expect({ id, rates: roomCountsForRank(id) }).toEqual({ id, rates: true });
+    }
+  });
+
+  it('leaves the ranked queue rating, and the default venue with it', () => {
+    // The queue exists to pair people for RANKED play, and a venue-less table
+    // is a private match two people arranged themselves. Both would have been
+    // silently unranked if the default room were still casual.
+    expect(roomCountsForRank(MATCHMAKING_ROOM)).toBe(true);
+    expect(roomCountsForRank(DEFAULT_VENUE_ROOM)).toBe(true);
+    expect(DEFAULT_VENUE_ROOM).not.toBe('casual');
+  });
+
+  it('rates a match with no venue at all, and one this build has never heard of', () => {
+    // The trap this predicate is shaped to avoid. recordMatch asks it for
+    // SOLO and PRACTICE results too, and those carry no venue — routed through
+    // normalizeVenueRoomId they would every one of them resolve to the default
+    // room and be judged by whatever it happens to say, which is a long way
+    // from "this match was not played at a table". Only a room that says
+    // otherwise takes the ladder away.
+    for (const nothing of [undefined, null, '', '   ']) {
+      expect(roomCountsForRank(nothing as unknown as string)).toBe(true);
+    }
+    for (const unknown of ['nonsense', 'rookie', 'practice', 'CASUAL_X']) {
+      expect({ unknown, rates: roomCountsForRank(unknown) }).toEqual({ unknown, rates: true });
+    }
+  });
+
+  it('reads a venue the way the relay stores one, case and space included', () => {
+    expect(roomCountsForRank('  CASUAL  ')).toBe(false);
   });
 });
 

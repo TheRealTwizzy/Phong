@@ -599,7 +599,17 @@ export interface MatchEndResult {
   previousTier: Tier | null;
   tier: Tier | null;
   tierChanged: boolean;
-  /** False when the match ran on non-stock physics: XP paid, rating untouched. */
+  /**
+   * Whether the RULES were ranked-legal — false on non-stock physics or with
+   * the sonar on, and then neither estimator moved.
+   *
+   * True is not the same as "the ladder moved", and the gap widened when
+   * Casual stopped rating: a duel there is ranked-legal, so this is true and
+   * hidden MMR does move, while the visible tier stands still. `rankDirection`
+   * is the field that answers what the player is actually shown. Nothing in
+   * `src/` reads this today; the persisted `matches.ranked` column is
+   * `ranksThisMatch`, which is the stricter one.
+   */
   ranked: boolean;
   /**
    * Which way the visible ranked rating moved, for the winner overlay's glyph.
@@ -668,6 +678,10 @@ export interface RoomMatchConfig {
    * may be watched at all is answered by the VENUE (src/venues.ts), which is
    * why the top three brackets simply have no spectator seats and everything
    * below them rates exactly as it always did.
+   *
+   * The venue DOES now reach `unrankedReasons`, on its own account: a Casual
+   * table pays XP and moves no rank. That is a statement about the room, not
+   * about who is watching in it, and this flag is still not one of them.
    *
    * Being a config field means it rides room_config and game_start for free
    * and is already locked during play by set_room_config's own guard.
@@ -784,7 +798,7 @@ export type WSServerMessage =
   // recipient. A spectator is told about a seat change the way a player is
   // told about `opponent_joined` — never with `opponent_left`, which would
   // report a departure to somebody who lost nobody.
-  | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean; isPrivate: boolean; joinKey: string | null }
+  | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean; isPrivate: boolean; joinKey: string | null; venueRoomId: string }
   // Where the match already stands, for a watcher who has just sat down.
   | { type: 'spectator_sync'; snapshot: SpectatorSnapshot }
   // Where the search stands. `found` is followed immediately by the ordinary

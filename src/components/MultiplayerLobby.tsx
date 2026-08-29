@@ -72,7 +72,13 @@ interface MultiplayerLobbyProps {
   /** Take a watching seat at a table rather than a playing one. */
   onWatchTable?: (roomId: string) => void;
   /** Who is sitting where at the table this player is at, or null. */
-  tableState?: { seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean } | null;
+  tableState?: {
+    seats: TableSeatInfo[];
+    yourSeat: TableSeat | null;
+    spectatorsEnabled: boolean;
+    /** The venue this TABLE is in, which `venueRoomId` above is not. */
+    venueRoomId?: string;
+  } | null;
   /** Move to another seat at this table. Refused server-side once a match is on. */
   onSwapSeat?: (seat: TableSeat) => void;
   /** Whether this table is locked, and the key that opens it if it is. */
@@ -609,6 +615,12 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 mode="multiplayer"
                 readOnly={!isHost}
                 idPrefix="lobby"
+                // The TABLE's venue, not the room the player walked in from.
+                // `venueRoomId` above is the browse venue and is null for
+                // anyone who arrived on a join key, so reading it here would
+                // make the badge right for the host and silent for the guest —
+                // the exact failure the venue reason exists to prevent.
+                venueRoomId={tableState?.venueRoomId ?? null}
               />
             </div>
           </>

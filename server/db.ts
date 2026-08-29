@@ -24,6 +24,7 @@ import {
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
 import { isRankedRules } from '../src/matchRules';
+import { roomCountsForRank } from '../src/venues';
 import { ALL_ACHIEVEMENTS, achievementById, isUnlockable } from '../src/achievements';
 import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
 import {
@@ -101,6 +102,23 @@ export interface RecordMatchContext {
    * ladder, never the loss itself.
    */
   forceUnranked?: boolean;
+  /**
+   * The venue the table sits in (`src/venues.ts`), for a duel.
+   *
+   * Supplied ONLY by server code holding a live room, never taken from a
+   * request — the same rule `forceUnranked` above obeys, and for a sharper
+   * reason: a client-named "casual" would be a free way for a losing player to
+   * dodge the rating loss, on the one path with no room to check it against.
+   *
+   * Absent means "no room to ask", and the match rates on its rules alone. The
+   * alternative — refusing to rate whenever the venue is unknown — is the
+   * worse failure: a stock-rules duel in `elite` whose room was reaped before
+   * a retried POST landed would silently stop counting. The exposure the other
+   * way is nearly nothing, because the relay records both seats with the venue
+   * the instant the score decides, and the shared matchKey makes a later POST
+   * a replay of that row.
+   */
+  venueRoomId?: string;
 }
 
 // Overridable so production can point at a persistent volume (e.g. /data on
@@ -2477,7 +2495,12 @@ class GameDatabase {
     // The visible ladder moves on a duel, and on a solo match at a difficulty
     // the player had to EARN. Rookie is the tutorial rung — placing against it
     // would be a formality — so it feeds hidden MMR only.
-    const ranksThisMatch = ranked && (isPvp || soloCountsForRank(difficulty));
+    // ...and in a venue that rates at all. Casual is the PvP mirror of a
+    // Rookie solo: `ranked` above is untouched, so hidden MMR still learns
+    // from the match and the pre-match odds stay honest, while the visible
+    // tier, rankedGames and the history row's `ranked` column stand still.
+    const venueRates = roomCountsForRank(context.venueRoomId);
+    const ranksThisMatch = ranked && venueRates && (isPvp || soloCountsForRank(difficulty));
     // Sampled before the update so the overlay can say which way the ladder
     // went. Only the DIRECTION ever leaves the server — the mu itself is not
     // something the client renders (see src/components/ui/RankBadge.tsx).

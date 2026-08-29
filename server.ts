@@ -284,6 +284,15 @@ function broadcastTableState(room: Room): void {
         // Only ever sent to sockets already AT this table, which is the whole
         // point of a key: you get it by being let in, or by being told it.
         joinKey: room.joinKey,
+        // Which venue this TABLE is in, which is not the same question as
+        // which room the player was browsing when they got here. They differ
+        // for anyone who arrived on a join key rather than by tapping a listed
+        // table — and Casual does not move the ladder, so a lobby that guessed
+        // from the browse venue would tell the guest the opposite of the truth
+        // about the match they are about to play. Sent here rather than on
+        // room_created/room_joined because a watcher receives neither, and
+        // their badge should be right too.
+        venueRoomId: room.venueRoomId,
       })
     );
   };
@@ -646,8 +655,13 @@ function persistDuelStreaks(room: Room): void {
  * the hidden half live with the sonar forced on and can simply describe it
  * over a voice call — the sonar rule (CLAUDE.md §12) with a second person
  * attached. Drawing that line by ROOM is what keeps every other match rating
- * exactly as it always did: no per-match flag, no forceUnranked, no new
- * unrankedReasons case.
+ * exactly as it always did: no per-match flag and no forceUnranked.
+ *
+ * It used to add "and no new unrankedReasons case". There is one now — the
+ * venue itself, because a Casual table does not move the ladder — but it is a
+ * case about a different question, and watching is still not among the things
+ * that unrank a match. This function narrows the CONFIG; the ranked verdict
+ * is derived in recordMatch from the room's own venueRoomId.
  *
  * One function for both the create and the edit path, so a host cannot open
  * seats a bracket forbids by asking twice.
@@ -899,6 +913,9 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
 
     const context: RecordMatchContext = {
       performanceWeight: performanceWeight(mine, theirs, room.earnedBests[seat]),
+      // From the ROOM, never from a client. Casual tables do not move the
+      // visible ladder, and this is the only place that can say so honestly.
+      venueRoomId: room.venueRoomId,
     };
     const oppRating = ratingBefore[seat === 0 ? 1 : 0];
     if (oppRating) {
@@ -1681,6 +1698,12 @@ async function startServer() {
             context.opponentRankRating = oppRating.rank;
           }
           context.performanceWeight = performanceWeight(mine, theirs, room.earnedBests[seat]);
+          // The venue is the relay's answer or it is no answer at all — the
+          // menu is the client, and a payload-named venue would be a free
+          // ladder-loss dodge. Outside this branch there is no live room to
+          // ask, so the match rates on its rules alone; see the note on
+          // RecordMatchContext.venueRoomId for why that is the safe side.
+          context.venueRoomId = room.venueRoomId;
         }
       }
 
