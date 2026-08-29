@@ -92,10 +92,11 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 │                              #   a rally streak, anything on screen, a locale, a
 │                              #   test, a doc update, and the pre-push gate.
 │                              #   See .claude/skills/README.md
-├── .claude/settings.json      # Three gamedev plugins (agents + commands), and the
-│                              #   SessionStart hook that installs them. Agents don't
-│                              #   compete for triggers, so the twelve still own every
-│                              #   ruling they own.
+├── .claude/settings.json      # Three gamedev plugins (agents + commands), the
+│                              #   SessionStart hook that installs them, and the
+│                              #   permission allowlist for the pre-push gauntlet.
+│                              #   Agents don't compete for triggers, so the twelve
+│                              #   still own every ruling they own.
 ├── .claude/hooks/             # session-start.sh — fetches the plugin marketplace,
 │                              #   installs the three, runs npm install. Never fatal.
 ├── DEVELOPMENT.md             # Dev workflows, phone testing over HTTPS
@@ -108,7 +109,7 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── scripts/e2e-*.mjs          # E2E (profiles, cosmetics, gameplay, rating,
 │                              #   rules, achievements, elite, duel, eject, invite,
 │                              #   venues, menu, lobby, spectate, queue, split,
-│                              #   streak, delete, build-id)
+│                              #   streak, history, delete, build-id)
 ├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each
 ├── .github/workflows/ci.yml   # Typecheck+unit+build, and the E2E suites
 ├── index.html                 # HTML entry

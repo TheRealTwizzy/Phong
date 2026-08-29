@@ -117,10 +117,15 @@ claim, sat at the bottom of the file where the CLI writes it FIRST. So every ses
 every session opened with a dirty `git status` on a file nobody had touched, and the check said
 nothing, because two installs agree with each other perfectly while both disagree with the repo.
 The rule is that **the stored bytes must match what the installer emits**, and the check that
-actually states it is a diff against ONE real install: run `claude plugin install`, then
-`git diff .claude/settings.json` and expect nothing. Reordering the file by hand TOWARD that order
-is the fix, and is how this was fixed; reordering it away is what puts the churn back, and the diff
-then lands in somebody's unrelated commit.
+actually states it is a diff against ONE real install — where "real" excludes the fast path: an
+install answered "already installed" never serializes, so on a machine with the plugins present
+that check passes having checked nothing. Force the write with an uninstall/reinstall of the LAST
+plugin in `enabledPlugins` (it re-appends, so the order survives), then
+`git diff .claude/settings.json` and expect nothing. That cycle is also how a NEW top-level key
+finds its place: the serializer decides the order (it put `permissions` first, above `hooks`), so
+add the key anywhere, run the cycle, and commit the bytes the installer leaves behind. Reordering
+the file by hand TOWARD that order is the fix, and is how this was fixed; reordering it away is
+what puts the churn back, and the diff then lands in somebody's unrelated commit.
 
 To check it took: `claude plugin list` names all three, or open `/plugin` → Installed (and its
 Errors tab). `/reload-plugins` applies an install to the session you are already in, which matters
