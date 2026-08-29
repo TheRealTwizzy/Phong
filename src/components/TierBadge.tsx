@@ -55,6 +55,12 @@ export const TierBadge: React.FC<TierBadgeProps> = ({
       id={`tier-badge-${tier}`}
       className={`inline-flex items-center border uppercase ${dims} ${TIER_STYLE[tier]} ${className}`}
       title={countdown ? `${label} #${ladderPosition}` : label}
+      // In countdown mode the only rendered text is `#7`, and `title` is not
+      // reliably announced — nor reachable at all by keyboard or touch, since
+      // this span is not focusable. Without a label the rank the number stands
+      // for is simply lost. Absent otherwise, where the visible text already
+      // IS the tier name and a label would only repeat it.
+      aria-label={countdown ? `${label} #${ladderPosition}` : undefined}
     >
       {/* min-w-0 + truncate on the INNER span, because this is an inline-flex
           box: the label is an anonymous flex item, whose automatic minimum size

@@ -40,7 +40,7 @@ import {
   countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
-import { MatchEndPayload, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
+import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
 import {
@@ -828,6 +828,11 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
   const ratingBefore = duelStartRatings(room);
+  const recorded: Array<{
+    seat: 0 | 1;
+    player: NonNullable<Room['players'][0]>;
+    result: MatchEndResult;
+  }> = [];
   for (const seat of seats) {
     const me = room.players[seat];
     const them = room.players[seat === 0 ? 1 : 0];
@@ -872,10 +877,13 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
     if (opts.forgivenLoss && !isWinner) context.forceUnranked = true;
 
     try {
-      const result = db.recordMatch(payload, context);
-      if (me.ws.readyState === WebSocket.OPEN) {
-        me.ws.send(JSON.stringify({ type: 'match_recorded', matchKey, result }));
-      }
+      // Recorded now, pushed after the loop. Both seats' ratings move in this
+      // one function and seat 0 is written first, so anything derived from the
+      // WHOLE table — `ladderPosition` is the only one today — would see the
+      // opponent's pre-match row and answer for a ladder that is one update
+      // out of date. Two adjacent Overlords swapping order in a duel is
+      // exactly when it is wrong, and exactly when somebody is looking.
+      recorded.push({ seat, player: me, result: db.recordMatch(payload, context) });
     } catch (e: any) {
       // An uninitialized profile can't hold a match (it has no identity yet);
       // anything else is worth seeing in the log. Either way the other seat
@@ -883,6 +891,21 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
       if (e?.message !== 'PROFILE_NOT_INITIALIZED') {
         console.error(`duel record failed for seat ${seat} in ${room.id}:`, e);
       }
+    }
+  }
+
+  for (const { seat, player, result } of recorded) {
+    // Re-derived against both committed rows. Only the position is taken, not
+    // the whole profile: everything else in `result` is this seat's own record
+    // of its own match and is already final, while this one field is a
+    // statement about every other player.
+    try {
+      result.profile.ladderPosition = db.getProfile(player.deviceId!).ladderPosition;
+    } catch (e: any) {
+      console.error(`ladder position refresh failed for seat ${seat} in ${room.id}:`, e);
+    }
+    if (player.ws.readyState === WebSocket.OPEN) {
+      player.ws.send(JSON.stringify({ type: 'match_recorded', matchKey, result }));
     }
   }
 }
