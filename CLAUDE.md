@@ -113,6 +113,8 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 ├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each,
 │                              #   in a bounded pool (E2E_CONCURRENCY)
 ├── .github/workflows/ci.yml   # Typecheck+unit+build, and the E2E suites
+├── .github/workflows/codeql.yml # CodeQL — what makes the ruleset's
+│                              #   code-scanning rule satisfiable at all
 ├── index.html                 # HTML entry
 ├── package.json               # npm scripts & deps (lockfile: package-lock.json)
 ├── server.ts                  # Express + ws relay + REST API + Vite middleware
@@ -410,6 +412,25 @@ rule anybody checked was too narrow in the direction that lets a green run hide 
 `.claude/skills/phong-ship-check` keeps that reasoning so it is not rebuilt. **A suite that
 asserts old behaviour is a suite that will be deleted rather than read** — when a rule
 changes, change the suite in the same commit.
+
+**A ruleset requires CodeQL, so `.github/workflows/codeql.yml` is what makes `main` mergeable.**
+The `Claude_Phong` repository ruleset holds the default branch to code scanning (CodeQL, security
+alerts at `high_or_higher`, alerts at `errors`), and for a while nothing in the repository
+produced any: there was one workflow and it was `ci.yml`. **A required analysis that nothing
+generates is not a safety net, it is a branch nobody can merge into** — the pull request sits at
+`blocked` with every visible check green and no failing job to point at, which is why it went
+unnoticed until a merge came back `blocked` rather than `clean` and the ruleset had to be read
+through the API to find out why. The `pull_request` trigger is the load-bearing one: the rule is
+evaluated on the PR head, so analysing only `main` would leave every PR blocked for want of
+results about itself. It is **advanced** setup rather than GitHub's default setup because default
+setup is a repository SETTING and the automation here cannot reach settings (403 `Resource not
+accessible by integration`); if anyone turns default setup on later, this file has to be deleted
+in the same change, since GitHub disables one of the two rather than running both. `build-mode:
+none` and no `npm ci`: CodeQL reads this source directly, and installing a `node_modules` tree in
+front of an extractor that excludes it would add minutes to every PR for nothing. **The other two
+rules in that ruleset are not fixable from the repository at all** — `code_quality` and
+`copilot_code_review` are GitHub-side features enabled in settings, so a workflow file cannot
+satisfy them.
 
 **`TESTING.md` is the working guide to the suite**: what each layer owns, why a V8 coverage
 report reads 0% for `server.ts` and every `.tsx` (they run out-of-process), how the floors are

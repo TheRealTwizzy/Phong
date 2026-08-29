@@ -1,0 +1,70 @@
+# CodeQL, which exists to make a ruleset rule satisfiable rather than to add a
+# check for its own sake.
+#
+# The `Claude_Phong` repository ruleset requires code scanning on `main` —
+# CodeQL, security alerts at `high_or_higher`, alerts at `errors`. A required
+# analysis that nothing produces is not a safety net: it is a branch nobody
+# without bypass rights can merge into, permanently and silently, since the
+# pull request simply sits at `blocked` with every visible check green. This is
+# the workflow that produces it.
+#
+# ADVANCED setup rather than GitHub's default setup, and that is a constraint
+# rather than a preference: default setup is configured through repository
+# settings, which the automation here cannot reach (the API answers 403
+# `Resource not accessible by integration`). If somebody with admin rights
+# turns default setup ON later, DELETE this file in the same change — the two
+# configurations conflict, and GitHub disables one of them rather than running
+# both.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  # The rule is evaluated on the PULL REQUEST, so this trigger is the whole
+  # point of the file. Without it the analysis would only ever exist for
+  # `main`, and every PR would still be blocked for want of results on its own
+  # head.
+  pull_request:
+  # A weekly pass over code that is not changing. CodeQL's query packs are
+  # updated independently of this repository, so a finding can appear in a file
+  # nobody has touched for months, and only a schedule will ever surface it.
+  schedule:
+    - cron: '17 4 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      # The one that matters: without it the upload at the end fails and the
+      # ruleset stays unsatisfied even though the job itself went green.
+      security-events: write
+      # Lets CodeQL read the workflow definitions it is analysing runs of.
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `javascript-typescript` is ONE analysis covering both, not two — the
+      # separate `javascript` and `typescript` identifiers are the older
+      # spelling and would double the run for nothing.
+      #
+      # `build-mode: none` because this is an interpreted codebase: CodeQL
+      # reads the source directly, so there is no compilation step to model and
+      # no `npm ci` to run. Deliberately NOT installing dependencies — it would
+      # add minutes to every pull request to put a `node_modules` tree in front
+      # of an extractor that excludes it anyway.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'
