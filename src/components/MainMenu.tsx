@@ -16,6 +16,8 @@ import {
   winProbability,
   recommendedDifficulty,
   xpForLevel,
+  isPlaced,
+  PLACEMENT_GAMES,
   TIER_LABEL_KEY,
 } from '../rating';
 import { normalizeRules } from '../matchRules';
@@ -349,6 +351,16 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   const xpIntoLevel = Math.max(0, (profile?.xp ?? 0) - levelFloor);
   const xpForThisLevel = Math.max(1, (profile?.xpNext ?? 1) - levelFloor);
   const xpFraction = Math.min(1, xpIntoLevel / xpForThisLevel);
+
+  // Placement is the one state where the rank meter measures something a
+  // player can COUNT rather than a rating, so it is the one state that says
+  // the number out loud. Clamped like the Profile modal's copy: placement
+  // needs sigma to settle as well as five games, so an unplaced player can
+  // legitimately hold more ranked games than the target and "12/5" reads as a
+  // bug rather than as progress.
+  const rankedGames = profile?.rankedGames ?? 0;
+  const placementPlayed = Math.min(rankedGames, PLACEMENT_GAMES);
+  const showPlacement = !isPlaced(rankedGames, profile?.rankSigma ?? 25 / 3);
 
   // The five destinations. SETTINGS holds the slot PROFILE used to, which is
   // now the header pill alone — a tab bar entry and a header button for the
@@ -757,6 +769,19 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 ladderPosition={profile?.ladderPosition}
                 className="max-w-[8rem] shrink"
               />
+              {showPlacement && (
+                // In `warn`, the same tone as the meter beneath it, so the two
+                // read as one statement. Numerals only: `placement_progress`
+                // spells "Placement 2/5" in full and is too long for this row,
+                // and it is still what the meter announces and what the
+                // Profile modal prints, so nothing is lost by the short form.
+                <span
+                  id="menu-placement-count"
+                  className="shrink-0 text-2xs tnum text-warn"
+                >
+                  {placementPlayed}/{PLACEMENT_GAMES}
+                </span>
+              )}
               <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
                 LV{profile?.level || 1}
               </span>

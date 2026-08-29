@@ -461,7 +461,14 @@ for (const id of ['menu-rank-bar', 'menu-xp-bar']) {
   if (!meters[id].inPill) fail(`#${id} is not inside the profile capsule`);
 }
 if (!meters.badge) fail('the profile capsule shows no tier badge');
-ok('both meters and the tier badge are inside the capsule, and the capsule is in the header');
+// This suite's player is UNRANKED, so the placement counter must be on screen:
+// the rank meter measures games toward placement there rather than a rating,
+// and it is the one state that can say its number out loud.
+const placement = await page.textContent('#menu-placement-count').catch(() => null);
+if (placement?.trim() !== `0/5`) {
+  fail(`the capsule shows no placement count for an unplaced player (got ${JSON.stringify(placement)})`);
+}
+ok('both meters and the tier badge are inside the capsule, with the placement count beside it');
 
 // TROPHIES is two pages from PLAY, so the window drops PLAY entirely. Anything
 // still in the document after this outlives the page it used to live on.
