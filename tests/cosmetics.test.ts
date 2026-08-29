@@ -299,53 +299,80 @@ describe('no two cosmetics look alike', () => {
 describe('the two meters that stack', () => {
   /**
    * MainMenu's capsule is the one place in the app where two ProgressBars sit
-   * one above the other: RankBadge's meter over the XP meter, 4px each with
-   * 2px between them. Every other bar in the app is one per card or row, so a
-   * floor over all five tones would be asserting things no player can see.
+   * one above the other: RankBadge's ladder meter over the XP meter, 4px each
+   * with 2px between them. Every other bar is one per card or row, so a floor
+   * over all the tones would be asserting things no player can see.
    *
-   * The tone pair cannot be read from here — it lives in RankBadge.tsx, and
-   * importing a component into a `node` suite drags React and motion/react in
-   * for one string. So this states the PALETTE facts the component's choice
-   * rests on, which is the half that can drift silently.
+   * Two answers were tried and neither held. `warn` is two shades of one amber
+   * with `xp`. `accent` is PER-COSMETIC while `xp` is fixed, so a cosmetic with
+   * a gold accent put the two meters back on one colour however far apart they
+   * were on the other seventeen — which is why the first assertion below is
+   * about uniformity rather than about distance. A pair that is only far apart
+   * on SOME themes has already failed.
    *
-   * 0.08 is the same number the catalogue is held to above, borrowed
+   * 0.08 is the number the catalogue itself is held to above, borrowed
    * deliberately: it is this repo's own measured "a player cannot tell these
    * apart", and two adjacent 4px fills have less to go on than two whole
    * themes do.
    */
   const SAME_COLOUR = 0.08;
+  const LADDER = ['--color-ladder-low', '--color-ladder-mid', '--color-ladder-high'] as const;
+  const vars = (id: CosmeticId) => cosmeticVars(COSMETICS[id]);
 
-  it('rules --color-warn out as the rank meter, in both ramps', () => {
-    // The unplaced meter was `warn`, on the reasoning that amber says "this
-    // does not count yet". It also says XP: --color-xp is the token contract's
-    // level-and-XP colour and the LV chip a row above wears it, so the capsule
-    // showed a player two amber bars and no way to tell which was the ladder.
-    // Neither token is per-cosmetic, so this is not a worst case over twenty
-    // themes — it is the only case, twice.
-    for (const [mode, ramp] of Object.entries(STATUS_RAMPS)) {
-      expect(
-        colorDistance(ramp.warn, ramp.xp),
-        `--color-warn and --color-xp are one amber in the ${mode} ramp`
-      ).toBeLessThan(SAME_COLOUR);
+  it('paints both meters the same on every cosmetic of a mode', () => {
+    // The whole requirement, and the leg that fails the moment either meter is
+    // wired back to something the equipped theme decides.
+    for (const mode of ['dark', 'light'] as const) {
+      const inMode = themeIds.filter((id) => COSMETICS[id].mode === mode);
+      for (const token of ['--color-xp', ...LADDER] as const) {
+        const values = new Set(inMode.map((id) => vars(id)[token]));
+        expect(
+          [...values],
+          `${token} differs between ${mode} cosmetics, so the capsule does not look the same on all of them`
+        ).toHaveLength(1);
+      }
     }
   });
 
-  it('names the cosmetics where no tone separates them either', () => {
-    // --color-accent is per-cosmetic and --color-xp is fixed gold, so a gold
-    // accent lands on top of it and there is nothing else to reach for: `win`
-    // and `loss` mean won and lost, and `warn` is the pair above. These two are
-    // therefore a known palette finding rather than a bug in the component, and
-    // they read the same for a PLACED player today. Listing them by name is the
-    // point: a twenty-first gold accent joins the set here instead of shipping
-    // as one more capsule nobody can read.
-    const merged = themeIds.filter(
-      (id) =>
-        colorDistance(
-          cosmeticVars(COSMETICS[id])['--color-accent'],
-          cosmeticVars(COSMETICS[id])['--color-xp']
-        )! < SAME_COLOUR
-    );
-    expect(merged).toEqual(['retro-crt', 'quantum-gold']);
+  it('keeps every ladder stop clear of the XP bar it stacks on', () => {
+    for (const [mode, ramp] of Object.entries(STATUS_RAMPS)) {
+      for (const stop of [ramp.ladderLow, ramp.ladderMid, ramp.ladderHigh]) {
+        expect(
+          colorDistance(stop, ramp.xp),
+          `a ladder stop and --color-xp are one colour in the ${mode} ramp`
+        ).toBeGreaterThan(SAME_COLOUR);
+      }
+    }
+  });
+
+  it('keeps the three stops clear of each other, or it is not a ramp', () => {
+    for (const [mode, ramp] of Object.entries(STATUS_RAMPS)) {
+      const stops = [ramp.ladderLow, ramp.ladderMid, ramp.ladderHigh];
+      for (let i = 1; i < stops.length; i++) {
+        expect(
+          colorDistance(stops[i - 1], stops[i]),
+          `ladder stops ${i - 1} and ${i} are one colour in the ${mode} ramp, so the meter never appears to change`
+        ).toBeGreaterThan(SAME_COLOUR);
+      }
+    }
+  });
+
+  it('keeps every stop clear of the colours that MEAN something', () => {
+    // A meter is not a verdict. Green means won, red means lost, amber means
+    // this does not count, and purple means the rank held — a ladder bar that
+    // landed on any of them would be saying one of those things by accident.
+    // Two near misses, so they are not re-derived: #818cf8 sits 0.054 from
+    // rankSteady and #ec4899 sits 0.082 from loss.
+    for (const [mode, ramp] of Object.entries(STATUS_RAMPS)) {
+      for (const stop of [ramp.ladderLow, ramp.ladderMid, ramp.ladderHigh]) {
+        for (const key of ['win', 'loss', 'warn', 'rankSteady'] as const) {
+          expect(
+            colorDistance(stop, ramp[key]),
+            `a ladder stop reads as --color-${key} in the ${mode} ramp`
+          ).toBeGreaterThan(SAME_COLOUR);
+        }
+      }
+    }
   });
 });
 

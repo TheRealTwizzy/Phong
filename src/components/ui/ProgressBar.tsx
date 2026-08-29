@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { motion } from 'motion/react';
 import { useMotion } from './motion';
 import { meterOrigin, rememberMeter } from './meterMemory';
+import { ladderStop } from './ladderTone';
 
 // Fills with transform: scaleX(), never width. Animating width relayouts the
 // bar on every frame; a transform runs on the compositor. The visual result
@@ -13,7 +14,18 @@ const TONE = {
   win: 'bg-win',
   loss: 'bg-loss',
   warn: 'bg-warn',
+  // Picked by the fill rather than by this map — see LADDER below and
+  // ladderTone.ts. The entry exists so `ladder` is a real key of TONE and the
+  // union below needs no special case.
+  ladder: '',
 } as const;
+
+/**
+ * The one tone chosen by VALUE. `TONE` is static because every other bar means
+ * one thing whatever it reads; the ladder meter takes low/mid/high by how full
+ * it is, so it is resolved per render instead.
+ */
+const LADDER = ['bg-ladder-low', 'bg-ladder-mid', 'bg-ladder-high'] as const;
 
 const HEIGHT = { sm: 'h-1', md: 'h-2' } as const;
 
@@ -92,7 +104,13 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
             every call site that passes no resumeKey is unchanged. */}
         <motion.div
           key={resumeKey}
-          className={`h-full origin-left rounded-chip ${TONE[tone]}`}
+          // transition-colors so a bar crossing a ladder threshold eases into
+          // the next stop instead of snapping mid-tween. It is inert for every
+          // other tone, whose class never changes, and reduced motion drops it
+          // along with the scaleX tween m.meter already zeroes.
+          className={`h-full origin-left rounded-chip transition-colors motion-reduce:transition-none ${
+            tone === 'ladder' ? LADDER[ladderStop(pct)] : TONE[tone]
+          }`}
           initial={animate ? { scaleX: from } : false}
           animate={{ scaleX: pct }}
           transition={m.meter}

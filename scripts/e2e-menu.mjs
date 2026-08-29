@@ -456,6 +456,15 @@ const meters = await page.evaluate(() => {
     out[id] = el ? { inPager: !!pager?.contains(el), inPill: !!pill?.contains(el) } : null;
   }
   out.badge = !!pill?.querySelector('[id^="tier-badge-"]');
+  // The ladder meter's fill takes its colour from a token added in this change
+  // (--color-ladder-*), and Tailwind generates `bg-ladder-mid` from the theme
+  // block rather than from anything a test can read. If that generation ever
+  // stops, the fill paints with NO background and the bar is invisible — with
+  // no build error and every fast test still green, because the class name is
+  // right and only the stylesheet is missing. This is the one thing here that
+  // needs a real browser.
+  const fill = document.getElementById('menu-rank-bar')?.firstElementChild;
+  out.rankFill = fill ? getComputedStyle(fill).backgroundColor : null;
   return out;
 });
 for (const id of ['menu-xp-bar', 'menu-rank-bar']) {
@@ -466,6 +475,44 @@ for (const id of ['menu-rank-bar', 'menu-xp-bar']) {
   if (!meters[id].inPill) fail(`#${id} is not inside the profile capsule`);
 }
 if (!meters.badge) fail('the profile capsule shows no tier badge');
+// Deliberately NOT an exact rgb() string: which of the three stops is painted
+// is the fast layer's business (tests/ladderTone.test.ts), and pinning the hex
+// here would just duplicate tests/cosmetics.test.ts in a place that has to be
+// edited every time the ramp is retuned. What only this layer can say is that
+// SOMETHING is painted.
+const TRANSPARENT = /^(transparent$|rgba\(0,\s*0,\s*0,\s*0\)$)/;
+if (!meters.rankFill || TRANSPARENT.test(meters.rankFill)) {
+  fail(
+    `the rank meter's fill has no background (${JSON.stringify(meters.rankFill)}) — the ladder ` +
+      `utility was not generated, so the bar is invisible`
+  );
+}
+// ...and the same for the two stops NO suite ever renders. This player is
+// unranked at 0/5, so the meter is always at `low` here and would stay green
+// while `mid` and `high` produced an invisible bar for everybody who is placed.
+// Probed on throwaway elements, the way the pt-safe-bar offset is read below,
+// rather than by manufacturing a placed player.
+const stops = await page.evaluate(() => {
+  const out = {};
+  for (const name of ['bg-ladder-low', 'bg-ladder-mid', 'bg-ladder-high']) {
+    const probe = document.createElement('div');
+    probe.className = name;
+    document.body.appendChild(probe);
+    out[name] = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+  }
+  return out;
+});
+const unpainted = Object.entries(stops).filter(([, c]) => !c || TRANSPARENT.test(c));
+if (unpainted.length) {
+  fail(
+    `these ladder utilities resolve to nothing: ${unpainted.map(([n]) => n).join(', ')} — the ` +
+      `meter would be invisible at that fill`
+  );
+}
+if (new Set(Object.values(stops)).size !== 3) {
+  fail(`the three ladder stops are not three colours: ${JSON.stringify(stops)}`);
+}
 // This suite's player is UNRANKED, so the placement counter must be on screen:
 // the rank meter measures games toward placement there rather than a rating,
 // and it is the one state that can say its number out loud.
@@ -473,7 +520,7 @@ const placement = await page.textContent('#menu-placement-count').catch(() => nu
 if (placement?.trim() !== `0/5`) {
   fail(`the capsule shows no placement count for an unplaced player (got ${JSON.stringify(placement)})`);
 }
-ok('both meters and the tier badge are inside the capsule, with the placement count beside it');
+ok('both meters and the tier badge are inside the capsule, the rank fill is painted, and the placement count is beside it');
 
 // TROPHIES is two pages from PLAY, so the window drops PLAY entirely. Anything
 // still in the document after this outlives the page it used to live on.

@@ -43,27 +43,32 @@ import { ProgressBar } from './ProgressBar';
 // games. Reading a rating out of that is not possible; reading one out of tier
 // progress would be.
 //
-// Both states share one TONE, and the unplaced one used to be `warn`. In the
-// header capsule this meter stacks directly on the XP meter, and --color-warn
-// and --color-xp are two shades of the same amber in BOTH status ramps —
-// 0.044 apart in OKLab on nineteen cosmetics and 0.034 on the light one, where
-// tests/cosmetics.test.ts requires 0.08 of two whole themes. Worse than the
-// number: --color-xp is the token contract's level-and-XP colour and the LV
-// chip on the row above wears it too, so an amber rank meter read as a second
-// XP bar rather than as a different measurement. `warn` was carrying "this
-// does not count yet" alone when it was chosen; the UNRANKED chip, the 2/5
-// counter and this meter's own accessible label all say it now.
+// Both states share one TONE, and it took two goes to find one that works,
+// because this meter stacks DIRECTLY on the XP meter in the header capsule and
+// --color-xp is a fixed gold that the LV chip a row above also wears.
 //
-// What `accent` does NOT do is clear that floor everywhere, and the honest
-// version is worth having written down: --color-accent is per-cosmetic while
-// --color-xp is fixed gold, so on quantum-gold (0.018) and retro-crt (0.049)
-// the two meters are still one colour — as they already were for every PLACED
-// player on those two, before this line changed. Seventeen cosmetics move to
-// 0.16-0.40 and gilded-age to 0.091; quantum-gold alone comes down, to exactly
-// what its placed players already see. No tone in the palette separates a
-// second meter from a gold accent, so the remaining case is a palette finding
-// and not a prop — tests/cosmetics.test.ts names the two rather than pretending
-// a floor holds.
+//   `warn` — the first answer, for the unplaced state, on the reasoning that
+//   amber says "this does not count yet". Amber is also what XP says: the two
+//   tokens sit 0.044 apart in OKLab on nineteen cosmetics and 0.034 on the
+//   light one, where tests/cosmetics.test.ts asks 0.08 of two whole THEMES. So
+//   the capsule showed an unplaced player two amber bars with nothing to say
+//   which one was the ladder. What `warn` was carrying alone is said three
+//   other ways now: the UNRANKED chip, the 2/5 counter, and this meter's own
+//   accessible label.
+//
+//   `accent` — the second, and it cannot work either, for a reason no prop can
+//   fix: --color-accent is PER-COSMETIC while --color-xp is fixed, so a
+//   cosmetic whose accent is gold puts the two meters back on one colour
+//   (quantum-gold 0.018, retro-crt 0.049) however far apart they are on the
+//   other seventeen.
+//
+// So the meter left the accent altogether. `ladder` is a fixed three-stop ramp
+// picked by how full the bar is (components/ui/ladderTone.ts), which makes it
+// uniform on all twenty cosmetics — the property the first two answers were
+// each missing half of. Cool hues on purpose: green and red are reserved for
+// won and lost, and this bar fills UP as a player climbs, so a ramp built from
+// them would paint the fullest meter — someone about to be promoted, or
+// finishing placement — in the colour that means a loss.
 
 export interface RankBadgeProps {
   tier: Tier;
@@ -98,7 +103,7 @@ export const RankBadge: React.FC<RankBadgeProps> = ({
       id={id}
       value={progress}
       height="sm"
-      tone="accent"
+      tone="ladder"
       className={className}
       ariaLabel={
         placed

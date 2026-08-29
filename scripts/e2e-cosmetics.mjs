@@ -3,6 +3,11 @@
 //     dimmed, it is absent from the DOM.
 //  2. Equipping repaints the whole shell, not just the court, and survives a
 //     reload (the choice lives on the profile now, not the device).
+//  2b. ...with ONE exception, and it is deliberate: the two progression meters
+//     in the menu capsule do not follow the cosmetic. They stack, and
+//     --color-xp is a fixed gold, so a rank meter on the per-cosmetic accent
+//     became the same bar as the XP meter on every theme whose accent was also
+//     gold — retro-crt, which this suite equips, being one of them.
 //  3. The server refuses a locked cosmetic posted straight at the API, because
 //     the picker that hides it is the client.
 //  4. Opening somebody else's profile renders that card in THEIR cosmetic while
@@ -56,6 +61,15 @@ async function onboard(page, username) {
   await page.waitForSelector('#main-menu-screen', { timeout: 8000 });
 }
 
+/**
+ * The rank meter's painted fill. Its computed colour rather than its class, so
+ * this cannot pass on a utility Tailwind never generated.
+ */
+const meterFill = (page) =>
+  page
+    .$eval('#menu-rank-bar > *', (el) => getComputedStyle(el).backgroundColor)
+    .catch(() => null);
+
 const cssVar = (page, selector, name) =>
   page.$eval(
     selector,
@@ -95,6 +109,9 @@ ok(`picker lists the ${FREE.length} owned cosmetics and no trace of the locked o
 
 // ---- 2. Equipping repaints the shell, and it sticks ---------------------
 const before = await cssVar(owner, '#app-root-container', '--color-accent');
+// Sampled here so leg 2b can compare it across the same equip. The capsule is
+// behind the open profile sheet, not unmounted by it.
+const meterBefore = await meterFill(owner);
 await owner.click(`#cosmetic-btn-${EQUIP}`);
 await owner.waitForSelector(`#app-root-container[data-cosmetic="${EQUIP}"]`, { timeout: 5000 });
 const after = await cssVar(owner, '#app-root-container', '--color-accent');
@@ -110,6 +127,30 @@ await owner.waitForSelector('#main-menu-screen', { timeout: 8000 });
 const afterReload = await cssVar(owner, '#app-root-container', '--color-accent');
 if (afterReload !== after) fail(`cosmetic did not survive a reload (${after} -> ${afterReload})`);
 ok(`equipping ${EQUIP} repaints the shell and survives a reload`);
+
+// ---- 2b. ...except the two meters that stack ----------------------------
+// The rank meter sits directly on the XP meter in the capsule, and --color-xp
+// is fixed. So a rank meter painted in the per-cosmetic accent was the SAME
+// COLOUR as the bar beneath it on every gold-accented theme — retro-crt among
+// them, which is what this suite just equipped. It takes a fixed three-stop
+// ramp instead (--color-ladder-*), and the property is that the accent moved
+// and this did not.
+//
+// Only a browser can say this. The fast layer holds the tokens
+// (tests/cosmetics.test.ts) and the stop arithmetic (tests/ladderTone.test.ts),
+// but neither can see which tone RankBadge actually passes — that lives in a
+// .tsx, and reverting it to `accent` reddens nothing anywhere else.
+const meterAfter = await meterFill(owner);
+if (!meterBefore || !meterAfter) {
+  fail(`the rank meter's fill was not readable (${meterBefore} -> ${meterAfter})`);
+}
+if (meterBefore !== meterAfter) {
+  fail(
+    `equipping ${EQUIP} recoloured the rank meter (${meterBefore} -> ${meterAfter}) — it follows ` +
+      `the cosmetic again, so on a gold-accented theme it is the same bar as the XP meter below it`
+  );
+}
+ok('the capsule meters keep their own colours while the rest of the shell repaints');
 
 // ---- 3. The server refuses a locked cosmetic ----------------------------
 const refusal = await owner.evaluate(async (locked) => {
