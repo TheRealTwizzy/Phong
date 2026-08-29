@@ -66,7 +66,9 @@ For the client networking layer, the storage and fetch fakes at the top of
 
 Each browser suite gets its own free port, throwaway `DATA_DIR` and server — a shared database
 would let one suite's players decide another's assertions — so **`npm run build` is a
-precondition, not an errand.**
+precondition, not an errand.** The same isolation lets the runner hold several suites in
+flight (`E2E_CONCURRENCY`); a suite must go on assuming nothing about the machine but its own
+port and `DATA_DIR`, because three siblings may be running beside it.
 
 ## Reaching the canvas, where nothing is in the DOM
 

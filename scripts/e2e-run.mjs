@@ -6,9 +6,20 @@
 // harness gives every suite a free port, a throwaway DATA_DIR and a fresh
 // `node dist/server.cjs`, then reports the lot.
 //
+// That isolation is also what lets the suites run CONCURRENTLY: nothing is
+// shared but the CPU, and each suite's output is buffered whole rather than
+// streamed, so parallel runs cannot interleave a line. A bounded pool runs
+// E2E_CONCURRENCY suites at once — defaulting to half the cores capped at 4,
+// because a "suite" here is a server process plus a Chromium, not a thread.
+// The cap is deliberate headroom, not a guess that more would break: the
+// suites assert real timings (gesture settles, serve countdowns, the 15s
+// reaper), and a starved suite fails on a timeout that reads as a flake.
+// E2E_CONCURRENCY=1 is exactly the old serial behaviour.
+//
 // Usage:
 //   node scripts/e2e-run.mjs                 # every suite
 //   node scripts/e2e-run.mjs duel invite     # only the named ones
+//   E2E_CONCURRENCY=1 node scripts/e2e-run.mjs   # strictly serial
 //   node scripts/e2e-run.mjs --list
 //
 // Chromium comes from CHROMIUM_PATH, else Playwright's own download, else a
@@ -168,8 +179,7 @@ const chromiumPath = suites.some((s) => s.needsBrowser !== false) ? await resolv
 console.log(`Chromium: ${chromiumPath ?? 'not needed for these suites'}`);
 console.log(`Suites:   ${suites.map((s) => s.name).join(', ')}\n`);
 
-const results = [];
-for (const suite of suites) {
+async function runSuite(suite) {
   const file = path.join('scripts', `e2e-${suite.name}.mjs`);
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), `phong-e2e-${suite.name}-`));
@@ -186,7 +196,6 @@ for (const suite of suites) {
 
   let server = null;
   const started = Date.now();
-  process.stdout.write(`▶ ${suite.name} … `);
   let result;
   try {
     if (!suite.ownsServer) {
@@ -202,11 +211,38 @@ for (const suite of suites) {
   }
 
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
-  const passed = result.code === 0;
-  results.push({ name: suite.name, passed, seconds, out: result.out });
-  console.log(passed ? `PASS (${seconds}s)` : `FAIL (${seconds}s, exit ${result.code})`);
-  if (!passed) console.log(result.out.split('\n').map((l) => `    ${l}`).join('\n'));
+  return { name: suite.name, passed: result.code === 0, seconds, out: result.out, code: result.code };
 }
+
+// Validated rather than trusted: `E2E_CONCURRENCY=all` would otherwise make
+// NaN workers, which is zero workers, which is a runner that exits green
+// having run nothing.
+const concurrency = (() => {
+  const n = Number(process.env.E2E_CONCURRENCY);
+  if (Number.isInteger(n) && n >= 1) return n;
+  return Math.min(4, Math.max(1, Math.floor(os.availableParallelism() / 2)));
+})();
+
+// Indexed by position, not pushed on completion: the pool finishes suites in
+// whatever order they take, and the summary below promises SUITES order.
+const results = new Array(suites.length);
+let nextIndex = 0;
+async function worker() {
+  for (;;) {
+    const i = nextIndex++;
+    if (i >= suites.length) return;
+    const r = await runSuite(suites[i]);
+    results[i] = r;
+    // One console.log per suite, the failure dump folded into the same call —
+    // a second write could land between another suite's line and ITS dump.
+    const line = r.passed
+      ? `✓ ${r.name} (${r.seconds}s)`
+      : `✗ ${r.name} (${r.seconds}s, exit ${r.code})\n${r.out.split('\n').map((l) => `    ${l}`).join('\n')}`;
+    console.log(line);
+  }
+}
+console.log(`Workers:  ${Math.min(concurrency, suites.length)}\n`);
+await Promise.all(Array.from({ length: Math.min(concurrency, suites.length) }, worker));
 
 const failed = results.filter((r) => !r.passed);
 console.log('\n─────────────────────────────');

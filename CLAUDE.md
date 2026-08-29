@@ -110,7 +110,8 @@ When a client reports `ball_cross_net`, the server computes the opponent's view 
 │                              #   rules, achievements, elite, duel, eject, invite,
 │                              #   venues, menu, lobby, spectate, queue, split,
 │                              #   streak, history, delete, build-id)
-├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each
+├── scripts/e2e-run.mjs        # Runs them: a server, port and DATA_DIR each,
+│                              #   in a bounded pool (E2E_CONCURRENCY)
 ├── .github/workflows/ci.yml   # Typecheck+unit+build, and the E2E suites
 ├── index.html                 # HTML entry
 ├── package.json               # npm scripts & deps (lockfile: package-lock.json)
@@ -384,7 +385,10 @@ names the broken flow instead of a broken build. `npm run test:e2e` is the same 
 point locally. Every suite gets its own free port, throwaway `DATA_DIR` and
 `node dist/server.cjs` (the production entry — a suite would otherwise inherit another's
 players and leaderboard), so `npm run build` is a precondition, and Chromium is resolved
-from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. `verify` runs
+from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. That per-suite
+isolation is also what lets the runner hold several in flight (`E2E_CONCURRENCY`, default
+half the cores capped at 4; `=1` is the old serial run), which is what makes running ALL
+of them the cheap answer rather than the noble one. `verify` runs
 `test:coverage` rather than a bare `npm test`: per-module floors on the shared pure logic,
 set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
 components are Playwright's job, and one number would either fail on that bet or be set low
