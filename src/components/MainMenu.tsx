@@ -808,7 +808,21 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               value={xpFraction}
               tone="xp"
               height="sm"
-              ariaLabel={t('xp', lang)}
+              // The percentage rides the LABEL, which is the only channel that
+              // survives here. ARIA makes a <button>'s descendants
+              // presentational, and this meter lives inside the capsule, which
+              // is one — so `role="progressbar"` and `aria-valuenow` are
+              // dropped from the tree and a bare "XP" announced a bar with no
+              // progress in it. Descendant labels still contribute to the
+              // BUTTON's accessible name, so the value reaches a reader that
+              // way, and a browser that does not flatten still gets a real
+              // progressbar with a live value. One string, both cases.
+              //
+              // It also makes the two meters consistent rather than
+              // accidentally different: the placement bar's label is already
+              // "Placement 2/5" and carries its own number, which is why that
+              // one survived the move into the capsule and this one did not.
+              ariaLabel={`${t('xp', lang)} ${Math.round(xpFraction * 100)}%`}
               /* Keyed on the LEVEL: a level-up is a new band, so the bar
                  fills from empty rather than sweeping backwards from 0.95 to
                  0.05 to report progress the player just made. Undefined while
