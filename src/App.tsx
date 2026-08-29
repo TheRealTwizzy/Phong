@@ -189,6 +189,16 @@ const DEFAULT_SETTINGS: GameSettings = {
  * that check — every key it names reads as dead weight, and a typo in it reads
  * as nothing at all.
  */
+/**
+ * How long the winner overlay will hold Rematch back for a pending result.
+ *
+ * Long enough that the ordinary case — the relay's own match_recorded, or this
+ * phone's POST — always lands first, and short enough that a player is never
+ * left prodding a dead button. It is a backstop, not the mechanism: the two
+ * real doors are the result arriving and the record failing.
+ */
+const RESULT_WAIT_MS = 4000;
+
 const RANK_ARROWS: Record<RankMagnitude, number> = { none: 0, minor: 1, moderate: 2, large: 3 };
 const RANK_UP_KEY: Record<RankMagnitude, string> = {
   none: 'rank_steady',
@@ -316,6 +326,17 @@ export default function App() {
   // A match that failed to reach the server is parked on the device; the
   // player is told rather than left looking at an untracked result.
   const [toastRecordFailed, setToastRecordFailed] = useState<boolean>(false);
+  /**
+   * Whether the finished match's result has stopped being pending.
+   *
+   * Three doors, and it needs all three: the result landing, the record having
+   * failed outright, and a hard timeout for the case where neither happens —
+   * a request still hanging when the socket has gone quiet. Only the Rematch
+   * button waits on it, and only so the ladder movement is on screen before
+   * the match it describes can be replaced. Main Menu never waits: no state
+   * this app can reach may have its only exit blocked on a network call.
+   */
+  const [recordTimedOut, setRecordTimedOut] = useState<boolean>(false);
   const [toastPracticeXp, setToastPracticeXp] = useState<number | null>(null);
   // A permanent unlock banked from an elite mission — worth announcing.
   /**
@@ -1099,6 +1120,33 @@ export default function App() {
     recordedWinnerRef.current = winner;
     recordMatchCompletion(winner === 'player');
   }, [winner, spectating, recordMatchCompletion]);
+
+  /**
+   * The last door out of a pending result, so Rematch cannot be waiting on a
+   * request that is never going to answer.
+   *
+   * Keyed on `winner` ALONE and on nothing rebuilt per render. App re-renders
+   * once per animation frame while a ball is in play, so an effect depending
+   * on a callback tears its timer down and re-arms it sixty times a second and
+   * never fires — which is how the achievement toast once outlived its match,
+   * the overlay and the menu after it (convention §14).
+   */
+  useEffect(() => {
+    if (!winner) {
+      setRecordTimedOut(false);
+      return;
+    }
+    const id = window.setTimeout(() => setRecordTimedOut(true), RESULT_WAIT_MS);
+    return () => window.clearTimeout(id);
+  }, [winner]);
+
+  /**
+   * Whether the overlay has something to say about this match yet.
+   *
+   * A watcher settles immediately: they record nothing, so there is no result
+   * coming and nothing for their Rematch — which they do not have — to wait on.
+   */
+  const resultSettled = !!lastMatchResult || toastRecordFailed || recordTimedOut || !!spectating;
 
   // Daily Mission Claim Handler
   const handleClaimMissionReward = async (missionId: string) => {
@@ -3726,21 +3774,37 @@ export default function App() {
 
               {/* The result strip. The end of a match is this game's main
                   progression payoff and it used to be a +XP number in a grey
-                  box; the XP bar now actually moves toward the next level. */}
-              {lastMatchResult && (
+                  box; the XP bar now actually moves toward the next level.
+
+                  Rendered ALWAYS, not once the result lands. It used to be
+                  gated on `lastMatchResult`, which is the same mistake the
+                  rank tile inside it already fixed one level down — that tile
+                  vanished for an unranked match, which is exactly when a
+                  player most wants to be told the ladder did not move. Gated,
+                  the whole strip appeared out of nowhere a few hundred
+                  milliseconds in and shoved the buttons down the screen, and a
+                  player who tapped Rematch on the whistle never saw the match
+                  they had just played. The numbers this phone already knows —
+                  the score, the rally — are on screen from the first frame,
+                  and only what the server owes fills in. */}
+              {!spectating && (
                 <div className="flex w-full flex-col gap-3">
                   <div className="grid w-full grid-cols-3 gap-2">
                     <StatTile
                       label={t('progression', currentLanguage)}
-                      value={`+${lastMatchResult.earnedXp}`}
+                      value={lastMatchResult ? `+${lastMatchResult.earnedXp}` : '···'}
                       tone="xp"
                       // The odds had a tile of their own, in the slot the rank
                       // now occupies permanently. They are a PRE-match
                       // prediction and the XP they scaled is right above them,
                       // so this is where they belong anyway.
-                      hint={`${t('predicted_odds', currentLanguage)} ${Math.round(
-                        lastMatchResult.winProbability * 100
-                      )}%`}
+                      hint={
+                        lastMatchResult
+                          ? `${t('predicted_odds', currentLanguage)} ${Math.round(
+                              lastMatchResult.winProbability * 100
+                            )}%`
+                          : undefined
+                      }
                     />
                     <StatTile
                       label={t('longest_rally', currentLanguage)}
@@ -3767,7 +3831,7 @@ export default function App() {
                           tile at all. */}
                       <div className="flex flex-col items-center gap-1">
                         <TierBadge
-                          tier={lastMatchResult.tier ?? 'unranked'}
+                          tier={lastMatchResult?.tier ?? profile?.tier ?? 'unranked'}
                           language={currentLanguage}
                         />
                         {/* One arrow for a minor move, two for a moderate one,
@@ -3779,37 +3843,54 @@ export default function App() {
                             it already holds a TierBadge. Three h-4 arrows add
                             48px and push the badge out; three of these come to
                             about 28px. */}
-                        <span
-                          id={`rank-move-${lastMatchResult.rankDirection}`}
-                          data-rank-magnitude={lastMatchResult.rankMagnitude}
-                          role="img"
-                          aria-label={t(
-                            rankMoveKey(lastMatchResult.rankDirection, lastMatchResult.rankMagnitude),
-                            currentLanguage
-                          )}
-                          title={t(
-                            rankMoveKey(lastMatchResult.rankDirection, lastMatchResult.rankMagnitude),
-                            currentLanguage
-                          )}
-                          className="flex shrink-0 items-center -space-x-1.5"
-                        >
-                          {lastMatchResult.rankDirection === 'none' ? (
-                            <Circle className="h-2.5 w-2.5 fill-current text-rank-steady" />
-                          ) : (
-                            Array.from(
-                              { length: RANK_ARROWS[lastMatchResult.rankMagnitude] },
-                              (_, i) =>
-                                lastMatchResult.rankDirection === 'up' ? (
-                                  <ArrowUp key={i} className="h-3.5 w-3.5 text-win" />
-                                ) : (
-                                  <ArrowDown key={i} className="h-3.5 w-3.5 text-loss" />
-                                )
-                            )
-                          )}
-                        </span>
+                        {lastMatchResult ? (
+                          <span
+                            id={`rank-move-${lastMatchResult.rankDirection}`}
+                            data-rank-magnitude={lastMatchResult.rankMagnitude}
+                            role="img"
+                            aria-label={t(
+                              rankMoveKey(lastMatchResult.rankDirection, lastMatchResult.rankMagnitude),
+                              currentLanguage
+                            )}
+                            title={t(
+                              rankMoveKey(lastMatchResult.rankDirection, lastMatchResult.rankMagnitude),
+                              currentLanguage
+                            )}
+                            className="flex shrink-0 items-center -space-x-1.5"
+                          >
+                            {lastMatchResult.rankDirection === 'none' ? (
+                              <Circle className="h-2.5 w-2.5 fill-current text-rank-steady" />
+                            ) : (
+                              Array.from(
+                                { length: RANK_ARROWS[lastMatchResult.rankMagnitude] },
+                                (_, i) =>
+                                  lastMatchResult.rankDirection === 'up' ? (
+                                    <ArrowUp key={i} className="h-3.5 w-3.5 text-win" />
+                                  ) : (
+                                    <ArrowDown key={i} className="h-3.5 w-3.5 text-loss" />
+                                  )
+                              )
+                            )}
+                          </span>
+                        ) : (
+                          /* The slot the arrows are about to fill, holding its
+                             own height so nothing shifts when they arrive.
+                             aria-hidden rather than a "pending" name: the
+                             ladder has not answered yet, and announcing a rank
+                             movement that does not exist is worse than
+                             announcing nothing. The tier badge above is still
+                             read, and it is still true. */
+                          <span
+                            id="rank-move-pending"
+                            aria-hidden="true"
+                            className="flex shrink-0 items-center"
+                          >
+                            <Circle className="h-2.5 w-2.5 fill-current text-ink-dim opacity-40" />
+                          </span>
+                        )}
                       </div>
                       <span className="text-2xs font-normal tracking-normal text-ink-muted uppercase">
-                        {lastMatchResult.tierChanged
+                        {lastMatchResult?.tierChanged
                           ? t('rank_updated', currentLanguage)
                           : t('skill_tier', currentLanguage)}
                       </span>
@@ -3858,10 +3939,19 @@ export default function App() {
                       resetMatch();
                     }
                   }}
+                  // Held back until the result this match produced is on
+                  // screen. Rematch replaces the match it describes, so a
+                  // player who taps it on the whistle would never learn what
+                  // the one they just played did to their ladder — the whole
+                  // point of the strip above. Three doors open it (the result,
+                  // a failed record, a hard timeout) so it can never stick,
+                  // and Main Menu below waits on NONE of them: no state this
+                  // app can reach may have its only exit blocked on a request.
                   disabled={
-                    mode === 'multiplayer' &&
-                    (opponentId === null ||
-                      (playerIndex !== null && rematchVotes[playerIndex]))
+                    !resultSettled ||
+                    (mode === 'multiplayer' &&
+                      (opponentId === null ||
+                        (playerIndex !== null && rematchVotes[playerIndex])))
                   }
                   icon={
                     <RefreshCw
