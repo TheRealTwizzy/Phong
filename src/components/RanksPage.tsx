@@ -24,6 +24,18 @@ export interface RanksPageProps {
   onViewProfile?: (id: string) => void;
   /** The page the pager is showing, not merely one it has mounted. */
   isCurrent: boolean;
+  /**
+   * Ask the server for the player's own profile again. The header capsule
+   * shows their ladder POSITION, which this page then prints again for every
+   * row — and nothing else refreshes it while the menu sits open, since the
+   * session heartbeat never reads a profile. So the header could hold #7
+   * beside a freshly fetched board showing #9, on one screen. Only this page
+   * has that problem, and only this page pays for it.
+   *
+   * Named for what it fetches rather than for when: BOTH ways of asking this
+   * page for the ladder again spend it.
+   */
+  onRefetchProfile?: () => void;
 }
 
 export const RanksPage: React.FC<RanksPageProps> = ({
@@ -31,11 +43,34 @@ export const RanksPage: React.FC<RanksPageProps> = ({
   currentPlayerId,
   onViewProfile,
   isCurrent,
+  onRefetchProfile,
 }) => {
   const [reloadKey, setReloadKey] = useState(0);
-  const refresh = () => setReloadKey((k) => k + 1);
+  const refreshBoard = () => setReloadKey((k) => k + 1);
+  // The button asks the server again, and "again" means BOTH numbers. This
+  // page prints a ladder position for every row and the header capsule prints
+  // the player's own, so refreshing one and not the other is exactly the
+  // disagreement the page has to avoid — and which control asked does not
+  // change that. The button was scoped to the board for one release on the
+  // reasoning that pressing it asks this LIST to say the ladder again; true of
+  // what the control does, and beside the point, since the invariant is about
+  // the two numbers standing on one screen. A player watching the top of the
+  // ladder presses this repeatedly, which makes it the likelier way in rather
+  // than the exotic one.
+  const refresh = () => {
+    refreshBoard();
+    onRefetchProfile?.();
+  };
 
-  useArrivalRefetch(isCurrent, refresh);
+  useArrivalRefetch(isCurrent, refreshBoard);
+  // The profile is a leg of its own rather than folded into `refresh`, for two
+  // reasons. A transition arrival would otherwise ask for it twice, once
+  // through each. And the two answer "has MOUNTING already covered this"
+  // differently: the board fetches itself on mount so it only wants the
+  // transition, while nothing fetches the profile at all — so a tab tap that
+  // jumps here from outside the pager's window, mounting this page already
+  // current, is an arrival for the profile and not for the board.
+  useArrivalRefetch(isCurrent, () => onRefetchProfile?.(), true);
 
   return (
     <>

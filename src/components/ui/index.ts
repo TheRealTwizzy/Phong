@@ -8,6 +8,10 @@ export { Sheet, type SheetProps } from './Sheet';
 export { Button, type ButtonProps } from './Button';
 export { Panel, type PanelProps } from './Panel';
 export { ProgressBar, type ProgressBarProps } from './ProgressBar';
+// ProgressBar's backing store. `resumeKey` is the whole surface a call
+// site needs, so only the reset is re-exported — App has to empty it when
+// this browser changes account (see App.startFreshIdentity).
+export { resetMeterMemory } from './meterMemory';
 export { StatTile, type StatTileProps } from './StatTile';
 export {
   SegmentedControl,

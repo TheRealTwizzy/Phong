@@ -36,8 +36,28 @@ import { useEffect, useRef } from 'react';
  *    deps would re-run this effect constantly — and while a ball is in play
  *    App re-renders once per animation frame.
  */
-export function useArrivalRefetch(isCurrent: boolean, onArrive: () => void) {
-  const was = useRef(isCurrent);
+export function useArrivalRefetch(
+  isCurrent: boolean,
+  onArrive: () => void,
+  /**
+   * Treat mounting ALREADY current as an arrival. Off by default, because a
+   * page that mounts current has just run its own fetch effect and a second
+   * one would be a duplicate — the pager only mounts a page current when a tab
+   * tap jumps to it from outside the three-slot window.
+   *
+   * On for a caller that has no mount fetch of its own to lean on. RanksPage
+   * refreshes two things on arrival: its board, which fetched itself on mount,
+   * and the PROFILE behind the header capsule, which nothing else fetches at
+   * all. Same arrival, opposite answer to "did the mount already cover this",
+   * so the flag is the difference rather than two hooks.
+   */
+  alsoOnMount = false
+) {
+  // `false` makes the first effect run a transition, so a mount-while-current
+  // fires exactly once — including under StrictMode, whose setup → cleanup →
+  // setup sees `was` already true on the second setup. Counting runs instead
+  // of comparing values is what would double here, in dev only.
+  const was = useRef(alsoOnMount ? false : isCurrent);
   const cb = useRef(onArrive);
   cb.current = onArrive;
 

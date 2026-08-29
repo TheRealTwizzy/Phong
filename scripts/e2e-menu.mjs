@@ -30,6 +30,17 @@
 //     snapshot taken when RANKS slid into the window.
 // 12. A refetch never blanks what is already on screen, which is what makes
 //     leg 11 an improvement rather than a flash on every arrival.
+// 13a. Arriving on RANKS refetches the PROFILE too, not only the board — the
+//     header capsule prints the player's own ladder position and this page
+//     prints the same ladder, so the two must not be fetched at different
+//     moments and disagree on one screen. The page's refresh BUTTON is the
+//     same requirement by a second door, and was missed the first time.
+// 13. The progression meters are in the HEADER and not in a page. They used to
+//     open the PLAY page as a rank card, so they unmounted every time the pager
+//     window moved past index 0 and refilled from empty on the way back. The
+//     header is the one region outside the pager, and the capsule that holds
+//     them has to stay inside the offset the toast stack clears it by — a
+//     failure with no build error and no red test, just toasts over the header.
 //
 // WHAT THIS SUITE CANNOT DO, stated so nobody reads more into a green run than
 // is there: it cannot test `touch-action`. That is enforced by the compositor
@@ -425,6 +436,131 @@ await page.unroute('**/api/leaderboard*');
 await settle();
 if ((await boardRows()) === 0) fail('the board never came back after the held response was released');
 ok('a refetch leaves the rows on screen while it is in flight');
+
+// ---- 13. The progression meters live in the header, not in a page --------
+// The XP bar and the rank meter opened the PLAY page as a full-width card, so
+// they unmounted whenever the pager window moved past PLAY (three slots of
+// five) and replayed `scaleX: 0 -> pct` on the way back — a sweep from empty
+// for a value that had not changed. They are in the header now, which is the
+// one region outside the pager.
+await page.click('#menu-nav-play');
+await settle();
+
+const meters = await page.evaluate(() => {
+  const pager = document.querySelector('#menu-pager');
+  const pill = document.querySelector('#menu-profile-pill');
+  const ids = ['menu-xp-bar', 'menu-rank-bar'];
+  const out = {};
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    out[id] = el ? { inPager: !!pager?.contains(el), inPill: !!pill?.contains(el) } : null;
+  }
+  out.badge = !!pill?.querySelector('[id^="tier-badge-"]');
+  return out;
+});
+for (const id of ['menu-xp-bar', 'menu-rank-bar']) {
+  if (!meters[id]) fail(`#${id} is not in the document on the menu`);
+  if (meters[id].inPager) fail(`#${id} is inside #menu-pager, so it unmounts with its page`);
+}
+for (const id of ['menu-rank-bar', 'menu-xp-bar']) {
+  if (!meters[id].inPill) fail(`#${id} is not inside the profile capsule`);
+}
+if (!meters.badge) fail('the profile capsule shows no tier badge');
+// This suite's player is UNRANKED, so the placement counter must be on screen:
+// the rank meter measures games toward placement there rather than a rating,
+// and it is the one state that can say its number out loud.
+const placement = await page.textContent('#menu-placement-count').catch(() => null);
+if (placement?.trim() !== `0/5`) {
+  fail(`the capsule shows no placement count for an unplaced player (got ${JSON.stringify(placement)})`);
+}
+ok('both meters and the tier badge are inside the capsule, with the placement count beside it');
+
+// TROPHIES is two pages from PLAY, so the window drops PLAY entirely. Anything
+// still in the document after this outlives the page it used to live on.
+await page.click('#menu-nav-achievements');
+await settle();
+if (await page.$('#menu-page-play')) fail('PLAY is still mounted, so this leg proves nothing');
+const survived = await page.evaluate(() =>
+  ['menu-xp-bar', 'menu-rank-bar'].filter((id) => !document.getElementById(id))
+);
+if (survived.length) fail(`the meters unmounted with PLAY: ${survived.join(', ')}`);
+ok('the meters outlive the page they used to open');
+
+// The header must not grow past the offset the toast stack clears it by.
+// `pt-safe-bar` is pt-safe + 48px and today's header is exactly that, so the
+// budget is zero: a taller capsule silently puts every toast over the header.
+// Read the utility itself rather than hardcoding 48, or this goes stale the
+// day index.css changes and says nothing while it does.
+await page.click('#menu-nav-play');
+await settle();
+const headerBox = await page.evaluate(() => {
+  const probe = document.createElement('div');
+  probe.className = 'pt-safe-bar';
+  document.body.appendChild(probe);
+  const offset = parseFloat(getComputedStyle(probe).paddingTop);
+  probe.remove();
+  const header = document.querySelector('#main-menu-screen header');
+  if (!header) return { missing: true };
+  const r = header.getBoundingClientRect();
+  return { offset, bottom: r.bottom, overflow: header.scrollWidth - header.clientWidth };
+});
+if (headerBox.missing) fail('the menu has no header');
+if (!(headerBox.offset > 0)) fail(`pt-safe-bar resolved to ${headerBox.offset}px, so this leg proves nothing`);
+if (headerBox.bottom > headerBox.offset) {
+  fail(`the header runs to ${headerBox.bottom}px, past the ${headerBox.offset}px the toast stack clears it by`);
+}
+if (headerBox.overflow > 1) fail(`the header row overflows its own width by ${headerBox.overflow}px`);
+ok(`the header ends at ${headerBox.bottom}px, inside the ${headerBox.offset}px toast offset, and does not overflow`);
+// What this does NOT cover, so nobody reads more into it: the test player is
+// UNRANKED (8 characters) with a short username, so the overflow check never
+// meets "Cyber Overlord" (14) or a 16-character name — the case the capsule's
+// `truncate` and `max-w` exist for. And no suite plays a match and samples a
+// meter on the way back, so the resume itself is held by
+// tests/meterMemory.test.ts, not here.
+
+// ---- 13a. Arriving on RANKS refetches the profile ------------------------
+// The header shows the player's own ladder position; RANKS prints the same
+// ladder for everybody. Nothing else refreshes that number while the menu sits
+// open — the 15s session heartbeat reads the session and never a profile — so
+// another player passing an Overlord left the header holding a stale #N beside
+// a board that had just fetched the true one. Same arrival the board's own
+// refetch spends (leg 11), so this is not a second concept.
+let profileCalls = 0;
+const countProfile = (r) => {
+  if (new URL(r.url()).pathname === '/api/profile/me') profileCalls += 1;
+};
+page.on('request', countProfile);
+
+await page.click('#menu-nav-history');
+await settle();
+profileCalls = 0;
+await page.click('#menu-nav-leaderboard');
+await settle();
+if (profileCalls < 1) {
+  fail('arriving on RANKS did not refetch the profile, so the header can disagree with the board it is standing next to');
+}
+// The refresh BUTTON is the same requirement through a second door, and it
+// shipped without this for a release: it bumped the board's reloadKey alone, so
+// a player sitting on RANKS watching the top of the ladder — which is exactly
+// who presses this, and presses it repeatedly — refreshed the rows and left the
+// header holding the number they had arrived with. Arrival was fixed first
+// because it was the one reported; the invariant is the two numbers agreeing on
+// screen, not the moment that asked for them.
+profileCalls = 0;
+await page.click('#btn-refresh-leaderboard');
+await settle();
+if (profileCalls < 1) {
+  fail('the RANKS refresh button asked the board again and not the profile, so the header can hold a stale position beside the rows that just moved');
+}
+// And NOT on every page: four times the requests to fix one disagreement.
+profileCalls = 0;
+await page.click('#menu-nav-history');
+await settle();
+if (profileCalls !== 0) {
+  fail(`arriving on HISTORY refetched the profile ${profileCalls} times — only RANKS shows a competing copy of that number`);
+}
+page.off('request', countProfile);
+ok('RANKS refetches the profile behind the header on arrival AND on its refresh button, and no other page does');
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 await browser.close();

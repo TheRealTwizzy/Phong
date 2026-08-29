@@ -10,11 +10,14 @@ import {
 import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
+import { TierBadge } from './TierBadge';
 import {
   aiRating,
   winProbability,
   recommendedDifficulty,
   xpForLevel,
+  isPlaced,
+  PLACEMENT_GAMES,
   TIER_LABEL_KEY,
 } from '../rating';
 import { normalizeRules } from '../matchRules';
@@ -35,7 +38,6 @@ import {
 } from '../venues';
 import {
   Button,
-  Panel,
   ProgressBar,
   RankBadge,
   SegmentedControl,
@@ -56,7 +58,6 @@ import {
   Settings,
   Play,
   Shield,
-  Flame,
   ChevronRight,
   Lock,
   Sparkles,
@@ -351,6 +352,16 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   const xpForThisLevel = Math.max(1, (profile?.xpNext ?? 1) - levelFloor);
   const xpFraction = Math.min(1, xpIntoLevel / xpForThisLevel);
 
+  // Placement is the one state where the rank meter measures something a
+  // player can COUNT rather than a rating, so it is the one state that says
+  // the number out loud. Clamped like the Profile modal's copy: placement
+  // needs sigma to settle as well as five games, so an unplaced player can
+  // legitimately hold more ranked games than the target and "12/5" reads as a
+  // bug rather than as progress.
+  const rankedGames = profile?.rankedGames ?? 0;
+  const placementPlayed = Math.min(rankedGames, PLACEMENT_GAMES);
+  const showPlacement = !isPlaced(rankedGames, profile?.rankSigma ?? 25 / 3);
+
   // The five destinations. SETTINGS holds the slot PROFILE used to, which is
   // now the header pill alone — a tab bar entry and a header button for the
   // same modal were two doors to one room, and the pill is the one every suite
@@ -427,35 +438,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       id="menu-page-play-scroll"
       className="scroll-y flex h-full min-h-0 flex-col gap-3 px-safe pb-3"
     >
-        {/* Rank is the hero: the ladder always shows its next rung. */}
-        <Panel id="menu-rank-card" variant="raised" className="flex shrink-0 items-center gap-4">
-          <RankBadge
-            size="hero"
-            tier={profile?.tier || 'unranked'}
-            rankMu={profile?.rankMu ?? 25}
-            rankedGames={profile?.rankedGames ?? 0}
-            rankSigma={profile?.rankSigma ?? 25 / 3}
-            language={lang}
-          />
-          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <div className="flex items-baseline justify-between gap-2">
-              <span className="text-kicker text-ink-muted uppercase">
-                {t('menu_level', lang)} {profile?.level || 1}
-              </span>
-              <span className="inline-flex items-center gap-0.5 rounded-chip border border-warn/30 bg-warn/15 px-1 text-2xs text-warn">
-                <Flame className="h-2.5 w-2.5 fill-current" />
-                {profile?.dailyStreak || 1}d
-              </span>
-            </div>
-            <ProgressBar
-              id="menu-xp-bar"
-              value={xpFraction}
-              tone="xp"
-              ariaLabel={t('menu_level', lang)}
-            />
-          </div>
-        </Panel>
-
         <SectionLabel>{t('menu_section_play', lang)}</SectionLabel>
 
         {/* The ranked queue. The slot was held open and honest through the
@@ -726,7 +708,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         <button
           id="menu-profile-pill"
           onClick={onOpenProfile}
-          className="flex min-w-0 items-center gap-2 rounded-card border border-line bg-surface-2 p-1 pr-2.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-card border border-line bg-surface-2 p-1 pr-2.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
         >
           <div className="relative shrink-0">
             <AvatarImage
@@ -746,12 +728,110 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               }`}
             />
           </div>
-          <span className="max-w-[110px] truncate text-2xs text-ink">
-            {profile?.username || 'Player'}
-          </span>
-          <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
-            LV{profile?.level || 1}
-          </span>
+          {/* username · rank · level, with BOTH meters under all three. The
+              capsule IS the progression readout now; what it replaced was this
+              row alone, over a full-width rank card that opened the PLAY page
+              and said the same three things a second time.
+
+              Three rows in 30px, and every one of those numbers is
+              LOAD-BEARING rather than tidy: an 18px chip row, a 2px gap, the
+              4px rank meter, another 2px gap, the 4px XP meter. `pt-safe-bar`
+              (src/index.css:237) offsets the toast stack by pt-safe + 48px to
+              clear both top bars in the app, and this header is ALREADY
+              exactly pt-safe + 48px, so the column has to fit inside the
+              avatar beside it. `gap-1` here would make it 34 and push the
+              header past the offset — failing no build and reddening no test,
+              just putting every toast over the header it exists to clear. The
+              slack to buy, if the 2px ever reads badly, is the chips' own
+              `py-0.5`, not these gaps. */}
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <div className="flex min-w-0 items-center gap-1">
+              {/* text-left because a <button> centres its inherited text, and
+                  this span is now wider than its content. */}
+              <span className="min-w-[3rem] flex-1 truncate text-left text-2xs text-ink">
+                {profile?.username || 'Player'}
+              </span>
+              {/* The cap is MEASURED, not guessed: at text-2xs the widest
+                  labels are "Cyber Overlord" at 128px and "Grandmaster" at
+                  109px, and a cap under either truncates a rank for every
+                  player who holds it, however much room the row actually has —
+                  `max-w` does not yield when there is space, it just clips. So
+                  it is sized to the longest label and left `shrink`, which
+                  gives way only when the row is genuinely over budget. The
+                  username's own `min-w` is the other half: without it a flex
+                  item at `basis: 0%` absorbs none of the overflow and the badge
+                  takes it all, so a long name would push the rank out instead
+                  of ellipsising itself. */}
+              <TierBadge
+                tier={profile?.tier || 'unranked'}
+                language={lang}
+                size="xs"
+                ladderPosition={profile?.ladderPosition}
+                className="max-w-[8rem] shrink"
+              />
+              {showPlacement && (
+                // In `warn`, the same tone as the meter beneath it, so the two
+                // read as one statement. Numerals only: `placement_progress`
+                // spells "Placement 2/5" in full and is too long for this row,
+                // and it is still what the meter announces and what the
+                // Profile modal prints, so nothing is lost by the short form.
+                <span
+                  id="menu-placement-count"
+                  className="shrink-0 text-2xs tnum text-warn"
+                >
+                  {placementPlayed}/{PLACEMENT_GAMES}
+                </span>
+              )}
+              <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
+                LV{profile?.level || 1}
+              </span>
+            </div>
+            <RankBadge
+              size="bar"
+              id="menu-rank-bar"
+              tier={profile?.tier || 'unranked'}
+              rankMu={profile?.rankMu ?? 25}
+              rankedGames={profile?.rankedGames ?? 0}
+              rankSigma={profile?.rankSigma ?? 25 / 3}
+              language={lang}
+            />
+            {/* The XP meter is inside the capsule, under the rank one, so both
+                meters read as one stack rather than as a card and a chip.
+                Neither needs a track of its own drawn for it: a ProgressBar's
+                track is `bg-surface-1`, which IS the screen background, so a
+                bar out here on the header would be a fill with nothing behind
+                it — the same mistake the rank ring made against a raised
+                Panel, reported at the time as "the meter has no ring". Inside
+                the `bg-surface-2` capsule the track reads as a well. */}
+            <ProgressBar
+              id="menu-xp-bar"
+              value={xpFraction}
+              tone="xp"
+              height="sm"
+              // The percentage rides the LABEL, which is the only channel that
+              // survives here. ARIA makes a <button>'s descendants
+              // presentational, and this meter lives inside the capsule, which
+              // is one — so `role="progressbar"` and `aria-valuenow` are
+              // dropped from the tree and a bare "XP" announced a bar with no
+              // progress in it. Descendant labels still contribute to the
+              // BUTTON's accessible name, so the value reaches a reader that
+              // way, and a browser that does not flatten still gets a real
+              // progressbar with a live value. One string, both cases.
+              //
+              // It also makes the two meters consistent rather than
+              // accidentally different: the placement bar's label is already
+              // "Placement 2/5" and carries its own number, which is why that
+              // one survived the move into the capsule and this one did not.
+              ariaLabel={`${t('xp', lang)} ${Math.round(xpFraction * 100)}%`}
+              /* Keyed on the LEVEL: a level-up is a new band, so the bar
+                 fills from empty rather than sweeping backwards from 0.95 to
+                 0.05 to report progress the player just made. Undefined while
+                 the session call is still in flight, so the null-profile
+                 render -- where xpFraction is 0 -- neither reads nor writes
+                 the origin. */
+              resumeKey={profile ? `menu-xp:${profile.level}` : undefined}
+            />
+          </div>
         </button>
       </header>
 

@@ -50,6 +50,7 @@ import {
   achievementXpCap,
   PRACTICE_XP_DAILY_CAP,
   soloAdjustedXp,
+  LADDER_TOP_N,
 } from '../src/rating';
 import { BotSeed, botProfileFields } from './bots';
 import {
@@ -300,6 +301,17 @@ interface PlayerRow {
   cosmetic: string | null;
   // From the LEFT JOIN on avatars; NULL when the player has no avatar.
   avatarUpdatedAt?: string | null;
+}
+
+/**
+ * Whether this profile is a row the ranked board would print AND sits on the
+ * one rung that renders a position. Both halves matter: `tierFor` is a pure
+ * function of a rating, so an uninitialized profile or a bot can hold
+ * 'overlord' while the board refuses to list it, and numbering a row nobody
+ * can see it beside is how the badge and the Ranks page come to disagree.
+ */
+function onLadder(p: PlayerProfile): boolean {
+  return p.tier === 'overlord' && Boolean(p.initializedAt) && !p.id.startsWith('bot-');
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
@@ -1091,11 +1103,51 @@ class GameDatabase {
     if (!row) return null;
     // Elite unlocks live in their own permanent table; the client checks them
     // when deciding which themes are available, so they ride the profile.
-    return {
+    const profile = {
       ...rowToProfile(row),
       eliteUnlocks: this.eliteUnlocks(id),
       modeStats: this.getModeStats(id),
     };
+    // Only for the top rung, and only for a row the BOARD would list. There is
+    // no index on rankMu, so this is a table scan — gating it means it runs for
+    // a handful of accounts rather than on every profile read in the app,
+    // including the per-tick one inside the matchmaking sweep. Nobody else
+    // renders a position, so nobody else pays for one.
+    //
+    // The gate has to be the board's own membership test and not just the
+    // tier, or a row the board refuses to print still gets a number: an
+    // uninitialized profile is placed and rated like any other row, so it takes
+    // a tier from `tierFor` and would be handed #1 for a ladder it does not
+    // appear on. A bot is the same case from the other side — the board gives
+    // it `rank: null` on purpose.
+    if (onLadder(profile)) {
+      profile.ladderPosition = this.ladderPosition(id, profile.rankMu) ?? undefined;
+    }
+    return profile;
+  }
+
+  /**
+   * The hidden rating and nothing else, for the paths that PAIR and PREDICT
+   * rather than display.
+   *
+   * `getProfile` is four queries, a conditional write, and — since the ladder
+   * position landed — a full unindexed COUNT over `players` for anyone on the
+   * top rung. `queueCandidate` and `sendMatchPrediction` read two floats out of
+   * all that and discard the rest, which was merely wasteful before and became
+   * a problem the moment the count existed: `sweepQueue` rebuilds its whole
+   * candidate list once per pairing, so a sweep asks for every queued entry
+   * N+1 times, every two seconds, synchronously, on the relay's event loop.
+   *
+   * Gating the count on the top rung does NOT protect that path, which is what
+   * the change adding it assumed: a queued Overlord IS the top rung. The repair
+   * is not a cheaper count or an index to serve it — it is not asking these
+   * paths for a profile at all.
+   */
+  public matchmakingRating(id: string): { mu: number; sigma: number } | null {
+    const row = this.stmt('SELECT mmrMu, mmrSigma FROM players WHERE id = ?').get(id) as unknown as
+      | { mmrMu: number; mmrSigma: number }
+      | undefined;
+    return row ? { mu: row.mmrMu, sigma: row.mmrSigma } : null;
   }
 
   public getProfile(id: string): PlayerProfile {
@@ -2177,6 +2229,10 @@ class GameDatabase {
       cosmetic: p.cosmetic,
       dailyStreak: p.dailyStreak,
       tier: p.tier,
+      // A position, not a rating. It is the one rank number that is already
+      // public — the leaderboard prints it for everybody — so a stranger reads
+      // the same "#7" the player does, instead of the words for the same fact.
+      ladderPosition: p.ladderPosition,
       rankedGames: p.rankedGames,
       createdAt: p.createdAt,
       achievements: p.achievements,
@@ -2441,6 +2497,15 @@ class GameDatabase {
       profile.rankedGames += 1;
     }
     profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma);
+    // And the position with it, for the same reason the line above exists: this
+    // object was loaded BEFORE the match was applied and is handed straight
+    // back as MatchEndResult.profile, which the client installs verbatim and
+    // the relay pushes as `match_recorded`. Left to readProfile alone it would
+    // be the pre-match number — and the win that carries somebody into the top
+    // 100 is the exact moment anyone is looking at it.
+    profile.ladderPosition = onLadder(profile)
+      ? this.ladderPosition(profile.id, profile.rankMu) ?? undefined
+      : undefined;
     // 'none' is both "did not rate" and "rated and did not move" — from the
     // player's side those are the same fact, and the overlay says so with one
     // glyph rather than distinguishing a difference nobody can act on.
@@ -3080,6 +3145,66 @@ class GameDatabase {
     return this.moveAccount(row.id, newDeviceId, claimingSessionId);
   }
 
+  /**
+   * The tiebreak every board and `ladderPosition` share. Two rows tied on a
+   * board's own metric sort ARBITRARILY in SQLite, so the board could reorder
+   * tied players between two refreshes of the same page — and a position
+   * counted as "rows above this one" cannot agree with an order that has no
+   * answer. One deterministic key gives both the same one.
+   */
+  private static readonly LADDER_TIEBREAK = 'p.id ASC';
+
+  /**
+   * Where this player sits on the ranked ladder, or null outside the top
+   * LADDER_TOP_N. The number the top rung renders instead of its name.
+   *
+   * It has to be the SAME number `getLeaderboard` prints, or a badge reading
+   * #12 beside a Ranks page reading #7 is worse than no badge at all — and the
+   * board's `rank` is not a count, it is a dense JS counter over a filtered,
+   * ordered scan. So its filters are mirrored here rather than approximated:
+   * an uninitialized profile and every one of the seeded bots is invisible to
+   * the board and must be invisible to this count too. Bots are the one that
+   * actually bites: they are pre-placed, so a naive `rankMu > ?` would let the
+   * whole curated roster push every human down.
+   *
+   * **The placed test is part of the ORDER, not just the filter.** The board
+   * LISTS an unplaced player who has started placement (`rankedGames > 0`) and
+   * sorts them BELOW every placed one, so "above me in mu" and "above me on
+   * the board" are different sets: an unplaced player four games in can hold a
+   * mu above an Overlord's and still rank under them. Counting on mu alone
+   * therefore reported a position larger than the board's for exactly the
+   * players the number is for. The predicate here is the board's own primary
+   * sort key, character for character.
+   *
+   * The row is also asked to exclude ITSELF, which is not tidiness: inside
+   * `recordMatch` this runs on a profile whose rating has already moved in
+   * memory while its stored row still holds the pre-match value. After a LOSS
+   * the stored self therefore satisfies `rankMu > ?` and the player was counted
+   * as standing above themselves — one position too low, or none at all at the
+   * top-100 boundary, until the next fresh read.
+   *
+   * One constant SQL string with binds, never an interpolated rating: `stmt()`
+   * caches on the text, so interpolating would mint a prepared statement per
+   * distinct rating and grow the cache without bound. The placement constants
+   * ARE interpolated, exactly as `getLeaderboard` interpolates them — they are
+   * compile-time values, so the text stays constant.
+   */
+  private ladderPosition(id: string, rankMu: number): number | null {
+    const row = this.stmt(
+        `SELECT COUNT(*) AS above
+           FROM players p
+          WHERE p.initializedAt IS NOT NULL
+            AND p.id NOT LIKE 'bot-%'
+            AND p.id <> ?
+            AND p.rankedGames >= ${PLACEMENT_GAMES}
+            AND p.rankSigma <= ${PLACEMENT_SIGMA}
+            AND (p.rankMu > ? OR (p.rankMu = ? AND p.id < ?))`
+      )
+      .get(id, rankMu, rankMu, id) as unknown as { above: number } | undefined;
+    const position = (row?.above ?? 0) + 1;
+    return position <= LADDER_TOP_N ? position : null;
+  }
+
   public getLeaderboard(
     sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
     limit = 50,
@@ -3115,7 +3240,7 @@ class GameDatabase {
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
             AND (${progress} OR p.id LIKE 'bot-%')
-          ORDER BY ${orderBy}`
+          ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}`
       )
       .all() as unknown as PlayerRow[];
 

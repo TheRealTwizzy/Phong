@@ -65,6 +65,35 @@ plus a stacked sheet's own depth capped at four, so 74 is the ceiling — and th
 is load-bearing rather than decorative — now that the notice expires on a timer, being painted
 over would make it invisible for good rather than merely late.
 
+## A ProgressBar's track is the screen
+
+`ProgressBar`'s track is `bg-surface-1`, and `--color-surface-1` is *the screen background*
+(`src/index.css:51`). Drop a bar straight onto a screen and it renders as a fill with no track —
+you see the amber, you never see how far it has to go. It needs a card under it: the XP meter in
+the menu header carries its own `bg-surface-2` chip, and the rank meter is fine because it sits
+inside the `bg-surface-2` capsule. The rank ring hit the same thing from the other side — its
+`stroke-line` track against a `bg-surface-3` raised `Panel` — and was reported as "the meter has
+no ring at all".
+
+**A chip's own padding is where header slack comes from, not the gaps.** The menu capsule
+stacks a label row and two meters inside the 30px its avatar sets, and the header is already
+flush with the `pt-safe-bar` offset the toast stack clears it by. The first three-row build
+stood at 60.09px against 60 — sub-pixel, invisible, and caused entirely by a `py-0.5` on the
+tier chip. `TierBadge` grew an `xs` size to spend it. Do not buy that back from the gaps
+between meters: two 4px bars need the 2px between them to read as two.
+
+**A resume key names one meter and one BAND.** `resumeKey` makes a bar animate from where it last
+stood rather than from empty, which is what a meter outside the pager needs: `MainMenu` unmounts
+for the whole of a match, so the bar that comes back is a fresh mount. The key must carry the band
+(`menu-xp:{level}`, `rank:{tier}`) because a level-up drops the fraction from 0.95 to 0.05 —
+resumed from the old band, gaining a level animates as a long slide leftward. And two bars mounted
+at once must never share a key: each would write the other's origin. The store is
+`src/components/ui/meterMemory.ts`, pure and held by `tests/meterMemory.test.ts` — and it is
+module scope, so it outlives an identity swap the way `carryRef` and the on-device match
+queue do. `App.startFreshIdentity` calls `resetMeterMemory()` beside those two, or a brand
+new account (level 1, unplaced — the ordinary case) inherits the previous player's bands and
+watches its placement meter slide DOWN from their 4/5.
+
 ## A call site never arms its own timer
 
 Convention §13: **every transient notification goes through `ToastHost`, which owns both the
@@ -94,6 +123,14 @@ player equipped — including inside `PublicProfileModal`, which paints in someb
   and *invisible* on a light one: use a token, or `cos-light:` where the hue is the point.
 - **Never define a token in terms of another.** Custom properties are substituted where declared,
   so it resolves against `:root` once and never follows an override.
+- **Two meters that stack have only colour to tell them apart, and `--color-xp` is spoken
+  for.** The menu capsule is the only place in the app where two `ProgressBar`s sit one above
+  the other. `--color-warn` is 0.044 from `--color-xp` in OKLab — under the 0.08 this repo
+  demands of two whole THEMES — and neither is per-cosmetic, so that is not a worst case, it
+  is the only case. The rank meter is `accent` for that reason. `accent` IS per-cosmetic
+  though, so it does not clear the floor on a gold accent (`quantum-gold`, `retro-crt`);
+  `tests/cosmetics.test.ts` names those rather than asserting a floor the catalogue cannot
+  meet. Before stacking a third meter anywhere, measure the pair with `colorDistance`.
 
 ## Verifying, in a repo that bet against component tests
 

@@ -278,6 +278,18 @@ export interface PlayerProfile {
   lastActive: string;
   // Visible skill tier, derived from rankMu once placed (see src/rating.ts).
   tier: Tier;
+  /**
+   * Position on the ranked ladder, 1..LADDER_TOP_N, for the top rung ONLY.
+   * Absent for everyone else — including an Overlord who has slipped outside
+   * the top 100, who reads as "Cyber Overlord" again.
+   *
+   * A position is not a rating: it is the one rank number that is already
+   * public, since the leaderboard shows it to everybody. It is derived
+   * server-side against the same filters and the same order the board uses, so
+   * the badge and the Ranks page cannot disagree.
+   */
+  ladderPosition?: number;
+
   // One-time code that reclaims this profile on a new device (rotates on use).
   // Only ever serialized to the profile's own device.
   recoveryCode?: string;
@@ -321,6 +333,18 @@ export interface PublicProfile {
   dailyStreak: number;
   // Tier only — a public profile never exposes raw mu/sigma numbers.
   tier: Tier;
+  /**
+   * Position on the ranked ladder, 1..LADDER_TOP_N, for the top rung ONLY.
+   * Absent for everyone else — including an Overlord who has slipped outside
+   * the top 100, who reads as "Cyber Overlord" again.
+   *
+   * A position is not a rating: it is the one rank number that is already
+   * public, since the leaderboard shows it to everybody. It is derived
+   * server-side against the same filters and the same order the board uses, so
+   * the badge and the Ranks page cannot disagree.
+   */
+  ladderPosition?: number;
+
   rankedGames: number;
   createdAt: string;
   achievements: string[];

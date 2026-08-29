@@ -40,7 +40,7 @@ import {
   countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
-import { MatchEndPayload, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
+import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
 import {
@@ -53,7 +53,7 @@ import {
   roomsOf,
 } from './src/venues';
 import { validateUsername } from './src/profileRules';
-import { Rating, winProbability } from './src/rating';
+import { Rating, newRating, winProbability } from './src/rating';
 
 
 /**
@@ -187,9 +187,13 @@ function watcherBeside(room: Room, side: 0 | 1): WebSocket | null {
 function sendMatchPrediction(room: Room): void {
   const [a, b] = room.players;
   if (!a || !b) return;
-  const r0 = db.getProfile(a.playerId);
-  const r1 = db.getProfile(b.playerId);
-  const p0 = winProbability({ mu: r0.mmrMu, sigma: r0.mmrSigma }, { mu: r1.mmrMu, sigma: r1.mmrSigma });
+  // Two ratings, not two profiles. `getProfile` is four queries and, for
+  // anyone on the top rung, a full table scan for a ladder position nothing
+  // here renders. `newRating()` is byte-for-byte what its lazy mint would have
+  // produced for a row that is not there, so nothing about this moves.
+  const r0 = db.matchmakingRating(a.playerId) ?? newRating();
+  const r1 = db.matchmakingRating(b.playerId) ?? newRating();
+  const p0 = winProbability(r0, r1);
   for (const side of [0, 1] as const) {
     sendAll(viewersOf(room, side), {
       type: 'match_prediction',
@@ -368,11 +372,18 @@ const queueRoomConfig = (): RoomMatchConfig =>
 /** A queue entry as the pure pairing rules see it. */
 function queueCandidate(entry: QueueEntry): Candidate | null {
   if (!entry.deviceId) return null;
-  const profile = db.getProfile(entry.deviceId);
+  // The RATING, never the profile. `sweepQueue` rebuilds this list once per
+  // pairing, so a sweep asks for every queued entry N+1 times every two
+  // seconds, synchronously, on the relay's event loop — and `getProfile` is
+  // four queries, a conditional write and, for a queued Overlord, a full
+  // unindexed COUNT over `players` for a ladder position that pairs nobody.
+  // `newRating()` matches what its lazy mint produced, so a row that has gone
+  // away mid-queue still pairs exactly as it did.
+  const rating = db.matchmakingRating(entry.deviceId) ?? newRating();
   return {
     deviceId: entry.deviceId,
-    mu: profile.mmrMu,
-    sigma: profile.mmrSigma,
+    mu: rating.mu,
+    sigma: rating.sigma,
     joinedAt: entry.joinedAt,
     rttMs: entry.rttMs,
   };
@@ -828,6 +839,11 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
   const ratingBefore = duelStartRatings(room);
+  const recorded: Array<{
+    seat: 0 | 1;
+    player: NonNullable<Room['players'][0]>;
+    result: MatchEndResult;
+  }> = [];
   for (const seat of seats) {
     const me = room.players[seat];
     const them = room.players[seat === 0 ? 1 : 0];
@@ -872,10 +888,13 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
     if (opts.forgivenLoss && !isWinner) context.forceUnranked = true;
 
     try {
-      const result = db.recordMatch(payload, context);
-      if (me.ws.readyState === WebSocket.OPEN) {
-        me.ws.send(JSON.stringify({ type: 'match_recorded', matchKey, result }));
-      }
+      // Recorded now, pushed after the loop. Both seats' ratings move in this
+      // one function and seat 0 is written first, so anything derived from the
+      // WHOLE table — `ladderPosition` is the only one today — would see the
+      // opponent's pre-match row and answer for a ladder that is one update
+      // out of date. Two adjacent Overlords swapping order in a duel is
+      // exactly when it is wrong, and exactly when somebody is looking.
+      recorded.push({ seat, player: me, result: db.recordMatch(payload, context) });
     } catch (e: any) {
       // An uninitialized profile can't hold a match (it has no identity yet);
       // anything else is worth seeing in the log. Either way the other seat
@@ -883,6 +902,21 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
       if (e?.message !== 'PROFILE_NOT_INITIALIZED') {
         console.error(`duel record failed for seat ${seat} in ${room.id}:`, e);
       }
+    }
+  }
+
+  for (const { seat, player, result } of recorded) {
+    // Re-derived against both committed rows. Only the position is taken, not
+    // the whole profile: everything else in `result` is this seat's own record
+    // of its own match and is already final, while this one field is a
+    // statement about every other player.
+    try {
+      result.profile.ladderPosition = db.getProfile(player.deviceId!).ladderPosition;
+    } catch (e: any) {
+      console.error(`ladder position refresh failed for seat ${seat} in ${room.id}:`, e);
+    }
+    if (player.ws.readyState === WebSocket.OPEN) {
+      player.ws.send(JSON.stringify({ type: 'match_recorded', matchKey, result }));
     }
   }
 }

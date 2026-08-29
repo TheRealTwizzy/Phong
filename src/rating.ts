@@ -343,6 +343,19 @@ const TIER_FLOORS: { tier: Tier; mu: number }[] = [
 export const PLACEMENT_GAMES = 5;
 export const PLACEMENT_SIGMA = 4.0;
 
+/**
+ * How far the top of the ladder is numbered. Cyber Overlord is a rating
+ * threshold like every other rung — reaching it is still rankMu >= 37 and
+ * nothing else — but it is the one rung with no rung above it, so it reads as
+ * a POSITION rather than a word: #1 through #100, counting down.
+ *
+ * Deliberately not the definition of the tier. Making the headcount decide who
+ * is an Overlord would put every other player's activity inside `tierFor`,
+ * which is a pure function of one player's own rating today — and on a server
+ * with fewer than a hundred ranked players it would promote everyone placed.
+ */
+export const LADDER_TOP_N = 100;
+
 export function isPlaced(rankedGames: number, rankSigma: number): boolean {
   return rankedGames >= PLACEMENT_GAMES && rankSigma <= PLACEMENT_SIGMA;
 }
@@ -363,9 +376,17 @@ export function tierProgress(rankMu: number): number {
     return rankMu >= t.mu && (!next || rankMu < next.mu);
   });
   if (idx <= 0) return clamp((rankMu - 16) / 3, 0, 1);
+  const next = TIER_FLOORS[idx + 1];
+  // The top band is FULL, always. There is no rung above Overlord, so the only
+  // way to give this line a denominator was a synthetic `floor + 3` band —
+  // which meant the apex meter measured progress toward a ceiling that does not
+  // exist, read 0 at exactly the moment a player arrived there, and then
+  // saturated at mu 40 and never moved again. A full bar is the honest answer:
+  // the ladder is finished. What replaces the missing progress is the ladder
+  // POSITION on the badge beside it (LADDER_TOP_N).
+  if (!next) return 1;
   const floor = TIER_FLOORS[idx].mu;
-  const next = TIER_FLOORS[idx + 1]?.mu ?? floor + 3;
-  return clamp((rankMu - floor) / (next - floor), 0, 1);
+  return clamp((rankMu - floor) / (next.mu - floor), 0, 1);
 }
 
 export const TIER_LABEL_KEY: Record<Tier, string> = {

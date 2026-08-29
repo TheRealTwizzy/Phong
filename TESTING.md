@@ -36,7 +36,8 @@ coverage number.
 
 | Suite | Owns |
 |---|---|
-| `rating` `xp` `achievements` | TrueSkill, tiers, the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
+| `rating` `xp` `achievements` | TrueSkill, tiers, `tierProgress` (incl. the full top band), the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
+| `ladderPosition` | The number the top rung renders instead of its name, that it AGREES with the leaderboard's own, and that the narrow rating read the relay pairs on says the same thing a whole profile would |
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `matchHistory` | History reads: one row per player per match, the `ranked` column, mode/ranked filters, paging, per-player retention |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
@@ -44,13 +45,14 @@ coverage number.
 | `streaks` | A rally streak: whose it is, what ends it, and what it carries into |
 | `room` | The relay's room rules, the reaper, and the adversarial `match_sync` guards |
 | `matchRules` | Ranked bands, normalization, `duelMatchKey` |
-| `cosmetics` | All 20 cosmetics × every unlock route, the contrast floor, and the distinctness floor |
+| `cosmetics` | All 20 cosmetics × every unlock route, the contrast floor, the distinctness floor, and the two tones the header capsule stacks |
 | `color` | The colour maths both those floors stand on |
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
 | `gestures` | The swipe thresholds, the axis lock, the release velocity and the page-settle rule — the ONLY place these are stated (see §5) |
+| `meterMemory` | Where a progress meter resumes from, and that a band change resets it — the ONLY place this is stated (see §5) |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
@@ -371,6 +373,84 @@ still in the DOM while the request is in flight. That second leg is the one to r
 copying: intercepting proves the request LEFT, not that React has painted the loading state, and
 sampled immediately it reads the pre-refresh paint and goes green however the branch is written.
 It was measured exactly that way. The wait after interception is what makes it a test.
+
+**A progression meter is not fresh on arrival, and only the fast layer can say so.** A page
+that leaves the pager's three-slot window unmounts and resets, which is right for a page and
+wrong for a meter: a bar that refills from empty on the way back from a match reads as the XP
+being earned a second time. Both meters therefore live in the header, outside `#menu-pager`,
+and `ProgressBar`'s `resumeKey` carries the remaining case — `AnimatePresence` unmounting the
+whole menu for the length of a match. `scripts/e2e-menu.mjs` holds the STRUCTURE (both bars in
+the header and not inside the pager; both still in the document while PLAY is unmounted; the
+header still inside the `pt-safe-bar` offset the toast stack clears it by, measured off the
+utility rather than hardcoded). It cannot hold the RESUME: no browser suite plays a match and
+samples a meter on the way back, so `tests/meterMemory.test.ts` is the only place the store's
+rules are stated — that an unseen band resumes empty, that a level-up or a promotion IS a new
+band, and that two keys cannot write each other. The manual check that proved it is worth
+repeating rather than automating badly: sample the XP fill's `scaleX` on the first frame back
+from a match against a mission bar's, which has no `resumeKey` — same mount, same frame, same
+primitive, and the only difference is the store. Measured 0.66 against 0.00.
+
+**The header's height is a budget with nothing in it.** `pt-safe-bar` is `pt-safe + 48px` and
+the menu header is exactly that, so anything added to the capsule silently puts every toast
+over the bar the offset exists to clear — no build error, no red test, nothing to see but a
+notice covering the controls it is about. The `e2e-menu` leg above is the only thing that
+catches it. What that leg does NOT cover, stated so nobody reads more into a green run: its
+player is UNRANKED with a short username, so its overflow check never meets "Cyber Overlord"
+(128px at `text-2xs`) or a 16-character name — the case the capsule's `max-w` and `truncate`
+exist for, and one to re-measure by hand when that row changes.
+
+**The apex number must be the number the board prints.** Cyber Overlord reads as a ladder
+position (`#1`..`#100`) rather than a name, and `getLeaderboard`'s `rank` is not a count — it is
+a dense JS counter over a filtered, ordered scan. So a badge computed any other way disagrees
+with the Ranks page for the same player, which is worse than no badge, and only one assertion
+catches it: `tests/ladderPosition.test.ts` reads both and compares them player for player. The
+fixture puts two bots ABOVE the apex on purpose, because bots are pre-placed and a count that
+forgets them pushes every human down by the whole roster; it seats a rated player with no
+ranked game and an uninitialized one, each of which would take #1 from a gate that read the
+rating alone; and it seats one four games into placement rated above every Overlord, because
+the board lists that player and sorts them UNDER the placed rows, so a count on rating alone
+put every Overlord one position lower than the Ranks page did. A separate leg records a LOSS
+and checks the returned position against the board, since `recordMatch` reports before it
+persists and the stale higher self was being counted as standing above the player. Each of
+those was verified by reverting the fix and watching the leg go red — a fixture this dense is
+exactly where a vacuous pass hides. Reaching Overlord is still `rankMu >= 37` and nothing else — the headcount is a
+display, never a definition — so no test here may make one player's tier depend on another's.
+
+**A duel moves two of them, so both seats have to be numbered against the ladder they BOTH
+left behind.** `recordRoomMatch` writes seat 0 first, so a position derived inside that loop
+answers for a table where the opponent still holds their pre-match row — and it is wrong in
+exactly one band, when the winner's new rating lands between the loser's new one and the
+loser's old one. Then both seats are told they are #2 and the board shows nobody at #1.
+`tests/duelRecord.test.ts` plays it through the real relay, seeding two Overlords straight into
+the database because μ37 is only ever reached through PvP and manufacturing one otherwise
+means dozens of duels for one assertion. Three things about that fixture are load-bearing and
+all three were learned by watching it pass against a broken server. The winner must be SEAT 0,
+since the loser's stale row is only ever too high and a stale read for seat 1 cannot differ.
+The sigmas must be ASYMMETRIC — a confident winner and an uncertain loser — or the winner
+clears the loser's old rating outright and the band is empty. And the band itself is asserted
+rather than assumed, because a retune of the rank step would slide the fixture out of it and
+the test would go quiet instead of red.
+
+**A field derived from the whole table must not ride a profile onto a hot path.** The count is
+gated on the top rung, and that gate is about correctness rather than cost: `queueCandidate` runs
+for every queued entry N+1 times per two-second sweep, and a queued Overlord is precisely the
+account the gate does not spare. So the relay pairs and predicts on `db.matchmakingRating` — two
+floats, one statement — and the suite pins that it reports exactly what `getProfile` would, which
+is what makes the substitution faithful rather than merely faster. That it IS faster is not
+something an assertion states better than the absent call does; `queue` and `duel` cover that
+pairing still works.
+
+**The capsule is the one place two meters stack, and colour is all they have.** The rank meter
+sits directly over the XP meter, 4px each, and `--color-xp` is the token contract's level-and-XP
+colour that the `LV` chip beside them also wears — so a rank meter in the same family reads as a
+second XP bar. `--color-warn` was that family: 0.044 from `--color-xp` in OKLab, against the
+0.08 `tests/cosmetics.test.ts` demands of two whole themes. What the suite asserts is the PALETTE
+fact rather than the component's prop, deliberately — the tone lives in a `.tsx` and importing
+it would drag React and `motion/react` into a `node` suite for one string — so it pins that
+`warn` and `xp` are one amber in BOTH status ramps, and it NAMES the two cosmetics whose accent
+is gold enough to have the same problem (`retro-crt`, `quantum-gold`) instead of asserting a floor
+the catalogue cannot meet. A twenty-first gold accent fails that list rather than shipping as one
+more capsule nobody can read.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test

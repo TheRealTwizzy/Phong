@@ -415,7 +415,12 @@ export const ProfileModal: React.FC<Props> = ({
                 )}
 
                 <div className="flex items-center gap-2 mt-1 flex-wrap">
-                  <TierBadge tier={profile.tier} language={language} size="md" />
+                  <TierBadge
+                    tier={profile.tier}
+                    language={language}
+                    size="md"
+                    ladderPosition={profile.ladderPosition}
+                  />
                   {profile.tier === 'unranked' && (
                     <span className="text-[10px] text-ink-muted font-mono">
                       {t('placement_progress', language, {
