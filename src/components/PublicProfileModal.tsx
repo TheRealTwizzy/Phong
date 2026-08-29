@@ -146,7 +146,11 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
             />
             <div className="flex min-w-0 flex-col gap-0.5">
               <span className="flex items-center gap-1.5">
-                <TierBadge tier={profile.tier} language={language} />
+                <TierBadge
+                  tier={profile.tier}
+                  language={language}
+                  ladderPosition={profile.ladderPosition}
+                />
                 <span className="text-2xs text-accent">LV{profile.level}</span>
               </span>
               <span className="text-2xs font-normal tracking-normal text-ink-dim">

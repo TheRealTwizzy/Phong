@@ -56,7 +56,6 @@ import {
   Settings,
   Play,
   Shield,
-  Flame,
   ChevronRight,
   Lock,
   Sparkles,
@@ -717,17 +716,22 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               }`}
             />
           </div>
-          {/* username · rank · level, with the ladder under all three. The
+          {/* username · rank · level, with BOTH meters under all three. The
               capsule IS the progression readout now; what it replaced was this
               row alone, over a full-width rank card that opened the PLAY page
               and said the same three things a second time.
 
-              This column is 24px against a 30px avatar, and that is
-              LOAD-BEARING rather than tidy: `pt-safe-bar` (src/index.css:237)
-              offsets the toast stack by pt-safe + 48px to clear both top bars
-              in the app, and this header is ALREADY exactly pt-safe + 48px. A
-              taller capsule fails no build and reddens no test; it just puts
-              every toast over the header the offset exists to clear. */}
+              Three rows in 30px, and every one of those numbers is
+              LOAD-BEARING rather than tidy: an 18px chip row, a 2px gap, the
+              4px rank meter, another 2px gap, the 4px XP meter. `pt-safe-bar`
+              (src/index.css:237) offsets the toast stack by pt-safe + 48px to
+              clear both top bars in the app, and this header is ALREADY
+              exactly pt-safe + 48px, so the column has to fit inside the
+              avatar beside it. `gap-1` here would make it 34 and push the
+              header past the offset — failing no build and reddening no test,
+              just putting every toast over the header it exists to clear. The
+              slack to buy, if the 2px ever reads badly, is the chips' own
+              `py-0.5`, not these gaps. */}
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <div className="flex min-w-0 items-center gap-1">
               {/* text-left because a <button> centres its inherited text, and
@@ -749,6 +753,8 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               <TierBadge
                 tier={profile?.tier || 'unranked'}
                 language={lang}
+                size="xs"
+                ladderPosition={profile?.ladderPosition}
                 className="max-w-[8rem] shrink"
               />
               <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
@@ -764,43 +770,30 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               rankSigma={profile?.rankSigma ?? 25 / 3}
               language={lang}
             />
+            {/* The XP meter is inside the capsule, under the rank one, so both
+                meters read as one stack rather than as a card and a chip.
+                Neither needs a track of its own drawn for it: a ProgressBar's
+                track is `bg-surface-1`, which IS the screen background, so a
+                bar out here on the header would be a fill with nothing behind
+                it — the same mistake the rank ring made against a raised
+                Panel, reported at the time as "the meter has no ring". Inside
+                the `bg-surface-2` capsule the track reads as a well. */}
+            <ProgressBar
+              id="menu-xp-bar"
+              value={xpFraction}
+              tone="xp"
+              height="sm"
+              ariaLabel={t('xp', lang)}
+              /* Keyed on the LEVEL: a level-up is a new band, so the bar
+                 fills from empty rather than sweeping backwards from 0.95 to
+                 0.05 to report progress the player just made. Undefined while
+                 the session call is still in flight, so the null-profile
+                 render -- where xpFraction is 0 -- neither reads nor writes
+                 the origin. */
+              resumeKey={profile ? `menu-xp:${profile.level}` : undefined}
+            />
           </div>
         </button>
-
-        {/* The XP meter needs its own chip rather than sitting bare on the
-            header: a ProgressBar's track is `bg-surface-1`, which IS the screen
-            background, so a bare bar would be a fill with no track at all --
-            the same mistake the rank ring made against a raised Panel, reported
-            at the time as "the meter has no ring". `self-stretch` matches the
-            capsule's height without contributing any of its own. */}
-        <div className="flex w-[4.5rem] shrink-0 flex-col justify-center gap-1 self-stretch rounded-card border border-line bg-surface-2 px-2">
-          {/* The streak, and nothing else. This row started as ProgressBar's
-              own label/trailing pair with an "XP" kicker on the left, and the
-              kicker cost about 24px the capsule needed more: at 390px a chip
-              wide enough to hold it left "Grandmaster" and "Cyber Overlord"
-              truncating for everyone who holds them. The bar is `--color-xp`,
-              which the token contract reserves for level and XP alone, and the
-              LV chip beside it is the same colour — between them the meter is
-              named without spending the width. `t('xp')` stays as the
-              accessible name. */}
-          <span className="inline-flex self-end items-center gap-0.5 rounded-chip border border-warn/30 bg-warn/15 px-1 text-2xs text-warn">
-            <Flame className="h-2.5 w-2.5 fill-current" />
-            {profile?.dailyStreak || 1}d
-          </span>
-          <ProgressBar
-            id="menu-xp-bar"
-            value={xpFraction}
-            tone="xp"
-            height="sm"
-            ariaLabel={t('xp', lang)}
-            /* Keyed on the LEVEL: a level-up is a new band, so the bar fills
-               from empty rather than sweeping backwards from 0.95 to 0.05 to
-               report progress the player just made. Undefined while the session
-               call is still in flight, so the null-profile render -- where
-               xpFraction is 0 -- neither reads nor writes the origin. */
-            resumeKey={profile ? `menu-xp:${profile.level}` : undefined}
-          />
-        </div>
       </header>
 
       {/* The one scrolling region. Every direct child is `shrink-0`: this is a

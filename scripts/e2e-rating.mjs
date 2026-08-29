@@ -254,10 +254,21 @@ const leak = await alice.evaluate(async () => {
   return {
     tier: p.tier,
     leaked: ['mmrMu', 'mmrSigma', 'rankMu', 'rankSigma', 'eloRating'].filter((k) => k in p),
+    // A ladder POSITION is not a rating — it is the one rank number already
+    // public, since the board prints it for everybody — so it is allowed here
+    // where every mu/sigma is not. Listed rather than ignored so the next
+    // field added to PublicProfile still has to argue its way past this leg.
+    position: p.ladderPosition ?? null,
   };
 });
 if (leak.leaked.length) fail(`public profile leaks ${leak.leaked.join(', ')}`);
 if (!leak.tier) fail('public profile has no tier');
+// This player is UNRANKED, and only the top rung carries a position. A number
+// here would mean the gate was reading the rating alone rather than board
+// membership — which is how an uninitialized row came to be handed #1.
+if (leak.position !== null) {
+  fail(`an unranked public profile carries a ladder position (${leak.position})`);
+}
 ok(`public profile exposes tier "${leak.tier}" and no raw rating fields`);
 
 // ---- 6. Missions are server state, claimable exactly once ---------------

@@ -75,6 +75,13 @@ inside the `bg-surface-2` capsule. The rank ring hit the same thing from the oth
 `stroke-line` track against a `bg-surface-3` raised `Panel` — and was reported as "the meter has
 no ring at all".
 
+**A chip's own padding is where header slack comes from, not the gaps.** The menu capsule
+stacks a label row and two meters inside the 30px its avatar sets, and the header is already
+flush with the `pt-safe-bar` offset the toast stack clears it by. The first three-row build
+stood at 60.09px against 60 — sub-pixel, invisible, and caused entirely by a `py-0.5` on the
+tier chip. `TierBadge` grew an `xs` size to spend it. Do not buy that back from the gaps
+between meters: two 4px bars need the 2px between them to read as two.
+
 **A resume key names one meter and one BAND.** `resumeKey` makes a bar animate from where it last
 stood rather than from empty, which is what a meter outside the pager needs: `MainMenu` unmounts
 for the whole of a match, so the bar that comes back is a fresh mount. The key must carry the band

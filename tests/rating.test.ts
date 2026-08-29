@@ -20,6 +20,7 @@ import {
   recommendedDifficulty,
   isPlaced,
   tierFor,
+  tierProgress,
   updateRating,
   winProbability,
 } from '../src/rating';
@@ -384,6 +385,33 @@ describe('placement and tiers', () => {
     expect(tierFor(25, 10, 2)).toBe('ace');
     expect(tierFor(30, 10, 2)).toBe('master');
     expect(tierFor(40, 10, 2)).toBe('overlord');
+  });
+
+  // tierProgress had no test at all until the top band changed under it, which
+  // is exactly why it could: its only caller is a component, and this repo has
+  // no component tests by choice.
+  it('measures progress through the band a rating actually sits in', () => {
+    // Contender runs 19 to 22, so 20.5 is halfway.
+    expect(tierProgress(20.5)).toBeCloseTo(0.5, 5);
+    expect(tierProgress(19)).toBeCloseTo(0, 5);
+    // Just under the next floor is nearly full, never over it.
+    expect(tierProgress(21.99)).toBeGreaterThan(0.99);
+    expect(tierProgress(21.99)).toBeLessThan(1);
+  });
+
+  it('fills the top band completely, because there is no rung above it', () => {
+    // The apex used to be measured against a synthetic `floor + 3` band, so a
+    // player arriving at Overlord saw an EMPTY meter at the moment they got
+    // there, a half-full one at mu 38.5, and a permanently full one from mu 40
+    // on that could never move again. There is nothing above Overlord to be
+    // partway toward; the ladder is finished, and the meter says so.
+    expect(tierProgress(37)).toBe(1);
+    expect(tierProgress(38.5)).toBe(1);
+    expect(tierProgress(40)).toBe(1);
+    expect(tierProgress(99)).toBe(1);
+    // And the band below it is still a real fraction, so this is a special
+    // case for the TOP rung and not a clamp that swallowed the whole ladder.
+    expect(tierProgress(35.5)).toBeCloseTo(0.5, 5);
   });
 
   it('does NOT change tier as sigma alone shrinks', () => {

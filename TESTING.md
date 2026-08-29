@@ -36,7 +36,8 @@ coverage number.
 
 | Suite | Owns |
 |---|---|
-| `rating` `xp` `achievements` | TrueSkill, tiers, the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
+| `rating` `xp` `achievements` | TrueSkill, tiers, `tierProgress` (incl. the full top band), the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
+| `ladderPosition` | The number the top rung renders instead of its name, and that it AGREES with the leaderboard's own |
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `matchHistory` | History reads: one row per player per match, the `ranked` column, mode/ranked filters, paging, per-player retention |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
@@ -397,6 +398,17 @@ catches it. What that leg does NOT cover, stated so nobody reads more into a gre
 player is UNRANKED with a short username, so its overflow check never meets "Cyber Overlord"
 (128px at `text-2xs`) or a 16-character name — the case the capsule's `max-w` and `truncate`
 exist for, and one to re-measure by hand when that row changes.
+
+**The apex number must be the number the board prints.** Cyber Overlord reads as a ladder
+position (`#1`..`#100`) rather than a name, and `getLeaderboard`'s `rank` is not a count — it is
+a dense JS counter over a filtered, ordered scan. So a badge computed any other way disagrees
+with the Ranks page for the same player, which is worse than no badge, and only one assertion
+catches it: `tests/ladderPosition.test.ts` reads both and compares them player for player. The
+fixture puts two bots ABOVE the apex on purpose, because bots are pre-placed and a count that
+forgets them pushes every human down by the whole roster; it also seats a rated player with no
+ranked game and an uninitialized one, each of which would take #1 from a gate that read the
+rating alone. Reaching Overlord is still `rankMu >= 37` and nothing else — the headcount is a
+display, never a definition — so no test here may make one player's tier depend on another's.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test

@@ -457,9 +457,11 @@ for (const id of ['menu-xp-bar', 'menu-rank-bar']) {
   if (!meters[id]) fail(`#${id} is not in the document on the menu`);
   if (meters[id].inPager) fail(`#${id} is inside #menu-pager, so it unmounts with its page`);
 }
-if (!meters['menu-rank-bar'].inPill) fail('the rank meter is not inside the profile capsule');
+for (const id of ['menu-rank-bar', 'menu-xp-bar']) {
+  if (!meters[id].inPill) fail(`#${id} is not inside the profile capsule`);
+}
 if (!meters.badge) fail('the profile capsule shows no tier badge');
-ok('both meters are in the header, the rank meter and the tier badge inside the capsule');
+ok('both meters and the tier badge are inside the capsule, and the capsule is in the header');
 
 // TROPHIES is two pages from PLAY, so the window drops PLAY entirely. Anything
 // still in the document after this outlives the page it used to live on.
