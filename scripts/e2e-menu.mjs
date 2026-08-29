@@ -30,6 +30,12 @@
 //     snapshot taken when RANKS slid into the window.
 // 12. A refetch never blanks what is already on screen, which is what makes
 //     leg 11 an improvement rather than a flash on every arrival.
+// 13. The progression meters are in the HEADER and not in a page. They used to
+//     open the PLAY page as a rank card, so they unmounted every time the pager
+//     window moved past index 0 and refilled from empty on the way back. The
+//     header is the one region outside the pager, and the capsule that holds
+//     them has to stay inside the offset the toast stack clears it by — a
+//     failure with no build error and no red test, just toasts over the header.
 //
 // WHAT THIS SUITE CANNOT DO, stated so nobody reads more into a green run than
 // is there: it cannot test `touch-action`. That is enforced by the compositor
@@ -425,6 +431,78 @@ await page.unroute('**/api/leaderboard*');
 await settle();
 if ((await boardRows()) === 0) fail('the board never came back after the held response was released');
 ok('a refetch leaves the rows on screen while it is in flight');
+
+// ---- 13. The progression meters live in the header, not in a page --------
+// The XP bar and the rank meter opened the PLAY page as a full-width card, so
+// they unmounted whenever the pager window moved past PLAY (three slots of
+// five) and replayed `scaleX: 0 -> pct` on the way back — a sweep from empty
+// for a value that had not changed. They are in the header now, which is the
+// one region outside the pager.
+await page.click('#menu-nav-play');
+await settle();
+
+const meters = await page.evaluate(() => {
+  const pager = document.querySelector('#menu-pager');
+  const pill = document.querySelector('#menu-profile-pill');
+  const ids = ['menu-xp-bar', 'menu-rank-bar'];
+  const out = {};
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    out[id] = el ? { inPager: !!pager?.contains(el), inPill: !!pill?.contains(el) } : null;
+  }
+  out.badge = !!pill?.querySelector('[id^="tier-badge-"]');
+  return out;
+});
+for (const id of ['menu-xp-bar', 'menu-rank-bar']) {
+  if (!meters[id]) fail(`#${id} is not in the document on the menu`);
+  if (meters[id].inPager) fail(`#${id} is inside #menu-pager, so it unmounts with its page`);
+}
+if (!meters['menu-rank-bar'].inPill) fail('the rank meter is not inside the profile capsule');
+if (!meters.badge) fail('the profile capsule shows no tier badge');
+ok('both meters are in the header, the rank meter and the tier badge inside the capsule');
+
+// TROPHIES is two pages from PLAY, so the window drops PLAY entirely. Anything
+// still in the document after this outlives the page it used to live on.
+await page.click('#menu-nav-achievements');
+await settle();
+if (await page.$('#menu-page-play')) fail('PLAY is still mounted, so this leg proves nothing');
+const survived = await page.evaluate(() =>
+  ['menu-xp-bar', 'menu-rank-bar'].filter((id) => !document.getElementById(id))
+);
+if (survived.length) fail(`the meters unmounted with PLAY: ${survived.join(', ')}`);
+ok('the meters outlive the page they used to open');
+
+// The header must not grow past the offset the toast stack clears it by.
+// `pt-safe-bar` is pt-safe + 48px and today's header is exactly that, so the
+// budget is zero: a taller capsule silently puts every toast over the header.
+// Read the utility itself rather than hardcoding 48, or this goes stale the
+// day index.css changes and says nothing while it does.
+await page.click('#menu-nav-play');
+await settle();
+const headerBox = await page.evaluate(() => {
+  const probe = document.createElement('div');
+  probe.className = 'pt-safe-bar';
+  document.body.appendChild(probe);
+  const offset = parseFloat(getComputedStyle(probe).paddingTop);
+  probe.remove();
+  const header = document.querySelector('#main-menu-screen header');
+  if (!header) return { missing: true };
+  const r = header.getBoundingClientRect();
+  return { offset, bottom: r.bottom, overflow: header.scrollWidth - header.clientWidth };
+});
+if (headerBox.missing) fail('the menu has no header');
+if (!(headerBox.offset > 0)) fail(`pt-safe-bar resolved to ${headerBox.offset}px, so this leg proves nothing`);
+if (headerBox.bottom > headerBox.offset) {
+  fail(`the header runs to ${headerBox.bottom}px, past the ${headerBox.offset}px the toast stack clears it by`);
+}
+if (headerBox.overflow > 1) fail(`the header row overflows its own width by ${headerBox.overflow}px`);
+ok(`the header ends at ${headerBox.bottom}px, inside the ${headerBox.offset}px toast offset, and does not overflow`);
+// What this does NOT cover, so nobody reads more into it: the test player is
+// UNRANKED (8 characters) with a short username, so the overflow check never
+// meets "Cyber Overlord" (14) or a 16-character name — the case the capsule's
+// `truncate` and `max-w` exist for. And no suite plays a match and samples a
+// meter on the way back, so the resume itself is held by
+// tests/meterMemory.test.ts, not here.
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 await browser.close();

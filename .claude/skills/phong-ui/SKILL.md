@@ -65,6 +65,24 @@ plus a stacked sheet's own depth capped at four, so 74 is the ceiling — and th
 is load-bearing rather than decorative — now that the notice expires on a timer, being painted
 over would make it invisible for good rather than merely late.
 
+## A ProgressBar's track is the screen
+
+`ProgressBar`'s track is `bg-surface-1`, and `--color-surface-1` is *the screen background*
+(`src/index.css:51`). Drop a bar straight onto a screen and it renders as a fill with no track —
+you see the amber, you never see how far it has to go. It needs a card under it: the XP meter in
+the menu header carries its own `bg-surface-2` chip, and the rank meter is fine because it sits
+inside the `bg-surface-2` capsule. The rank ring hit the same thing from the other side — its
+`stroke-line` track against a `bg-surface-3` raised `Panel` — and was reported as "the meter has
+no ring at all".
+
+**A resume key names one meter and one BAND.** `resumeKey` makes a bar animate from where it last
+stood rather than from empty, which is what a meter outside the pager needs: `MainMenu` unmounts
+for the whole of a match, so the bar that comes back is a fresh mount. The key must carry the band
+(`menu-xp:{level}`, `rank:{tier}`) because a level-up drops the fraction from 0.95 to 0.05 —
+resumed from the old band, gaining a level animates as a long slide leftward. And two bars mounted
+at once must never share a key: each would write the other's origin. The store is
+`src/components/ui/meterMemory.ts`, pure and held by `tests/meterMemory.test.ts`.
+
 ## A call site never arms its own timer
 
 Convention §13: **every transient notification goes through `ToastHost`, which owns both the

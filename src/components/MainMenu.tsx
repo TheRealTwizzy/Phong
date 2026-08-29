@@ -10,6 +10,7 @@ import {
 import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
+import { TierBadge } from './TierBadge';
 import {
   aiRating,
   winProbability,
@@ -35,7 +36,6 @@ import {
 } from '../venues';
 import {
   Button,
-  Panel,
   ProgressBar,
   RankBadge,
   SegmentedControl,
@@ -427,35 +427,6 @@ export const MainMenu: React.FC<MainMenuProps> = ({
       id="menu-page-play-scroll"
       className="scroll-y flex h-full min-h-0 flex-col gap-3 px-safe pb-3"
     >
-        {/* Rank is the hero: the ladder always shows its next rung. */}
-        <Panel id="menu-rank-card" variant="raised" className="flex shrink-0 items-center gap-4">
-          <RankBadge
-            size="hero"
-            tier={profile?.tier || 'unranked'}
-            rankMu={profile?.rankMu ?? 25}
-            rankedGames={profile?.rankedGames ?? 0}
-            rankSigma={profile?.rankSigma ?? 25 / 3}
-            language={lang}
-          />
-          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-            <div className="flex items-baseline justify-between gap-2">
-              <span className="text-kicker text-ink-muted uppercase">
-                {t('menu_level', lang)} {profile?.level || 1}
-              </span>
-              <span className="inline-flex items-center gap-0.5 rounded-chip border border-warn/30 bg-warn/15 px-1 text-2xs text-warn">
-                <Flame className="h-2.5 w-2.5 fill-current" />
-                {profile?.dailyStreak || 1}d
-              </span>
-            </div>
-            <ProgressBar
-              id="menu-xp-bar"
-              value={xpFraction}
-              tone="xp"
-              ariaLabel={t('menu_level', lang)}
-            />
-          </div>
-        </Panel>
-
         <SectionLabel>{t('menu_section_play', lang)}</SectionLabel>
 
         {/* The ranked queue. The slot was held open and honest through the
@@ -726,7 +697,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
         <button
           id="menu-profile-pill"
           onClick={onOpenProfile}
-          className="flex min-w-0 items-center gap-2 rounded-card border border-line bg-surface-2 p-1 pr-2.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-card border border-line bg-surface-2 p-1 pr-2.5 transition-colors active:scale-95 motion-reduce:active:scale-100"
         >
           <div className="relative shrink-0">
             <AvatarImage
@@ -746,13 +717,90 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               }`}
             />
           </div>
-          <span className="max-w-[110px] truncate text-2xs text-ink">
-            {profile?.username || 'Player'}
-          </span>
-          <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
-            LV{profile?.level || 1}
-          </span>
+          {/* username · rank · level, with the ladder under all three. The
+              capsule IS the progression readout now; what it replaced was this
+              row alone, over a full-width rank card that opened the PLAY page
+              and said the same three things a second time.
+
+              This column is 24px against a 30px avatar, and that is
+              LOAD-BEARING rather than tidy: `pt-safe-bar` (src/index.css:237)
+              offsets the toast stack by pt-safe + 48px to clear both top bars
+              in the app, and this header is ALREADY exactly pt-safe + 48px. A
+              taller capsule fails no build and reddens no test; it just puts
+              every toast over the header the offset exists to clear. */}
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <div className="flex min-w-0 items-center gap-1">
+              {/* text-left because a <button> centres its inherited text, and
+                  this span is now wider than its content. */}
+              <span className="min-w-[3rem] flex-1 truncate text-left text-2xs text-ink">
+                {profile?.username || 'Player'}
+              </span>
+              {/* The cap is MEASURED, not guessed: at text-2xs the widest
+                  labels are "Cyber Overlord" at 128px and "Grandmaster" at
+                  109px, and a cap under either truncates a rank for every
+                  player who holds it, however much room the row actually has —
+                  `max-w` does not yield when there is space, it just clips. So
+                  it is sized to the longest label and left `shrink`, which
+                  gives way only when the row is genuinely over budget. The
+                  username's own `min-w` is the other half: without it a flex
+                  item at `basis: 0%` absorbs none of the overflow and the badge
+                  takes it all, so a long name would push the rank out instead
+                  of ellipsising itself. */}
+              <TierBadge
+                tier={profile?.tier || 'unranked'}
+                language={lang}
+                className="max-w-[8rem] shrink"
+              />
+              <span className="shrink-0 rounded-chip bg-xp px-1 text-2xs text-ink-on-accent">
+                LV{profile?.level || 1}
+              </span>
+            </div>
+            <RankBadge
+              size="bar"
+              id="menu-rank-bar"
+              tier={profile?.tier || 'unranked'}
+              rankMu={profile?.rankMu ?? 25}
+              rankedGames={profile?.rankedGames ?? 0}
+              rankSigma={profile?.rankSigma ?? 25 / 3}
+              language={lang}
+            />
+          </div>
         </button>
+
+        {/* The XP meter needs its own chip rather than sitting bare on the
+            header: a ProgressBar's track is `bg-surface-1`, which IS the screen
+            background, so a bare bar would be a fill with no track at all --
+            the same mistake the rank ring made against a raised Panel, reported
+            at the time as "the meter has no ring". `self-stretch` matches the
+            capsule's height without contributing any of its own. */}
+        <div className="flex w-[4.5rem] shrink-0 flex-col justify-center gap-1 self-stretch rounded-card border border-line bg-surface-2 px-2">
+          {/* The streak, and nothing else. This row started as ProgressBar's
+              own label/trailing pair with an "XP" kicker on the left, and the
+              kicker cost about 24px the capsule needed more: at 390px a chip
+              wide enough to hold it left "Grandmaster" and "Cyber Overlord"
+              truncating for everyone who holds them. The bar is `--color-xp`,
+              which the token contract reserves for level and XP alone, and the
+              LV chip beside it is the same colour — between them the meter is
+              named without spending the width. `t('xp')` stays as the
+              accessible name. */}
+          <span className="inline-flex self-end items-center gap-0.5 rounded-chip border border-warn/30 bg-warn/15 px-1 text-2xs text-warn">
+            <Flame className="h-2.5 w-2.5 fill-current" />
+            {profile?.dailyStreak || 1}d
+          </span>
+          <ProgressBar
+            id="menu-xp-bar"
+            value={xpFraction}
+            tone="xp"
+            height="sm"
+            ariaLabel={t('xp', lang)}
+            /* Keyed on the LEVEL: a level-up is a new band, so the bar fills
+               from empty rather than sweeping backwards from 0.95 to 0.05 to
+               report progress the player just made. Undefined while the session
+               call is still in flight, so the null-profile render -- where
+               xpFraction is 0 -- neither reads nor writes the origin. */
+            resumeKey={profile ? `menu-xp:${profile.level}` : undefined}
+          />
+        </div>
       </header>
 
       {/* The one scrolling region. Every direct child is `shrink-0`: this is a

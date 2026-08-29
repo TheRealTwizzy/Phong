@@ -51,6 +51,7 @@ coverage number.
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
 | `gestures` | The swipe thresholds, the axis lock, the release velocity and the page-settle rule — the ONLY place these are stated (see §5) |
+| `meterMemory` | Where a progress meter resumes from, and that a band change resets it — the ONLY place this is stated (see §5) |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
@@ -371,6 +372,31 @@ still in the DOM while the request is in flight. That second leg is the one to r
 copying: intercepting proves the request LEFT, not that React has painted the loading state, and
 sampled immediately it reads the pre-refresh paint and goes green however the branch is written.
 It was measured exactly that way. The wait after interception is what makes it a test.
+
+**A progression meter is not fresh on arrival, and only the fast layer can say so.** A page
+that leaves the pager's three-slot window unmounts and resets, which is right for a page and
+wrong for a meter: a bar that refills from empty on the way back from a match reads as the XP
+being earned a second time. Both meters therefore live in the header, outside `#menu-pager`,
+and `ProgressBar`'s `resumeKey` carries the remaining case — `AnimatePresence` unmounting the
+whole menu for the length of a match. `scripts/e2e-menu.mjs` holds the STRUCTURE (both bars in
+the header and not inside the pager; both still in the document while PLAY is unmounted; the
+header still inside the `pt-safe-bar` offset the toast stack clears it by, measured off the
+utility rather than hardcoded). It cannot hold the RESUME: no browser suite plays a match and
+samples a meter on the way back, so `tests/meterMemory.test.ts` is the only place the store's
+rules are stated — that an unseen band resumes empty, that a level-up or a promotion IS a new
+band, and that two keys cannot write each other. The manual check that proved it is worth
+repeating rather than automating badly: sample the XP fill's `scaleX` on the first frame back
+from a match against a mission bar's, which has no `resumeKey` — same mount, same frame, same
+primitive, and the only difference is the store. Measured 0.66 against 0.00.
+
+**The header's height is a budget with nothing in it.** `pt-safe-bar` is `pt-safe + 48px` and
+the menu header is exactly that, so anything added to the capsule silently puts every toast
+over the bar the offset exists to clear — no build error, no red test, nothing to see but a
+notice covering the controls it is about. The `e2e-menu` leg above is the only thing that
+catches it. What that leg does NOT cover, stated so nobody reads more into a green run: its
+player is UNRANKED with a short username, so its overflow check never meets "Cyber Overlord"
+(128px at `text-2xs`) or a 16-character name — the case the capsule's `max-w` and `truncate`
+exist for, and one to re-measure by hand when that row changes.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test

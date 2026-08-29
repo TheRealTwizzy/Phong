@@ -33,7 +33,14 @@ export const TierBadge: React.FC<TierBadgeProps> = ({
       className={`inline-flex items-center border uppercase ${dims} ${TIER_STYLE[tier]} ${className}`}
       title={t(TIER_LABEL_KEY[tier], language)}
     >
-      {t(TIER_LABEL_KEY[tier], language)}
+      {/* min-w-0 + truncate on the INNER span, because this is an inline-flex
+          box: the label is an anonymous flex item, whose automatic minimum size
+          is its content, so text-overflow on the outer span CLIPS rather than
+          ellipsising. The menu capsule caps this chip and "Cyber Overlord" is
+          fourteen characters — the full label stays in `title`, and the tier
+          colour says the rest. Every other call site leaves the width
+          unconstrained, so this never fires there. */}
+      <span className="min-w-0 truncate">{t(TIER_LABEL_KEY[tier], language)}</span>
     </span>
   );
 };

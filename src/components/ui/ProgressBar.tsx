@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { motion } from 'motion/react';
 import { useMotion } from './motion';
+import { meterOrigin, rememberMeter } from './meterMemory';
 
 // Fills with transform: scaleX(), never width. Animating width relayouts the
 // bar on every frame; a transform runs on the compositor. The visual result
@@ -28,6 +29,14 @@ export interface ProgressBarProps {
   className?: string;
   /** Announced to assistive tech; the bar is decorative without it. */
   ariaLabel?: string;
+  /**
+   * Resume from where this meter last stood instead of filling from empty on
+   * every mount. The key names a BAND — see meterMemory.ts — and it is
+   * deliberately NOT the `id`: an `id` is a Playwright selector contract that
+   * has to stay stable, while a resume key has to CHANGE at a band boundary.
+   * Directly conflicting requirements, so they are two props.
+   */
+  resumeKey?: string;
 }
 
 export const ProgressBar: React.FC<ProgressBarProps> = ({
@@ -40,9 +49,25 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   animate = true,
   className = '',
   ariaLabel,
+  resumeKey,
 }) => {
   const m = useMotion();
   const pct = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+
+  // A pure Map read on every render, consumed only when the keyed fill MOUNTS,
+  // so StrictMode's double render costs nothing and cannot poison it — unlike a
+  // first-run flag, which the first setup spends (see useArrivalRefetch.ts).
+  // Reduced motion resumes nothing: with m.meter at duration 0 an origin would
+  // be a one-frame flash of the stale value, which is the thing being avoided.
+  const from = !resumeKey || m.reduced ? 0 : meterOrigin(resumeKey);
+
+  // Written from an effect and never during render. The value recorded is the
+  // TARGET rather than the painted position, so leaving the menu mid-tween
+  // remembers where the bar was heading — right for a number that is already
+  // true on the server.
+  useEffect(() => {
+    if (resumeKey) rememberMeter(resumeKey, pct);
+  }, [resumeKey, pct]);
 
   return (
     <div className={className}>
@@ -61,9 +86,14 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
         aria-valuemax={ariaLabel ? 100 : undefined}
         className={`w-full overflow-hidden rounded-chip bg-surface-1 ${HEIGHT[height]}`}
       >
+        {/* `key` is what makes a band change re-read `initial`: motion consumes
+            it at mount only, so without this a level-up would keep the previous
+            level's origin forever. `key={undefined}` is identical to no key, so
+            every call site that passes no resumeKey is unchanged. */}
         <motion.div
+          key={resumeKey}
           className={`h-full origin-left rounded-chip ${TONE[tone]}`}
-          initial={animate ? { scaleX: 0 } : false}
+          initial={animate ? { scaleX: from } : false}
           animate={{ scaleX: pct }}
           transition={m.meter}
           style={{ width: '100%' }}
