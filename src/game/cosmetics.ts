@@ -74,6 +74,18 @@ export interface StatusPalette {
   xp: string;
   locked: string;
   rankSteady: string;
+  /**
+   * The ladder meter's three stops, low to high. The only ramp here picked by a
+   * VALUE rather than by a meaning — the rank bar takes one by how full it is
+   * (components/ui/ladderTone.ts) — and it belongs in this palette rather than
+   * on the shell for the reason the others do: it must not follow the cosmetic.
+   * It stacks directly on the XP bar, and --color-xp is a fixed gold, so a
+   * per-cosmetic colour made the two meters one bar wherever the accent was
+   * also gold.
+   */
+  ladderLow: string;
+  ladderMid: string;
+  ladderHigh: string;
 }
 
 const STATUS_DARK: StatusPalette = {
@@ -83,6 +95,14 @@ const STATUS_DARK: StatusPalette = {
   xp: '#ffc53d',
   locked: '#4c5668',
   rankSteady: '#a78bfa',
+  // Measured, not picked. Every stop clears 0.08 OKLab against `xp` — the bar
+  // this one stacks on — by at least 0.269, and clears `win`, `loss`, `warn`
+  // and `rankSteady` too, so a meter can never be misread as a status. Two
+  // near misses are worth not re-deriving: #818cf8 sits 0.054 from rankSteady
+  // and #ec4899 sits 0.082 from loss.
+  ladderLow: '#19e3ff',
+  ladderMid: '#8b5cf6',
+  ladderHigh: '#ff2fb8',
 };
 
 const STATUS_LIGHT: StatusPalette = {
@@ -92,6 +112,13 @@ const STATUS_LIGHT: StatusPalette = {
   xp: '#8a5f00',
   locked: '#8b93a1',
   rankSteady: '#5b3fc4',
+  // Same hues, dark enough for a light ground — the whole reason two ramps
+  // exist. The midpoint is #4c1d95 rather than the #6d28d9 that matches the
+  // dark ramp's lightness, because that one lands 0.053 from this ramp's
+  // rankSteady.
+  ladderLow: '#0369a1',
+  ladderMid: '#4c1d95',
+  ladderHigh: '#a21caf',
 };
 
 export const STATUS_RAMPS: Record<CosmeticMode, StatusPalette> = {
@@ -791,6 +818,9 @@ export function cosmeticVars(cosmetic: Cosmetic): Record<string, string> {
     '--color-xp': st.xp,
     '--color-locked': st.locked,
     '--color-rank-steady': st.rankSteady,
+    '--color-ladder-low': st.ladderLow,
+    '--color-ladder-mid': st.ladderMid,
+    '--color-ladder-high': st.ladderHigh,
     // The elevation tokens bake their colours, so they have to be rebuilt here
     // or a cosmetic gets somebody else's rim light. Same reason as above: a
     // `color-mix()` referring to --color-ink inside @theme would be resolved

@@ -45,7 +45,7 @@ coverage number.
 | `streaks` | A rally streak: whose it is, what ends it, and what it carries into |
 | `room` | The relay's room rules, the reaper, and the adversarial `match_sync` guards |
 | `matchRules` | Ranked bands, normalization, `duelMatchKey` |
-| `cosmetics` | All 20 cosmetics × every unlock route, the contrast floor, the distinctness floor, and the two tones the header capsule stacks |
+| `cosmetics` | All 20 cosmetics × every unlock route, the contrast floor, the distinctness floor, and the two meters the header capsule stacks |
 | `color` | The colour maths both those floors stand on |
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
@@ -53,6 +53,7 @@ coverage number.
 | `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
 | `gestures` | The swipe thresholds, the axis lock, the release velocity and the page-settle rule — the ONLY place these are stated (see §5) |
 | `meterMemory` | Where a progress meter resumes from, and that a band change resets it — the ONLY place this is stated (see §5) |
+| `ladderTone` | Which stop of the rank meter's fixed ramp a fill is at — the one tone in the app picked by a value rather than a meaning |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
@@ -440,17 +441,27 @@ is what makes the substitution faithful rather than merely faster. That it IS fa
 something an assertion states better than the absent call does; `queue` and `duel` cover that
 pairing still works.
 
-**The capsule is the one place two meters stack, and colour is all they have.** The rank meter
-sits directly over the XP meter, 4px each, and `--color-xp` is the token contract's level-and-XP
-colour that the `LV` chip beside them also wears — so a rank meter in the same family reads as a
-second XP bar. `--color-warn` was that family: 0.044 from `--color-xp` in OKLab, against the
-0.08 `tests/cosmetics.test.ts` demands of two whole themes. What the suite asserts is the PALETTE
-fact rather than the component's prop, deliberately — the tone lives in a `.tsx` and importing
-it would drag React and `motion/react` into a `node` suite for one string — so it pins that
-`warn` and `xp` are one amber in BOTH status ramps, and it NAMES the two cosmetics whose accent
-is gold enough to have the same problem (`retro-crt`, `quantum-gold`) instead of asserting a floor
-the catalogue cannot meet. A twenty-first gold accent fails that list rather than shipping as one
-more capsule nobody can read.
+**The capsule is the one place two meters stack, and neither may follow the cosmetic.** The rank
+meter sits directly over the XP meter, 4px each, and `--color-xp` is the token contract's fixed
+level-and-XP gold that the `LV` chip beside them also wears. Two answers failed. `warn` is two
+shades of one amber with `xp` — 0.044 apart in OKLab, against the 0.08 `tests/cosmetics.test.ts`
+asks of two whole themes. `accent` is PER-COSMETIC while `xp` is fixed, so a gold-accented theme
+put them back on one colour whatever the distance was elsewhere. **That is why the assertion is
+uniformity and not a floor**: a distance floor is exactly what `accent` passed on seventeen
+cosmetics and failed on three, so the suite asserts that `cosmeticVars` returns the SAME value on
+every cosmetic of a mode, then checks the ramp's stops against `xp`, against each other, and
+against `win`/`loss`/`warn`/`rank-steady` so a meter can never be read as a verdict.
+`tests/ladderTone.test.ts` holds the stop arithmetic, including that a non-finite fill reads as
+empty rather than as no stop at all — the failure there is an unpainted, invisible bar, not a
+visibly wrong one.
+
+**Neither of those can see which tone the component actually passes**, because it lives in a
+`.tsx` and importing it would drag React and `motion/react` into a `node` suite. Reverting
+`RankBadge` to `tone="accent"` reddens nothing in the fast layer — verified. So `e2e-cosmetics`
+equips `retro-crt`, the gold-accented free theme, and asserts the shell accent moved while the
+meter's computed fill did not; and `e2e-menu` asserts that fill is painted at all, which is the
+other browser-only failure: if Tailwind stops generating `bg-ladder-mid` from the token, the bar
+renders with no background and every fast test still passes.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test
