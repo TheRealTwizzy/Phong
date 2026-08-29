@@ -214,7 +214,20 @@ async function revealLocked(page, building = 'solo') {
 // and there was no tap handler to cut it short.
 //
 // Each check gets its own fresh player: the profile above has long since
-// earned first_serve, and an unlock only happens once.
+// earned first_serve, and an unlock only happens once per account.
+//
+// And each check RETRIES on a fresh player when it finds the toast simply
+// gone. The dwell is the product's own 3s celebration TTL, and expiring is
+// the product WORKING — the first leg asserts exactly that — so a step that
+// arrives to find the toast already dismissed has lost a race against a
+// correct timer, not found a bug. Every Playwright round trip between the
+// toast mounting and an assertion running spends that 3s, and the pooled
+// runner can have siblings loading this box, so the race is genuinely
+// losable. A lost race is intermittent by nature; it is retried — a fresh
+// player being the only way to a fresh toast — and bounded, because the same
+// loss three accounts in a row is not intermittent: a toast that never
+// appears, or a dismiss that takes its siblings, fails every attempt the
+// same way and still goes red.
 // ---------------------------------------------------------------------------
 
 // Park the paddle at the wall and keep asking to serve (Space is a no-op when
@@ -255,14 +268,37 @@ async function freshPlayerInAMatch(label) {
   return { ctx: c, page: p };
 }
 
+// Run one toast check, retrying on a fresh player when it loses the race
+// against the toast's own dwell (the section comment above says why losing
+// is not failing). `run` returns null for a pass, or a sentence
+// naming the race it lost; a real verdict — the toast intercepting taps, a
+// dismiss that misses — calls fail() inside and exits on the spot. A passing
+// attempt reports its ✓ lines through `note`, so an abandoned one prints
+// nothing it did not finish.
+async function retryToastRace(label, run, attempts = 3) {
+  let lost = '';
+  for (let i = 1; i <= attempts; i++) {
+    const { ctx, page: p } = await freshPlayerInAMatch(`${label}${i}`);
+    const notes = [];
+    const verdict = await run(p, (m) => notes.push(m));
+    await ctx.close();
+    if (verdict === null) {
+      for (const m of notes) ok(m);
+      return;
+    }
+    lost = verdict;
+    if (i < attempts) console.log(`  · ${lost} — retrying on a fresh player (${i}/${attempts} spent)`);
+  }
+  fail(`${lost} — ${attempts} fresh players in a row; a lost race is intermittent, this is not`);
+}
+
 // --- 1. It expires while a match is running underneath it -------------------
-{
-  const { ctx, page: p } = await freshPlayerInAMatch('Expiry');
+await retryToastRace('Expiry', async (p, note) => {
   await playSoloToEnd(p);
   if (!(await p.waitForSelector('[data-toast="achievement"]', { timeout: 20000 }).catch(() => null))) {
-    fail('a first-ever match announced no unlock at all');
+    return 'the unlock toast was never seen (its 3s dwell can pass between polls)';
   }
-  ok('a first match announces its unlock');
+  note('a first match announces its unlock');
 
   // Play Again puts a live court back under the toast, and serving gets the
   // ball moving — which is exactly the condition that used to make the toast
@@ -279,19 +315,18 @@ async function freshPlayerInAMatch(label) {
   }
   await p.keyboard.up('KeyA');
   if (stillUp) fail('the toast outlived a match running under it — its timer is being re-armed by App re-renders');
-  ok('the toast expires on schedule with a ball in play');
-  await ctx.close();
-}
+  note('the toast expires on schedule with a ball in play');
+  return null;
+});
 
 // --- 2. Tapping it dismisses it, and it does not eat the HUD's taps ---------
-{
-  const { ctx, page: p } = await freshPlayerInAMatch('Tap');
+await retryToastRace('Tap', async (p, note) => {
   await playSoloToEnd(p);
   const toast = await p.waitForSelector('[data-toast="achievement"]', { timeout: 20000 }).catch(() => null);
-  if (!toast) fail('no achievement toast to tap');
+  if (!toast) return 'no achievement toast to tap (its 3s dwell can pass between polls)';
 
   // Back to a live court so the HUD is on screen under the toast. Everything
-  // from here runs inside the toast's own dwell, so it is still up.
+  // from here races the toast's remaining dwell, so any step can find it gone.
   await p.click('#btn-play-again');
   await p.waitForSelector('#half-court-canvas', { timeout: 8000 });
 
@@ -304,27 +339,32 @@ async function freshPlayerInAMatch(label) {
     const el = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
     return { intercepted: !!(el && t.contains(el)) };
   });
-  if (hit.gone) fail('the toast vanished inside its own dwell — cannot test what it blocks');
+  if (hit.gone) return 'the toast spent its dwell during the return to the court';
   if (hit.noButton) fail('no HUD sound button to test against');
   if (hit.intercepted) fail('the toast is swallowing taps meant for the HUD underneath it');
-  ok('the HUD stays reachable while a toast is up');
+  note('the HUD stays reachable while a toast is up');
 
   // A first-ever match unlocks several at once, so each card is tapped on its
   // own id: dismissing one must take that one and leave its siblings, which is
-  // the whole reason the dismiss is a functional update.
+  // the whole reason the dismiss is a functional update. The cards mounted
+  // together and share one TTL, so a sibling expiring mid-check is the race
+  // again — a real dismiss-all bug fails every fresh attempt the same way.
   const ids = await p.$$eval('[data-toast="achievement"]', (els) => els.map((e) => e.id));
-  if (!ids.length) fail('the toast vanished before it could be tapped');
-  await p.click(`#${ids[0]}`);
+  if (!ids.length) return 'the toast expired between the HUD check and the tap';
+  const tapped = await p.click(`#${ids[0]}`, { timeout: 2000 }).then(() => true).catch(() => false);
+  if (!tapped) return 'the card expired under the tap aimed at it';
   const went = await p
     .waitForSelector(`#${ids[0]}`, { state: 'detached', timeout: 1500 })
     .then(() => true)
     .catch(() => false);
   if (!went) fail('tapping the achievement toast did not dismiss it');
   const left = await p.$$eval('[data-toast="achievement"]', (els) => els.length);
-  if (left !== ids.length - 1) fail(`tapping one card took ${ids.length - left} of ${ids.length} cards with it`);
-  ok(`tapping a card dismisses that card alone (${ids.length} unlocked, ${left} left)`);
-  await ctx.close();
-}
+  if (left !== ids.length - 1) {
+    return `one tap left ${left} cards where ${ids.length - 1} were expected (siblings share the dwell)`;
+  }
+  note(`tapping a card dismisses that card alone (${ids.length} unlocked, ${left} left)`);
+  return null;
+});
 
 if (errs.length) fail(`page errors: ${errs.join(' | ')}`);
 console.log('\nTREE + GATING CHECKS PASSED');

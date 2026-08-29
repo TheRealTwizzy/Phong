@@ -99,5 +99,14 @@ same rule, because `spin` drives an easier geometry and the same AI returns more
 first. This is about *choosing* a bound as you write one; whether a red you are looking at is a
 sample rather than a bug is `phong-ship-check`'s call, under "Reading a failure".
 
+The other machine-shaped noise is a **race against a product timer**. The achievement toast
+dwells for the product's own 3s TTL and expiring is the product working, so a suite step that
+finds it already gone has lost a scheduling race, not caught a bug — and with siblings loading
+the box, the race is genuinely losable. `scripts/e2e-achievements.mjs` retries the whole check
+on a fresh player (an unlock is one-shot per account, so only a fresh player gets a fresh
+toast), bounded at three, because a lost race is intermittent by nature and the same loss three
+accounts in a row is a verdict: a toast that never appears still goes red. Never widen the
+product's TTL to make a suite comfortable.
+
 And when a rule changes, change its suite in the same commit — **a suite that asserts old
 behaviour is deleted rather than read.**
