@@ -3137,31 +3137,46 @@ class GameDatabase {
    * It has to be the SAME number `getLeaderboard` prints, or a badge reading
    * #12 beside a Ranks page reading #7 is worse than no badge at all — and the
    * board's `rank` is not a count, it is a dense JS counter over a filtered,
-   * ordered scan. So all three of its filters are mirrored here rather than
-   * approximated: an uninitialized profile, a player with no ranked game, and
-   * every one of the seeded bots is invisible to the board and must be
-   * invisible to this count too. Bots are the one that actually bites: they
-   * are pre-placed, so a naive `rankMu > ?` would let the whole curated roster
-   * push every human down.
+   * ordered scan. So its filters are mirrored here rather than approximated:
+   * an uninitialized profile and every one of the seeded bots is invisible to
+   * the board and must be invisible to this count too. Bots are the one that
+   * actually bites: they are pre-placed, so a naive `rankMu > ?` would let the
+   * whole curated roster push every human down.
    *
-   * The placed-first sort key needs no clause of its own, because this is only
-   * ever asked about a player who IS placed and everyone above them therefore
-   * is too.
+   * **The placed test is part of the ORDER, not just the filter.** The board
+   * LISTS an unplaced player who has started placement (`rankedGames > 0`) and
+   * sorts them BELOW every placed one, so "above me in mu" and "above me on
+   * the board" are different sets: an unplaced player four games in can hold a
+   * mu above an Overlord's and still rank under them. Counting on mu alone
+   * therefore reported a position larger than the board's for exactly the
+   * players the number is for. The predicate here is the board's own primary
+   * sort key, character for character.
+   *
+   * The row is also asked to exclude ITSELF, which is not tidiness: inside
+   * `recordMatch` this runs on a profile whose rating has already moved in
+   * memory while its stored row still holds the pre-match value. After a LOSS
+   * the stored self therefore satisfies `rankMu > ?` and the player was counted
+   * as standing above themselves — one position too low, or none at all at the
+   * top-100 boundary, until the next fresh read.
    *
    * One constant SQL string with binds, never an interpolated rating: `stmt()`
    * caches on the text, so interpolating would mint a prepared statement per
-   * distinct rating and grow the cache without bound.
+   * distinct rating and grow the cache without bound. The placement constants
+   * ARE interpolated, exactly as `getLeaderboard` interpolates them — they are
+   * compile-time values, so the text stays constant.
    */
   private ladderPosition(id: string, rankMu: number): number | null {
     const row = this.stmt(
         `SELECT COUNT(*) AS above
            FROM players p
           WHERE p.initializedAt IS NOT NULL
-            AND p.rankedGames > 0
             AND p.id NOT LIKE 'bot-%'
+            AND p.id <> ?
+            AND p.rankedGames >= ${PLACEMENT_GAMES}
+            AND p.rankSigma <= ${PLACEMENT_SIGMA}
             AND (p.rankMu > ? OR (p.rankMu = ? AND p.id < ?))`
       )
-      .get(rankMu, rankMu, id) as unknown as { above: number } | undefined;
+      .get(id, rankMu, rankMu, id) as unknown as { above: number } | undefined;
     const position = (row?.above ?? 0) + 1;
     return position <= LADDER_TOP_N ? position : null;
   }

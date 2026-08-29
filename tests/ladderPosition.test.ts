@@ -77,6 +77,16 @@ beforeAll(async () => {
   db.initializeProfile(ghostId, 'GhostEcho');
   setRating(ghostId, 99, 0);
 
+  // Four placement games in, and rated above the apex. This one is ON the
+  // board — `rankedGames > 0` is the board's progress filter — but sorted
+  // BELOW every placed player, because the board's primary key is placed-ness
+  // and not rating. So "above me in mu" and "above me on the board" are
+  // different sets, which a count on rating alone cannot see.
+  const risingId = 'dev_rising_gggggggggg';
+  db.getProfile(risingId);
+  db.initializeProfile(risingId, 'RisingFox');
+  setRating(risingId, 50, 4);
+
   // Uninitialized: never finished onboarding, invisible everywhere.
   const strayId = 'dev_stray_fffffffffff';
   db.getProfile(strayId);
@@ -112,6 +122,22 @@ describe('the ladder position the top rung renders', () => {
     const ghost = db.getProfile('dev_ghost_eeeeeeeeeeee');
     expect(ghost.ladderPosition).toBeUndefined();
     expect(db.getProfile('dev_overlord_aaaaaaaaa').ladderPosition).toBe(1);
+  });
+
+  it('ignores an unplaced player, however high their rating has climbed', () => {
+    // RisingFox is rated 50 — above every Overlord here — with four placement
+    // games played. The board lists them LAST, under all the placed rows, so a
+    // count keyed on rating alone put every Overlord one position lower than
+    // the Ranks page did, for exactly the players the number exists for.
+    const rising = db.getProfile('dev_rising_gggggggggg');
+    expect(rising.tier).toBe('unranked');
+    expect(rising.ladderPosition).toBeUndefined();
+    expect(db.getProfile('dev_overlord_aaaaaaaaa').ladderPosition).toBe(1);
+
+    const board = db.getLeaderboard('elo', 100);
+    const risingRank = board.find((e) => e.id === 'dev_rising_gggggggggg')!.rank;
+    const apexRank = board.find((e) => e.id === 'dev_overlord_aaaaaaaaa')!.rank;
+    expect(risingRank).toBeGreaterThan(apexRank!);
   });
 
   it('ignores a profile that never finished onboarding', () => {
@@ -193,5 +219,35 @@ describe('a match that changes the rating changes the number with it', () => {
     // And it is the number the board would print at this instant.
     const entry = db.getLeaderboard('elo', 200).find((e) => e.id === climberId)!;
     expect(result.profile.ladderPosition).toBe(entry.rank);
+  });
+
+  it('does not count the player against their own pre-match row on a loss', () => {
+    // recordMatch mutates the profile in memory and does not persist it until
+    // the end, so mid-flight the player's STORED row still holds the higher
+    // pre-match rating. After a loss that stored self satisfies `rankMu > ?`
+    // and the player was counted as standing above themselves: one position
+    // too low, or none at all at the top-100 boundary.
+    const fallerId = 'dev_faller_888888888';
+    seat(fallerId, 'Faller', 44.99);
+    const before = db.getProfile(fallerId).ladderPosition!;
+
+    const result = db.recordMatch({
+      playerId: fallerId,
+      username: 'Faller',
+      playerScore: 0,
+      opponentScore: 5,
+      bestStreak: 1,
+      endStreak: 0,
+      earnedStreak: 1,
+      mode: 'multiplayer',
+      isWinner: false,
+    } as MatchEndPayload);
+
+    // The rating fell, so the position may legitimately be the same or worse —
+    // what it may not be is a number nobody else agrees with.
+    expect(result.profile.ladderPosition).toBe(db.getProfile(fallerId).ladderPosition);
+    const entry = db.getLeaderboard('elo', 200).find((e) => e.id === fallerId)!;
+    expect(result.profile.ladderPosition).toBe(entry.rank);
+    expect(result.profile.ladderPosition).toBeGreaterThanOrEqual(before);
   });
 });

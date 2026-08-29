@@ -405,9 +405,15 @@ a dense JS counter over a filtered, ordered scan. So a badge computed any other 
 with the Ranks page for the same player, which is worse than no badge, and only one assertion
 catches it: `tests/ladderPosition.test.ts` reads both and compares them player for player. The
 fixture puts two bots ABOVE the apex on purpose, because bots are pre-placed and a count that
-forgets them pushes every human down by the whole roster; it also seats a rated player with no
+forgets them pushes every human down by the whole roster; it seats a rated player with no
 ranked game and an uninitialized one, each of which would take #1 from a gate that read the
-rating alone. Reaching Overlord is still `rankMu >= 37` and nothing else — the headcount is a
+rating alone; and it seats one four games into placement rated above every Overlord, because
+the board lists that player and sorts them UNDER the placed rows, so a count on rating alone
+put every Overlord one position lower than the Ranks page did. A separate leg records a LOSS
+and checks the returned position against the board, since `recordMatch` reports before it
+persists and the stale higher self was being counted as standing above the player. Each of
+those was verified by reverting the fix and watching the leg go red — a fixture this dense is
+exactly where a vacuous pass hides. Reaching Overlord is still `rankMu >= 37` and nothing else — the headcount is a
 display, never a definition — so no test here may make one player's tier depend on another's.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change

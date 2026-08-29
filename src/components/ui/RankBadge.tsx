@@ -1,6 +1,7 @@
 import React from 'react';
 import { LanguageCode } from '../../types';
 import { Tier, PLACEMENT_GAMES, isPlaced, tierProgress } from '../../rating';
+import { t } from '../../i18n/translations';
 import { TierBadge } from '../TierBadge';
 import { ProgressBar } from './ProgressBar';
 
@@ -28,10 +29,19 @@ import { ProgressBar } from './ProgressBar';
 // without solving both again.
 //
 // HARD RULE: rankMu enters tierProgress() and reaches a transform. It never
-// becomes text, and there is no numeric aria-label — which is now enforced by
-// omission, since ProgressBar emits role/aria-valuenow only when given an
-// ariaLabel and this passes none. The suites regex the whole document body for
+// becomes text, and it never reaches an aria-label either — ProgressBar emits
+// role/aria-valuenow only when given one, so the PLACED meter passes none and
+// is decorative by construction. The suites regex the whole document body for
 // a raw rating, and rightly so. The tier is spoken by the TierBadge beside it.
+//
+// The UNPLACED meter is the opposite case and needs the opposite treatment.
+// Its value is a count of games played, not a rating, and the visible
+// "Placement 2/5" line that used to sit under the ring went with the ring — so
+// without a label a screen reader heard "Unranked" and nothing else, with no
+// way to learn how many placement games were left. It gets the localized
+// string it lost, which announces `played/total` as a percentage of five
+// games. Reading a rating out of that is not possible; reading one out of tier
+// progress would be.
 
 export interface RankBadgeProps {
   tier: Tier;
@@ -68,6 +78,14 @@ export const RankBadge: React.FC<RankBadgeProps> = ({
       height="sm"
       tone={placed ? 'accent' : 'warn'}
       className={className}
+      ariaLabel={
+        placed
+          ? undefined
+          : t('placement_progress', language, {
+              played: String(played),
+              total: String(PLACEMENT_GAMES),
+            })
+      }
       // The BAND, so a promotion starts the new tier empty instead of sliding
       // backwards out of the old one. Placement is a band of its own: the meter
       // counts 1/5 to 5/5 across a session and resumes mid-count.
