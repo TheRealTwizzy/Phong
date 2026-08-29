@@ -76,7 +76,19 @@ const BOT_SIGMA = 1.0;
 // against its own room state (TrueSkill-2 style signals). Solo never gets
 // these — solo stats are self-reported and would be a free rating dial.
 export interface RecordMatchContext {
+  /** The opponent's HIDDEN estimator, which predicts the match and moves the
+   *  hidden estimator. Never the one the visible ladder rates against. */
   opponentRating?: Rating;
+  /**
+   * The opponent's VISIBLE ladder rating, for the rank update.
+   *
+   * Separate from `opponentRating` because the two estimators diverge by
+   * design — a solo match moves mmrMu and never rankMu, SOLO_MU_CAPS caps one
+   * while AI_ADAPT_BAND moves the other — so rating the ladder against the
+   * hidden pair measured `mu - oppMu` across two different scales. It was
+   * wrong in both magnitude and in the win probability the step is built on.
+   */
+  opponentRankRating?: Rating;
   /** 0.5..1.5 weight from margin of victory / rally quality. */
   performanceWeight?: number;
   /**
@@ -2345,6 +2357,7 @@ class GameDatabase {
     now: Date = new Date()
   ): MatchEndResult {
     const opponentRating = context.opponentRating;
+    const opponentRankRating = context.opponentRankRating;
     const performance = context.performanceWeight ?? 1;
     const profile = this.getProfile(payload.playerId);
     // Names come from the profile, never the payload — backstop for the
@@ -2486,9 +2499,21 @@ class GameDatabase {
             // the exact trap placement was just fixed for.
             sigmaScale: placementOpts.sigmaScale,
           };
+      // The ladder rates against the LADDER. `oppRating` above is the hidden
+      // estimator: it predicts the match and moves the hidden pair, and the
+      // two genuinely diverge — a solo match moves mmrMu and never rankMu, and
+      // SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other — so using
+      // it here measured the standardised margin across two different scales.
+      // Absent (a solo match, or a caller with no room to sample from) falls
+      // back to an even ladder match against ourselves, the same shape
+      // `oppRating`'s own fallback takes, and never to the hidden pair, which
+      // is the bug.
+      const oppRankRating: Rating = isPvp
+        ? opponentRankRating || { mu: profile.rankMu, sigma: profile.rankSigma }
+        : oppRating;
       const nextRank = updateRating(
         { mu: profile.rankMu, sigma: profile.rankSigma },
-        oppRating,
+        oppRankRating,
         isWin,
         rankOpts
       );

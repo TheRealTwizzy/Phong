@@ -251,10 +251,21 @@ export interface Room {
   spectators: (SpectatorSession | null)[];
 }
 
-/** A seat's hidden rating, as the ladder in src/rating.ts models it. */
+/**
+ * A seat's TWO ratings, as src/rating.ts models them, sampled before the match.
+ *
+ * Both, because the two updates rate against different things: the hidden
+ * estimator predicts the match and moves the hidden estimator, while the
+ * visible ladder moves against the visible ladder. One pair standing in for
+ * both is how a ranked duel came to be rated against a number drawn from the
+ * other estimator — and the two genuinely diverge, by design: a solo match
+ * moves mmrMu and never rankMu, SOLO_MU_CAPS caps one while AI_ADAPT_BAND
+ * moves the other, and any match that is `ranked` but not `ranksThisMatch`
+ * (a Rookie solo) moves the first and not the second.
+ */
 export interface SeatRating {
-  mu: number;
-  sigma: number;
+  mmr: { mu: number; sigma: number };
+  rank: { mu: number; sigma: number };
 }
 
 /** What a client is told when the room's match (re)starts. */

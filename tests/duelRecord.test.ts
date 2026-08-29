@@ -3,6 +3,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { findMission } from '../src/game/missions';
 import { duelMatchKey } from '../src/matchRules';
+import { PVP_UPDATE, updateRating } from '../src/rating';
+import { performanceWeight } from '../server/room';
 import { Device, Phone as PhoneSocket, Relay, sleep, startRelay } from './helpers/relay';
 
 // A duel end-to-end through the REAL relay and the REAL record route, because
@@ -65,10 +67,13 @@ const board = async (): Promise<any[]> =>
  * and the server compiles a statement per read rather than caching rows, so
  * its next `getProfile` sees this.
  *
- * Both ratings are set, not just the visible one: the RANK update rates a duel
- * against the opponent's hidden MMR (recordMatch's `oppRating`), so leaving
- * mmrMu at the default 25 would have two Overlords rating each other as
- * beginners.
+ * Both ratings are set, not just the visible one, because a duel rates EACH
+ * estimator against its own counterpart: the visible ladder against the
+ * opponent's rankMu, the hidden one against their mmrMu. A fixture has to
+ * stand the device up on both ladders or half of what it is testing is still
+ * a default-μ25 beginner. (It used to say something narrower — that the rank
+ * update rated against the opponent's hidden MMR — which was true, and was
+ * the bug: the standardised margin was measured across two different scales.)
  */
 function seedLadder(device: Device, mu: number, sigma: number): void {
   const sql = new DatabaseSync(path.join(relay.dataDir, 'phong.db'));
@@ -83,6 +88,34 @@ function seedLadder(device: Device, mu: number, sigma: number): void {
     // A silent no-op here would leave two μ25 players duelling and every
     // assertion below asking about a ladder neither is on.
     if (changed !== 1) throw new Error(`seedLadder matched ${changed} rows for ${device.username}`);
+  } finally {
+    sql.close();
+  }
+}
+
+/**
+ * Stand a device at DIFFERENT ratings on the two estimators.
+ *
+ * seedLadder deliberately sets them equal, which is right for a fixture about
+ * the ladder alone and useless for asking WHICH of the two a duel rates
+ * against — with both at the same value, either answer looks correct. The two
+ * diverge in ordinary play, so a test about that has to be able to pull them
+ * apart.
+ */
+function seedSplit(
+  device: Device,
+  r: { rankMu: number; rankSigma: number; mmrMu: number; mmrSigma: number }
+): void {
+  const sql = new DatabaseSync(path.join(relay.dataDir, 'phong.db'));
+  try {
+    const changed = sql
+      .prepare(
+        `UPDATE players
+            SET rankMu = ?, rankSigma = ?, rankedGames = 5, mmrMu = ?, mmrSigma = ?
+          WHERE id = ?`
+      )
+      .run(r.rankMu, r.rankSigma, r.mmrMu, r.mmrSigma, device.id).changes;
+    if (changed !== 1) throw new Error(`seedSplit matched ${changed} rows for ${device.username}`);
   } finally {
     sql.close();
   }
@@ -405,6 +438,54 @@ describe('recording a duel', () => {
 
     race.p1.close();
     race.p2.close();
+  }, 45000);
+
+  it('rates the visible ladder against the opponent\'s LADDER, not their hidden MMR', async () => {
+    // The two estimators diverge by design: a solo match moves mmrMu and never
+    // rankMu, SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other, and a
+    // Rookie solo moves the first and not the second. So a fixture can stand a
+    // player far apart on the two, and then the ladder update either used the
+    // right one or it did not.
+    //
+    // The host is a Legend on the ladder and an ordinary μ25 in hidden MMR.
+    // Beating them is a big upset on the ladder and a coin flip on MMR, so the
+    // guest's rank gain is much larger when it is measured against the rank
+    // pair — which is the whole point of the fix. Asserted against
+    // updateRating itself rather than a magic number, so it stays true if the
+    // constants move.
+    const host = await newDevice('SplitRating');
+    const guest = await newDevice('SplitChallenger');
+    seedSplit(host, { rankMu: 34, rankSigma: 2, mmrMu: 25, mmrSigma: 2 });
+    seedSplit(guest, { rankMu: 25, rankSigma: 2, mmrMu: 25, mmrSigma: 2 });
+
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 1, p2Score: 3 });
+    const guestRecord = await p2.await('match_recorded');
+    expect(guestRecord.result.rankDirection).toBe('up');
+
+    const after = await getProfile(guest);
+    const perf = performanceWeight(3, 1, 0);
+    const againstRank = updateRating(
+      { mu: 25, sigma: 2 },
+      { mu: 34, sigma: 2 },
+      true,
+      { ...PVP_UPDATE, performance: perf }
+    );
+    const againstMmr = updateRating(
+      { mu: 25, sigma: 2 },
+      { mu: 25, sigma: 2 },
+      true,
+      { ...PVP_UPDATE, performance: perf }
+    );
+    expect(after.rankMu).toBeCloseTo(againstRank.mu, 6);
+    // And the two answers really are far apart, or this proves nothing.
+    expect(Math.abs(againstRank.mu - againstMmr.mu)).toBeGreaterThan(0.3);
+
+    // The hidden estimator still rates against the hidden pair, untouched.
+    expect(after.mmrMu).toBeCloseTo(againstMmr.mu, 6);
+
+    p1.close();
+    p2.close();
   }, 45000);
 
   it('moves exactly one seat up the ladder and the other down', async () => {

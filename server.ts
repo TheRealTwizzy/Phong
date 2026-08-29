@@ -774,7 +774,10 @@ function duelStartRatings(room: Room): Array<SeatRating | null> {
       const player = room.players[seat];
       if (!player?.deviceId || !seatStillHoldsAccount(player)) return null;
       const p = db.getProfile(player.deviceId);
-      return { mu: p.mmrMu, sigma: p.mmrSigma };
+      return {
+        mmr: { mu: p.mmrMu, sigma: p.mmrSigma },
+        rank: { mu: p.rankMu, sigma: p.rankSigma },
+      };
     };
     room.startRatings = [sample(0), sample(1)];
     room.startRatingsSeq = room.matchSeq;
@@ -898,7 +901,10 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
       performanceWeight: performanceWeight(mine, theirs, room.earnedBests[seat]),
     };
     const oppRating = ratingBefore[seat === 0 ? 1 : 0];
-    if (oppRating) context.opponentRating = oppRating;
+    if (oppRating) {
+      context.opponentRating = oppRating.mmr;
+      context.opponentRankRating = oppRating.rank;
+    }
     // Only the LEAVER's copy is spared the ladder by a forgiven abandon; the
     // survivor's win rates on its own merits either way.
     if (opts.forgivenLoss && !isWinner) context.forceUnranked = true;
@@ -1670,7 +1676,10 @@ async function startServer() {
           // they stood at the start rather than against whichever of them
           // happened to be committed first.
           const oppRating = duelStartRatings(room)[seat === 0 ? 1 : 0];
-          if (oppRating) context.opponentRating = oppRating;
+          if (oppRating) {
+            context.opponentRating = oppRating.mmr;
+            context.opponentRankRating = oppRating.rank;
+          }
           context.performanceWeight = performanceWeight(mine, theirs, room.earnedBests[seat]);
         }
       }
