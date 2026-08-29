@@ -835,6 +835,22 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
   // vacating the leaver's seat, so a decided match and an abandoned one are
   // both recorded off the same complete room.
   if (!room.players[0] || !room.players[1]) return;
+  // A level score decided nothing, and `isWinner` below is `mine > theirs` —
+  // false for BOTH seats — so recording one would file a LOSS against each
+  // player. That is the worst available answer to "we cannot tell who won",
+  // and it is what a [cap, cap] match_sync used to produce before
+  // applyMatchSync learned to refuse one. Nothing is recorded instead: a duel
+  // with no winner has no result to file, and leaving the matchKey unstamped
+  // keeps it recoverable rather than half-paid.
+  //
+  // The abandon path is exempt because it NAMES its winner: a walk-out at 0-0
+  // is a real result and `winnerSeat` says whose.
+  if (opts.winnerSeat === undefined && room.scores[0] === room.scores[1]) {
+    console.error(
+      `refusing to record an undecided duel in ${room.id}: ${room.scores.join('-')}`
+    );
+    return;
+  }
 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
@@ -1627,7 +1643,19 @@ async function startServer() {
         // from. A room is reused by every rematch and reset to 0-0 by each
         // one, so an unqualified cross-check overwrote a slow or replayed POST
         // with the NEXT match's blank score and filed it as a 0-0 loss.
-        if (room && seat >= 0 && room.matchSeq === seq) {
+        // ...and only for one it has something to SAY about. A level score is
+        // the relay behind the client rather than ahead of it: in a P2P duel
+        // the deciding match_sync travels the WebSocket while this POST travels
+        // HTTP, so the winner's own report legitimately arrives first, against
+        // a room still reading 0-0. Overwriting from that room set
+        // `playerScore = 0` and `isWinner = mine > theirs` = FALSE, filing the
+        // WINNER a 0-0 loss — and the shared matchKey then deduped the relay's
+        // correct record away, so it stood. Two red down-arrows off an ordinary
+        // race, no malformed message needed. When the room cannot decide the
+        // match, the client's own account of it stands, exactly as it does when
+        // there is no room at all.
+        const level = room ? room.scores[0] === room.scores[1] : false;
+        if (room && seat >= 0 && room.matchSeq === seq && !level) {
           const mine = room.scores[seat];
           const theirs = room.scores[seat === 0 ? 1 : 0];
           payload.playerScore = mine;

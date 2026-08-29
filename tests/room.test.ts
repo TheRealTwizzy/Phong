@@ -177,6 +177,45 @@ describe('applyMatchSync — a score reported by a peer', () => {
     expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 1 })).decided).toBe(false);
   });
 
+  it('refuses a snapshot claiming BOTH seats won, rather than repairing it', () => {
+    // The reported bug, stated at the boundary that let it in. A replica stops
+    // at the first score to reach the cap, so no honest peer reports two
+    // winners — but the two scores are clamped INDEPENDENTLY, so [999, 999]
+    // used to land as [5, 5], report the match decided, and leave
+    // recordRoomMatch's `mine > theirs` false for BOTH seats: two ranked
+    // losses and two red down-arrows off one message.
+    const r = room();
+    applyMatchSync(r, sync({ p1Score: 3, p2Score: 2, bestStreaks: [7, 7] as any }));
+
+    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 5 })).decided).toBe(false);
+    expect(applyMatchSync(r, sync({ p1Score: 999, p2Score: 999 })).decided).toBe(false);
+    expect(applyMatchSync(r, sync({ p1Score: 6, p2Score: 5 })).decided).toBe(false);
+
+    // Nothing of the refused snapshots is kept — not the score, and not the
+    // fields a snapshot ASSIGNS. A peer that is wrong about who won is not one
+    // whose serving seat or streaks are worth taking either.
+    expect(r.scores).toEqual([3, 2]);
+    expect(r.matchOver).toBe(false);
+    expect(r.bestStreaks).toEqual([7, 7]);
+
+    // And the room is still able to hear the real result afterwards, so the
+    // refusal costs the honest peer nothing.
+    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 2 })).decided).toBe(true);
+    expect(r.scores).toEqual([5, 2]);
+  });
+
+  it('does not start play, or burn a revision, on a two-winner snapshot', () => {
+    // Refused BEFORE the revision is bumped, so a malformed snapshot cannot
+    // spend a number a legitimate one still wants — and before inPlay can be
+    // set, or a walk-out during the countdown becomes an abandon for a match
+    // nobody played. Same reasoning as the 0-0 guard below.
+    const r = room();
+    applyMatchSync(r, sync({ p1Score: 5, p2Score: 5, rev: 40, crossingsThisPoint: 9 }));
+    expect(r.inPlay).toBe(false);
+    expect(r.syncRev).toBe(0);
+    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 1, rev: 40 })).decided).toBe(true);
+  });
+
   it('clears rematch votes when the match decides, so none are banked early', () => {
     const r = room({ rematchVotes: [true, false] });
     applyMatchSync(r, sync({ p1Score: 5 }));

@@ -320,6 +320,117 @@ describe('recording a duel', () => {
     p2.close();
   });
 
+  it('files nothing at all when a snapshot claims BOTH seats won', async () => {
+    // The reported bug, end to end: two players saw a red down-arrow after one
+    // ranked duel. updateRating cannot invert a sign — a winner always gains —
+    // so a red arrow means the server believed that seat LOST, and both red
+    // meant both were recorded as losers. One match_sync with each score at
+    // the cap was enough: the two are clamped independently, so [9, 9] landed
+    // as [3, 3], reported the match decided, and recordRoomMatch's
+    // `mine > theirs` was false for BOTH seats.
+    //
+    // room.test.ts holds the boundary that refuses it. This holds the outcome,
+    // and it is not the same assertion: a recordRoomMatch that still ties
+    // passes there and fails here.
+    const host = await newDevice('TieHost');
+    const guest = await newDevice('TieGuest');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 1, p2Score: 1 });
+    p1.send({ type: 'match_sync', matchSeq, rev: 2, p1Score: 9, p2Score: 9 });
+    p2.send({ type: 'match_sync', matchSeq, rev: 3, p1Score: 3, p2Score: 3 });
+    await sleep(400);
+
+    const hostProfile = await getProfile(host);
+    const guestProfile = await getProfile(guest);
+    // Neither a loss for either of them, nor a win for either — an undecided
+    // duel has no result to file, and inventing one for both is how a player
+    // lost rating to a match nobody won.
+    for (const p of [hostProfile, guestProfile]) {
+      expect(p.matchesPlayed).toBe(0);
+      expect(p.matchesLost).toBe(0);
+      expect(p.matchesWon).toBe(0);
+      expect(p.rankedGames).toBe(0);
+      expect(p.xp).toBe(0);
+    }
+    expect(p1.all('match_recorded')).toHaveLength(0);
+    expect(p2.all('match_recorded')).toHaveLength(0);
+
+    // And the room is still playable afterwards: the refusal drops the
+    // snapshot, not the match.
+    p1.send({ type: 'match_sync', matchSeq, rev: 4, p1Score: 3, p2Score: 1 });
+    const decided = await p1.await('match_recorded');
+    expect(decided.result.rankDirection).toBe('up');
+    expect((await getProfile(host)).matchesWon).toBe(1);
+    expect((await getProfile(guest)).matchesLost).toBe(1);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('does not file the WINNER a 0-0 loss when their POST outruns the sync', async () => {
+    // The second route to two red arrows, and the likelier one: it needs no
+    // malformed message, just an ordinary race. In a P2P duel the deciding
+    // match_sync goes over the WebSocket while the client's own POST goes over
+    // HTTP, so the winner's report can reach the relay first — against a room
+    // still reading 0-0. The cross-check then overwrote the payload from that
+    // room, and `isWinner = mine > theirs` was false, so the WINNER was filed a
+    // 0-0 loss. The shared matchKey deduped the relay's correct record away
+    // afterwards, so the wrong one stood: winner red, loser red.
+    //
+    // A room that has not decided the match has nothing to say about it, so
+    // the client's own account stands — the same rule as no room at all.
+    const host = await newDevice('EarlyWin');
+    const guest = await newDevice('EarlyLose');
+    const race = await seatDuel(host, guest, 3);
+
+    const early = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        playerScore: 3, opponentScore: 0,
+        bestStreak: 4, endStreak: 4, earnedStreak: 4,
+        mode: 'multiplayer', isWinner: true,
+        roomId: race.roomId, matchSeq: race.matchSeq,
+      }),
+    });
+    expect(early.status).toBe(200);
+    const result = await early.json();
+    expect(result.rankDirection).toBe('up');
+
+    const hostProfile = await getProfile(host);
+    expect(hostProfile.matchesWon).toBe(1);
+    expect(hostProfile.matchesLost).toBe(0);
+    expect(hostProfile.totalPointsScored).toBe(3);
+
+    race.p1.close();
+    race.p2.close();
+  }, 45000);
+
+  it('moves exactly one seat up the ladder and the other down', async () => {
+    // The direct regression assertion for "both arrows were red". The rank
+    // tile draws MatchEndResult.rankDirection, so a decided ranked duel has to
+    // produce one 'up' and one 'down' — never two of a kind, in either
+    // direction. Nothing in the browser layer asserts the arrow, which is how
+    // this reached a player in the first place.
+    const host = await newDevice('DirUp');
+    const guest = await newDevice('DirDown');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 3, p2Score: 1 });
+    const hostRecord = await p1.await('match_recorded');
+    const guestRecord = await p2.await('match_recorded');
+
+    const directions = [hostRecord.result.rankDirection, guestRecord.result.rankDirection];
+    expect(directions.filter((d: string) => d === 'up')).toHaveLength(1);
+    expect(directions.filter((d: string) => d === 'down')).toHaveLength(1);
+    expect(hostRecord.result.rankDirection).toBe('up');
+    expect(guestRecord.result.rankDirection).toBe('down');
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
   it('tells both phones to come off P2P the moment it starts counting', async () => {
     // The fix for the divergence rather than a rule for living with it. Every
     // way of reconciling two peers' accounts after they split trades one wrong
