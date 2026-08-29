@@ -578,6 +578,17 @@ export interface MatchEndPayload {
 /** Where the ladder went: up, down, or nowhere. */
 export type RankDirection = 'up' | 'down' | 'none';
 
+/**
+ * How FAR the ladder moved, bucketed server-side into the number of arrows the
+ * winner overlay draws.
+ *
+ * Four values so it is total, with 'none' exactly when `rankDirection` is
+ * 'none' — the two are derived from one delta sharing one epsilon, so they can
+ * never disagree about whether anything happened. An arrow with no direction,
+ * or a direction with no arrows, is the failure this shape rules out.
+ */
+export type RankMagnitude = 'none' | 'minor' | 'moderate' | 'large';
+
 export interface MatchEndResult {
   profile: PlayerProfile;
   earnedXp: number;
@@ -588,7 +599,17 @@ export interface MatchEndResult {
   previousTier: Tier | null;
   tier: Tier | null;
   tierChanged: boolean;
-  /** False when the match ran on non-stock physics: XP paid, rating untouched. */
+  /**
+   * Whether the RULES were ranked-legal — false on non-stock physics or with
+   * the sonar on, and then neither estimator moved.
+   *
+   * True is not the same as "the ladder moved", and the gap widened when
+   * Casual stopped rating: a duel there is ranked-legal, so this is true and
+   * hidden MMR does move, while the visible tier stands still. `rankDirection`
+   * is the field that answers what the player is actually shown. Nothing in
+   * `src/` reads this today; the persisted `matches.ranked` column is
+   * `ranksThisMatch`, which is the stricter one.
+   */
   ranked: boolean;
   /**
    * Which way the visible ranked rating moved, for the winner overlay's glyph.
@@ -599,6 +620,24 @@ export interface MatchEndResult {
    * mu itself is never sent anywhere it could be rendered.
    */
   rankDirection: RankDirection;
+  /**
+   * How big that move was, drawn as 1, 2 or 3 arrows.
+   *
+   * A BUCKET, and never the mu behind it. RankBadge.tsx states the hard rule —
+   * rankMu enters tierProgress() and reaches a CSS transform, never text and
+   * never an aria-label — and a raw delta would walk past every guard that
+   * enforces it: e2e-rating regexes the rendered body and checks the public
+   * profile's field list, and a number on this object is in neither. A
+   * difference of two ratings is itself a rating; watched over a few matches it
+   * reconstructs the trajectory the tier exists to abstract.
+   *
+   * Bucketed HERE rather than on the client for two more reasons.
+   * stampRecordedMatch persists this object whole, so a delta would sit in
+   * recorded_matches for its fortnight; and two bundles bucketing for
+   * themselves would draw a different number of arrows for the same match. The
+   * count is a property of the result, not of whatever is looking at it.
+   */
+  rankMagnitude: RankMagnitude;
   newAchievements: Achievement[];
   // Today's missions after this match advanced them — server-owned, so the
   // client never computes mission progress itself.
@@ -639,6 +678,10 @@ export interface RoomMatchConfig {
    * may be watched at all is answered by the VENUE (src/venues.ts), which is
    * why the top three brackets simply have no spectator seats and everything
    * below them rates exactly as it always did.
+   *
+   * The venue DOES now reach `unrankedReasons`, on its own account: a Casual
+   * table pays XP and moves no rank. That is a statement about the room, not
+   * about who is watching in it, and this flag is still not one of them.
    *
    * Being a config field means it rides room_config and game_start for free
    * and is already locked during play by set_room_config's own guard.
@@ -755,7 +798,7 @@ export type WSServerMessage =
   // recipient. A spectator is told about a seat change the way a player is
   // told about `opponent_joined` — never with `opponent_left`, which would
   // report a departure to somebody who lost nobody.
-  | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean; isPrivate: boolean; joinKey: string | null }
+  | { type: 'table_state'; roomId: string; seats: TableSeatInfo[]; yourSeat: TableSeat | null; spectatorsEnabled: boolean; isPrivate: boolean; joinKey: string | null; venueRoomId: string }
   // Where the match already stands, for a watcher who has just sat down.
   | { type: 'spectator_sync'; snapshot: SpectatorSnapshot }
   // Where the search stands. `found` is followed immediately by the ordinary

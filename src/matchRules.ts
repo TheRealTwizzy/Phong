@@ -1,5 +1,6 @@
 import { AIDifficulty, GameMode, MatchRules, RoomMatchConfig } from './types';
 import { soloCountsForRank } from './rating';
+import { roomCountsForRank } from './venues';
 
 // Pre-match match rules, shared by client and server like profileRules.ts and
 // rating.ts. In a solo match these are chosen on the MainMenu; in a duel they
@@ -151,17 +152,29 @@ export function unrankedRuleKeys(rules: Partial<MatchRules> | null | undefined):
  * badge. This is the whole verdict in one place, so the sheet, the lobby and
  * anything added later cannot each answer it differently.
  *
- * The SERVER still derives its own half from `isRankedRules(payload.rules)`
- * plus `soloCountsForRank(difficulty)`; this does not replace that and is
- * never trusted by it. It is the same rule stated once for display.
+ * The SERVER still derives its own half from `isRankedRules(payload.rules)`,
+ * `soloCountsForRank(difficulty)` and `roomCountsForRank(venueRoomId)` — the
+ * last read from the live room and never from a request; this does not
+ * replace that and is never trusted by it. It is the same rule stated once
+ * for display.
  */
-export type UnrankedReason = 'mode' | 'difficulty' | 'sonar' | PhysicsRuleKey;
+export type UnrankedReason = 'mode' | 'venue' | 'difficulty' | 'sonar' | PhysicsRuleKey;
 
 export interface RankedMatchContext {
   rules: Partial<MatchRules> | null | undefined;
   mode: GameMode;
-  /** Solo only. A duel rates on its rules alone. */
+  /** Solo only. */
   difficulty?: AIDifficulty;
+  /**
+   * Duel only, and only when this phone actually KNOWS it.
+   *
+   * A duel used to rate on its rules alone; it now also depends on the room
+   * the table sits in, because Casual does not move the ladder. Absent reports
+   * nothing rather than guessing — a badge that invents a venue is worse than
+   * one that stays quiet about it, and the server derives its own half from
+   * the live room either way.
+   */
+  venueRoomId?: string | null;
 }
 
 /** Modes that never write a rating for anybody, whatever the rules say. */
@@ -170,6 +183,17 @@ const UNRATED_MODES: readonly GameMode[] = ['practice', 'split'];
 export function unrankedReasons(ctx: RankedMatchContext): UnrankedReason[] {
   const reasons: UnrankedReason[] = [];
   if (UNRATED_MODES.includes(ctx.mode)) reasons.push('mode');
+  // Second, and above the sonar deliberately. The panel renders blockers[0]
+  // alone, so this order IS the display priority — and on a Casual table with
+  // the sonar on, naming the sonar tells the host that switching it off
+  // restores the ladder, which is a lie. The venue cannot be changed from the
+  // lobby; the sonar can.
+  //
+  // Guarded on the mode because unrankedReasons is pure and anyone may call
+  // it: a stray venueRoomId on a solo context must not unrank a solo match.
+  if (ctx.mode === 'multiplayer' && ctx.venueRoomId && !roomCountsForRank(ctx.venueRoomId)) {
+    reasons.push('venue');
+  }
   if (ctx.mode === 'solo' && ctx.difficulty && !soloCountsForRank(ctx.difficulty)) {
     reasons.push('difficulty');
   }

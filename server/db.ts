@@ -12,6 +12,7 @@ import {
   MatchEndResult,
   ModeStats,
   RankDirection,
+  RankMagnitude,
   GameMode,
   DailyMission,
   CosmeticId,
@@ -23,6 +24,7 @@ import {
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
 import { isRankedRules } from '../src/matchRules';
+import { roomCountsForRank } from '../src/venues';
 import { ALL_ACHIEVEMENTS, achievementById, isUnlockable } from '../src/achievements';
 import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
 import {
@@ -51,6 +53,8 @@ import {
   PRACTICE_XP_DAILY_CAP,
   soloAdjustedXp,
   LADDER_TOP_N,
+  RANK_MOVE_EPSILON,
+  rankMoveSize,
 } from '../src/rating';
 import { BotSeed, botProfileFields } from './bots';
 import {
@@ -76,7 +80,19 @@ const BOT_SIGMA = 1.0;
 // against its own room state (TrueSkill-2 style signals). Solo never gets
 // these — solo stats are self-reported and would be a free rating dial.
 export interface RecordMatchContext {
+  /** The opponent's HIDDEN estimator, which predicts the match and moves the
+   *  hidden estimator. Never the one the visible ladder rates against. */
   opponentRating?: Rating;
+  /**
+   * The opponent's VISIBLE ladder rating, for the rank update.
+   *
+   * Separate from `opponentRating` because the two estimators diverge by
+   * design — a solo match moves mmrMu and never rankMu, SOLO_MU_CAPS caps one
+   * while AI_ADAPT_BAND moves the other — so rating the ladder against the
+   * hidden pair measured `mu - oppMu` across two different scales. It was
+   * wrong in both magnitude and in the win probability the step is built on.
+   */
+  opponentRankRating?: Rating;
   /** 0.5..1.5 weight from margin of victory / rally quality. */
   performanceWeight?: number;
   /**
@@ -86,6 +102,23 @@ export interface RecordMatchContext {
    * ladder, never the loss itself.
    */
   forceUnranked?: boolean;
+  /**
+   * The venue the table sits in (`src/venues.ts`), for a duel.
+   *
+   * Supplied ONLY by server code holding a live room, never taken from a
+   * request — the same rule `forceUnranked` above obeys, and for a sharper
+   * reason: a client-named "casual" would be a free way for a losing player to
+   * dodge the rating loss, on the one path with no room to check it against.
+   *
+   * Absent means "no room to ask", and the match rates on its rules alone. The
+   * alternative — refusing to rate whenever the venue is unknown — is the
+   * worse failure: a stock-rules duel in `elite` whose room was reaped before
+   * a retried POST landed would silently stop counting. The exposure the other
+   * way is nearly nothing, because the relay records both seats with the venue
+   * the instant the score decides, and the shared matchKey makes a later POST
+   * a replay of that row.
+   */
+  venueRoomId?: string;
 }
 
 // Overridable so production can point at a persistent volume (e.g. /data on
@@ -2345,6 +2378,7 @@ class GameDatabase {
     now: Date = new Date()
   ): MatchEndResult {
     const opponentRating = context.opponentRating;
+    const opponentRankRating = context.opponentRankRating;
     const performance = context.performanceWeight ?? 1;
     const profile = this.getProfile(payload.playerId);
     // Names come from the profile, never the payload — backstop for the
@@ -2461,7 +2495,12 @@ class GameDatabase {
     // The visible ladder moves on a duel, and on a solo match at a difficulty
     // the player had to EARN. Rookie is the tutorial rung — placing against it
     // would be a formality — so it feeds hidden MMR only.
-    const ranksThisMatch = ranked && (isPvp || soloCountsForRank(difficulty));
+    // ...and in a venue that rates at all. Casual is the PvP mirror of a
+    // Rookie solo: `ranked` above is untouched, so hidden MMR still learns
+    // from the match and the pre-match odds stay honest, while the visible
+    // tier, rankedGames and the history row's `ranked` column stand still.
+    const venueRates = roomCountsForRank(context.venueRoomId);
+    const ranksThisMatch = ranked && venueRates && (isPvp || soloCountsForRank(difficulty));
     // Sampled before the update so the overlay can say which way the ladder
     // went. Only the DIRECTION ever leaves the server — the mu itself is not
     // something the client renders (see src/components/ui/RankBadge.tsx).
@@ -2486,9 +2525,21 @@ class GameDatabase {
             // the exact trap placement was just fixed for.
             sigmaScale: placementOpts.sigmaScale,
           };
+      // The ladder rates against the LADDER. `oppRating` above is the hidden
+      // estimator: it predicts the match and moves the hidden pair, and the
+      // two genuinely diverge — a solo match moves mmrMu and never rankMu, and
+      // SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other — so using
+      // it here measured the standardised margin across two different scales.
+      // Absent (a solo match, or a caller with no room to sample from) falls
+      // back to an even ladder match against ourselves, the same shape
+      // `oppRating`'s own fallback takes, and never to the hidden pair, which
+      // is the bug.
+      const oppRankRating: Rating = isPvp
+        ? opponentRankRating || { mu: profile.rankMu, sigma: profile.rankSigma }
+        : oppRating;
       const nextRank = updateRating(
         { mu: profile.rankMu, sigma: profile.rankSigma },
-        oppRating,
+        oppRankRating,
         isWin,
         rankOpts
       );
@@ -2509,13 +2560,13 @@ class GameDatabase {
     // 'none' is both "did not rate" and "rated and did not move" — from the
     // player's side those are the same fact, and the overlay says so with one
     // glyph rather than distinguishing a difference nobody can act on.
-    const rankDirection: RankDirection = !ranksThisMatch
-      ? 'none'
-      : profile.rankMu > rankMuBefore + 1e-9
-        ? 'up'
-        : profile.rankMu < rankMuBefore - 1e-9
-          ? 'down'
-          : 'none';
+    // Direction and size come off ONE delta sharing one epsilon, so they cannot
+    // disagree about whether anything happened — an arrow with no direction, or
+    // a direction with no arrows, is not a state either field can reach alone.
+    const rankDelta = ranksThisMatch ? profile.rankMu - rankMuBefore : 0;
+    const rankDirection: RankDirection =
+      rankDelta > RANK_MOVE_EPSILON ? 'up' : rankDelta < -RANK_MOVE_EPSILON ? 'down' : 'none';
+    const rankMagnitude: RankMagnitude = rankMoveSize(rankDelta);
 
     // 3. Update Match Statistics
     profile.matchesPlayed += 1;
@@ -2750,6 +2801,7 @@ class GameDatabase {
       tierChanged: ranksThisMatch && profile.tier !== previousTier,
       ranked,
       rankDirection,
+      rankMagnitude,
       newAchievements,
       missions: this.getMissions(payload.playerId, now),
     };
@@ -2813,6 +2865,11 @@ class GameDatabase {
       tierChanged: false,
       ranked: false,
       rankDirection: 'none',
+      // A row stamped before this field existed replays with no magnitude, and
+      // `...stored` would leave it undefined — which renders no arrows at all
+      // beside a direction that has one. recorded_matches keeps rows for a
+      // fortnight, so that window is real rather than theoretical.
+      rankMagnitude: 'none',
       newAchievements: [],
       ...stored,
       profile: this.readProfile(playerId)!,

@@ -30,7 +30,6 @@ import {
   BUILDINGS,
   BuildingId,
   DEFAULT_BUILDING,
-  DEFAULT_VENUE_ROOM,
   EntryVerdict,
   RoomDef,
   roomEntryVerdict,
@@ -1131,7 +1130,11 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 block
                 onClick={() => {
                   setQueueInfoOpen(false);
-                  onOpenMultiplayer(DEFAULT_VENUE_ROOM);
+                  // Named outright rather than taken from DEFAULT_VENUE_ROOM,
+                  // which is now the hidden room a venue-less table lands in:
+                  // it has no browser and its listing 404s. This button offers
+                  // the ungated bracket a player can actually walk into.
+                  onOpenMultiplayer('casual');
                 }}
               >
                 {t('queue_browse', lang)}

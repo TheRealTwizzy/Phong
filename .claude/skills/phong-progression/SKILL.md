@@ -73,6 +73,28 @@ makes; `PLACEMENT_SIGMA` is what actually releases a tier. At the ordinary PvP s
 reach 4.0 until roughly the sixteenth game, so players saw "5/5" and stayed unranked with no way
 to tell what was missing. `PLACEMENT_SIGMA_SCALE` (`:256`) is what makes the counter honest.
 
+## Two ratings, and each rates against its own
+
+`recordMatch` runs two updates and they take DIFFERENT opponents. The hidden estimator rates
+against the opponent's `mmrMu/mmrSigma` (`RecordMatchContext.opponentRating`); the visible
+ladder rates against their `rankMu/rankSigma` (`opponentRankRating`). `duelStartRatings`
+samples both pairs per seat, cached on the room per `matchSeq`.
+
+One pair used to stand in for both, and it was the hidden one. That is not a rounding error:
+the two diverge by design — solo moves `mmrMu` and never `rankMu`, `SOLO_MU_CAPS` caps one
+while `AI_ADAPT_BAND` moves the other, and a match that is `ranked` but not `ranksThisMatch`
+(a Rookie solo, a Casual duel) moves the first and not the second — so the ladder step was
+measured across two scales. Against a Legend-on-the-ladder, ordinary-in-MMR opponent an upset
+win was worth 0.53 mu where it should be 1.21, better than a fifth of a tier band, always in
+the same direction. **A fixture that sets both pairs equal cannot tell which one was used**;
+`seedSplit` in `tests/duelRecord.test.ts` exists to pull them apart.
+
+`rankMoveSize` (`src/rating.ts`) buckets the delta into the 1/2/3 arrows the winner overlay
+draws. Bucketed SERVER-side and never sent as a number: `rankMu` reaching the client is the
+one thing `RankBadge.tsx` forbids outright. The bands are measured, and 0.8 is chosen to clear
+the whole `performanceWeight` clamp (0.5-1.5 scales an even settled duel to 0.245-0.734), so a
+scoreline can never change the arrow count on its own.
+
 ## Verifying
 
 ```bash

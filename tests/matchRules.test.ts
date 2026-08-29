@@ -267,6 +267,58 @@ describe('unrankedReasons', () => {
       'sonar',
       'paddleScale',
     ]);
+    // The venue sits second, above the sonar deliberately: on a Casual table
+    // with the sonar on, naming the sonar tells the host that switching it
+    // off restores the ladder. It does not. The venue cannot be changed from
+    // the lobby; the sonar can.
+    expect(unrankedReasons({ rules, mode: 'multiplayer', venueRoomId: 'casual' })).toEqual([
+      'venue',
+      'sonar',
+      'paddleScale',
+    ]);
+  });
+
+  it('reports the venue for a casual duel and for no other room', () => {
+    const rules = DEFAULT_MATCH_RULES;
+    expect(unrankedReasons({ rules, mode: 'multiplayer', venueRoomId: 'casual' })).toEqual([
+      'venue',
+    ]);
+    for (const id of ['beginner', 'pro', '_queue', '_default']) {
+      expect({ id, reasons: unrankedReasons({ rules, mode: 'multiplayer', venueRoomId: id }) }).toEqual(
+        { id, reasons: [] }
+      );
+    }
+  });
+
+  it('says nothing about a venue it was not told, and never unranks solo with one', () => {
+    // Absent means "not told", not "casual": a badge that guesses the venue is
+    // worse than one that stays quiet, and the server derives its own half
+    // from the live room either way.
+    const rules = DEFAULT_MATCH_RULES;
+    expect(unrankedReasons({ rules, mode: 'multiplayer' })).toEqual([]);
+    expect(unrankedReasons({ rules, mode: 'multiplayer', venueRoomId: null })).toEqual([]);
+    // unrankedReasons is pure and anybody may call it, so a stray venue on a
+    // solo context must not take a Cyber win off the ladder.
+    expect(
+      unrankedReasons({ rules, mode: 'solo', difficulty: 'cyber', venueRoomId: 'casual' })
+    ).toEqual([]);
+  });
+
+  it('never reports the venue and the difficulty together', () => {
+    // They are mutually exclusive by mode — a duel has no difficulty and a
+    // solo match has no table — so the strip's one line never has to choose
+    // between them.
+    for (const venueRoomId of ['casual', 'pro', undefined]) {
+      for (const mode of ['solo', 'multiplayer', 'practice', 'split'] as const) {
+        const reasons = unrankedReasons({
+          rules: DEFAULT_MATCH_RULES,
+          mode,
+          difficulty: 'rookie',
+          venueRoomId,
+        });
+        expect(reasons.includes('venue') && reasons.includes('difficulty')).toBe(false);
+      }
+    }
   });
 });
 

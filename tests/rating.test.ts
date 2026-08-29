@@ -23,6 +23,11 @@ import {
   tierProgress,
   updateRating,
   winProbability,
+  RANK_MOVE_EPSILON,
+  RANK_MOVE_MODERATE_MU,
+  RANK_MOVE_LARGE_MU,
+  rankMoveSize,
+  START_SIGMA,
 } from '../src/rating';
 
 const fresh = (): Rating => newRating();
@@ -430,5 +435,88 @@ describe('placement and tiers', () => {
     }
     expect(isPlaced(PLACEMENT_GAMES, r.sigma)).toBe(true);
     expect(['legend', 'overlord']).toContain(tierFor(r.mu, PLACEMENT_GAMES, r.sigma));
+  });
+});
+
+describe('how far the ladder moved, as arrows', () => {
+  // The overlay drew ONE arrow at any magnitude, so a first placement game
+  // that moved 4.2 mu and a converged player's expected win that moved 0.05
+  // drew the identical glyph. These bands are read off the real distribution
+  // rather than chosen, so they are pinned to the constants and not to
+  // literals — a moved threshold should fail the property, not the arithmetic.
+
+  it('is none exactly at and below the epsilon, and for a delta that is not a number', () => {
+    expect(rankMoveSize(0)).toBe('none');
+    expect(rankMoveSize(RANK_MOVE_EPSILON)).toBe('none');
+    expect(rankMoveSize(-RANK_MOVE_EPSILON)).toBe('none');
+    // NaN must land here rather than falling through to a size nothing moved
+    // by — the guard is written negated for exactly this.
+    expect(rankMoveSize(NaN)).toBe('none');
+  });
+
+  it('bands on magnitude alone, so a loss and a win of the same size match', () => {
+    for (const d of [0.05, 0.489, 0.9, 1.5, 2.5, 5]) {
+      expect(rankMoveSize(d)).toBe(rankMoveSize(-d));
+    }
+  });
+
+  it('puts each band edge on the side its constant names', () => {
+    expect(rankMoveSize(RANK_MOVE_MODERATE_MU - 1e-6)).toBe('minor');
+    expect(rankMoveSize(RANK_MOVE_MODERATE_MU)).toBe('moderate');
+    expect(rankMoveSize(RANK_MOVE_LARGE_MU - 1e-6)).toBe('moderate');
+    expect(rankMoveSize(RANK_MOVE_LARGE_MU)).toBe('large');
+  });
+
+  it('never goes down as the move gets bigger', () => {
+    const order = { none: 0, minor: 1, moderate: 2, large: 3 };
+    let last = 0;
+    for (let d = 0; d <= 6; d += 0.01) {
+      const step = order[rankMoveSize(d)];
+      expect(step).toBeGreaterThanOrEqual(last);
+      last = step;
+    }
+  });
+
+  it('draws a settled duel as one arrow and a first placement game as three', () => {
+    // The judgement the bands exist to make: a routine ranked result is one
+    // arrow, which is what lets two mean something.
+    const settled = { mu: 25, sigma: 2 };
+    const even = updateRating(settled, { mu: 25, sigma: 2 }, true, PVP_UPDATE);
+    expect(rankMoveSize(even.mu - settled.mu)).toBe('minor');
+
+    const converged = { mu: 25, sigma: 1 };
+    const expected = updateRating(converged, { mu: 19, sigma: 2 }, true, PVP_UPDATE);
+    expect(rankMoveSize(expected.mu - converged.mu)).toBe('minor');
+
+    const fresh = newRating();
+    const first = updateRating(fresh, { mu: 25, sigma: START_SIGMA }, true, PLACEMENT_UPDATE);
+    expect(rankMoveSize(first.mu - fresh.mu)).toBe('large');
+  });
+
+  it('draws an upset against a settled player as more than one arrow', () => {
+    // Two arrows have to be reachable in ordinary play or the band is dead.
+    const me = { mu: 25, sigma: 2 };
+    const upset = updateRating(me, { mu: 31, sigma: 2 }, true, PVP_UPDATE);
+    expect(rankMoveSize(upset.mu - me.mu)).toBe('moderate');
+  });
+
+  it('cannot be moved a whole band by the performance weight alone', () => {
+    // The arrows report the LADDER, not the scoreboard. performanceWeight is
+    // clamped to 0.5..1.5, and an even settled duel scaled across that whole
+    // range spans 0.245 to 0.734 — so the moderate threshold has to clear the
+    // TOP of the range, not merely its midpoint. 0.75 would sit 2% above it.
+    const me = { mu: 25, sigma: 2 };
+    for (const performance of [0.5, 0.75, 1, 1.25, 1.5]) {
+      const moved = updateRating(me, { mu: 25, sigma: 2 }, true, { ...PVP_UPDATE, performance });
+      expect(rankMoveSize(moved.mu - me.mu)).toBe('minor');
+    }
+  });
+
+  it('draws an earned-difficulty solo win as one arrow', () => {
+    // Solo is deliberately the lighter step (SOLO_UPDATE's k), and the arrows
+    // have to say so rather than flattering it.
+    const me = { mu: 25, sigma: 2 };
+    const won = updateRating(me, AI_RATINGS.cyber, true, soloVs('cyber'));
+    expect(rankMoveSize(won.mu - me.mu)).toBe('minor');
   });
 });

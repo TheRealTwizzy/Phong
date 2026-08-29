@@ -36,7 +36,7 @@ coverage number.
 
 | Suite | Owns |
 |---|---|
-| `rating` `xp` `achievements` | TrueSkill, tiers, `tierProgress` (incl. the full top band), the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
+| `rating` `xp` `achievements` | TrueSkill, tiers, `tierProgress` (incl. the full top band), the per-rung solo caps, the arrow-count bands, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
 | `ladderPosition` | The number the top rung renders instead of its name, that it AGREES with the leaderboard's own, and that the narrow rating read the relay pairs on says the same thing a whole profile would |
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `matchHistory` | History reads: one row per player per match, the `ranked` column, mode/ranked filters, paging, per-player retention |
@@ -50,7 +50,7 @@ coverage number.
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
 | `identity` `username` `avatar` `device` `bots` `qr` `i18n` | Identity, assets, the device gate, locales |
-| `venues` | Buildings and rooms: the bracket predicate the menu and the relay share |
+| `venues` | Buildings and rooms: the bracket predicate the menu and the relay share, and which rooms move the visible ladder |
 | `gestures` | The swipe thresholds, the axis lock, the release velocity and the page-settle rule — the ONLY place these are stated (see §5) |
 | `meterMemory` | Where a progress meter resumes from, and that a band change resets it — the ONLY place this is stated (see §5) |
 | `ladderTone` | Which stop of the rank meter's fixed ramp a fill is at — the one tone in the app picked by a value rather than a meaning |
@@ -134,8 +134,27 @@ badge through the real sheet, and `scripts/e2e-duel.mjs` has the host ask for it
 **The pre-match badge answers the WHOLE question, not just the sliders.** It promised "counts
 for rank" for a Rookie solo match the server was always going to refuse to rate, and for
 Practice and Split Screen, which record no rating at all. `unrankedReasons` states mode,
-difficulty, sonar and physics in one ordered list so the sheet and the lobby cannot drift; a
-badge that is wrong about the one thing it exists to say is worse than no badge.
+**venue**, difficulty, sonar and physics in one ordered list so the sheet and the lobby cannot
+drift; a badge that is wrong about the one thing it exists to say is worse than no badge. The
+ORDER is part of it, because the strip renders `blockers[0]` alone: `'venue'` is above
+`'sonar'` so a Casual table with the sonar on is not told that switching the sonar off
+restores a ladder the room was never going to move. And the venue comes from `table_state`
+— the TABLE — never from the room the player was browsing, or the badge is right for the host
+and wrong for the guest who arrived on a key. `tests/matchRules.test.ts` pins the order and
+the mutual exclusion; `scripts/e2e-venues.mjs` drives both sides of that divergence.
+
+**A duel has exactly one winner, and a snapshot claiming two is refused rather than repaired.**
+`isWinner` is `mine > theirs`, so a level score is false for BOTH seats — and `applyMatchSync`
+clamped the two scores independently and decided on `>= cap ||`, so one `match_sync` of
+[999, 999] became [cap, cap] and filed a real ranked LOSS against each player: two red
+down-arrows, two rating losses, two loss rows, while each phone's own `score_update` showed
+them both VICTORY. The whole snapshot is refused at the untrusted-peer boundary, before the
+revision is bumped; `recordRoomMatch` records nothing on a level score behind it; and the REST
+cross-check no longer overwrites a decided client claim from an undecided room, which was a
+second and likelier route to the same two red arrows — in a P2P duel the winner's POST can
+legitimately outrun the deciding sync. `tests/room.test.ts` holds the boundary and
+`tests/duelRecord.test.ts` holds the outcome, which is a different assertion: a
+`recordRoomMatch` that still ties passes the first and fails the second.
 
 **Never add a match-recording path without a `matchKey`.** A duel legitimately arrives up to
 three times — the relay writes it for both seats, both clients POST it as a fallback, the

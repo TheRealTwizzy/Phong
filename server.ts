@@ -284,6 +284,15 @@ function broadcastTableState(room: Room): void {
         // Only ever sent to sockets already AT this table, which is the whole
         // point of a key: you get it by being let in, or by being told it.
         joinKey: room.joinKey,
+        // Which venue this TABLE is in, which is not the same question as
+        // which room the player was browsing when they got here. They differ
+        // for anyone who arrived on a join key rather than by tapping a listed
+        // table — and Casual does not move the ladder, so a lobby that guessed
+        // from the browse venue would tell the guest the opposite of the truth
+        // about the match they are about to play. Sent here rather than on
+        // room_created/room_joined because a watcher receives neither, and
+        // their badge should be right too.
+        venueRoomId: room.venueRoomId,
       })
     );
   };
@@ -646,8 +655,13 @@ function persistDuelStreaks(room: Room): void {
  * the hidden half live with the sonar forced on and can simply describe it
  * over a voice call — the sonar rule (CLAUDE.md §12) with a second person
  * attached. Drawing that line by ROOM is what keeps every other match rating
- * exactly as it always did: no per-match flag, no forceUnranked, no new
- * unrankedReasons case.
+ * exactly as it always did: no per-match flag and no forceUnranked.
+ *
+ * It used to add "and no new unrankedReasons case". There is one now — the
+ * venue itself, because a Casual table does not move the ladder — but it is a
+ * case about a different question, and watching is still not among the things
+ * that unrank a match. This function narrows the CONFIG; the ranked verdict
+ * is derived in recordMatch from the room's own venueRoomId.
  *
  * One function for both the create and the edit path, so a host cannot open
  * seats a bracket forbids by asking twice.
@@ -774,7 +788,10 @@ function duelStartRatings(room: Room): Array<SeatRating | null> {
       const player = room.players[seat];
       if (!player?.deviceId || !seatStillHoldsAccount(player)) return null;
       const p = db.getProfile(player.deviceId);
-      return { mu: p.mmrMu, sigma: p.mmrSigma };
+      return {
+        mmr: { mu: p.mmrMu, sigma: p.mmrSigma },
+        rank: { mu: p.rankMu, sigma: p.rankSigma },
+      };
     };
     room.startRatings = [sample(0), sample(1)];
     room.startRatingsSeq = room.matchSeq;
@@ -835,6 +852,22 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
   // vacating the leaver's seat, so a decided match and an abandoned one are
   // both recorded off the same complete room.
   if (!room.players[0] || !room.players[1]) return;
+  // A level score decided nothing, and `isWinner` below is `mine > theirs` —
+  // false for BOTH seats — so recording one would file a LOSS against each
+  // player. That is the worst available answer to "we cannot tell who won",
+  // and it is what a [cap, cap] match_sync used to produce before
+  // applyMatchSync learned to refuse one. Nothing is recorded instead: a duel
+  // with no winner has no result to file, and leaving the matchKey unstamped
+  // keeps it recoverable rather than half-paid.
+  //
+  // The abandon path is exempt because it NAMES its winner: a walk-out at 0-0
+  // is a real result and `winnerSeat` says whose.
+  if (opts.winnerSeat === undefined && room.scores[0] === room.scores[1]) {
+    console.error(
+      `refusing to record an undecided duel in ${room.id}: ${room.scores.join('-')}`
+    );
+    return;
+  }
 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
@@ -880,9 +913,15 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
 
     const context: RecordMatchContext = {
       performanceWeight: performanceWeight(mine, theirs, room.earnedBests[seat]),
+      // From the ROOM, never from a client. Casual tables do not move the
+      // visible ladder, and this is the only place that can say so honestly.
+      venueRoomId: room.venueRoomId,
     };
     const oppRating = ratingBefore[seat === 0 ? 1 : 0];
-    if (oppRating) context.opponentRating = oppRating;
+    if (oppRating) {
+      context.opponentRating = oppRating.mmr;
+      context.opponentRankRating = oppRating.rank;
+    }
     // Only the LEAVER's copy is spared the ladder by a forgiven abandon; the
     // survivor's win rates on its own merits either way.
     if (opts.forgivenLoss && !isWinner) context.forceUnranked = true;
@@ -1627,7 +1666,19 @@ async function startServer() {
         // from. A room is reused by every rematch and reset to 0-0 by each
         // one, so an unqualified cross-check overwrote a slow or replayed POST
         // with the NEXT match's blank score and filed it as a 0-0 loss.
-        if (room && seat >= 0 && room.matchSeq === seq) {
+        // ...and only for one it has something to SAY about. A level score is
+        // the relay behind the client rather than ahead of it: in a P2P duel
+        // the deciding match_sync travels the WebSocket while this POST travels
+        // HTTP, so the winner's own report legitimately arrives first, against
+        // a room still reading 0-0. Overwriting from that room set
+        // `playerScore = 0` and `isWinner = mine > theirs` = FALSE, filing the
+        // WINNER a 0-0 loss — and the shared matchKey then deduped the relay's
+        // correct record away, so it stood. Two red down-arrows off an ordinary
+        // race, no malformed message needed. When the room cannot decide the
+        // match, the client's own account of it stands, exactly as it does when
+        // there is no room at all.
+        const level = room ? room.scores[0] === room.scores[1] : false;
+        if (room && seat >= 0 && room.matchSeq === seq && !level) {
           const mine = room.scores[seat];
           const theirs = room.scores[seat === 0 ? 1 : 0];
           payload.playerScore = mine;
@@ -1642,8 +1693,17 @@ async function startServer() {
           // they stood at the start rather than against whichever of them
           // happened to be committed first.
           const oppRating = duelStartRatings(room)[seat === 0 ? 1 : 0];
-          if (oppRating) context.opponentRating = oppRating;
+          if (oppRating) {
+            context.opponentRating = oppRating.mmr;
+            context.opponentRankRating = oppRating.rank;
+          }
           context.performanceWeight = performanceWeight(mine, theirs, room.earnedBests[seat]);
+          // The venue is the relay's answer or it is no answer at all — the
+          // menu is the client, and a payload-named venue would be a free
+          // ladder-loss dodge. Outside this branch there is no live room to
+          // ask, so the match rates on its rules alone; see the note on
+          // RecordMatchContext.venueRoomId for why that is the safe side.
+          context.venueRoomId = room.venueRoomId;
         }
       }
 

@@ -3,6 +3,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { findMission } from '../src/game/missions';
 import { duelMatchKey } from '../src/matchRules';
+import { PVP_UPDATE, updateRating } from '../src/rating';
+import { performanceWeight } from '../server/room';
 import { Device, Phone as PhoneSocket, Relay, sleep, startRelay } from './helpers/relay';
 
 // A duel end-to-end through the REAL relay and the REAL record route, because
@@ -65,10 +67,13 @@ const board = async (): Promise<any[]> =>
  * and the server compiles a statement per read rather than caching rows, so
  * its next `getProfile` sees this.
  *
- * Both ratings are set, not just the visible one: the RANK update rates a duel
- * against the opponent's hidden MMR (recordMatch's `oppRating`), so leaving
- * mmrMu at the default 25 would have two Overlords rating each other as
- * beginners.
+ * Both ratings are set, not just the visible one, because a duel rates EACH
+ * estimator against its own counterpart: the visible ladder against the
+ * opponent's rankMu, the hidden one against their mmrMu. A fixture has to
+ * stand the device up on both ladders or half of what it is testing is still
+ * a default-μ25 beginner. (It used to say something narrower — that the rank
+ * update rated against the opponent's hidden MMR — which was true, and was
+ * the bug: the standardised margin was measured across two different scales.)
  */
 function seedLadder(device: Device, mu: number, sigma: number): void {
   const sql = new DatabaseSync(path.join(relay.dataDir, 'phong.db'));
@@ -83,6 +88,34 @@ function seedLadder(device: Device, mu: number, sigma: number): void {
     // A silent no-op here would leave two μ25 players duelling and every
     // assertion below asking about a ladder neither is on.
     if (changed !== 1) throw new Error(`seedLadder matched ${changed} rows for ${device.username}`);
+  } finally {
+    sql.close();
+  }
+}
+
+/**
+ * Stand a device at DIFFERENT ratings on the two estimators.
+ *
+ * seedLadder deliberately sets them equal, which is right for a fixture about
+ * the ladder alone and useless for asking WHICH of the two a duel rates
+ * against — with both at the same value, either answer looks correct. The two
+ * diverge in ordinary play, so a test about that has to be able to pull them
+ * apart.
+ */
+function seedSplit(
+  device: Device,
+  r: { rankMu: number; rankSigma: number; mmrMu: number; mmrSigma: number }
+): void {
+  const sql = new DatabaseSync(path.join(relay.dataDir, 'phong.db'));
+  try {
+    const changed = sql
+      .prepare(
+        `UPDATE players
+            SET rankMu = ?, rankSigma = ?, rankedGames = 5, mmrMu = ?, mmrSigma = ?
+          WHERE id = ?`
+      )
+      .run(r.rankMu, r.rankSigma, r.mmrMu, r.mmrSigma, device.id).changes;
+    if (changed !== 1) throw new Error(`seedSplit matched ${changed} rows for ${device.username}`);
   } finally {
     sql.close();
   }
@@ -319,6 +352,242 @@ describe('recording a duel', () => {
     p1.close();
     p2.close();
   });
+
+  it('files nothing at all when a snapshot claims BOTH seats won', async () => {
+    // The reported bug, end to end: two players saw a red down-arrow after one
+    // ranked duel. updateRating cannot invert a sign — a winner always gains —
+    // so a red arrow means the server believed that seat LOST, and both red
+    // meant both were recorded as losers. One match_sync with each score at
+    // the cap was enough: the two are clamped independently, so [9, 9] landed
+    // as [3, 3], reported the match decided, and recordRoomMatch's
+    // `mine > theirs` was false for BOTH seats.
+    //
+    // room.test.ts holds the boundary that refuses it. This holds the outcome,
+    // and it is not the same assertion: a recordRoomMatch that still ties
+    // passes there and fails here.
+    const host = await newDevice('TieHost');
+    const guest = await newDevice('TieGuest');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 1, p2Score: 1 });
+    p1.send({ type: 'match_sync', matchSeq, rev: 2, p1Score: 9, p2Score: 9 });
+    p2.send({ type: 'match_sync', matchSeq, rev: 3, p1Score: 3, p2Score: 3 });
+    await sleep(400);
+
+    const hostProfile = await getProfile(host);
+    const guestProfile = await getProfile(guest);
+    // Neither a loss for either of them, nor a win for either — an undecided
+    // duel has no result to file, and inventing one for both is how a player
+    // lost rating to a match nobody won.
+    for (const p of [hostProfile, guestProfile]) {
+      expect(p.matchesPlayed).toBe(0);
+      expect(p.matchesLost).toBe(0);
+      expect(p.matchesWon).toBe(0);
+      expect(p.rankedGames).toBe(0);
+      expect(p.xp).toBe(0);
+    }
+    expect(p1.all('match_recorded')).toHaveLength(0);
+    expect(p2.all('match_recorded')).toHaveLength(0);
+
+    // And the room is still playable afterwards: the refusal drops the
+    // snapshot, not the match.
+    p1.send({ type: 'match_sync', matchSeq, rev: 4, p1Score: 3, p2Score: 1 });
+    const decided = await p1.await('match_recorded');
+    expect(decided.result.rankDirection).toBe('up');
+    expect((await getProfile(host)).matchesWon).toBe(1);
+    expect((await getProfile(guest)).matchesLost).toBe(1);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('does not file the WINNER a 0-0 loss when their POST outruns the sync', async () => {
+    // The second route to two red arrows, and the likelier one: it needs no
+    // malformed message, just an ordinary race. In a P2P duel the deciding
+    // match_sync goes over the WebSocket while the client's own POST goes over
+    // HTTP, so the winner's report can reach the relay first — against a room
+    // still reading 0-0. The cross-check then overwrote the payload from that
+    // room, and `isWinner = mine > theirs` was false, so the WINNER was filed a
+    // 0-0 loss. The shared matchKey deduped the relay's correct record away
+    // afterwards, so the wrong one stood: winner red, loser red.
+    //
+    // A room that has not decided the match has nothing to say about it, so
+    // the client's own account stands — the same rule as no room at all.
+    const host = await newDevice('EarlyWin');
+    const guest = await newDevice('EarlyLose');
+    const race = await seatDuel(host, guest, 3);
+
+    const early = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        playerScore: 3, opponentScore: 0,
+        bestStreak: 4, endStreak: 4, earnedStreak: 4,
+        mode: 'multiplayer', isWinner: true,
+        roomId: race.roomId, matchSeq: race.matchSeq,
+      }),
+    });
+    expect(early.status).toBe(200);
+    const result = await early.json();
+    expect(result.rankDirection).toBe('up');
+
+    const hostProfile = await getProfile(host);
+    expect(hostProfile.matchesWon).toBe(1);
+    expect(hostProfile.matchesLost).toBe(0);
+    expect(hostProfile.totalPointsScored).toBe(3);
+
+    race.p1.close();
+    race.p2.close();
+  }, 45000);
+
+  it('rates the visible ladder against the opponent\'s LADDER, not their hidden MMR', async () => {
+    // The two estimators diverge by design: a solo match moves mmrMu and never
+    // rankMu, SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other, and a
+    // Rookie solo moves the first and not the second. So a fixture can stand a
+    // player far apart on the two, and then the ladder update either used the
+    // right one or it did not.
+    //
+    // The host is a Legend on the ladder and an ordinary μ25 in hidden MMR.
+    // Beating them is a big upset on the ladder and a coin flip on MMR, so the
+    // guest's rank gain is much larger when it is measured against the rank
+    // pair — which is the whole point of the fix. Asserted against
+    // updateRating itself rather than a magic number, so it stays true if the
+    // constants move.
+    const host = await newDevice('SplitRating');
+    const guest = await newDevice('SplitChallenger');
+    seedSplit(host, { rankMu: 34, rankSigma: 2, mmrMu: 25, mmrSigma: 2 });
+    seedSplit(guest, { rankMu: 25, rankSigma: 2, mmrMu: 25, mmrSigma: 2 });
+
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 1, p2Score: 3 });
+    const guestRecord = await p2.await('match_recorded');
+    expect(guestRecord.result.rankDirection).toBe('up');
+
+    const after = await getProfile(guest);
+    const perf = performanceWeight(3, 1, 0);
+    const againstRank = updateRating(
+      { mu: 25, sigma: 2 },
+      { mu: 34, sigma: 2 },
+      true,
+      { ...PVP_UPDATE, performance: perf }
+    );
+    const againstMmr = updateRating(
+      { mu: 25, sigma: 2 },
+      { mu: 25, sigma: 2 },
+      true,
+      { ...PVP_UPDATE, performance: perf }
+    );
+    expect(after.rankMu).toBeCloseTo(againstRank.mu, 6);
+    // And the two answers really are far apart, or this proves nothing.
+    expect(Math.abs(againstRank.mu - againstMmr.mu)).toBeGreaterThan(0.3);
+
+    // The hidden estimator still rates against the hidden pair, untouched.
+    expect(after.mmrMu).toBeCloseTo(againstMmr.mu, 6);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('pays a casual duel in XP and hidden MMR, and never in rank', async () => {
+    // Casual's own description has said so in seven locales since the room
+    // shipped — "Any rank welcome. Play for the game, not the ladder." — while
+    // the server rated it like any other bracket. Gated the way a Rookie solo
+    // is, not the way Practice is: hidden MMR still learns from the match, so
+    // the pre-match odds and the queue stay honest, and only the visible tier
+    // stands still. Driven through the relay, which is the only thing that
+    // knows a table's venue: a client never names one.
+    const host = await newDevice('CasualWin');
+    const guest = await newDevice('CasualLose');
+
+    const p1 = await relay.openPhone(host);
+    p1.send({
+      type: 'create_room',
+      playerId: host.id,
+      venueRoomId: 'casual',
+      config: { winningScore: 3, rules: {} },
+    });
+    const created = await p1.await('room_created');
+    const p2 = await relay.openPhone(guest);
+    p2.send({ type: 'join_room', roomId: created.roomId, playerId: guest.id });
+    await p2.await('room_joined');
+    p2.send({ type: 'player_ready', ready: true });
+    await p1.await('ready_state');
+    p1.send({ type: 'start_match' });
+    const start = await p1.await('game_start');
+    await p2.await('game_start');
+
+    p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 3, p2Score: 1 });
+    const hostRecord = await p1.await('match_recorded');
+    const guestRecord = await p2.await('match_recorded');
+
+    // The ladder did not move, and the overlay says so with the one glyph it
+    // has for "nothing happened here".
+    expect(hostRecord.result.rankDirection).toBe('none');
+    expect(guestRecord.result.rankDirection).toBe('none');
+    expect(hostRecord.result.rankMagnitude).toBe('none');
+
+    for (const [device, won] of [[host, true], [guest, false]] as const) {
+      const p = await getProfile(device);
+      expect(p.rankMu).toBe(25);
+      expect(p.rankSigma).toBeCloseTo(25 / 3, 6);
+      expect(p.rankedGames).toBe(0);
+      expect(p.tier).toBe('unranked');
+      // But it was a real match: it played, it paid, and the hidden estimator
+      // learned from it.
+      expect(p.matchesPlayed).toBe(1);
+      expect(won ? p.matchesWon : p.matchesLost).toBe(1);
+      expect(p.xp).toBeGreaterThan(0);
+      expect(p.mmrMu).not.toBe(25);
+    }
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('still rates a duel in a bracketed room, and in one with no venue at all', async () => {
+    // The other half, and the one that would have gone quietly wrong: casual
+    // used to BE the default venue, so making it unranked without splitting
+    // the two would have taken the ladder from every invite-code table and
+    // every older bundle as well. seatDuel names no venue, exactly as those
+    // callers do not.
+    const host = await newDevice('DefaultVenueW');
+    const guest = await newDevice('DefaultVenueL');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 3, p2Score: 0 });
+    await p1.await('match_recorded');
+    await p2.await('match_recorded');
+
+    expect((await getProfile(host)).rankedGames).toBe(1);
+    expect((await getProfile(guest)).rankedGames).toBe(1);
+    expect((await getProfile(host)).rankMu).toBeGreaterThan(25);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('moves exactly one seat up the ladder and the other down', async () => {
+    // The direct regression assertion for "both arrows were red". The rank
+    // tile draws MatchEndResult.rankDirection, so a decided ranked duel has to
+    // produce one 'up' and one 'down' — never two of a kind, in either
+    // direction. Nothing in the browser layer asserts the arrow, which is how
+    // this reached a player in the first place.
+    const host = await newDevice('DirUp');
+    const guest = await newDevice('DirDown');
+    const { p1, p2, matchSeq } = await seatDuel(host, guest, 3);
+
+    p1.send({ type: 'match_sync', matchSeq, rev: 1, p1Score: 3, p2Score: 1 });
+    const hostRecord = await p1.await('match_recorded');
+    const guestRecord = await p2.await('match_recorded');
+
+    const directions = [hostRecord.result.rankDirection, guestRecord.result.rankDirection];
+    expect(directions.filter((d: string) => d === 'up')).toHaveLength(1);
+    expect(directions.filter((d: string) => d === 'down')).toHaveLength(1);
+    expect(hostRecord.result.rankDirection).toBe('up');
+    expect(guestRecord.result.rankDirection).toBe('down');
+
+    p1.close();
+    p2.close();
+  }, 45000);
 
   it('tells both phones to come off P2P the moment it starts counting', async () => {
     // The fix for the divergence rather than a rule for living with it. Every

@@ -1,4 +1,4 @@
-import { AIDifficulty, GameMode } from './types';
+import { AIDifficulty, GameMode, RankMagnitude } from './types';
 
 // TrueSkill-style skill rating, shared by client and server (same convention
 // as profileRules.ts — the server imports from ../src so the two sides can
@@ -262,6 +262,54 @@ export const PLACEMENT_UPDATE: UpdateOptions = {
   ...PVP_UPDATE,
   sigmaScale: PVP_UPDATE.sigmaScale * PLACEMENT_SIGMA_SCALE,
 };
+
+/**
+ * How far a match moved the visible ladder, as the number of arrows to draw.
+ *
+ * The overlay used to draw ONE arrow at any magnitude, so a first placement
+ * game that moved 4.2 mu and a converged player's expected win that moved 0.05
+ * drew the identical glyph — the direction was the whole message, and "how
+ * much" was not asked.
+ *
+ * The bands are read off the real distribution, not chosen. A tier is exactly
+ * 3 mu wide, which is what makes them mean anything; measured against
+ * PVP_UPDATE at mu gaps of -6..+6 and an opponent at sigma 2:
+ *
+ *   sigma 0.6   0.018 - 0.088    ~34 wins to a tier
+ *   sigma 1.0   0.049 - 0.238
+ *   sigma 2.0   0.196 - 0.895    an even duel is 0.489
+ *   sigma 3.0   0.442 - 1.852
+ *   sigma 4.0   0.785 - 2.977
+ *   placement   4.21, 3.01, 1.45, 1.51, 0.95 over the five games
+ *   solo, earned rung, sigma 2   0.171
+ *
+ * MODERATE at 0.8 is where an ordinary settled duel stops and a real surprise
+ * starts, so a routine ranked result is one arrow and two mean something. The
+ * value has to clear the whole performance-weight range and not merely its
+ * midpoint: performanceWeight is clamped to 0.5..1.5, and an even settled duel
+ * scaled by it spans 0.245 to 0.734. 0.75 would sit 2% above the top of that;
+ * 0.8 sits clear of it, so a 3-0 scoreline can never promote a routine duel to
+ * two arrows on its own. The arrows report the LADDER, not the scoreboard.
+ *
+ * LARGE at 2.0 is "placement, or a big result while still uncertain" — rare
+ * enough that a player who sees three arrows knows why. Rejected: 0.5/1.5,
+ * which puts about half of steady-state results in the middle band and makes
+ * two arrows the default.
+ */
+export const RANK_MOVE_EPSILON = 1e-9;
+export const RANK_MOVE_MODERATE_MU = 0.8;
+export const RANK_MOVE_LARGE_MU = 2.0;
+
+/** Shared with the direction so the two can never disagree about 'none'. */
+export function rankMoveSize(deltaMu: number): RankMagnitude {
+  const d = Math.abs(deltaMu);
+  // Negated rather than `d <= EPSILON`, so a NaN delta lands on 'none' too
+  // rather than falling through to a magnitude nothing moved by.
+  if (!(d > RANK_MOVE_EPSILON)) return 'none';
+  if (d < RANK_MOVE_MODERATE_MU) return 'minor';
+  if (d < RANK_MOVE_LARGE_MU) return 'moderate';
+  return 'large';
+}
 
 /**
  * One-sided TrueSkill update: returns the new rating for `me` after a result
