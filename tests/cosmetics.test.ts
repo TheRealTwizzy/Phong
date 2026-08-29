@@ -5,11 +5,12 @@ import {
   COSMETICS,
   DEFAULT_COSMETIC_ID,
   LEGACY_COSMETIC_IDS,
+  STATUS_RAMPS,
   cosmeticVars,
   isCosmeticUnlocked,
   normalizeCosmeticId,
 } from '../src/game/cosmetics';
-import { contrastRatio, luminance, paletteDistance } from '../src/game/color';
+import { colorDistance, contrastRatio, luminance, paletteDistance } from '../src/game/color';
 import { TIER_ORDER, type Tier } from '../src/rating';
 import { ALL_ACHIEVEMENTS } from '../src/achievements';
 import { ELITE_POOL } from '../src/game/missions';
@@ -292,6 +293,59 @@ describe('no two cosmetics look alike', () => {
       accentColor: '#ff0000',
     };
     expect(paletteDistance(COSMETICS.neon, identicalButOne, KEYS)).toBeLessThan(FLOOR);
+  });
+});
+
+describe('the two meters that stack', () => {
+  /**
+   * MainMenu's capsule is the one place in the app where two ProgressBars sit
+   * one above the other: RankBadge's meter over the XP meter, 4px each with
+   * 2px between them. Every other bar in the app is one per card or row, so a
+   * floor over all five tones would be asserting things no player can see.
+   *
+   * The tone pair cannot be read from here — it lives in RankBadge.tsx, and
+   * importing a component into a `node` suite drags React and motion/react in
+   * for one string. So this states the PALETTE facts the component's choice
+   * rests on, which is the half that can drift silently.
+   *
+   * 0.08 is the same number the catalogue is held to above, borrowed
+   * deliberately: it is this repo's own measured "a player cannot tell these
+   * apart", and two adjacent 4px fills have less to go on than two whole
+   * themes do.
+   */
+  const SAME_COLOUR = 0.08;
+
+  it('rules --color-warn out as the rank meter, in both ramps', () => {
+    // The unplaced meter was `warn`, on the reasoning that amber says "this
+    // does not count yet". It also says XP: --color-xp is the token contract's
+    // level-and-XP colour and the LV chip a row above wears it, so the capsule
+    // showed a player two amber bars and no way to tell which was the ladder.
+    // Neither token is per-cosmetic, so this is not a worst case over twenty
+    // themes — it is the only case, twice.
+    for (const [mode, ramp] of Object.entries(STATUS_RAMPS)) {
+      expect(
+        colorDistance(ramp.warn, ramp.xp),
+        `--color-warn and --color-xp are one amber in the ${mode} ramp`
+      ).toBeLessThan(SAME_COLOUR);
+    }
+  });
+
+  it('names the cosmetics where no tone separates them either', () => {
+    // --color-accent is per-cosmetic and --color-xp is fixed gold, so a gold
+    // accent lands on top of it and there is nothing else to reach for: `win`
+    // and `loss` mean won and lost, and `warn` is the pair above. These two are
+    // therefore a known palette finding rather than a bug in the component, and
+    // they read the same for a PLACED player today. Listing them by name is the
+    // point: a twenty-first gold accent joins the set here instead of shipping
+    // as one more capsule nobody can read.
+    const merged = themeIds.filter(
+      (id) =>
+        colorDistance(
+          cosmeticVars(COSMETICS[id])['--color-accent'],
+          cosmeticVars(COSMETICS[id])['--color-xp']
+        )! < SAME_COLOUR
+    );
+    expect(merged).toEqual(['retro-crt', 'quantum-gold']);
   });
 });
 

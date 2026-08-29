@@ -42,6 +42,28 @@ import { ProgressBar } from './ProgressBar';
 // string it lost, which announces `played/total` as a percentage of five
 // games. Reading a rating out of that is not possible; reading one out of tier
 // progress would be.
+//
+// Both states share one TONE, and the unplaced one used to be `warn`. In the
+// header capsule this meter stacks directly on the XP meter, and --color-warn
+// and --color-xp are two shades of the same amber in BOTH status ramps —
+// 0.044 apart in OKLab on nineteen cosmetics and 0.034 on the light one, where
+// tests/cosmetics.test.ts requires 0.08 of two whole themes. Worse than the
+// number: --color-xp is the token contract's level-and-XP colour and the LV
+// chip on the row above wears it too, so an amber rank meter read as a second
+// XP bar rather than as a different measurement. `warn` was carrying "this
+// does not count yet" alone when it was chosen; the UNRANKED chip, the 2/5
+// counter and this meter's own accessible label all say it now.
+//
+// What `accent` does NOT do is clear that floor everywhere, and the honest
+// version is worth having written down: --color-accent is per-cosmetic while
+// --color-xp is fixed gold, so on quantum-gold (0.018) and retro-crt (0.049)
+// the two meters are still one colour — as they already were for every PLACED
+// player on those two, before this line changed. Seventeen cosmetics move to
+// 0.16-0.40 and gilded-age to 0.091; quantum-gold alone comes down, to exactly
+// what its placed players already see. No tone in the palette separates a
+// second meter from a gold accent, so the remaining case is a palette finding
+// and not a prop — tests/cosmetics.test.ts names the two rather than pretending
+// a floor holds.
 
 export interface RankBadgeProps {
   tier: Tier;
@@ -76,7 +98,7 @@ export const RankBadge: React.FC<RankBadgeProps> = ({
       id={id}
       value={progress}
       height="sm"
-      tone={placed ? 'accent' : 'warn'}
+      tone="accent"
       className={className}
       ariaLabel={
         placed

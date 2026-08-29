@@ -45,7 +45,7 @@ coverage number.
 | `streaks` | A rally streak: whose it is, what ends it, and what it carries into |
 | `room` | The relay's room rules, the reaper, and the adversarial `match_sync` guards |
 | `matchRules` | Ranked bands, normalization, `duelMatchKey` |
-| `cosmetics` | All 20 cosmetics × every unlock route, the contrast floor, and the distinctness floor |
+| `cosmetics` | All 20 cosmetics × every unlock route, the contrast floor, the distinctness floor, and the two tones the header capsule stacks |
 | `color` | The colour maths both those floors stand on |
 | `matchQueue` `sessionWatch` `staleBuild` `sessionMint` | The client networking layer |
 | `protocolParity` `p2pParity` | That the relay and the P2P replica are the same game |
@@ -424,6 +424,18 @@ floats, one statement — and the suite pins that it reports exactly what `getPr
 is what makes the substitution faithful rather than merely faster. That it IS faster is not
 something an assertion states better than the absent call does; `queue` and `duel` cover that
 pairing still works.
+
+**The capsule is the one place two meters stack, and colour is all they have.** The rank meter
+sits directly over the XP meter, 4px each, and `--color-xp` is the token contract's level-and-XP
+colour that the `LV` chip beside them also wears — so a rank meter in the same family reads as a
+second XP bar. `--color-warn` was that family: 0.044 from `--color-xp` in OKLab, against the
+0.08 `tests/cosmetics.test.ts` demands of two whole themes. What the suite asserts is the PALETTE
+fact rather than the component's prop, deliberately — the tone lives in a `.tsx` and importing
+it would drag React and `motion/react` into a `node` suite for one string — so it pins that
+`warn` and `xp` are one amber in BOTH status ramps, and it NAMES the two cosmetics whose accent
+is gold enough to have the same problem (`retro-crt`, `quantum-gold`) instead of asserting a floor
+the catalogue cannot meet. A twenty-first gold accent fails that list rather than shipping as one
+more capsule nobody can read.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test

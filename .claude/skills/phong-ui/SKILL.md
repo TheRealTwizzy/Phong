@@ -123,6 +123,14 @@ player equipped — including inside `PublicProfileModal`, which paints in someb
   and *invisible* on a light one: use a token, or `cos-light:` where the hue is the point.
 - **Never define a token in terms of another.** Custom properties are substituted where declared,
   so it resolves against `:root` once and never follows an override.
+- **Two meters that stack have only colour to tell them apart, and `--color-xp` is spoken
+  for.** The menu capsule is the only place in the app where two `ProgressBar`s sit one above
+  the other. `--color-warn` is 0.044 from `--color-xp` in OKLab — under the 0.08 this repo
+  demands of two whole THEMES — and neither is per-cosmetic, so that is not a worst case, it
+  is the only case. The rank meter is `accent` for that reason. `accent` IS per-cosmetic
+  though, so it does not clear the floor on a gold accent (`quantum-gold`, `retro-crt`);
+  `tests/cosmetics.test.ts` names those rather than asserting a floor the catalogue cannot
+  meet. Before stacking a third meter anywhere, measure the pair with `colorDistance`.
 
 ## Verifying, in a repo that bet against component tests
 
