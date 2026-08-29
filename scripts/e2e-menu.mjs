@@ -30,6 +30,10 @@
 //     snapshot taken when RANKS slid into the window.
 // 12. A refetch never blanks what is already on screen, which is what makes
 //     leg 11 an improvement rather than a flash on every arrival.
+// 13a. Arriving on RANKS refetches the PROFILE too, not only the board — the
+//     header capsule prints the player's own ladder position and this page
+//     prints the same ladder, so the two must not be fetched at different
+//     moments and disagree on one screen.
 // 13. The progression meters are in the HEADER and not in a page. They used to
 //     open the PLAY page as a rank card, so they unmounted every time the pager
 //     window moved past index 0 and refilled from empty on the way back. The
@@ -512,6 +516,37 @@ ok(`the header ends at ${headerBox.bottom}px, inside the ${headerBox.offset}px t
 // `truncate` and `max-w` exist for. And no suite plays a match and samples a
 // meter on the way back, so the resume itself is held by
 // tests/meterMemory.test.ts, not here.
+
+// ---- 13a. Arriving on RANKS refetches the profile ------------------------
+// The header shows the player's own ladder position; RANKS prints the same
+// ladder for everybody. Nothing else refreshes that number while the menu sits
+// open — the 15s session heartbeat reads the session and never a profile — so
+// another player passing an Overlord left the header holding a stale #N beside
+// a board that had just fetched the true one. Same arrival the board's own
+// refetch spends (leg 11), so this is not a second concept.
+let profileCalls = 0;
+const countProfile = (r) => {
+  if (new URL(r.url()).pathname === '/api/profile/me') profileCalls += 1;
+};
+page.on('request', countProfile);
+
+await page.click('#menu-nav-history');
+await settle();
+profileCalls = 0;
+await page.click('#menu-nav-leaderboard');
+await settle();
+if (profileCalls < 1) {
+  fail('arriving on RANKS did not refetch the profile, so the header can disagree with the board it is standing next to');
+}
+// And NOT on every page: four times the requests to fix one disagreement.
+profileCalls = 0;
+await page.click('#menu-nav-history');
+await settle();
+if (profileCalls !== 0) {
+  fail(`arriving on HISTORY refetched the profile ${profileCalls} times — only RANKS shows a competing copy of that number`);
+}
+page.off('request', countProfile);
+ok('arriving on RANKS refetches the profile behind the header, and no other page does');
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 await browser.close();

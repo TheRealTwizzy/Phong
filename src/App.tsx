@@ -857,9 +857,22 @@ export default function App() {
    * other is dropped, rather than firing a second round of confetti for a
    * level the player already saw themselves reach.
    */
-  const applyMatchResult = useCallback((matchKey: string, result: MatchEndResult) => {
+  const applyMatchResult = useCallback((matchKey: string, result: MatchEndResult, source: 'post' | 'relay') => {
     if (!result) return;
-    if (matchKey && shownMatchKeyRef.current === matchKey) return;
+    if (matchKey && shownMatchKeyRef.current === matchKey) {
+      // The toasts are done — but the PROFILE may not be. Anything derived from
+      // the whole player table can only be right once every seat of this match
+      // has been written, and the relay's copy is read after both are; our own
+      // POST records one seat and cannot be. So a duplicate FROM THE RELAY
+      // still installs its profile, silently, and a duplicate from our own POST
+      // is dropped exactly as before.
+      //
+      // Authority by SOURCE, never by arrival order: "later wins" reads well
+      // and is wrong in the mirror case, where the relay lands first and our
+      // own POST is the duplicate that would reinstall the stale number.
+      if (source === 'relay' && result.profile) setProfile(result.profile);
+      return;
+    }
     if (matchKey) shownMatchKeyRef.current = matchKey;
 
     setLastMatchResult(result);
@@ -1019,7 +1032,7 @@ export default function App() {
           if (shownMatchKeyRef.current !== matchKey) setToastRecordFailed(true);
           return;
         }
-        applyMatchResult(matchKey, outcome.result!);
+        applyMatchResult(matchKey, outcome.result!, 'post');
       } catch (e) {
         console.error('Failed to record match on server:', e);
         if (shownMatchKeyRef.current !== matchKey) setToastRecordFailed(true);
@@ -1885,7 +1898,7 @@ export default function App() {
         // score it owns, and this is our copy of it. It arrives whether or not
         // our own POST ever lands — which is the point: a phone that dies on
         // the final point no longer loses the match it just played.
-        applyMatchResult(msg.matchKey, msg.result);
+        applyMatchResult(msg.matchKey, msg.result, 'relay');
         break;
 
       case 'session_invalid':
@@ -3408,6 +3421,7 @@ export default function App() {
                   currentPlayerId={playerId}
                   onViewProfile={openPublicProfile}
                   isCurrent={isCurrent}
+                  onArrive={fetchProfile}
                 />
               ),
               achievements: (isCurrent) => (

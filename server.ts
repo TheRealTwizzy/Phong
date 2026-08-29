@@ -53,7 +53,7 @@ import {
   roomsOf,
 } from './src/venues';
 import { validateUsername } from './src/profileRules';
-import { Rating, winProbability } from './src/rating';
+import { Rating, newRating, winProbability } from './src/rating';
 
 
 /**
@@ -187,9 +187,13 @@ function watcherBeside(room: Room, side: 0 | 1): WebSocket | null {
 function sendMatchPrediction(room: Room): void {
   const [a, b] = room.players;
   if (!a || !b) return;
-  const r0 = db.getProfile(a.playerId);
-  const r1 = db.getProfile(b.playerId);
-  const p0 = winProbability({ mu: r0.mmrMu, sigma: r0.mmrSigma }, { mu: r1.mmrMu, sigma: r1.mmrSigma });
+  // Two ratings, not two profiles. `getProfile` is four queries and, for
+  // anyone on the top rung, a full table scan for a ladder position nothing
+  // here renders. `newRating()` is byte-for-byte what its lazy mint would have
+  // produced for a row that is not there, so nothing about this moves.
+  const r0 = db.matchmakingRating(a.playerId) ?? newRating();
+  const r1 = db.matchmakingRating(b.playerId) ?? newRating();
+  const p0 = winProbability(r0, r1);
   for (const side of [0, 1] as const) {
     sendAll(viewersOf(room, side), {
       type: 'match_prediction',
@@ -368,11 +372,18 @@ const queueRoomConfig = (): RoomMatchConfig =>
 /** A queue entry as the pure pairing rules see it. */
 function queueCandidate(entry: QueueEntry): Candidate | null {
   if (!entry.deviceId) return null;
-  const profile = db.getProfile(entry.deviceId);
+  // The RATING, never the profile. `sweepQueue` rebuilds this list once per
+  // pairing, so a sweep asks for every queued entry N+1 times every two
+  // seconds, synchronously, on the relay's event loop — and `getProfile` is
+  // four queries, a conditional write and, for a queued Overlord, a full
+  // unindexed COUNT over `players` for a ladder position that pairs nobody.
+  // `newRating()` matches what its lazy mint produced, so a row that has gone
+  // away mid-queue still pairs exactly as it did.
+  const rating = db.matchmakingRating(entry.deviceId) ?? newRating();
   return {
     deviceId: entry.deviceId,
-    mu: profile.mmrMu,
-    sigma: profile.mmrSigma,
+    mu: rating.mu,
+    sigma: rating.sigma,
     joinedAt: entry.joinedAt,
     rttMs: entry.rttMs,
   };

@@ -1126,6 +1126,30 @@ class GameDatabase {
     return profile;
   }
 
+  /**
+   * The hidden rating and nothing else, for the paths that PAIR and PREDICT
+   * rather than display.
+   *
+   * `getProfile` is four queries, a conditional write, and — since the ladder
+   * position landed — a full unindexed COUNT over `players` for anyone on the
+   * top rung. `queueCandidate` and `sendMatchPrediction` read two floats out of
+   * all that and discard the rest, which was merely wasteful before and became
+   * a problem the moment the count existed: `sweepQueue` rebuilds its whole
+   * candidate list once per pairing, so a sweep asks for every queued entry
+   * N+1 times, every two seconds, synchronously, on the relay's event loop.
+   *
+   * Gating the count on the top rung does NOT protect that path, which is what
+   * the change adding it assumed: a queued Overlord IS the top rung. The repair
+   * is not a cheaper count or an index to serve it — it is not asking these
+   * paths for a profile at all.
+   */
+  public matchmakingRating(id: string): { mu: number; sigma: number } | null {
+    const row = this.stmt('SELECT mmrMu, mmrSigma FROM players WHERE id = ?').get(id) as unknown as
+      | { mmrMu: number; mmrSigma: number }
+      | undefined;
+    return row ? { mu: row.mmrMu, sigma: row.mmrSigma } : null;
+  }
+
   public getProfile(id: string): PlayerProfile {
     const existing = this.readProfile(id);
     if (!existing) {

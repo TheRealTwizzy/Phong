@@ -37,7 +37,7 @@ coverage number.
 | Suite | Owns |
 |---|---|
 | `rating` `xp` `achievements` | TrueSkill, tiers, `tierProgress` (incl. the full top band), the per-rung solo caps, the XP curve, solo momentum/fatigue, the achievement tree and the unlocks it gates |
-| `ladderPosition` | The number the top rung renders instead of its name, and that it AGREES with the leaderboard's own |
+| `ladderPosition` | The number the top rung renders instead of its name, that it AGREES with the leaderboard's own, and that the narrow rating read the relay pairs on says the same thing a whole profile would |
 | `db` | The store: matches, idempotency, abandons, and the counters `recordMatch` derives |
 | `matchHistory` | History reads: one row per player per match, the `ranked` column, mode/ranked filters, paging, per-player retention |
 | `missions` | The dealt hand, rerolls, elite unlocks, Practice Wall XP |
@@ -415,6 +415,15 @@ persists and the stale higher self was being counted as standing above the playe
 those was verified by reverting the fix and watching the leg go red — a fixture this dense is
 exactly where a vacuous pass hides. Reaching Overlord is still `rankMu >= 37` and nothing else — the headcount is a
 display, never a definition — so no test here may make one player's tier depend on another's.
+
+**A field derived from the whole table must not ride a profile onto a hot path.** The count is
+gated on the top rung, and that gate is about correctness rather than cost: `queueCandidate` runs
+for every queued entry N+1 times per two-second sweep, and a queued Overlord is precisely the
+account the gate does not spare. So the relay pairs and predicts on `db.matchmakingRating` — two
+floats, one statement — and the suite pins that it reports exactly what `getProfile` would, which
+is what makes the substitution faithful rather than merely faster. That it IS faster is not
+something an assertion states better than the absent call does; `queue` and `duel` cover that
+pairing still works.
 
 **A suite that asserts old behaviour is deleted rather than read.** When a rule changes, change
 its suite in the same commit. The five-rung ladder deleted one outright: `physics` had a test

@@ -190,6 +190,31 @@ describe('the ladder position the top rung renders', () => {
   });
 });
 
+describe('the narrow rating read the relay pairs and predicts on', () => {
+  // `queueCandidate` and `sendMatchPrediction` used to ask for a whole profile
+  // and keep two floats out of it. That was merely wasteful until the ladder
+  // position landed inside `getProfile`, at which point a queued Overlord cost
+  // a full unindexed COUNT over `players` — N+1 times per queued entry per
+  // two-second sweep, synchronously, on the relay's event loop. These pin that
+  // the substitution is FAITHFUL; that it is faster is not something a test
+  // states better than the absent call does.
+  it('returns exactly what getProfile would have reported', () => {
+    for (const id of ['dev_overlord_aaaaaaaaa', 'dev_legend_ddddddddddd', 'dev_rising_gggggggggg']) {
+      const full = db.getProfile(id);
+      expect(db.matchmakingRating(id)).toEqual({ mu: full.mmrMu, sigma: full.mmrSigma });
+    }
+  });
+
+  it('reports nothing for an id with no row, rather than minting one', () => {
+    // The difference from `getProfile`, which lazy-mints. Both call sites fall
+    // back to `newRating()` — byte-for-byte what that mint produced — so an
+    // account deleted mid-queue still pairs exactly as it did, and the sweep no
+    // longer creates a player row as a side effect of looking at the queue.
+    expect(db.matchmakingRating('dev_nobody_00000000000')).toBeNull();
+    expect(db.matchmakingRating('dev_nobody_00000000000')).toBeNull();
+  });
+});
+
 describe('a match that changes the rating changes the number with it', () => {
   it('reports the POST-match position, not the one it was loaded with', () => {
     // recordMatch loads the profile BEFORE applying the match, mutates it in
