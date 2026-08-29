@@ -118,8 +118,13 @@ await c.click('#menu-mode-quickmatch');
 await c.click('#btn-quickmatch-join');
 await c.waitForSelector('#btn-quickmatch-cancel', { timeout: 8000 });
 await c.click('#btn-quickmatch-cancel');
+// 20s, not 8: this wait is a full click → WS → relay → WS → React commit
+// round-trip, and the runner's pool schedules this suite beside its heaviest
+// siblings — measured 3.2× slower beside duel+history, where the 8s ceiling
+// was the one assertion in all twenty suites to lose. The ceiling is a bet
+// about the MACHINE; the assertion is about the app, and it is unchanged.
 await c
-  .waitForFunction(() => document.querySelector('#menu-mode-quickmatch')?.getAttribute('data-searching') === 'false', { timeout: 8000 })
+  .waitForFunction(() => document.querySelector('#menu-mode-quickmatch')?.getAttribute('data-searching') === 'false', { timeout: 20000 })
   .catch(() => fail('cancelling left the row searching'));
 await c.waitForTimeout(1200);
 if (await shown(c, '#half-court-canvas')) fail('a cancelled search still seated the player');

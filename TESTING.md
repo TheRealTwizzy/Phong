@@ -65,9 +65,14 @@ coverage number.
 `streak` · `history` · `delete` · `eject` · `build-id`
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
-database would let one suite's players decide another suite's assertions. `npm run build` is
-therefore a precondition. Chromium resolves from `CHROMIUM_PATH`, else a Playwright download,
-else system Chrome.
+database would let one suite's players decide another suite's assertions. That isolation is
+also what lets the runner hold several in flight at once: a bounded pool (`E2E_CONCURRENCY`,
+default a quarter of the cores capped at 4 — a "suite" is a server plus a Chromium, the suites
+assert real timings, and at half the cores the queue suite failed 2 of 3 runs beside duel and
+history while passing solo, a starved timeout reading as a flake) shares nothing between
+suites but the CPU, and `E2E_CONCURRENCY=1` is exactly the old one-at-a-time run.
+`npm run build` is therefore a precondition. Chromium resolves from `CHROMIUM_PATH`, else a
+Playwright download, else system Chrome.
 
 ## 3. Reading a coverage report honestly
 

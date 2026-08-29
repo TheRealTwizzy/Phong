@@ -1,4 +1,16 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(npm run lint)",
+      "Bash(npm run lint:suites)",
+      "Bash(npm test)",
+      "Bash(npm run test:coverage)",
+      "Bash(npm run build)",
+      "Bash(npm run test:e2e)",
+      "Bash(node scripts/e2e-run.mjs *)",
+      "Bash(claude plugin list)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {
