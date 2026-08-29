@@ -9,12 +9,17 @@
 // That isolation is also what lets the suites run CONCURRENTLY: nothing is
 // shared but the CPU, and each suite's output is buffered whole rather than
 // streamed, so parallel runs cannot interleave a line. A bounded pool runs
-// E2E_CONCURRENCY suites at once — defaulting to half the cores capped at 4,
-// because a "suite" here is a server process plus a Chromium, not a thread.
-// The cap is deliberate headroom, not a guess that more would break: the
-// suites assert real timings (gesture settles, serve countdowns, the 15s
-// reaper), and a starved suite fails on a timeout that reads as a flake.
-// E2E_CONCURRENCY=1 is exactly the old serial behaviour.
+// E2E_CONCURRENCY suites at once — defaulting to a QUARTER of the cores,
+// capped at 4, because a "suite" here is a server process plus a Chromium
+// running two or three live canvas games, not a thread. The divisor is
+// measured, not guessed: at half the cores a 4-core box ran 2 workers, and
+// the queue suite — whose cancel leg is a full client→relay→client round
+// trip — failed 2 of 3 runs beside duel and history while passing solo in
+// 12s, because the suites assert real timings (gesture settles, serve
+// countdowns, the 15s reaper) and a starved suite fails on a timeout that
+// reads as a flake. A quarter sends a 4-core box (CI included) back to
+// serial and gives a real dev box the speedup; E2E_CONCURRENCY overrides
+// either way, and =1 is exactly the old serial behaviour.
 //
 // Usage:
 //   node scripts/e2e-run.mjs                 # every suite
@@ -220,7 +225,7 @@ async function runSuite(suite) {
 const concurrency = (() => {
   const n = Number(process.env.E2E_CONCURRENCY);
   if (Number.isInteger(n) && n >= 1) return n;
-  return Math.min(4, Math.max(1, Math.floor(os.availableParallelism() / 2)));
+  return Math.min(4, Math.max(1, Math.floor(os.availableParallelism() / 4)));
 })();
 
 // Indexed by position, not pushed on completion: the pool finishes suites in

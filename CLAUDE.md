@@ -387,8 +387,9 @@ point locally. Every suite gets its own free port, throwaway `DATA_DIR` and
 players and leaderboard), so `npm run build` is a precondition, and Chromium is resolved
 from `CHROMIUM_PATH`, else a Playwright download, else a system Chrome. That per-suite
 isolation is also what lets the runner hold several in flight (`E2E_CONCURRENCY`, default
-half the cores capped at 4; `=1` is the old serial run), which is what makes running ALL
-of them the cheap answer rather than the noble one. `verify` runs
+a quarter of the cores capped at 4 — measured, half flaked a timing suite on a 4-core box;
+`=1` is the old serial run), which is what makes running ALL of them the cheap answer
+rather than the noble one. `verify` runs
 `test:coverage` rather than a bare `npm test`: per-module floors on the shared pure logic,
 set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
 components are Playwright's job, and one number would either fail on that bet or be set low
