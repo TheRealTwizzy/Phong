@@ -33,7 +33,8 @@
 // 13a. Arriving on RANKS refetches the PROFILE too, not only the board — the
 //     header capsule prints the player's own ladder position and this page
 //     prints the same ladder, so the two must not be fetched at different
-//     moments and disagree on one screen.
+//     moments and disagree on one screen. The page's refresh BUTTON is the
+//     same requirement by a second door, and was missed the first time.
 // 13. The progression meters are in the HEADER and not in a page. They used to
 //     open the PLAY page as a rank card, so they unmounted every time the pager
 //     window moved past index 0 and refilled from empty on the way back. The
@@ -538,6 +539,19 @@ await settle();
 if (profileCalls < 1) {
   fail('arriving on RANKS did not refetch the profile, so the header can disagree with the board it is standing next to');
 }
+// The refresh BUTTON is the same requirement through a second door, and it
+// shipped without this for a release: it bumped the board's reloadKey alone, so
+// a player sitting on RANKS watching the top of the ladder — which is exactly
+// who presses this, and presses it repeatedly — refreshed the rows and left the
+// header holding the number they had arrived with. Arrival was fixed first
+// because it was the one reported; the invariant is the two numbers agreeing on
+// screen, not the moment that asked for them.
+profileCalls = 0;
+await page.click('#btn-refresh-leaderboard');
+await settle();
+if (profileCalls < 1) {
+  fail('the RANKS refresh button asked the board again and not the profile, so the header can hold a stale position beside the rows that just moved');
+}
 // And NOT on every page: four times the requests to fix one disagreement.
 profileCalls = 0;
 await page.click('#menu-nav-history');
@@ -546,7 +560,7 @@ if (profileCalls !== 0) {
   fail(`arriving on HISTORY refetched the profile ${profileCalls} times — only RANKS shows a competing copy of that number`);
 }
 page.off('request', countProfile);
-ok('arriving on RANKS refetches the profile behind the header, and no other page does');
+ok('RANKS refetches the profile behind the header on arrival AND on its refresh button, and no other page does');
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 await browser.close();

@@ -3433,7 +3433,7 @@ export default function App() {
                   currentPlayerId={playerId}
                   onViewProfile={openPublicProfile}
                   isCurrent={isCurrent}
-                  onArrive={fetchProfile}
+                  onRefetchProfile={fetchProfile}
                 />
               ),
               achievements: (isCurrent) => (
