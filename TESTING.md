@@ -416,6 +416,21 @@ those was verified by reverting the fix and watching the leg go red — a fixtur
 exactly where a vacuous pass hides. Reaching Overlord is still `rankMu >= 37` and nothing else — the headcount is a
 display, never a definition — so no test here may make one player's tier depend on another's.
 
+**A duel moves two of them, so both seats have to be numbered against the ladder they BOTH
+left behind.** `recordRoomMatch` writes seat 0 first, so a position derived inside that loop
+answers for a table where the opponent still holds their pre-match row — and it is wrong in
+exactly one band, when the winner's new rating lands between the loser's new one and the
+loser's old one. Then both seats are told they are #2 and the board shows nobody at #1.
+`tests/duelRecord.test.ts` plays it through the real relay, seeding two Overlords straight into
+the database because μ37 is only ever reached through PvP and manufacturing one otherwise
+means dozens of duels for one assertion. Three things about that fixture are load-bearing and
+all three were learned by watching it pass against a broken server. The winner must be SEAT 0,
+since the loser's stale row is only ever too high and a stale read for seat 1 cannot differ.
+The sigmas must be ASYMMETRIC — a confident winner and an uncertain loser — or the winner
+clears the loser's old rating outright and the band is empty. And the band itself is asserted
+rather than assumed, because a retune of the rank step would slide the fixture out of it and
+the test would go quiet instead of red.
+
 **A field derived from the whole table must not ride a profile onto a hot path.** The count is
 gated on the top rung, and that gate is about correctness rather than cost: `queueCandidate` runs
 for every queued entry N+1 times per two-second sweep, and a queued Overlord is precisely the

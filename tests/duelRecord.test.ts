@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { findMission } from '../src/game/missions';
 import { duelMatchKey } from '../src/matchRules';
 import { Device, Phone as PhoneSocket, Relay, sleep, startRelay } from './helpers/relay';
@@ -47,6 +49,44 @@ const getMissions = async (device: Device) =>
 
 const matchHistory = async (device: Device) =>
   (await fetch(`${base}/api/matches/me`, { headers: { cookie: device.cookie } })).json();
+
+/** The ranked board the header badge has to agree with. */
+const board = async (): Promise<any[]> =>
+  (await (await fetch(`${base}/api/leaderboard?sort=elo`)).json()).leaderboard;
+
+/**
+ * Stand a device on the ranked ladder at a chosen rating, by hand.
+ *
+ * The only suite here that WRITES to the relay's database rather than reading
+ * it. The top rung is μ37 and is only ever reached through PvP — deliberately,
+ * so an AI cannot be farmed to the top of the board — which means the only way
+ * to reach it through the relay is to play dozens of ranked duels for one
+ * assertion. A second connection is safe because the database is in WAL mode
+ * and the server compiles a statement per read rather than caching rows, so
+ * its next `getProfile` sees this.
+ *
+ * Both ratings are set, not just the visible one: the RANK update rates a duel
+ * against the opponent's hidden MMR (recordMatch's `oppRating`), so leaving
+ * mmrMu at the default 25 would have two Overlords rating each other as
+ * beginners.
+ */
+function seedLadder(device: Device, mu: number, sigma: number): void {
+  const sql = new DatabaseSync(path.join(relay.dataDir, 'phong.db'));
+  try {
+    const changed = sql
+      .prepare(
+        `UPDATE players
+            SET rankMu = ?, rankSigma = ?, rankedGames = 5, mmrMu = ?, mmrSigma = ?
+          WHERE id = ?`
+      )
+      .run(mu, sigma, mu, sigma, device.id).changes;
+    // A silent no-op here would leave two μ25 players duelling and every
+    // assertion below asking about a ladder neither is on.
+    if (changed !== 1) throw new Error(`seedLadder matched ${changed} rows for ${device.username}`);
+  } finally {
+    sql.close();
+  }
+}
 
 /**
  * A device dealt a mission that a duel win actually satisfies.
@@ -1007,6 +1047,78 @@ describe('recording a duel', () => {
     expect(afterSecond.rankMu).toBeLessThan(afterFirst.rankMu);
     const history = await matchHistory(host);
     expect(history.matches.map((m: any) => m.ranked)).toEqual([1, 0]); // newest first
+  });
+
+  it('numbers two Overlords against the ladder BOTH results left behind', async () => {
+    // `ladderPosition` is the one field on a match result that is a statement
+    // about every other player, and a duel moves two of them. recordRoomMatch
+    // writes seat 0 first, so a position derived while seat 1 still holds its
+    // pre-match row answers for a ladder one update out of date — and the case
+    // where that is visible is precisely two adjacent Overlords swapping
+    // order, which is the case anybody at the top of the board is watching.
+    //
+    // Concretely, with the send back inside the recording loop: the winner is
+    // numbered while the loser still stands above them, so BOTH seats are told
+    // they are #2 and the board shows nobody at #1.
+    //
+    // The ratings are written straight into the database because there is no
+    // other way to reach μ37 — the top rung is only ever reached through PvP,
+    // by design (see CLAUDE.md §7), so manufacturing one through the relay
+    // would mean playing dozens of duels to test one line. After newDevice so
+    // the row exists, and before seatDuel because startMatch samples both
+    // seats then and caches them for the match.
+    const HOST_MU = 39.5;
+    const GUEST_MU = 40.2;
+    const host = await newDevice('LadderHost');
+    const guest = await newDevice('LadderGuest');
+    // The sigmas are the fixture, not decoration. A rank step scales with the
+    // player's own sigma, so a confident host moves a little and an uncertain
+    // guest moves a lot — which is what puts the host's new rating between the
+    // guest's new one and the guest's OLD one, the only band in which a stale
+    // read answers differently from a fresh one. Symmetric sigmas make the
+    // winner clear the loser's pre-match rating outright and the bug becomes
+    // invisible; that version of this test passed against the broken server.
+    seedLadder(host, HOST_MU, 1.0);
+    seedLadder(guest, GUEST_MU, 3.9);
+
+    const before = await board();
+    expect(before.slice(0, 2).map((e: any) => e.username)).toEqual(['LadderGuest', 'LadderHost']);
+
+    const { p1, p2 } = await seatDuel(host, guest, 3);
+    await cross(p1, p2, 1);
+    await cross(p2, p1, 1);
+    for (let i = 0; i < 3; i++) await point(p1, 'p1', i + 1);
+
+    const hostResult = (await p1.await('match_recorded')).result as any;
+    const guestResult = (await p2.await('match_recorded')).result as any;
+
+    // The upset landed, or this test is no longer about the thing it names.
+    expect(hostResult.profile.tier).toBe('overlord');
+    expect(guestResult.profile.tier).toBe('overlord');
+    const after = await board();
+    expect(after.slice(0, 2).map((e: any) => e.username)).toEqual(['LadderHost', 'LadderGuest']);
+    // And the band still holds. Stated rather than assumed because a retune of
+    // the rank step would move the winner clear of the loser's old rating, at
+    // which point every assertion below passes against a server that never had
+    // the fix — the fixture would go quiet instead of red. rankMu is read from
+    // the player's OWN profile, which is the only place it is ever legible.
+    const hostMuAfter = (await getProfile(host)).rankMu;
+    const guestMuAfter = (await getProfile(guest)).rankMu;
+    expect(guestMuAfter).toBeLessThan(hostMuAfter);
+    expect(hostMuAfter).toBeLessThan(GUEST_MU);
+
+    // The assertion that matters is not either number on its own — it is that
+    // each seat was told what the BOARD says about it. A number checked alone
+    // passes on the bug, because #2 is a perfectly plausible answer.
+    const rankOf = (name: string) => after.find((e: any) => e.username === name)!.rank;
+    expect(hostResult.profile.ladderPosition).toBe(rankOf('LadderHost'));
+    expect(guestResult.profile.ladderPosition).toBe(rankOf('LadderGuest'));
+    // And spelled out, because "both agree with the board" would also be
+    // satisfied by a board this suite had somehow left empty.
+    expect([hostResult.profile.ladderPosition, guestResult.profile.ladderPosition]).toEqual([1, 2]);
+
+    p1.close();
+    p2.close();
   });
 
   it('records no match when a lobby seat is left before any ball crosses', async () => {
