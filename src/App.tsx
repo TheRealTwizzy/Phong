@@ -13,6 +13,7 @@ import {
   MatchEndResult,
   MatchEndPayload,
   RankDirection,
+  RankMagnitude,
   PlayerStatus,
   DailyMission,
   LanguageCode,
@@ -174,12 +175,35 @@ const DEFAULT_SETTINGS: GameSettings = {
  * on-device queue carry the key the first attempt used and the server can see
  * they are the same match rather than three.
  */
-/** What each rank movement is called, for the glyph's accessible name. */
-const RANK_MOVE_KEY: Record<RankDirection, string> = {
-  up: 'rank_up',
-  down: 'rank_down',
+/**
+ * How many arrows a rank move draws, and what it is called.
+ *
+ * The overlay drew ONE arrow at any magnitude, so a first placement game that
+ * moved 4.2 mu and a converged player's expected win that moved 0.05 looked
+ * identical — the direction was the whole message. The server buckets the
+ * delta (rankMoveSize in src/rating.ts); this only counts glyphs.
+ *
+ * Flat literal records rather than a key built from the two fields:
+ * tests/i18n.test.ts finds a key by scanning the source for it in quotes, so a
+ * template-literal `t(`rank_${dir}_${size}`)` is invisible to both halves of
+ * that check — every key it names reads as dead weight, and a typo in it reads
+ * as nothing at all.
+ */
+const RANK_ARROWS: Record<RankMagnitude, number> = { none: 0, minor: 1, moderate: 2, large: 3 };
+const RANK_UP_KEY: Record<RankMagnitude, string> = {
   none: 'rank_steady',
+  minor: 'rank_up_minor',
+  moderate: 'rank_up_moderate',
+  large: 'rank_up_large',
 };
+const RANK_DOWN_KEY: Record<RankMagnitude, string> = {
+  none: 'rank_steady',
+  minor: 'rank_down_minor',
+  moderate: 'rank_down_moderate',
+  large: 'rank_down_large',
+};
+const rankMoveKey = (direction: RankDirection, size: RankMagnitude): string =>
+  direction === 'up' ? RANK_UP_KEY[size] : direction === 'down' ? RANK_DOWN_KEY[size] : 'rank_steady';
 
 const newSoloMatchKey = (): string =>
   `solo:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
@@ -3732,24 +3756,55 @@ export default function App() {
                       id="winner-rank-tile"
                       className="flex flex-col items-center justify-center gap-1 rounded-card border border-line bg-surface-1 px-2 py-2.5"
                     >
-                      <div className="flex items-center gap-1.5">
+                      {/* Stacked, not side by side. The tile is one of three
+                          in a grid — 100px on a 390px phone, 84px inside its
+                          own padding — and the tier badge alone measures 82px
+                          at "Unranked". Beside it even the SINGLE 16px arrow
+                          this replaced overflowed the tile and spilled over
+                          its neighbour; three would be hopeless. Nothing went
+                          red for it because the only layer that can see a
+                          layout here is the browser, and nothing asserted this
+                          tile at all. */}
+                      <div className="flex flex-col items-center gap-1">
                         <TierBadge
                           tier={lastMatchResult.tier ?? 'unranked'}
                           language={currentLanguage}
                         />
+                        {/* One arrow for a minor move, two for a moderate one,
+                            three for a large one — and the count comes from the
+                            server, so two bundles cannot draw a different number
+                            for the same match. h-3.5 with a negative gap rather
+                            than the h-4 a single arrow had: this tile is one of
+                            three in a grid, so about 100px on a small phone, and
+                            it already holds a TierBadge. Three h-4 arrows add
+                            48px and push the badge out; three of these come to
+                            about 28px. */}
                         <span
                           id={`rank-move-${lastMatchResult.rankDirection}`}
+                          data-rank-magnitude={lastMatchResult.rankMagnitude}
                           role="img"
-                          aria-label={t(RANK_MOVE_KEY[lastMatchResult.rankDirection], currentLanguage)}
-                          title={t(RANK_MOVE_KEY[lastMatchResult.rankDirection], currentLanguage)}
-                          className="flex items-center"
+                          aria-label={t(
+                            rankMoveKey(lastMatchResult.rankDirection, lastMatchResult.rankMagnitude),
+                            currentLanguage
+                          )}
+                          title={t(
+                            rankMoveKey(lastMatchResult.rankDirection, lastMatchResult.rankMagnitude),
+                            currentLanguage
+                          )}
+                          className="flex shrink-0 items-center -space-x-1.5"
                         >
-                          {lastMatchResult.rankDirection === 'up' ? (
-                            <ArrowUp className="h-4 w-4 text-win" />
-                          ) : lastMatchResult.rankDirection === 'down' ? (
-                            <ArrowDown className="h-4 w-4 text-loss" />
-                          ) : (
+                          {lastMatchResult.rankDirection === 'none' ? (
                             <Circle className="h-2.5 w-2.5 fill-current text-rank-steady" />
+                          ) : (
+                            Array.from(
+                              { length: RANK_ARROWS[lastMatchResult.rankMagnitude] },
+                              (_, i) =>
+                                lastMatchResult.rankDirection === 'up' ? (
+                                  <ArrowUp key={i} className="h-3.5 w-3.5 text-win" />
+                                ) : (
+                                  <ArrowDown key={i} className="h-3.5 w-3.5 text-loss" />
+                                )
+                            )
                           )}
                         </span>
                       </div>

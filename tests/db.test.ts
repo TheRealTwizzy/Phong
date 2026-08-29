@@ -93,6 +93,69 @@ describe('rankDirection', () => {
     const again = db.recordMatch(match('p_dir_replay', { matchKey: 'dir-replay' }));
     expect(again.alreadyRecorded).toBe(true);
     expect(again.rankDirection).toBe('up');
+    // The size replays with it, from the same stored blob. A row stamped
+    // before the field existed replays 'none' rather than undefined, which
+    // would draw a direction with no arrows beside it.
+    expect(again.rankMagnitude).toBe(first.rankMagnitude);
+    expect(again.rankMagnitude).not.toBe('none');
+  });
+
+  it('replays a row stamped before the size existed as none, never as undefined', () => {
+    // The fortnight after this ships. recorded_matches keeps rows for 14 days,
+    // and every one written by the previous build has a direction and no size
+    // in its stored blob — so the defaults literal replayRecordedMatch spreads
+    // `...stored` over is the only thing standing between those rows and a
+    // direction rendered with no arrows beside it. Simulated by stripping the
+    // field back out of a real stamp, which is exactly the shape of a row the
+    // old build wrote.
+    init('p_legacy', 'LegacyRow');
+    const first = db.recordMatch(match('p_legacy', { matchKey: 'legacy-1' }));
+    expect(first.rankMagnitude).not.toBe('none');
+
+    const sql = new DatabaseSync(DB_FILE);
+    try {
+      const row = sql
+        .prepare('SELECT result FROM recorded_matches WHERE playerId = ? AND matchKey = ?')
+        .get('p_legacy', 'legacy-1') as { result: string };
+      const stored = JSON.parse(row.result);
+      delete stored.rankMagnitude;
+      const changed = sql
+        .prepare('UPDATE recorded_matches SET result = ? WHERE playerId = ? AND matchKey = ?')
+        .run(JSON.stringify(stored), 'p_legacy', 'legacy-1').changes;
+      // A silent no-op would leave the untouched row replaying its own field
+      // and this asserting nothing at all.
+      expect(changed).toBe(1);
+    } finally {
+      sql.close();
+    }
+
+    const again = db.recordMatch(match('p_legacy', { matchKey: 'legacy-1' }));
+    expect(again.alreadyRecorded).toBe(true);
+    expect(again.rankDirection).toBe('up');
+    expect(again.rankMagnitude).toBe('none');
+  });
+
+  it('never reports a direction without a size, or a size without a direction', () => {
+    // The pair is derived from ONE delta sharing ONE epsilon precisely so this
+    // cannot drift. A test that only checked the size would pass on the bug
+    // where they disagree, so both halves are asserted together across every
+    // case that produces a 'none'.
+    init('p_pair', 'PairCase');
+    const cases = [
+      db.recordMatch(match('p_pair', { matchKey: 'pair-win' })),
+      db.recordMatch(
+        match('p_pair', { matchKey: 'pair-loss', playerScore: 1, opponentScore: 7, isWinner: false })
+      ),
+      db.recordMatch(match('p_pair', { matchKey: 'pair-rookie', mode: 'solo', difficulty: 'rookie' })),
+      db.recordMatch(match('p_pair', { matchKey: 'pair-sonar', rules: { opponentSonar: true } })),
+    ];
+    for (const res of cases) {
+      expect(res.rankMagnitude === 'none').toBe(res.rankDirection === 'none');
+    }
+    // And the two that did rate really did report a size, or the check above
+    // is satisfied by everything being 'none'.
+    expect(cases[0].rankMagnitude).not.toBe('none');
+    expect(cases[1].rankMagnitude).not.toBe('none');
   });
 });
 

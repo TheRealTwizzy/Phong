@@ -12,6 +12,7 @@ import {
   MatchEndResult,
   ModeStats,
   RankDirection,
+  RankMagnitude,
   GameMode,
   DailyMission,
   CosmeticId,
@@ -51,6 +52,8 @@ import {
   PRACTICE_XP_DAILY_CAP,
   soloAdjustedXp,
   LADDER_TOP_N,
+  RANK_MOVE_EPSILON,
+  rankMoveSize,
 } from '../src/rating';
 import { BotSeed, botProfileFields } from './bots';
 import {
@@ -2534,13 +2537,13 @@ class GameDatabase {
     // 'none' is both "did not rate" and "rated and did not move" — from the
     // player's side those are the same fact, and the overlay says so with one
     // glyph rather than distinguishing a difference nobody can act on.
-    const rankDirection: RankDirection = !ranksThisMatch
-      ? 'none'
-      : profile.rankMu > rankMuBefore + 1e-9
-        ? 'up'
-        : profile.rankMu < rankMuBefore - 1e-9
-          ? 'down'
-          : 'none';
+    // Direction and size come off ONE delta sharing one epsilon, so they cannot
+    // disagree about whether anything happened — an arrow with no direction, or
+    // a direction with no arrows, is not a state either field can reach alone.
+    const rankDelta = ranksThisMatch ? profile.rankMu - rankMuBefore : 0;
+    const rankDirection: RankDirection =
+      rankDelta > RANK_MOVE_EPSILON ? 'up' : rankDelta < -RANK_MOVE_EPSILON ? 'down' : 'none';
+    const rankMagnitude: RankMagnitude = rankMoveSize(rankDelta);
 
     // 3. Update Match Statistics
     profile.matchesPlayed += 1;
@@ -2775,6 +2778,7 @@ class GameDatabase {
       tierChanged: ranksThisMatch && profile.tier !== previousTier,
       ranked,
       rankDirection,
+      rankMagnitude,
       newAchievements,
       missions: this.getMissions(payload.playerId, now),
     };
@@ -2838,6 +2842,11 @@ class GameDatabase {
       tierChanged: false,
       ranked: false,
       rankDirection: 'none',
+      // A row stamped before this field existed replays with no magnitude, and
+      // `...stored` would leave it undefined — which renders no arrows at all
+      // beside a direction that has one. recorded_matches keeps rows for a
+      // fortnight, so that window is real rather than theoretical.
+      rankMagnitude: 'none',
       newAchievements: [],
       ...stored,
       profile: this.readProfile(playerId)!,

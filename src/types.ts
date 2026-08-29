@@ -578,6 +578,17 @@ export interface MatchEndPayload {
 /** Where the ladder went: up, down, or nowhere. */
 export type RankDirection = 'up' | 'down' | 'none';
 
+/**
+ * How FAR the ladder moved, bucketed server-side into the number of arrows the
+ * winner overlay draws.
+ *
+ * Four values so it is total, with 'none' exactly when `rankDirection` is
+ * 'none' — the two are derived from one delta sharing one epsilon, so they can
+ * never disagree about whether anything happened. An arrow with no direction,
+ * or a direction with no arrows, is the failure this shape rules out.
+ */
+export type RankMagnitude = 'none' | 'minor' | 'moderate' | 'large';
+
 export interface MatchEndResult {
   profile: PlayerProfile;
   earnedXp: number;
@@ -599,6 +610,24 @@ export interface MatchEndResult {
    * mu itself is never sent anywhere it could be rendered.
    */
   rankDirection: RankDirection;
+  /**
+   * How big that move was, drawn as 1, 2 or 3 arrows.
+   *
+   * A BUCKET, and never the mu behind it. RankBadge.tsx states the hard rule —
+   * rankMu enters tierProgress() and reaches a CSS transform, never text and
+   * never an aria-label — and a raw delta would walk past every guard that
+   * enforces it: e2e-rating regexes the rendered body and checks the public
+   * profile's field list, and a number on this object is in neither. A
+   * difference of two ratings is itself a rating; watched over a few matches it
+   * reconstructs the trajectory the tier exists to abstract.
+   *
+   * Bucketed HERE rather than on the client for two more reasons.
+   * stampRecordedMatch persists this object whole, so a delta would sit in
+   * recorded_matches for its fortnight; and two bundles bucketing for
+   * themselves would draw a different number of arrows for the same match. The
+   * count is a property of the result, not of whatever is looking at it.
+   */
+  rankMagnitude: RankMagnitude;
   newAchievements: Achievement[];
   // Today's missions after this match advanced them — server-owned, so the
   // client never computes mission progress itself.
