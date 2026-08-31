@@ -59,6 +59,7 @@ export const UnlockHintSheet: React.FC<UnlockHintSheetProps> = ({
 }) => (
   <Sheet
     id="unlock-hint-sheet"
+    closeId="btn-close-unlock-hint"
     isOpen={Boolean(achievement)}
     onClose={onClose}
     size="xs"

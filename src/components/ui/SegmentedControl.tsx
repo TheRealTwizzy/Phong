@@ -46,6 +46,8 @@ export interface SegmentedControlProps<T> {
   ariaLabel: string;
   /** Omit and a lock renders as a plain marker instead of a tappable reveal. */
   onLockTap?: (achievement: Achievement) => void;
+  /** Localized word for the lock overlay's accessible name. */
+  lockLabel?: string;
   className?: string;
 }
 
@@ -70,6 +72,7 @@ export function SegmentedControl<T extends string | number>({
   readOnly = false,
   ariaLabel,
   onLockTap,
+  lockLabel,
   className = '',
 }: SegmentedControlProps<T>) {
   return (
@@ -126,7 +129,12 @@ export function SegmentedControl<T extends string | number>({
             )}
 
             {locked && (
-              <LockBadge id={o.lockId} achievement={o.lock!} onReveal={onLockTap} />
+              <LockBadge
+                id={o.lockId}
+                achievement={o.lock!}
+                onReveal={onLockTap}
+                label={lockLabel}
+              />
             )}
           </div>
         );
