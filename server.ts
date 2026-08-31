@@ -71,6 +71,18 @@ type Seat = { role: 'player'; index: 0 | 1 } | { role: 'spectator'; slot: 0 | 1 
 const rooms = new Map<string, Room>();
 
 /**
+ * Set once SIGTERM/SIGINT has started closing sockets.
+ *
+ * A shutdown closes every client with 1001, and each close fires vacateSeat,
+ * where `abandoned` is true of every live duel. So a deploy filed a real
+ * ranked LOSS against whichever seat's handler ran first and a real ranked WIN
+ * to the other, spent the day's abandon forgiveness, and bumped the career
+ * counters — for two players who did not leave. Neither did anything wrong;
+ * the server did.
+ */
+let shuttingDown = false;
+
+/**
  * The ranked queue: everybody currently looking for a game.
  *
  * An in-process array beside the room map, and single-instance by design for
@@ -3008,7 +3020,11 @@ async function startServer() {
       // never report one, and the second player's departure from an
       // already-abandoned room records nothing.
       const bothSeated = !!(room.players[0] && room.players[1]);
-      const abandoned = bothSeated && room.inPlay && !room.matchOver && !!currentPlayerId;
+      // ...and not when WE are the reason the socket closed. Falling through
+      // leaves the persistDuelStreaks branch below, which is exactly the
+      // "this departure records no match" case a deploy should take.
+      const abandoned =
+        bothSeated && room.inPlay && !room.matchOver && !!currentPlayerId && !shuttingDown;
       if (abandoned) {
         try {
           // Same rule as recordRoomMatch: a seat that no longer holds
@@ -3131,6 +3147,8 @@ async function startServer() {
   // Render stops the old instance on every deploy of a disk-backed service;
   // close sockets and the listener cleanly instead of dying mid-request.
   const shutdown = (signal: string) => {
+    // Before a single socket is closed: every close below runs vacateSeat.
+    shuttingDown = true;
     console.log(`${signal} received, shutting down`);
     for (const client of wss.clients) {
       client.close(1001, 'Server restarting');
