@@ -323,7 +323,22 @@ export function checkPaddleCollision(
   ball: BallState,
   paddleX: number,
   paddleWidth: number,
-  paddleVx: number = 0
+  paddleVx: number = 0,
+  /**
+   * An extra push on the outgoing angle, in radians. The AI's aggression, and
+   * nothing else — the player passes none.
+   *
+   * It belongs INSIDE the contact rather than applied to the returned angle
+   * afterwards, and the reason is two lines down from here: `outgoingVx` is
+   * derived from this angle and fed to spinPace, which adds or scrubs up to
+   * SPIN_PADDLE_SPEED_GAIN of pace ACCORDING TO ITS SIGN. Bending the angle
+   * after the fact leaves the speed measured against a direction the ball is
+   * no longer going, so a push across the zero-angle axis — a shallow return
+   * nudged to the other side, which is exactly what aggression is for — gave a
+   * spun ball a boost where it should have been scrubbed. Folded in here, the
+   * angle, the pace and the returned spin cannot disagree by construction.
+   */
+  angleBias: number = 0
 ): HitResult {
   const paddleTop = PADDLE_Y - PADDLE_HEIGHT / 2;
   const paddleBottom = PADDLE_Y + PADDLE_HEIGHT / 2;
@@ -355,7 +370,8 @@ export function checkPaddleCollision(
       const angle = clamp(
         hitOffset * maxAngle +
           (drive * DRIVE_ANGLE_DEG * Math.PI) / 180 +
-          (incoming * SPIN_REBOUND_DEG * Math.PI) / 180,
+          (incoming * SPIN_REBOUND_DEG * Math.PI) / 180 +
+          angleBias,
         -maxAngle,
         maxAngle
       );
@@ -478,7 +494,7 @@ export const MIN_AI_COMPETENCE = 0.02;
 // so a bigger competence spread buys almost no measurable difficulty, while
 // the hard 93% ceiling in tests/physics.test.ts caps how far the hardest rung
 // may go. What actually separates the top three is carried elsewhere — the
-// anchor each is rated at, how hard each plays for the corners (aimReturn),
+// anchor each is rated at, how hard each plays for the corners (aimBias),
 // how much spin each reads, and serve pace.
 //
 // And one knot continues DOWN, to the other end of the same reachable range.
@@ -795,7 +811,7 @@ export class OpponentAI {
     this.spinRead = clamp(p.spinRead * (0.75 + Math.random() * 0.5), 0, 1);
     this.lapsed = Math.random() < p.lapseChance;
     // Which corner this rally is played for, committed once like every other
-    // read. Applied to the ball LEAVING (see aimReturn), never to where the
+    // read. Applied to the ball LEAVING (see aimBias), never to where the
     // paddle stands.
     this.aggressionBias = (Math.random() - 0.5) * 2 * style.aggression;
     this.reactionDelayTimer = p.reactionTime; // plan immediately on arrival
@@ -821,10 +837,8 @@ export class OpponentAI {
    * Bounded by the same limit checkPaddleCollision applies, so the AI can
    * never produce a ball the physics would not.
    */
-  public aimReturn(angle: number): number {
-    const limit = (Math.PI / 180) * MAX_REBOUND_ANGLE_DEG;
-    const push = (this.aggressionBias * AI_AGGRESSION_ANGLE_DEG * Math.PI) / 180;
-    return clamp(angle + push, -limit, limit);
+  public aimBias(): number {
+    return (this.aggressionBias * AI_AGGRESSION_ANGLE_DEG * Math.PI) / 180;
   }
 
   /**

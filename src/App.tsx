@@ -2750,16 +2750,19 @@ export default function App() {
           ob,
           aiRef.current.paddleX,
           paddleWidthRef.current,
-          aiRef.current.paddleVx
+          aiRef.current.paddleVx,
+          // Aggression bends the ball on its way out, not the paddle on its
+          // way to meet it — see OpponentAI.aimBias for why that swap matters
+          // to the ladder's ordering. Passed INTO the contact rather than
+          // applied to the angle it returns, because the contact derives its
+          // own pace from the direction the ball leaves in: see the
+          // angleBias parameter.
+          aiRef.current.aimBias()
         );
 
         if (oppHit.hit && oppHit.angle !== undefined && oppHit.speed !== undefined) {
-          // Aggression bends the ball on its way out, not the paddle on its
-          // way to meet it — see OpponentAI.aimReturn for why that swap
-          // matters to the ladder's ordering.
-          const aimed = aiRef.current.aimReturn(oppHit.angle);
-          ob.vy = -Math.abs(oppHit.speed * Math.cos(aimed));
-          ob.vx = oppHit.speed * Math.sin(aimed);
+          ob.vy = -Math.abs(oppHit.speed * Math.cos(oppHit.angle));
+          ob.vx = oppHit.speed * Math.sin(oppHit.angle);
           // The spin the contact produced, which this line used to drop on the
           // floor: oppHit.spin was computed and never read, so the ball left
           // the AI's paddle still carrying the PLAYER's spin, un-reversed and
