@@ -94,7 +94,13 @@ When you add a message:
 - **Ask what this message is the ACCOUNT of, and refuse it where that thing cannot exist.**
   `match_sync` is a replica's report, and a replica only exists once a DataChannel was
   negotiated — so it is refused on a table where no `rtc_signal` was ever relayed
-  (`room.p2pOffered`). Without that, one frame on a relayed table decided a ranked duel.
+  (`room.p2pOffered`, armed only by an offer and an answer from DIFFERENT seats —
+  a lone socket answering its own offer is not two peers). Without that, one frame
+  on a relayed table decided a ranked duel. **Validate the payload in
+  `acceptRtcSignal` when you add a signal kind**, and think about whether the new
+  kind is EVIDENCE of a peer: `ice` is relayed and advances nothing, because
+  candidates trickle from both seats in any order and treating them as evidence
+  puts the one-frame arming back.
 - **Never bound a snapshot by arithmetic instead.** Step-limiting `match_sync`'s score looked
   like the cheaper guard and is wrong: a snapshot is absolute, applied as a maximum by design,
   because a P2P relay never sees the intervening points. `tests/room.test.ts` fails loudly if

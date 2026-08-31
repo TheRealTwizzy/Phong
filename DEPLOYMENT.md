@@ -109,10 +109,19 @@ file that opens fine and is missing the newest writes.
 
 Three things it does that the old hand-rolled one-liner did not:
 
-- **Writes outside `DATA_DIR`, and refuses not to.** A backup on the volume it
-  protects is lost with that volume, which is the exact failure it exists for.
-  On Render that disk is also 1GB with no retention, so snapshots accumulating
-  beside the database eventually take the live database down too.
+- **Writes outside `DATA_DIR`, and refuses not to** — `DATA_DIR` itself
+  included, which the first version let through: it tested only for a path
+  *below* the directory, so `--out $DATA_DIR`, the likeliest way to get this
+  wrong by hand, wrote the snapshot straight beside `phong.db` and exited 0. A
+  backup on the volume it protects is lost with that volume, which is the exact
+  failure it exists for. On Render that disk is also 1GB with no retention, so
+  snapshots accumulating beside the database eventually take the live database
+  down too.
+- **Prunes only files it made itself.** The pattern is the exact timestamp shape
+  it writes, not `phong-*.db`: a hand-made `phong-before-upgrade.db` in the same
+  directory used to count toward `--keep` and sort *after* every ISO stamp, so
+  it took the newest slot and real backups were deleted in its place — three
+  backups at `--keep 2` left one. Put your own snapshots there safely.
 - **Opens the snapshot and runs `PRAGMA integrity_check`** before reporting
   success, and prints the row count. A backup nobody has opened is a backup
   nobody knows is good.
