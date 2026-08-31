@@ -2842,6 +2842,22 @@ async function startServer() {
         } else if (msg.type === 'match_sync' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
+          // A snapshot is a REPLICA's account of a match the relay did not
+          // see, and only a peer that negotiated a DataChannel has one. On a
+          // table where no offer was ever relayed there is no replica, so this
+          // is just a client asserting a score — and applyMatchSync takes the
+          // score as a maximum and will declare the match decided on it. One
+          // message naming the winning score for your own seat therefore filed
+          // a real ranked win for the sender and a real ranked loss for an
+          // opponent whose client never rendered it, since match_sync
+          // broadcasts no score_update.
+          //
+          // The scores are deliberately NOT step-limited instead: a snapshot
+          // is absolute rather than a delta and is applied as a maximum by
+          // design, because a P2P relay never sees the intervening points — so
+          // capping the advance leaves a legitimate match undecidable. The
+          // authority check is the honest boundary; the arithmetic is not.
+          if (!room.p2pOffered) return;
           room.lastActive = Date.now();
           // Whether this call is about to start a NEW match — the peers
           // agreeing a rematch between themselves inside applyMatchSync,
@@ -2893,6 +2909,10 @@ async function startServer() {
           // get past. Silent: the offer simply never arrives, which is the
           // case p2p.ts already falls back from.
           if (room.config.spectators) return;
+
+          // This table is negotiating a DataChannel, so a replica may exist on
+          // it — which is what match_sync below is allowed to speak for.
+          room.p2pOffered = true;
 
           const me = playerIndex() as 0 | 1;
           const oppIdx = me === 0 ? 1 : 0;

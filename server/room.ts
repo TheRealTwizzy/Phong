@@ -115,6 +115,20 @@ export interface Room {
    */
   matchOver: boolean;
   /**
+   * Whether a WebRTC offer has ever been relayed for this table.
+   *
+   * match_sync is a REPLICA's account of a match the relay never saw, so it is
+   * only meaningful from a peer that has one — and a peer only has one once
+   * the DataChannel was negotiated, which can only happen through rtc_signal
+   * here. On a table where that never happened there is no replica, and a
+   * snapshot is simply a client asserting a score.
+   *
+   * Set once and never cleared, because a link that opens and dies leaves a
+   * peer that legitimately still holds the replica it built — that is the
+   * one-sided fallback relayCounted exists for, and it must keep working.
+   */
+  p2pOffered?: boolean;
+  /**
    * The lobby handshake: the guest readies, and only then can the host start.
    * Cleared whenever the terms change — a guest readied under different rules
    * has not agreed to these — and reset by every match start.

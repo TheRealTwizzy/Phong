@@ -516,6 +516,13 @@ describe('recording a duel', () => {
     const start = await p1.await('game_start');
     await p2.await('game_start');
 
+    // Seated inline rather than through relay.seatDuel, so the WebRTC offer
+    // that helper sends has to be sent here too: match_sync is a replica's
+    // account of a match, and the relay refuses one from a table that never
+    // negotiated a DataChannel and therefore has no replica on it.
+    p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
+    await sleep(30);
+
     p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 3, p2Score: 1 });
     const hostRecord = await p1.await('match_recorded');
     const guestRecord = await p2.await('match_recorded');

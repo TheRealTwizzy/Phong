@@ -247,6 +247,18 @@ export async function startRelay(label: string): Promise<Relay> {
     p1.send({ type: 'start_match' });
     const start = await p1.await('game_start');
     await p2.await('game_start');
+
+    // A real duel negotiates a DataChannel (MultiplayerLobby's toggle is on by
+    // default) and the relay is the only signaling path, so a seated duel that
+    // never signals is a table the relay has no reason to believe carries a
+    // replica — and match_sync, which IS that replica's account, is refused on
+    // one. Sent after game_start rather than during the ready handshake: the
+    // negotiation genuinely overlaps the countdown, and injecting a message
+    // mid-handshake perturbs the very sequence tests/p2pParity.test.ts is
+    // comparing message-for-message.
+    p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
+    await sleep(30);
+
     return { p1, p2, roomId: created.roomId, matchSeq: start.matchSeq };
   };
 
