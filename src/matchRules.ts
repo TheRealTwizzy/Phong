@@ -53,6 +53,39 @@ export type AutoServeSeconds = (typeof AUTO_SERVE_OPTIONS)[number];
 export const WINNING_SCORES = [3, 5, 10, 15] as const;
 export const DEFAULT_WINNING_SCORE = 5;
 
+/**
+ * The shortest match that can be a shutout, and the one rule that says so.
+ *
+ * A shutout is a match LENGTH plus a clean sheet, which is why the floor lives
+ * here beside WINNING_SCORES rather than in the achievement or mission files
+ * that read it. What it exists to exclude is the 2-0 that was never played to
+ * the end: the relay records an abandoned duel at the STANDING score (§5), so
+ * without a floor, getting somebody to walk out early would pay like holding
+ * them scoreless over a full match.
+ *
+ * The cost of the floor is that a first-to-3 match can never be a shutout —
+ * every scoring path stops at `winningScore`, so a 3-0 IS the whole match and
+ * still falls short of 5. That is a real and deliberate trade, and the reason
+ * every description that depends on this states the length out loud: the rule
+ * used to be three copy-pasted expressions with the number in none of the
+ * copy, so a player winning 3-0 against Cyber over and over moved no shutout
+ * counter, opened no Dominion branch, and had nothing on screen to say why.
+ * `tests/achievements.test.ts` now fails if a description stops quoting it.
+ */
+export const SHUTOUT_MIN_POINTS = 5;
+
+/**
+ * Whether a finished match is a clean sheet. The single definition — the
+ * achievement triggers, the career counter and the daily tasks all ask this,
+ * so the number cannot drift between them or between code and copy.
+ */
+export const isShutout = (result: {
+  isWinner: boolean;
+  playerScore: number;
+  opponentScore: number;
+}): boolean =>
+  result.isWinner && result.opponentScore === 0 && result.playerScore >= SHUTOUT_MIN_POINTS;
+
 export const DEFAULT_MATCH_RULES: MatchRules = {
   paddleScale: 1,
   ballScale: 1,

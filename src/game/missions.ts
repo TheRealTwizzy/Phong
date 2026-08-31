@@ -1,4 +1,5 @@
-import { DailyMission, MatchEndPayload, MissionType } from '../types';
+import { DailyMission, GameUnlock, MatchEndPayload, MissionType } from '../types';
+import { isShutout } from '../matchRules';
 
 // Daily mission DEFINITIONS, shared by client and server exactly like
 // profileRules.ts and rating.ts. Progress and claims live on the SERVER
@@ -64,6 +65,42 @@ export const ELITE_POOL: MissionDef[] = [
 ];
 
 export const ALL_MISSIONS: MissionDef[] = [...MISSION_POOL, ...ELITE_POOL];
+
+/**
+ * What a task demands before it can be DEALT — the unlocks a player has to
+ * already hold for the task to be finishable at all.
+ *
+ * A task nobody can complete is the most confusing kind of task there is, and
+ * the elite pool held the worst case: `elite_cyber_3` asks for three Cyber
+ * wins, carries 600 XP and a permanent theme, and was dealt to players who had
+ * not opened Cyber — against a single elite reroll a day. The player is told
+ * to beat an opponent the menu will not let them select.
+ *
+ * Note the two spellings, because missing either one leaves half the problem:
+ * a duel task says so through `mode` (`elite_duel_3`) OR through `type`
+ * (`mission_multi`, which carries no `mode` field at all).
+ */
+export const missionRequires = (def: MissionDef): GameUnlock[] => {
+  const needs: GameUnlock[] = [];
+  if (def.difficulty) needs.push({ kind: 'difficulty', value: def.difficulty });
+  if (def.mode === 'multiplayer' || def.type === 'multiplayer') {
+    needs.push({ kind: 'mode', value: 'multiplayer' });
+  }
+  return needs;
+};
+
+/**
+ * The pool a given player may be dealt from. Kept here rather than in the
+ * database layer so the deal and the progress rule read the same definitions,
+ * and so a test can state the property that matters: every tier still deals a
+ * FULL hand at the worst case, which is an account with no achievements at
+ * all. Filtering a pool below its slot count would trade an impossible task
+ * for a missing one.
+ */
+export const dealablePool = (
+  pool: readonly MissionDef[],
+  holds: (unlock: GameUnlock) => boolean
+): MissionDef[] => pool.filter((def) => missionRequires(def).every(holds));
 
 /**
  * How many of each tier a player holds on any given day.
@@ -202,7 +239,11 @@ export function missionProgressDelta(def: MissionDef, match: MatchEndPayload): n
     case 'aces':
       return Math.max(0, Math.round(match.aces || 0));
     case 'shutouts':
-      return match.isWinner && match.opponentScore === 0 && match.playerScore >= 5 ? 1 : 0;
+      // The shared rule, not a third copy of it — the floor is a match length
+      // and matchRules.ts owns those. A task promising "without conceding"
+      // while silently demanding five points is a task a player at
+      // first-to-3 can never finish and is never told why.
+      return isShutout(match) ? 1 : 0;
     case 'rally':
       return 0; // handled as a maximum, not a sum — see applyMatchToProgress
     default:

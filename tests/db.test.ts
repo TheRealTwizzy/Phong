@@ -5,6 +5,7 @@ import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import type { MatchEndPayload, MatchRules } from '../src/types';
 import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, soloMuCap } from '../src/rating';
+import { SHUTOUT_MIN_POINTS, isShutout } from '../src/matchRules';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-db-test-'));
@@ -723,16 +724,32 @@ describe('counters the server derives, and the client cannot report', () => {
   });
 
   it('counts a shutout only for a win to nil of at least five points', () => {
-    // The floor exists so a 2-0 in a short match is not "a shutout" — the
-    // achievement it feeds is meant to mean something.
+    // The floor exists so a 2-0 that was never played to the end is not "a
+    // shutout" — the relay records an abandoned duel at the STANDING score, so
+    // without it, getting somebody to walk out early would pay like holding
+    // them scoreless over a full match.
+    //
+    // What it costs is the whole first-to-3 format: the match caps at 3, so a
+    // 3-0 there IS the entire match and still falls short. That case is in the
+    // table because it is the one that surprised a player — winning 3-0
+    // against Cyber over and over and moving no counter — and because the
+    // achievement copy now has to state the length out loud. If the floor ever
+    // moves, SHUTOUT_MIN_POINTS moves with it and the copy check in
+    // tests/achievements.test.ts follows.
+    expect(SHUTOUT_MIN_POINTS).toBe(5);
     const cases: [string, Partial<MatchEndPayload>, number][] = [
       ['5-0 win', { isWinner: true, playerScore: 5, opponentScore: 0 }, 1],
       ['7-0 win', { isWinner: true, playerScore: 7, opponentScore: 0 }, 1],
       ['5-1 win', { isWinner: true, playerScore: 5, opponentScore: 1 }, 0],
       ['4-0 win', { isWinner: true, playerScore: 4, opponentScore: 0 }, 0],
+      // A first-to-3 caps at 3, so this IS the whole match, and it still is not one.
+      ['3-0 win', { isWinner: true, playerScore: 3, opponentScore: 0 }, 0],
       ['0-5 loss', { isWinner: false, playerScore: 0, opponentScore: 5 }, 0],
     ];
     for (const [label, payload, expected] of cases) {
+      // The table and the shared predicate have to agree, or this is testing
+      // one of two rules and the other is free to drift.
+      expect(isShutout(payload as never) ? 1 : 0, `${label} (isShutout)`).toBe(expected);
       const id = `c_shut_${label.replace(/\W/g, '')}`;
       init(id, `Shut${label.replace(/\W/g, '')}`);
       played(id, payload, 1);

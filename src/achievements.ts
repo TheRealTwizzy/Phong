@@ -125,7 +125,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'shutout',
     title: 'Clean Sheet',
-    description: 'Win a match without conceding a single point.',
+    description: 'Win a first-to-5 match or longer with your opponent still on zero.',
     branch: 'foundation',
     parent: 'first_win',
     category: 'mastery',
@@ -271,7 +271,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'rally_150',
     title: 'Immovable Object',
-    description: 'Sustain a streak of 108 returns.',
+    description: 'Sustain a streak of 108 returns. Needs level 15.',
     branch: 'rally',
     parent: 'rally_100',
     category: 'mastery',
@@ -327,7 +327,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'ai_pro_10',
     title: 'Professional Standard',
-    description: 'Beat the Pro AI 10 times, at level 10 or above.',
+    description: 'Beat the Pro AI 10 times. Needs level 10.',
     branch: 'ladder',
     parent: 'ai_pro',
     category: 'mastery',
@@ -349,7 +349,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'ai_elite_10',
     title: 'Bracket Fixture',
-    description: 'Beat the Elite AI 10 times, at level 15 or above.',
+    description: 'Beat the Elite AI 10 times. Needs level 15.',
     branch: 'ladder',
     parent: 'ai_elite',
     category: 'mastery',
@@ -368,10 +368,13 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     scaled: true,
     icon: 'cpu',
   },
+  // A feat beside the ladder rather than a step on it: nothing is gated behind
+  // this, so it may stay hidden. The length is stated because the floor is
+  // SHUTOUT_MIN_POINTS and a first-to-3 win, however clean, is not a shutout.
   {
     id: 'cyber_shutout',
     title: 'Flawless Circuit',
-    description: 'Beat the Cyber AI without conceding a single point.',
+    description: 'Hold the Cyber AI on zero in a first-to-5 match or longer.',
     branch: 'ladder',
     parent: 'cyber_slayer',
     category: 'mastery',
@@ -381,15 +384,29 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
     icon: 'star',
   },
 
+  // The rung that opens Chaos, and therefore the one rung on this branch that
+  // may never be a secret or a side quest.
+  //
+  // It used to hang off `cyber_shutout` — a HIDDEN achievement asking for a
+  // clean sheet against Cyber — so the last step of the AI ladder was a feat
+  // orthogonal to the ladder itself, invisible until earned, and impossible
+  // outright at first-to-3, where the match caps at 3 and the shutout floor is
+  // 5. A player beating Cyber 3-0 over and over therefore climbed nothing,
+  // saw "Machine Ender" printed beside locked Chaos in the room list, and
+  // found `??? Hidden` when they went looking for it in the tree: the two
+  // surfaces disagreed about whether the name was even a secret. So the
+  // shutout moved OFF the path — it is a sibling feat now, exactly the shape
+  // `duel_shutout` already has beside `duel_10` — and this rung is visible.
+  // **A ladder rung is a win count; a feat is optional.** The Grandmaster gate
+  // stays: the top of the solo ladder still demands a real rating.
   {
     id: 'cyber_10',
     title: 'Machine Ender',
-    description: 'Beat the Cyber AI 10 times, at Grandmaster tier or above.',
+    description: 'Beat the Cyber AI 10 times. Needs Grandmaster tier or above.',
     branch: 'ladder',
-    parent: 'cyber_shutout',
+    parent: 'cyber_slayer',
     category: 'mastery',
     xpReward: 800,
-    hidden: true,
     gate: { tier: 'grandmaster' },
     icon: 'cpu',
   },
@@ -408,7 +425,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'chaos_10',
     title: 'Stormbreaker',
-    description: 'Beat the Chaos AI 10 times, at Legend tier or above.',
+    description: 'Beat the Chaos AI 10 times. Needs Legend tier or above.',
     branch: 'ladder',
     parent: 'ai_chaos',
     category: 'mastery',
@@ -475,7 +492,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'duel_shutout',
     title: 'Nothing Given',
-    description: 'Win a duel without conceding a point.',
+    description: 'Hold a duel opponent on zero in a first-to-5 match or longer.',
     branch: 'duel',
     parent: 'multiplayer_champ',
     category: 'online',
@@ -486,7 +503,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'duel_50',
     title: 'Fixture',
-    description: 'Win 50 duels.',
+    description: 'Win 50 duels. Needs Vanguard tier or above.',
     branch: 'duel',
     parent: 'duel_10',
     category: 'online',
@@ -550,7 +567,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'ace_100',
     title: 'Untouchable Serve',
-    description: 'Score 100 career aces.',
+    description: 'Score 100 career aces. Needs level 15.',
     branch: 'craft',
     parent: 'ace_25',
     category: 'mastery',
@@ -562,7 +579,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'points_2000',
     title: 'Two Thousand',
-    description: 'Score 2,000 career points.',
+    description: 'Score 2,000 career points. Needs level 25.',
     branch: 'craft',
     parent: 'points_500',
     category: 'special',
@@ -652,7 +669,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'streak_10',
     title: 'Untouchable',
-    description: 'Win 10 matches in a row.',
+    description: 'Win 10 matches in a row. Needs level 12.',
     branch: 'dominion',
     parent: 'streak_5',
     category: 'special',
@@ -664,7 +681,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'shutout_5',
     title: 'Miser',
-    description: 'Win 5 matches without conceding a point.',
+    description: 'Win 5 matches of first-to-5 or longer with your opponent on zero.',
     branch: 'dominion',
     category: 'mastery',
     xpReward: 300,
@@ -673,7 +690,7 @@ export const ALL_ACHIEVEMENTS: Achievement[] = [
   {
     id: 'shutout_15',
     title: 'Toll Collector',
-    description: 'Win 15 matches without conceding a point.',
+    description: 'Win 15 matches of first-to-5 or longer with your opponent on zero.',
     branch: 'dominion',
     parent: 'shutout_5',
     category: 'special',
@@ -740,6 +757,12 @@ export const UNLOCKS: Record<string, GameUnlock[]> = {
   // a rung at a time — Cyber once opened on a SINGLE Pro win, which handed a
   // first-session player the then-hardest opponent in the game before they
   // had any feel for the middle rung.
+  //
+  // **A rung named here is a WIN COUNT, and it is never `hidden`.** Both halves
+  // were broken at the top: `cyber_10` hung off a hidden Cyber shutout, which
+  // no first-to-3 match can produce, so the last step of the ladder was a feat
+  // beside the ladder that a player could neither see nor reach. A feat is a
+  // sibling, like `cyber_shutout` and `duel_shutout`; a rung is a count.
   ai_pro_10: [{ kind: 'difficulty', value: 'elite' }],
   ai_elite_10: [{ kind: 'difficulty', value: 'cyber' }],
   cyber_10: [{ kind: 'difficulty', value: 'chaos' }],

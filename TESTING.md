@@ -59,7 +59,7 @@ coverage number.
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
-| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` | The one-shot migrations |
+| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` | The one-shot migrations |
 
 ### Browser layer
 
@@ -239,13 +239,41 @@ passes on the bug: `tests/streaks.test.ts` and `tests/room.test.ts` hold the cli
 counters apart, `tests/db.test.ts` holds that a carried run is not paid for twice, and
 `scripts/e2e-rules.mjs` closes the practice farm through a real server.
 
-**Copy that quotes a threshold is checked against the threshold.** A theme's unlock line is
-free text sitting beside the structured fields it describes, so the rally rescale moved the
-fields and left the copy asking for a 10-hit rally to open something that opens at 7.
-`tests/themes.test.ts` now allows a number in that copy only if the requirement actually
-holds it — via `minRally`/`minLevel`/`minWins`, the linked elite mission's target, or the
-linked achievement's own (rescaled) description — and requires a `minRally` to be stated at
-all. Rewording to dodge it is not a fix; the numbers are the point.
+**Copy that quotes a threshold is checked against the threshold.** Requirement text is free
+text sitting beside the structured fields it describes, and it drifts off them silently. It
+first bit on a theme's unlock line, where the rally rescale moved the fields and left the copy
+asking for a 10-hit rally to open something that opens at 7; `tests/themes.test.ts` held the
+rule until the cosmetics rework deleted that file along with the `description` field it read,
+and this paragraph went on claiming a suite that was not there. It lives in
+`tests/achievements.test.ts` now, where the same failure had already happened twice over. A
+gated rung's description is the ONLY channel its gate has — nothing in the app renders an
+`AchievementGate`, and the tree draws `Requires {parent}`, which for a rung whose parent is
+already earned names something with a green tick beside it — and five of them stated no gate at
+all. The shutout family said "without conceding a point" while the code also demanded
+`SHUTOUT_MIN_POINTS`, so at first-to-3, where the match caps at 3, the requirement was
+unsatisfiable and unstated at once. So: every `gate` names its level or tier in its own
+description, and every description that depends on the shutout floor quotes it. Rewording to
+dodge it is not a fix; the numbers are the point.
+
+**A rung that unlocks something is a win count, and it is never hidden.** The AI ladder is
+walked, so each step has to be both reachable by playing the rung below and legible before it
+is earned. `cyber_10` opens Chaos and satisfied neither: it hung off `cyber_shutout`, a hidden
+clean-sheet feat that no first-to-3 match can produce, and was itself hidden while the solo room
+list printed its title beside the locked room. Two tests passed throughout and neither could
+have failed — the reachability walk appends ids to a list rather than playing for them, and the
+"no dead ends" test asserted that `unlockedKeys(ancestorsOf(id).concat(id))` contained
+`UNLOCKS[id]`, the entry it had just put there. **A test that cannot fail is worse than an
+absent one**, because it reads as coverage. `tests/achievements.test.ts` now walks the whole
+ladder to Chaos through real `recordMatch` calls with a point conceded in every match, so a feat
+put back on the path goes red; the vacuous assertion is repaired against a stated `EARNED_ON`
+map; and no id in `UNLOCKS` may be `hidden`.
+
+**A dealt task is one the player can play.** `elite_cyber_3` asks for three Cyber wins and pays
+a permanent theme, and was dealt to players who had not opened Cyber, against one elite reroll a
+day. `tests/missions.test.ts` sweeps a month of deals rather than one day — the hand comes from
+a seeded shuffle of `(playerId, dayKey)`, so a single day proves nothing about a pool that still
+holds the task — and asserts the opposite leg too, that a player who HAS climbed is still dealt
+it, since a filter that removed everything would pass the first check alone.
 
 **A rename is a rule about every table that keys off the name.** `moveAccount` renames
 `players.id`, so any table keyed on it must move in the same transaction or be orphaned —

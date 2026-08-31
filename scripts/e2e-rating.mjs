@@ -65,8 +65,11 @@ const me = (page) => page.evaluate(async () => (await fetch('/api/profile/me')).
 // Rookie, so anything above has to be earned rung by rung. Walk the ladder up
 // to CYBER: ten Pro wins at level 10 opens Elite, ten Elite wins at level 15
 // opens Cyber — and the server rejects a locked difficulty, which is the
-// point of the gate. (Chaos stays shut: it needs ten Cyber wins at
-// Grandmaster behind a Cyber shutout, which no scripted climb earns.)
+// point of the gate. (Chaos stays shut: this climb stops at the first Cyber
+// win, and the rung above needs ten of them at Grandmaster. It is reachable
+// now — it used to sit behind a Cyber SHUTOUT as well, which is a feat beside
+// the ladder rather than a step on it; tests/achievements.test.ts walks the
+// whole thing through real recorded matches.)
 const openLadder = (page) =>
   page.evaluate(async () => {
     const win = (difficulty) =>

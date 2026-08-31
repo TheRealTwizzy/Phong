@@ -16,6 +16,7 @@ import {
   GameMode,
   DailyMission,
   CosmeticId,
+  GameUnlock,
 } from '../src/types';
 import {
   validateUsername,
@@ -23,9 +24,9 @@ import {
   DELETED_PLAYER_ID,
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
-import { isRankedRules } from '../src/matchRules';
+import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS } from '../src/matchRules';
 import { roomCountsForRank } from '../src/venues';
-import { ALL_ACHIEVEMENTS, achievementById, isUnlockable } from '../src/achievements';
+import { ALL_ACHIEVEMENTS, achievementById, hasUnlock, isUnlockable } from '../src/achievements';
 import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
 import {
   Rating,
@@ -69,6 +70,7 @@ import {
   MissionDef,
   applyMatchToProgress,
   dealOrder,
+  dealablePool,
   findMission,
   missionDayKey,
 } from '../src/game/missions';
@@ -810,6 +812,7 @@ class GameDatabase {
     // meaning before the name is revived at the top of the ladder.
     this.backfillMatchRanked();
     this.relabelChaosMatches();
+    this.recountShutouts();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -936,6 +939,46 @@ class GameDatabase {
     this.setMeta(KEY, new Date().toISOString());
     if (rows.changes) {
       console.log(`chaos_relabel_v1: relabelled ${rows.changes} legacy chaos match row(s) to cyber`);
+    }
+  }
+
+  /**
+   * Recount `shutoutsWon` from the history that was already on disk.
+   *
+   * The column arrived through `addColumn(... DEFAULT 0)`, so every match
+   * played before it existed contributes nothing to it — and `shutout_5` and
+   * `shutout_15` read nothing else. An established player's counter therefore
+   * started at zero on a career that had earned plenty, and there is no path
+   * back: the counter is only ever incremented by the match in hand.
+   *
+   * `MAX`, never an assignment, and that is the load-bearing word.
+   * `insertMatch` trims `matches` to the newest 500 rows PER PLAYER, so a
+   * straight recount would quietly take shutouts away from exactly the
+   * accounts that have played the most — progression here never regresses, so
+   * the recount may only ever find more.
+   *
+   * `recordMatch` files the reporter as `player1`, so each seat's own row is
+   * the correctly-oriented record of that match and `player1Id` alone is the
+   * right filter — the same reason `getMatchHistory` does not match
+   * `player2Id`. The rule is spelled out rather than calling `isShutout`
+   * because it has to run inside SQLite; `tests/db.test.ts` holds the two
+   * against each other.
+   */
+  private recountShutouts(): void {
+    const KEY = 'shutout_recount_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `UPDATE players SET shutoutsWon = MAX(shutoutsWon, (
+           SELECT COUNT(*) FROM matches m
+            WHERE m.player1Id = players.id
+              AND m.winnerId = m.player1Id
+              AND m.scoreP2 = 0
+              AND m.scoreP1 >= ?))`
+      )
+      .run(SHUTOUT_MIN_POINTS);
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`shutout_recount_v1: recounted clean sheets for ${rows.changes} player(s)`);
     }
   }
 
@@ -1832,13 +1875,14 @@ class GameDatabase {
       return this.sweepClaimed(playerId, dayKey, this.trimSlots(playerId, dayKey, existing), now);
     }
 
+    const holds = this.unlocksHeldBy(playerId);
     const regular = pickHand(
-      dealOrder(MISSION_POOL, playerId, dayKey, 'regular'),
+      dealOrder(dealablePool(MISSION_POOL, holds), playerId, dayKey, 'regular'),
       this.recentlyDealt(playerId, 'regular'),
       REGULAR_SLOTS
     );
     const elite = pickHand(
-      dealOrder(ELITE_POOL, playerId, dayKey, 'elite'),
+      dealOrder(dealablePool(ELITE_POOL, holds), playerId, dayKey, 'elite'),
       this.recentlyDealt(playerId, 'elite'),
       ELITE_SLOTS
     );
@@ -1885,7 +1929,8 @@ class GameDatabase {
   }
 
   /**
-   * Refill any slot still holding a task that has already been PAID.
+   * Refill any slot still holding a task that has already been PAID, or one
+   * the player cannot play at all.
    *
    * The auto-reroll fires at claim time, which handles every claim made under
    * these rules — but a slot can hold a claimed task for reasons the claim
@@ -1896,9 +1941,16 @@ class GameDatabase {
    * on read makes "a paid task is not an active task" true however the slot
    * got that way, rather than only on the path that happens to create it.
    *
-   * Only CLAIMED tasks go. One that is finished but unclaimed stays exactly
-   * where it is — that is the player's reward waiting to be collected, and
-   * clearing it would quietly take the XP away.
+   * The unplayable half is the same repair for the same reason: the deal is
+   * filtered now, but a player holding `elite_cyber_3` without Cyber was dealt
+   * it before that existed and is otherwise stuck with it until the UTC reset,
+   * against one elite reroll a day. Unlocks only ever accumulate, so a task
+   * cannot become unplayable after it was dealt — this only ever catches a
+   * slot filled under the old rules.
+   *
+   * Only CLAIMED tasks go for the first reason. One that is finished but
+   * unclaimed stays exactly where it is — that is the player's reward waiting
+   * to be collected, and clearing it would quietly take the XP away.
    */
   private sweepClaimed(
     playerId: string,
@@ -1907,10 +1959,16 @@ class GameDatabase {
     now: Date
   ): { slot: number; missionId: string }[] {
     const rows = this.missionRows(playerId, dayKey);
+    const holds = this.unlocksHeldBy(playerId);
+    const playable = new Set(
+      [...dealablePool(MISSION_POOL, holds), ...dealablePool(ELITE_POOL, holds)]
+        .map((def) => def.id)
+    );
     let current = slots;
     for (const sl of slots) {
       const def = findMission(sl.missionId);
-      if (!def || !rows.get(def.id)?.claimedAt) continue;
+      if (!def) continue;
+      if (rows.get(def.id)?.claimedAt == null && playable.has(def.id)) continue;
       const replacement = this.fillSlot(playerId, dayKey, sl.slot, def.tier, current, now);
       current = current.map((entry) =>
         entry.slot === sl.slot
@@ -1919,6 +1977,37 @@ class GameDatabase {
       );
     }
     return current;
+  }
+
+  /**
+   * What this player holds, as the predicate the deal filters on.
+   *
+   * A task nobody can complete is the most confusing kind there is, and the
+   * elite pool held the worst case: `elite_cyber_3` asks for three Cyber wins,
+   * pays 600 XP and a permanent theme, and was dealt to players who had not
+   * opened Cyber — against one elite reroll a day. The player was told to go
+   * and beat an opponent the menu would not let them select.
+   *
+   * Reads ONLY the achievements column, deliberately, rather than going
+   * through `getProfile`: that one lazily MINTS a row for any id it has not
+   * seen, and creating an account as a side effect of looking at a task list
+   * is the same mistake `db.matchmakingRating` exists to avoid on the queue
+   * sweep. A row that is not there holds nothing, which is the right answer.
+   *
+   * Returned as a predicate rather than a filtered pool so one read serves
+   * both tiers — every caller here needs the regular pool and the elite one.
+   */
+  private unlocksHeldBy(playerId: string): (unlock: GameUnlock) => boolean {
+    const row = this.stmt('SELECT achievements FROM players WHERE id = ?')
+      .get(playerId) as { achievements: string } | undefined;
+    let earned: string[] = [];
+    try {
+      const parsed = JSON.parse(row?.achievements || '[]');
+      if (Array.isArray(parsed)) earned = parsed;
+    } catch {
+      earned = [];
+    }
+    return (u) => hasUnlock(earned, u.kind, u.value);
   }
 
   /** The tasks this player was dealt most recently, per tier. */
@@ -2028,7 +2117,7 @@ class GameDatabase {
     now: Date = new Date()
   ): string | null {
     const isElite = tier === 'elite';
-    const pool = isElite ? ELITE_POOL : MISSION_POOL;
+    const pool = dealablePool(isElite ? ELITE_POOL : MISSION_POOL, this.unlocksHeldBy(playerId));
     const order = dealOrder(pool, playerId, dayKey, isElite ? 'elite' : 'regular');
     // Anything may be dealt except what is already on the list and what was
     // dealt in the last few rolls. Finishing a task no longer retires it for
@@ -2610,8 +2699,16 @@ class GameDatabase {
     // match, never a total.
     profile.winStreak = isWin ? profile.winStreak + 1 : 0;
     if (profile.winStreak > profile.bestWinStreak) profile.bestWinStreak = profile.winStreak;
-    const cleanSheet = isWin && payload.opponentScore === 0 && payload.playerScore >= 5;
-    if (cleanSheet) profile.shutoutsWon += 1;
+    // One definition, shared with the daily tasks and quoted by the copy —
+    // this was three identical expressions with the 5-point floor written
+    // down nowhere a player could read it. Declared here and reused by the
+    // achievement triggers below rather than computed a second time.
+    const shutOut = isShutout({
+      isWinner: isWin,
+      playerScore: payload.playerScore,
+      opponentScore: payload.opponentScore,
+    });
+    if (shutOut) profile.shutoutsWon += 1;
     if (isWin && payload.mode === 'solo') {
       if (difficulty === 'rookie') profile.rookieWins += 1;
       else if (difficulty === 'pro') profile.proWins += 1;
@@ -2674,7 +2771,6 @@ class GameDatabase {
     // Achievement triggers
     const solo = payload.mode === 'solo';
     const pvp = payload.mode === 'multiplayer';
-    const shutOut = isWin && payload.opponentScore === 0 && payload.playerScore >= 5;
     const placed = isPlaced(profile.rankedGames, profile.rankSigma);
 
     // Foundation
@@ -2686,7 +2782,12 @@ class GameDatabase {
     // them unable to reach a duel at all.
     unlock('first_serve');
     if (isWin) unlock('first_win');
-    if (shutOut) unlock('shutout');
+    // Keyed on the COUNTER, not on the match in hand, so a clean sheet earned
+    // before the counter existed still opens the Dominion branch on the next
+    // match played. Same shape as `shutout_5`/`shutout_15` below, and the same
+    // reason the rally rungs read `profile.highestRally`: a feat performed
+    // before its gate could open is banked, not lost.
+    if (profile.shutoutsWon >= 1) unlock('shutout');
     if (profile.matchesPlayed >= 10) unlock('veteran_10');
     if (profile.matchesPlayed >= 50) unlock('veteran_50');
     if (profile.matchesPlayed >= 200) unlock('veteran_200');
