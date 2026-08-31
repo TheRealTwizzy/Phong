@@ -2760,6 +2760,12 @@ export default function App() {
           const aimed = aiRef.current.aimReturn(oppHit.angle);
           ob.vy = -Math.abs(oppHit.speed * Math.cos(aimed));
           ob.vx = oppHit.speed * Math.sin(aimed);
+          // The spin the contact produced, which this line used to drop on the
+          // floor: oppHit.spin was computed and never read, so the ball left
+          // the AI's paddle still carrying the PLAYER's spin, un-reversed and
+          // un-damped, and every wall it struck on the way back tilted the
+          // wrong way.
+          ob.spin = oppHit.spin ?? 0;
           ob.y = PADDLE_Y - PADDLE_HEIGHT / 2 - ob.radius;
 
           sound.playOpponentPaddleHit();
@@ -2778,6 +2784,13 @@ export default function App() {
             y: 0.02,
             vx: -ob.vx,
             vy: Math.abs(ob.vy),
+            // Mirrored, the same as every other crossing. This literal had no
+            // `spin` key at all, and BallState.spin is optional, so the field
+            // arrived undefined and every consumer read it as `spin || 0`:
+            // the player was never served a spun ball in solo, ever. The comment
+            // twenty lines above — "kept in step here so solo and PvP agree on
+            // what crossing the net does to spin" — was true of one direction.
+            spin: -(ob.spin || 0),
             radius: ob.radius,
             active: true,
           });
