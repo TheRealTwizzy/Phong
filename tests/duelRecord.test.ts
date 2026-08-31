@@ -401,6 +401,51 @@ describe('recording a duel', () => {
     p2.close();
   }, 45000);
 
+  it('does not rate a duel reported against a room nobody else ever sat in', async () => {
+    // The vouching guard, one step past where it first stood. Asking only for
+    // a live seat closed the ROOMLESS payload and left the same exploit within
+    // reach: create a room, sit in it alone, and POST stock-rule wins against
+    // it. The room exists and the seat is yours, so it vouched — and a fresh
+    // room mints a fresh matchKey, so it repeats without limit. Measured
+    // against the previous build over 25 rooms: rankMu 25.000 -> 45.817, tier
+    // overlord, 25 ranked games, with no opponent and no match ever started.
+    const lone = await newDevice('LoneRoomer');
+    const p1 = await Phone.open(lone);
+    for (let i = 0; i < 3; i++) {
+      p1.clear();
+      p1.send({ type: 'create_room', playerId: lone.id, config: { winningScore: 3, rules: {} } });
+      const created = await p1.await('room_created');
+      const res = await fetch(`${base}/api/match/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: lone.cookie },
+        body: JSON.stringify({
+          playerId: lone.id,
+          mode: 'multiplayer',
+          roomId: created.roomId,
+          matchSeq: 1,
+          isWinner: true,
+          playerScore: 3,
+          opponentScore: 0,
+          bestStreak: 12,
+          earnedStreak: 12,
+          endStreak: 12,
+          rules: {},
+        }),
+      });
+      expect((await res.json()).result?.rankDirection ?? 'none').toBe('none');
+    }
+
+    const p = await getProfile(lone);
+    // XP is still paid — the documented trade for a match the server cannot
+    // verify, and the same one a solo result gets. The LADDER is what a room
+    // has to vouch for.
+    expect(p.xp).toBeGreaterThan(0);
+    expect(p.rankMu).toBe(25);
+    expect(p.rankedGames).toBe(0);
+    expect(p.tier).toBe('unranked');
+    p1.close();
+  }, 45000);
+
   it('forgets a handshake when the seat that made it changes hands', async () => {
     // p2pOffered was documented as "set once and never cleared", and a room
     // outlives its occupants. So a pair negotiating P2P here left the table

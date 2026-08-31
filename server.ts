@@ -1779,7 +1779,9 @@ async function startServer() {
         // cannot fully verify, and the same one a solo result already gets. The
         // ladder is not moved, and a device-scoped key brings the ledger back
         // so a replay is answered with what the first one paid.
-        if (!room || seat < 0) {
+        const started = !!room && seq !== undefined && seq >= 1 && seq <= room.matchSeq;
+        const opposed = !!room && !!room.players[0] && !!room.players[1];
+        if (!room || seat < 0 || !started || !opposed) {
           context.forceUnranked = true;
           if (!payload.matchKey) {
             payload.matchKey = `unvouched:${req.deviceId}:${seq ?? 'x'}`;

@@ -95,8 +95,12 @@ When you add a message:
   `match_sync` is a replica's report, and a replica only exists once a DataChannel was
   negotiated — so it is refused on a table where no `rtc_signal` was ever relayed
   (`room.p2pOffered`, armed only by an offer and an answer from DIFFERENT seats —
-  a lone socket answering its own offer is not two peers). Without that, one frame
-  on a relayed table decided a ranked duel. **Validate the payload in
+  a lone socket answering its own offer is not two peers — and **cleared by
+  `clearP2PEvidence` whenever a playing seat empties or changes hands**, since a
+  room outlives its occupants and the evidence is about the PAIR). Without the
+  first, one frame on a relayed table decided a ranked duel; without the second,
+  one pair having played P2P here left the table able to vouch for a stranger's
+  forged snapshot forever. **Validate the payload in
   `acceptRtcSignal` when you add a signal kind**, and think about whether the new
   kind is EVIDENCE of a peer: `ice` is relayed and advances nothing, because
   candidates trickle from both seats in any order and treating them as evidence
