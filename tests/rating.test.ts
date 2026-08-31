@@ -150,7 +150,22 @@ describe('adaptive AI anchors', () => {
     // configuration (measured across four), because the rally harness sees
     // aggression's cost in missed balls and never its benefit in sharper
     // returns. This is exact, pure, and cannot go quiet.
-    for (const mu of [12, 18, 25, 30, 35, 40, 55]) {
+    //
+    // The low end is the same collapse from the other side, and it stopped at
+    // mu 12 here for one release: the curve's bottom knot was mu 12 with a
+    // flat 0.05 clamp underneath, so every player below mu ~10.9 met a Rookie
+    // and a Pro pinned to the same value. That is a REACHABLE state, not a
+    // pathological one — rating has no floor of its own, and twenty Pro losses
+    // from a standing start land at mu 8.76 (the case in the recoverability
+    // test above). At mu 0 the collapse reached Elite as well and the measured
+    // order INVERTED: Elite's committed aim error was 0.5610 against Rookie's
+    // 0.5522, because with competence pinned the only surviving difference was
+    // each rung's volatility, and Elite's is the smaller swing. So the mus
+    // below 12 are the point of this loop, not padding on it.
+    //
+    // 0 is the bottom of the whole reachable range: effectiveAiMu tracks down
+    // by AI_ADAPT_DOWN_BAND (20) from Rookie's anchor of 20.
+    for (const mu of [0, 5, 8.76, 10.9, 12, 18, 25, 30, 35, 40, 55]) {
       for (let i = 1; i < AI_DIFFICULTIES.length; i++) {
         const harder = competenceForMu(effectiveAiMu(AI_DIFFICULTIES[i], mu));
         const easier = competenceForMu(effectiveAiMu(AI_DIFFICULTIES[i - 1], mu));

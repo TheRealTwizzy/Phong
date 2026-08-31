@@ -435,6 +435,29 @@ export function checkPaddleCollision(
  */
 export const MAX_AI_COMPETENCE = 0.81;
 
+/**
+ * The other end of the same range, and it exists for the same reason the top
+ * one does: the curve has to keep the rungs apart everywhere they can land.
+ *
+ * effectiveAiMu tracks the player DOWN by AI_ADAPT_DOWN_BAND (20), so the
+ * reachable effective mu runs from Rookie's 20 - 20 = 0 to Chaos's 36 +
+ * AI_ADAPT_BAND = 43. The curve used to start at mu 12 and clamp at 0.05
+ * underneath, which put Rookie AND Pro on that floor for every player under
+ * mu ~10.9 — a state reached by ordinary losing, since rating has no floor of
+ * its own (twenty Pro losses from a standing start land at mu 8.76). Measured
+ * at 2700 balls a cell there, Rookie returned 44.6% of them and Pro 45.4%:
+ * the same opponent, while prediction and XP priced Pro as substantially
+ * stronger. At mu 0 the collapse reached Elite as well and the measured order
+ * inverted — Elite 41.6% against Rookie's 44.4%.
+ *
+ * 0.02 rather than 0 because every parameter in paramsForCompetence is a lerp
+ * in c, so a rung at 0 is the fixed bottom of all nine at once and nothing
+ * below it can ever be told apart. Note that a floor in the CURVE is not by
+ * itself enough — see MAX_CONTACT_ERROR, which was pinning the dominant
+ * parameter well above it.
+ */
+export const MIN_AI_COMPETENCE = 0.02;
+
 // The ladder as it is actually PLAYED, in competence.
 //
 // Knots at the five anchors in rating.ts (rookie 20, pro 24, elite 30, cyber
@@ -457,7 +480,20 @@ export const MAX_AI_COMPETENCE = 0.81;
 // may go. What actually separates the top three is carried elsewhere — the
 // anchor each is rated at, how hard each plays for the corners (aimReturn),
 // how much spin each reads, and serve pace.
+//
+// And one knot continues DOWN, to the other end of the same reachable range.
+// The curve used to start at mu 12 with a flat clamp underneath, which is the
+// identical collapse seen from below: a player under mu ~10.9 met a Rookie and
+// a Pro pinned to the same 0.05, and at mu 0 the pin reached Elite too and
+// INVERTED the ladder — measured over 4000 rally starts, Elite committed a
+// mean aim error of 0.5610 against Rookie's 0.5522, because with competence
+// flat the only surviving difference between the rungs was their volatility,
+// and Elite's swing is the smaller one. That is reachable by ordinary losing:
+// rating carries no floor of its own and twenty Pro losses land at mu 8.76.
+// See MIN_AI_COMPETENCE, and MAX_CONTACT_ERROR for the second floor that had
+// to move with it.
 const COMPETENCE_KNOTS: readonly (readonly [number, number])[] = [
+  [0, MIN_AI_COMPETENCE],
   [12, 0.05],
   [20, 0.36],
   [24, 0.49],
@@ -480,13 +516,13 @@ const COMPETENCE_KNOTS: readonly (readonly [number, number])[] = [
 ];
 
 export function competenceForMu(mu: number): number {
-  if (!Number.isFinite(mu)) return 0.05;
+  if (!Number.isFinite(mu)) return MIN_AI_COMPETENCE;
   for (let i = 1; i < COMPETENCE_KNOTS.length; i++) {
     const [mLo, cLo] = COMPETENCE_KNOTS[i - 1];
     const [mHi, cHi] = COMPETENCE_KNOTS[i];
     if (mu <= mHi) {
       const t = clamp((mu - mLo) / (mHi - mLo), 0, 1);
-      return clamp(cLo + (cHi - cLo) * t, 0.05, MAX_AI_COMPETENCE);
+      return clamp(cLo + (cHi - cLo) * t, MIN_AI_COMPETENCE, MAX_AI_COMPETENCE);
     }
   }
   return MAX_AI_COMPETENCE;
@@ -554,11 +590,33 @@ function lapseForCompetence(c: number): number {
 // because 57% was the bug that was fixed. Current measured rates live in the
 // header note above competenceForMu, in one place, where the curve they
 // describe is.
+/**
+ * The most aim error the AI may carry into a contact, as a standard deviation
+ * against a catch window of ~0.147.
+ *
+ * Derived from MIN_AI_COMPETENCE rather than picked, because a flat number here
+ * is a SECOND floor under the curve and it sat well above the first one. It was
+ * 0.6, which `0.085 * c^-0.7` reaches at c = 0.061 — above the competence an
+ * adapted Rookie AND an adapted Pro play at for any player under mu ~10.9, so
+ * the ladder's dominant parameter was one value for both of them exactly where
+ * the rungs are meant to be furthest apart. Extending COMPETENCE_KNOTS down to
+ * mu 0 did not fix that on its own: the curve separated (0.035 against 0.045 at
+ * mu 8.76) and the measured return rates did not move at all, 43.7% against
+ * 44.1% over 2700 balls a cell.
+ *
+ * Anchoring it to the bottom of the competence range makes it a rail against a
+ * nonsense input instead of a pin inside the reachable one — it can no longer
+ * bind for any competence the curve can produce. Nothing at ordinary skill
+ * changes: an average player's Rookie sits at c 0.36, where the expression
+ * gives 0.174.
+ */
+const MAX_CONTACT_ERROR = 0.085 * Math.pow(MIN_AI_COMPETENCE, -0.7);
+
 function paramsForCompetence(c: number): AIParams {
   return {
     reactionTime: lerp(0.34, 0.05, c),
     maxSpeed: lerp(0.6, 1.7, c),
-    contactError: clamp(0.085 * Math.pow(c, -0.7), 0.078, 0.6),
+    contactError: clamp(0.085 * Math.pow(c, -0.7), 0.078, MAX_CONTACT_ERROR),
     // An early misread that decays as the ball closes: the AI commits to the
     // wrong spot, then scrambles. Costs it the rally when it cannot cover the
     // correction in time, which is where maxSpeed bites.
@@ -719,7 +777,11 @@ export class OpponentAI {
   private beginRally(oppBall: BallState) {
     const style = AI_STYLES[this.difficulty];
     const base = competenceForMu(this.effectiveMu());
-    const c = clamp(base + (Math.random() - 0.5) * 2 * style.volatility, 0.05, MAX_AI_COMPETENCE);
+    const c = clamp(
+      base + (Math.random() - 0.5) * 2 * style.volatility,
+      MIN_AI_COMPETENCE,
+      MAX_AI_COMPETENCE
+    );
     const p = paramsForCompetence(c);
     this.params = p;
 
