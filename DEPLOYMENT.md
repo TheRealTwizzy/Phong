@@ -102,6 +102,26 @@ it, and prunes old ones:
 docker compose exec phong node scripts/backup.mjs --out /backups --keep 14
 ```
 
+**`/backups` is mounted by `docker-compose.yml`, and it has to be.** This
+command shipped once with nothing mounted there, and it could not work at all:
+the container runs as the unprivileged `node` user and `/` is root-owned, so it
+died on `EACCES: permission denied, mkdir '/backups'` — a raw stack trace in a
+cron log, and an operator following this runbook exactly ended up with no
+backups. It is a **named volume** (`phong-backups`) rather than a bind mount so
+this works with no host-side setup: Docker seeds a fresh named volume from the
+image, where the `Dockerfile` has already created the directory and given it to
+`node`. The script now also refuses a destination it cannot write, with a
+message instead of a stack trace.
+
+To put backups on a host path instead — worth doing, since the offsite step
+below is then a plain `rsync` — swap the mount for `- ./backups:/backups` and
+create it first, or Docker will make it root-owned and you are back to
+`EACCES`:
+
+```bash
+mkdir -p backups && sudo chown 1000:1000 backups   # 1000 is the `node` user
+```
+
 It uses `VACUUM INTO`, which takes a read transaction — WAL readers never block
 the writer, so this is safe against a live server and folds the WAL into the
 copy. **`cp phong.db` is not equivalent**: it races the WAL and can produce a
@@ -132,10 +152,17 @@ Three things it does that the old hand-rolled one-liner did not:
 - **Exits non-zero on any failure**, so a scheduler notices.
 
 It deliberately does not ship the file anywhere — where backups belong is a
-deployment decision. Mount a host directory at `/backups` and copy it offsite,
-or wrap it in `restic`/`rclone`. **A backup that never leaves the host is not a
+deployment decision. From the named volume, out to the host:
+
+```bash
+docker compose cp phong:/backups ./backups
+```
+
+...and then offsite with `rsync`/`restic`/`rclone`, or use the bind-mount
+variant above and skip the copy. **A backup that never leaves the host is not a
 backup**, because the most likely thing you are recovering from is losing the
-host.
+host — and a second Docker volume survives a wiped `phong-data`, a changed
+mount and a full data disk, but not the machine.
 
 Schedule it. On the Dokploy KVM, a nightly cron on the host:
 

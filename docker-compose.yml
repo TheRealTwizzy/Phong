@@ -18,6 +18,17 @@ services:
       TURN_STATIC_SECRET: ${TURN_STATIC_SECRET:-}
     volumes:
       - phong-data:/data
+      # Backups go on their own volume, never on the one they protect — that
+      # is the whole point of the guard in scripts/backup.mjs, and without
+      # this mount the backup command in DEPLOYMENT.md cannot run at all.
+      # A named volume rather than a bind mount so the runbook works with no
+      # host-side setup: Docker seeds it from the image, where the Dockerfile
+      # has already made it writable by the unprivileged user. To put backups
+      # on a host path instead, swap this for `- ./backups:/backups` and
+      # `mkdir -p backups && chown 1000:1000 backups` first — a bind mount
+      # takes the host directory's ownership, and Docker creates a missing one
+      # as root.
+      - phong-backups:/backups
     expose:
       - "3000"
 
@@ -57,5 +68,6 @@ services:
 
 volumes:
   phong-data:
+  phong-backups:
   caddy-data:
   caddy-config:

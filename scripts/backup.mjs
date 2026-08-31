@@ -75,7 +75,18 @@ if (outDir === dataAbs || outDir.startsWith(dataAbs + path.sep)) {
   console.error('[backup] a backup on the volume it protects is lost with it. Pass --out.');
   process.exit(1);
 }
-fs.mkdirSync(outDir, { recursive: true });
+// Guarded like every other failure here, because this is the one an operator
+// meets first: the destination has to be MOUNTED and writable, and the
+// container runs unprivileged, so an unmounted --out died on a raw
+// `EACCES: permission denied, mkdir '/backups'` stack trace in a cron log.
+try {
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.accessSync(outDir, fs.constants.W_OK);
+} catch (e) {
+  console.error(`[backup] cannot write to ${outDir}: ${e?.message}`);
+  console.error('[backup] mount a writable directory there (see DEPLOYMENT.md).');
+  process.exit(1);
+}
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const dest = path.join(outDir, `phong-${stamp}.db`);
