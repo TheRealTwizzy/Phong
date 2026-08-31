@@ -88,7 +88,15 @@ const bytes = fs.statSync(dest).size;
 console.log(`[backup] ${dest} — ${(bytes / 1024).toFixed(0)}KB, ${players} player row(s), integrity ok`);
 
 // Prune oldest-first, and only ever files this script made.
-const mine = fs.readdirSync(outDir).filter((f) => /^phong-.*\.db$/.test(f)).sort();
+//
+// The pattern is the exact shape `stamp` produces above and not `phong-*.db`,
+// which would have adopted anything sharing the prefix: a hand-made
+// phong-before-upgrade.db in the same directory counted toward `keep` and was
+// eventually deleted by a tool that promises, one line up, to prune only its
+// own. It also sorted arbitrarily among the timestamped ones, so it could take
+// a real backup's place at the front of the oldest-first list.
+const MINE = /^phong-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.db$/;
+const mine = fs.readdirSync(outDir).filter((f) => MINE.test(f)).sort();
 for (const stale of mine.slice(0, Math.max(0, mine.length - keep))) {
   fs.unlinkSync(path.join(outDir, stale));
   console.log(`[backup] pruned ${stale}`);
