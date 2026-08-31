@@ -488,6 +488,49 @@ describe('recording a duel', () => {
     p2.close();
   }, 45000);
 
+  it('rates a seated duel whose rules are tuned inside their bands', async () => {
+    // The bands are what make the sliders usable: a player adjusts the feel of
+    // a match without dropping out of the ladder, and only the extremes cost
+    // it. tests/matchRules.test.ts pins that arithmetic; this pins that a
+    // result carrying it survives the whole recording path.
+    //
+    // It lives here, on a SEATED duel, because a PvP payload naming no room is
+    // now paid in XP and never in rank — nothing can vouch for it. This case
+    // used to be a roomless POST in scripts/e2e-rules.mjs, which made it
+    // indistinguishable from the ladder exploit that gating closed.
+    const host = await newDevice('TunedWin');
+    const guest = await newDevice('TunedLose');
+    const { p1, p2, roomId, matchSeq } = await seatDuel(host, guest, 3);
+
+    const before = await getProfile(host);
+    const tuned = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        roomId,
+        matchSeq,
+        mode: 'multiplayer',
+        isWinner: true,
+        playerScore: 3,
+        opponentScore: 1,
+        bestStreak: 14,
+        endStreak: 14,
+        earnedStreak: 14,
+        rules: { paddleScale: 1.15, ballScale: 0.85, ballSpeedMax: 1.2, servePowerMax: 1.15 },
+      }),
+    });
+    expect(tuned.status).toBe(200);
+    const result = await tuned.json();
+    expect(result.ranked).toBe(true);
+
+    const after = await getProfile(host);
+    expect(after.rankedGames).toBe(before.rankedGames + 1);
+    expect(after.xp).toBeGreaterThan(before.xp);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
   it('pays a casual duel in XP and hidden MMR, and never in rank', async () => {
     // Casual's own description has said so in seven locales since the room
     // shipped — "Any rank welcome. Play for the game, not the ladder." — while
