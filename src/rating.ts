@@ -670,19 +670,36 @@ export const ACHIEVEMENT_BAND_CAP = 0.6;
 export const achievementXpCap = (level: number): number =>
   Math.round(levelBand(level) * ACHIEVEMENT_BAND_CAP);
 
-/** Cumulative XP required to REACH `level`. */
+/**
+ * Cumulative XP required to REACH `level`.
+ *
+ * Closed form of `sum(levelBand(l)) for l in 1..level-1`, which with
+ * `levelBand(l) = 250 + 60(l-1)` is `(L-1)(250 + 30(L-2))`. Pinned against the
+ * old accumulating loop in tests/xp.test.ts — it is what makes levelFromXp
+ * below O(1) instead of O(level^2).
+ */
 export function xpForLevel(level: number): number {
-  let total = 0;
-  for (let l = 1; l < level; l++) total += levelBand(l);
-  return total;
+  if (level <= 1) return 0;
+  return (level - 1) * (250 + 30 * (level - 2));
 }
 
+/**
+ * The level a total of `xp` has reached, and the total the next one opens at.
+ *
+ * Solved rather than counted. This was `while (xp >= next)` over an
+ * accumulating xpForLevel — O(level^2) — and levelFromXp(Infinity) therefore
+ * never returned at all: one POST carrying a large enough playerScore reached
+ * it through matchXp and wedged the process for good. The score is bounded at
+ * its own end now (server/db.ts), and this end cannot loop regardless.
+ *
+ * Inverting `xp = 30L^2 + 160L - 220` gives the root below; the correction
+ * steps absorb float error at the band edges and run at most once each.
+ */
 export function levelFromXp(xp: number): { level: number; xpNext: number } {
-  let level = 1;
-  let next = xpForLevel(2);
-  while (xp >= next) {
-    level++;
-    next = xpForLevel(level + 1);
-  }
-  return { level, xpNext: next };
+  if (!Number.isFinite(xp) || xp <= 0) return { level: 1, xpNext: xpForLevel(2) };
+  let level = Math.floor((-160 + Math.sqrt(25600 + 120 * (220 + xp))) / 60);
+  if (level < 1) level = 1;
+  while (xpForLevel(level + 1) <= xp) level++;
+  while (level > 1 && xpForLevel(level) > xp) level--;
+  return { level, xpNext: xpForLevel(level + 1) };
 }
