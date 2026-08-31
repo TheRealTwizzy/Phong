@@ -1705,6 +1705,35 @@ async function startServer() {
           // RecordMatchContext.venueRoomId for why that is the safe side.
           context.venueRoomId = room.venueRoomId;
         }
+
+        // Whether a room can DECIDE this match and whether one can VOUCH for it
+        // are different questions, and only the second one gates the ladder.
+        // The branch above deliberately stands aside for a room that cannot
+        // decide — a rematch has reset it, or in a P2P duel the winner's own
+        // POST legitimately outran the deciding match_sync — and in all of
+        // those the caller still holds a seat, the relay is recording its own
+        // copy, and roomId+matchSeq already gave the result a matchKey.
+        //
+        // No seat is the different case, and it was unguarded in three ways at
+        // once. The client's scores stood; matchKey is only derived when a
+        // roomId is present, so a POST without one skipped the
+        // recorded_matches ledger entirely and could be replayed without
+        // limit; and isRankedRules(undefined) and roomCountsForRank(undefined)
+        // are both true, so it rated, against an even fallback opponent. About
+        // 25 scripted POSTs carried rankMu from 25 to 37 — Cyber Overlord, the
+        // top-100 ladder position, tier_overlord, legend-aurora,
+        // duel_10/duel_50, and elite_duel_3's permanent theme.
+        //
+        // XP is still paid: that is the documented trade for a match the server
+        // cannot fully verify, and the same one a solo result already gets. The
+        // ladder is not moved, and a device-scoped key brings the ledger back
+        // so a replay is answered with what the first one paid.
+        if (!room || seat < 0) {
+          context.forceUnranked = true;
+          if (!payload.matchKey) {
+            payload.matchKey = `unvouched:${req.deviceId}:${seq ?? 'x'}`;
+          }
+        }
       }
 
       const result = db.recordMatch(payload, context);
