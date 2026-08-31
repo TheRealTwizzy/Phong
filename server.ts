@@ -29,6 +29,7 @@ import {
   applyMatchSync,
   clearP2PEvidence,
   clearSeatStreaks,
+  resetTableForNextPair,
   clampInt,
   generateRoomCode,
   performanceWeight,
@@ -441,6 +442,8 @@ function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
   const room: Room = {
     id: code,
     players: [session(a, 0), session(b, 1)],
+    // Both sat down before startMatch bumps matchSeq off 0. See Room.seatSince.
+    seatSince: [0, 0],
     scores: [0, 0],
     streaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
     bestStreaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
@@ -1779,9 +1782,34 @@ async function startServer() {
         // cannot fully verify, and the same one a solo result already gets. The
         // ladder is not moved, and a device-scoped key brings the ledger back
         // so a replay is answered with what the first one paid.
-        const started = !!room && seq !== undefined && seq >= 1 && seq <= room.matchSeq;
+        // ...and neither of those is "the caller played THIS match", which is
+        // what the ladder actually needs and what two more review rounds went
+        // on finding. `seq <= room.matchSeq` accepts every sequence the room
+        // has EVER played, and matchSeq does not move when a seat changes
+        // hands — so a newcomer taking a vacated seat could POST a fabricated
+        // ranked win under each historical sequence, every one a fresh
+        // (playerId, matchKey) for them. Measured over a three-match room:
+        // 25.000 -> 30.762 and three ranked games, having played nothing.
+        //
+        // Two conditions, because each covers what the other leaves. `current`
+        // alone still hands a newcomer the most recent match — they take the
+        // WINNER's vacated seat, the cross-check reads room.scores[seat] and
+        // files that win as theirs. `played` alone leaves an older sequence
+        // rated against an even FALLBACK opponent, since the cross-check skips
+        // unless the room is on that match and context.opponentRating is never
+        // set.
+        //
+        // `current` costs nothing real: matchSeq only advances past N through
+        // startMatch or the P2P adoption, both of which require matchOver,
+        // which is set in exactly three places and each is followed
+        // immediately by recordRoomMatch under the same duel:ROOM:N key. So a
+        // room past N already recorded N, and a late POST short-circuits on
+        // the ledger before forceUnranked is ever read.
+        const since = room?.seatSince?.[seat];
+        const played = seq !== undefined && since !== null && since !== undefined && seq > since;
+        const current = !!room && seq === room.matchSeq && seq !== undefined && seq >= 1;
         const opposed = !!room && !!room.players[0] && !!room.players[1];
-        if (!room || seat < 0 || !started || !opposed) {
+        if (!room || seat < 0 || !played || !current || !opposed) {
           context.forceUnranked = true;
           if (!payload.matchKey) {
             payload.matchKey = `unvouched:${req.deviceId}:${seq ?? 'x'}`;
@@ -2243,6 +2271,8 @@ async function startServer() {
           const hostName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 1';
           const room: Room = {
             id: code,
+            // The host sits down at matchSeq 0. See Room.seatSince.
+            seatSince: [0, null],
             players: [
               {
                 ws,
@@ -2368,6 +2398,9 @@ async function startServer() {
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
           const guestName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 2';
+          // Where this occupant came in, so the vouch in /api/match/record can
+          // tell a match they played from one the room merely remembers.
+          (room.seatSince ??= [null, null])[1] = room.matchSeq;
           room.players[1] = {
             ws,
             playerId: currentPlayerId,
@@ -2705,6 +2738,7 @@ async function startServer() {
             sessionId: cookieSessionId,
           };
           if (toPlayer) {
+            (room.seatSince ??= [null, null])[targetIdx] = room.matchSeq;
             room.players[targetIdx] = { ...who, playerIndex: targetIdx };
             room.streaks[targetIdx] = carriedStreak(cookieDeviceId);
             room.bestStreaks[targetIdx] = room.streaks[targetIdx];
@@ -2793,6 +2827,10 @@ async function startServer() {
           // took the rally achievements and their cosmetics with it.
           // startMatch clears matchOver, so a rematch is unaffected.
           if (room.matchOver) return;
+          // Same reason as point_scored below: a crossing from a lone socket
+          // is not a rally. countReturn would bump room.bestStreaks, which
+          // startMatchStreaks opens the NEXT match's peak on.
+          if (!room.players[0] || !room.players[1]) return;
           room.lastActive = Date.now();
           // A ball over the net is the moment the terms stop being editable.
           room.inPlay = true;
@@ -2836,6 +2874,15 @@ async function startServer() {
           // message re-ran recordRoomMatch — about thirty synchronous SQLite
           // queries each, on the loop that serves every other match.
           if (room.matchOver) return;
+          // ...and there is no match in an empty room. Gameplay from a socket
+          // sitting alone was scored into `room.scores`, which no seat change
+          // resets, so a host could drive the score to one short of the cap
+          // while seat 1 stood empty and land the decisive point the instant
+          // any stranger sat down: measured, a real ranked LOSS (25.000 ->
+          // 22.372) filed against a player who had done nothing but join, and
+          // a free ranked win for the host. A room with one player in it has
+          // nothing to report about a match.
+          if (!room.players[0] || !room.players[1]) return;
           room.lastActive = Date.now();
 
           // A point can be won off a serve that never crossed, so this is the
@@ -3142,11 +3189,6 @@ async function startServer() {
       room.players[mine] = null;
       room.rematchVotes[mine] = false;
       room.ready[mine] = false;
-      // The handshake belonged to the pair, not to the table. A room outlives
-      // its occupants, so leaving this set let the next person to take this
-      // seat forge a snapshot against an opponent who had never been on a
-      // DataChannel with anybody — see Room.p2pOffered.
-      clearP2PEvidence(room);
       const oppIdx = mine === 0 ? 1 : 0;
       const opp = room.players[oppIdx];
       if (opp?.ws && opp.ws.readyState === WebSocket.OPEN) {
@@ -3162,6 +3204,12 @@ async function startServer() {
         // One player left in it. That is a room with nobody to play against,
         // however busy the survivor keeps it, so the clock starts again.
         room.soloSince = Date.now();
+        // ...and the table goes back to being a lobby for whoever sits down
+        // next. AFTER the abandon above, which reads the score. swap_seat has
+        // always done most of this; vacateSeat did only the handshake, and
+        // every field it left standing was read as the next pair's — see
+        // resetTableForNextPair for what each one cost.
+        resetTableForNextPair(room, mine);
         broadcastTableState(room);
       }
       currentRoomId = null;

@@ -103,7 +103,21 @@ When you add a message:
   forged snapshot forever. **And a snapshot may not advance `matchSeq` on one
   seat's word** (`room.seqClaims`): adoption resets the room and every sequence
   mints a fresh `duelMatchKey`, so one socket could otherwise farm ranked losses
-  against a seated victim without limit. **Validate the payload in
+  against a seated victim without limit.
+
+**The standing rule underneath all three, because it has now been found five
+times.** A `Room` outlives its occupants, so before you add a field to it,
+decide whether it describes the TABLE (`id`, `config`, `venueRoomId`,
+`visibility`, `joinKey`, the watching seats) or the PAIR sitting at it. If it is
+the pair, it goes in `resetTableForNextPair` (`server/room.ts`) **in the same
+commit** — that is the one place `vacateSeat` and `swap_seat` both answer, and
+every entry on its list got there by being read as the next pair's: a
+handshake, a half-made rematch claim, a score, a pre-match rating sample, and
+four streak arrays. Two of those five were found by review *immediately after*
+the fix for the one before it, which is the actual reason this rule is written
+down rather than left to judgement. And the guards are the other half: a
+gameplay message from a room with an empty seat is refused, because a table
+with one player at it has nothing to report about a match. **Validate the payload in
   `acceptRtcSignal` when you add a signal kind**, and think about whether the new
   kind is EVIDENCE of a peer: `ice` is relayed and advances nothing, because
   candidates trickle from both seats in any order and treating them as evidence

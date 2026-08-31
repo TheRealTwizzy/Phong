@@ -156,6 +156,25 @@ export interface Room {
    * startMatch. See the branch there for why one seat's word is not enough.
    */
   seqClaims?: [number | null, number | null];
+  /**
+   * The `matchSeq` each current occupant sat down at, or null for an empty
+   * seat. The one thing a room knows about WHEN somebody has been here.
+   *
+   * A room outlives its occupants and `matchSeq` never goes backwards, so
+   * "this room started match N" and "the caller played match N" are different
+   * facts, and `/api/match/record` was reading the first as the second: a
+   * newcomer taking a vacated seat in a room that had played several matches
+   * could POST a fabricated ranked win under every historical sequence, each
+   * one a fresh `(playerId, matchKey)` for them. Measured over three matches:
+   * 25.000 -> 30.762 and three ranked games, for a player who joined and
+   * played nothing.
+   *
+   * `startMatch` bumps `matchSeq` AFTER both players are seated, so an honest
+   * occupant always has `seatSince < seq` for every match they played,
+   * rematches included. Null refuses, so a seating path that forgets to set it
+   * costs a duel its rank rather than handing one out.
+   */
+  seatSince?: [number | null, number | null];
   /** The seat whose valid `offer` was relayed, if any. See p2pOffered. */
   rtcOfferFrom?: 0 | 1;
   /** The seat whose valid `answer` was relayed, if any. See p2pOffered. */
@@ -832,6 +851,52 @@ export function clearP2PEvidence(room: Room): void {
   room.p2pOffered = false;
   room.rtcOfferFrom = undefined;
   room.rtcAnswerFrom = undefined;
+  // seqClaims belongs here for exactly the same reason and was missed when it
+  // was added: a claim is one seat's half of an agreed rematch, so a claim left
+  // behind by a departing player completed the pair for whoever sat down next.
+  // Measured before this line existed: seat 1 claims matchSeq+1, leaves, a
+  // stranger takes the seat, the new pair handshakes, and the SURVIVOR's lone
+  // snapshot filed a real ranked loss against the newcomer (25.000 -> 23.001).
+  // That is the p2pOffered bug returning through state added to fix it.
+  room.seqClaims = [null, null];
+}
+
+/**
+ * Put a table back to a lobby for whoever sits down next.
+ *
+ * A room outlives its occupants, and everything below is about the pair that
+ * has just been broken up rather than about the table. Left standing it is
+ * read as the NEW pair's, which is one bug class with several faces:
+ *
+ * - `scores` let a lone socket pre-load a match. With the both-seats guards in
+ *   server.ts that is already closed at the door; clearing here is the other
+ *   half, so a newcomer never inherits a score they did not play.
+ * - `startRatings` is the pre-match rating pair, keyed on a matchSeq that does
+ *   not move when a seat does — so the next occupant was rated against the
+ *   DEPARTED player's sample. `swap_seat` already cleared it, with that reason
+ *   written out; `vacateSeat` did not.
+ * - The four streak arrays are a run, and a run belongs to a player rather
+ *   than to a chair. `swap_seat` calls clearSeatStreaks; `vacateSeat` did not,
+ *   and `join_room` re-seeds seat 1's peak with a MAXIMUM against the stale
+ *   value, so a departed player's peak survived a bigger number.
+ * - `inPlay`/`matchOver` are the mirror case, failing closed rather than open:
+ *   they stayed true into the next pair, and `start_match` requires both to be
+ *   false, so a new guest could ready up and the host's Start button did
+ *   nothing at all, with no error.
+ *
+ * Not called when the room is being deleted — there is no next pair — and
+ * called only AFTER any abandon has been recorded, since that reads the score.
+ */
+export function resetTableForNextPair(room: Room, vacated: 0 | 1): void {
+  clearSeatStreaks(room, vacated);
+  clearP2PEvidence(room);
+  if (room.seatSince) room.seatSince[vacated] = null;
+  room.scores = [0, 0];
+  room.inPlay = false;
+  room.matchOver = false;
+  room.crossingsThisPoint = 0;
+  room.startRatings = null;
+  room.startRatingsSeq = 0;
 }
 
 /**

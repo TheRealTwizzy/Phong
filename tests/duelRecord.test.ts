@@ -446,6 +446,141 @@ describe('recording a duel', () => {
     p1.close();
   }, 45000);
 
+  it('records nothing from a socket sitting alone in a room', async () => {
+    // room.scores is not reset by a seat change and point_scored had no
+    // both-seats guard, so a host could drive the score to one short of the
+    // cap while seat 1 stood empty and land the decisive point the instant any
+    // stranger sat down. Measured before this: a real ranked LOSS against a
+    // player who had done nothing but join (25.000 -> 22.372), and a free
+    // ranked win for the host, off one message.
+    const host = await newDevice('PreloadHost');
+    const mark = await newDevice('PreloadMark');
+    const p1 = await Phone.open(host);
+    p1.send({ type: 'create_room', playerId: host.id, config: { winningScore: 3, rules: {} } });
+    const created = await p1.await('room_created');
+    for (let i = 0; i < 2; i++) {
+      p1.send({ type: 'point_scored', scorer: 'p1' });
+      await sleep(50);
+    }
+
+    const p2 = await Phone.open(mark);
+    p2.send({ type: 'join_room', roomId: created.roomId, playerId: mark.id });
+    await p2.await('room_joined');
+    p1.send({ type: 'point_scored', scorer: 'p1' });
+    await sleep(400);
+
+    for (const d of [host, mark]) {
+      const p = await getProfile(d);
+      expect(p.matchesPlayed).toBe(0);
+      expect(p.rankedGames).toBe(0);
+    }
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('does not vouch for a match the caller was not seated for', async () => {
+    // matchSeq never goes backwards and a room outlives its occupants, so
+    // "this room started match N" and "the caller played match N" are
+    // different facts — and the vouch was reading the first as the second. A
+    // newcomer taking a vacated seat could POST a fabricated ranked win under
+    // every historical sequence, each one a fresh (playerId, matchKey) for
+    // them. Measured over a three-match room: 25.000 -> 30.762, three ranked
+    // games, having played nothing.
+    const host = await newDevice('HistSeqHost');
+    const leaver = await newDevice('HistSeqLeaver');
+    const newcomer = await newDevice('HistSeqNewcomer');
+    const { p1, p2 } = await seatDuel(host, leaver, 3);
+    const roomId = (p1.last('room_created') as { roomId: string }).roomId;
+
+    // Three real matches, so the room reaches matchSeq 3.
+    for (let m = 0; m < 3; m++) {
+      for (let i = 0; i < 3; i++) {
+        p1.send({ type: 'point_scored', scorer: 'p1' });
+        await sleep(50);
+      }
+      await sleep(250);
+      if (m < 2) {
+        p1.send({ type: 'rematch_request' });
+        p2.send({ type: 'rematch_request' });
+        await sleep(250);
+      }
+    }
+    p2.send({ type: 'leave_room' });
+    p2.close();
+    await sleep(200);
+
+    const p3 = await Phone.open(newcomer);
+    p3.send({ type: 'join_room', roomId, playerId: newcomer.id });
+    await p3.await('room_joined');
+
+    for (const seq of [1, 2, 3]) {
+      const res = await fetch(`${base}/api/match/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: newcomer.cookie },
+        body: JSON.stringify({
+          playerId: newcomer.id, mode: 'multiplayer', roomId, matchSeq: seq,
+          isWinner: true, playerScore: 3, opponentScore: 0,
+          bestStreak: 14, earnedStreak: 14, endStreak: 14, rules: {},
+        }),
+      });
+      expect((await res.json()).result?.rankDirection ?? 'none').toBe('none');
+    }
+
+    const p = await getProfile(newcomer);
+    // XP is still paid — the documented trade for a match the server cannot
+    // verify. The LADDER is what a seat has to have been sat in to move.
+    expect(p.xp).toBeGreaterThan(0);
+    expect(p.rankMu).toBe(25);
+    expect(p.rankedGames).toBe(0);
+
+    p1.close();
+    p3.close();
+  }, 60000);
+
+  it("does not let a departed player's rematch claim decide for a newcomer", async () => {
+    // seqClaims is one seat's half of an agreed rematch, and clearP2PEvidence
+    // was missing it — so a claim left behind completed the pair for whoever
+    // sat down next, and the SURVIVOR's lone snapshot filed a real ranked loss
+    // against them (25.000 -> 23.001). The p2pOffered bug returning through
+    // the state added to fix it.
+    const host = await newDevice('ClaimHost');
+    const leaver = await newDevice('ClaimLeaver');
+    const newcomer = await newDevice('ClaimNewcomer');
+    const { p1, p2, matchSeq } = await seatDuel(host, leaver, 3);
+    const roomId = (p1.last('room_created') as { roomId: string }).roomId;
+
+    for (let i = 0; i < 3; i++) {
+      p1.send({ type: 'point_scored', scorer: 'p1' });
+      await sleep(50);
+    }
+    await sleep(300);
+    // The departing player leaves half a claim behind.
+    p2.send({ type: 'match_sync', matchSeq: matchSeq + 1, rev: 1, p1Score: 0, p2Score: 0 });
+    await sleep(80);
+    p2.send({ type: 'leave_room' });
+    p2.close();
+    await sleep(200);
+
+    const p3 = await Phone.open(newcomer);
+    p3.send({ type: 'join_room', roomId, playerId: newcomer.id });
+    await p3.await('room_joined');
+    // A real handshake with the NEW pair, so p2pOffered is legitimately armed.
+    p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
+    await p3.await('rtc_signal');
+    p3.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await p1.await('rtc_signal');
+
+    p1.send({ type: 'match_sync', matchSeq: matchSeq + 1, rev: 2, p1Score: 3, p2Score: 0 });
+    await sleep(400);
+
+    const p = await getProfile(newcomer);
+    expect(p.matchesLost).toBe(0);
+    expect(p.rankedGames).toBe(0);
+
+    p1.close();
+    p3.close();
+  }, 60000);
+
   it('does not let one seat farm rematches after a single real handshake', async () => {
     // The farm the two-sided rematch check exists for, end to end. After ONE
     // genuine handshake, a single socket could wait for the match to end and

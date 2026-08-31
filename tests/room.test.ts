@@ -3,6 +3,7 @@ import {
   acceptRtcSignal,
   applyMatchSync,
   clearP2PEvidence,
+  resetTableForNextPair,
   breakStreakOnPoint,
   clampInt,
   countReturn,
@@ -1069,6 +1070,25 @@ describe('acceptRtcSignal', () => {
     expect(acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v'.repeat(MAX_SDP_CHARS + 1) })).toBe(false);
   });
 
+  it('forgets a half-made rematch claim when a playing seat changes hands', () => {
+    // The p2pOffered bug returning through the state added to fix it. A claim
+    // is one seat's half of an agreed rematch, so one left behind by a
+    // departing player completed the pair for whoever sat down next: the
+    // SURVIVOR's lone snapshot then decided a match against a newcomer who had
+    // never agreed to anything. Measured before this: 25.000 -> 23.001 and a
+    // real ranked loss.
+    const r = room({ matchSeq: 1, matchOver: true, scores: [3, 0] });
+    applyMatchSync(r, 1, sync({ matchSeq: 2, p1Score: 0, p2Score: 0 }));
+    expect(r.seqClaims).toEqual([null, 2]); // half a pair, waiting on seat 0
+
+    clearP2PEvidence(r);
+    expect(r.seqClaims).toEqual([null, null]);
+
+    // ...so the survivor alone still cannot advance it.
+    applyMatchSync(r, 0, sync({ matchSeq: 2, p1Score: 3, p2Score: 0 }));
+    expect(r.matchSeq).toBe(1);
+  });
+
   it('forgets the handshake when a playing seat changes hands', () => {
     // The evidence belongs to the PAIR, not to the table. A room outlives its
     // occupants — a seat vacated by one player is taken by the next — so a
@@ -1103,5 +1123,62 @@ describe('acceptRtcSignal', () => {
     expect(acceptRtcSignal(r, 0, { kind: 'ice', candidate: null })).toBe(true);
     expect(acceptRtcSignal(r, 1, { kind: 'ice', candidate: { candidate: 'x' } })).toBe(true);
     expect(r.p2pOffered).toBeFalsy();
+  });
+});
+
+describe('resetTableForNextPair', () => {
+  // A room outlives its occupants, and every field below is about the pair
+  // that has just been broken up. `swap_seat` had always cleared most of them;
+  // `vacateSeat` cleared only the handshake, so each one was read as the NEW
+  // pair's. This is the whole class in one assertion.
+  it('leaves nothing of the previous pair for the next one to inherit', () => {
+    const r = room({
+      matchSeq: 4,
+      scores: [3, 1],
+      inPlay: true,
+      matchOver: true,
+      crossingsThisPoint: 6,
+      streaks: [9, 12],
+      bestStreaks: [14, 20],
+      earnedStreaks: [9, 12],
+      earnedBests: [14, 20],
+      startRatings: [
+        { mmr: { mu: 30, sigma: 2 }, rank: { mu: 30, sigma: 2 } },
+        { mmr: { mu: 20, sigma: 2 }, rank: { mu: 20, sigma: 2 } },
+      ] as never,
+      startRatingsSeq: 4,
+      seatSince: [0, 2],
+    });
+    acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v=0' });
+    acceptRtcSignal(r, 1, { kind: 'answer', sdp: 'v=0' });
+    applyMatchSync(r, 1, sync({ matchSeq: 5, p1Score: 0, p2Score: 0 }));
+
+    resetTableForNextPair(r, 1);
+
+    // A score the newcomer did not play — and the door it opened: a lone
+    // socket could drive this to one short of the cap and land the decisive
+    // point the instant a stranger sat down.
+    expect(r.scores).toEqual([0, 0]);
+    // The mirror case, which failed CLOSED and bricked the table: start_match
+    // requires both of these false, so a new guest could ready up and the
+    // host's Start button did nothing at all, with no error.
+    expect(r.inPlay).toBe(false);
+    expect(r.matchOver).toBe(false);
+    expect(r.crossingsThisPoint).toBe(0);
+    // A run belongs to a player, not to a chair, and a peak is permanent.
+    expect(r.bestStreaks[1]).toBe(0);
+    expect(r.earnedBests[1]).toBe(0);
+    // The pre-match rating pair is about a pair of players.
+    expect(r.startRatings).toBeNull();
+    expect(r.startRatingsSeq).toBe(0);
+    // And the two kinds of P2P evidence.
+    expect(r.p2pOffered).toBe(false);
+    expect(r.seqClaims).toEqual([null, null]);
+    // Occupancy, so a newcomer cannot vouch for what this seat played.
+    expect(r.seatSince).toEqual([0, null]);
+
+    // The seat that STAYED keeps its own run — it is the same player.
+    expect(r.bestStreaks[0]).toBe(14);
+    expect(r.seatSince?.[0]).toBe(0);
   });
 });
