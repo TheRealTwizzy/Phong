@@ -569,6 +569,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                   value={config.winningScore}
                   readOnly={!isHost}
                   onLockTap={setGateHint}
+                  lockLabel={t('locked', language)}
                   onChange={(pts) => onUpdateRoomConfig?.({ winningScore: pts })}
                   options={WINNING_SCORES.map((pts) => ({
                     value: pts,

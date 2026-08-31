@@ -8,7 +8,8 @@
 //   2. Switching buildings is one tap, and the strip marks where you are.
 //   3. A SOLO room is a rung — entering one sets the difficulty the sheet
 //      then confirms, rather than asking a second time.
-//   4. A locked rung says what opens it, and cannot be entered.
+//   4. A locked rung names the trophy that opens it, tapping its lock states
+//      that trophy's own REQUIREMENT, and the rung still cannot be entered.
 //   5. A PVP bracket a fresh player is too weak for is locked and SAYS the
 //      level it needs; the ungated rooms stay open to them.
 //   6. Training rooms reach the Practice Wall and Split Screen.
@@ -145,7 +146,7 @@ ok(`entering ROOKIE sets the rung and the sheet confirms it (${odds}%)`);
 await page.click('#btn-prematch-back');
 await page.waitForSelector('#prematch-modal', { state: 'detached', timeout: 5000 });
 
-// ---- 4. A locked rung says what opens it ---------------------------------
+// ---- 4. A locked rung says what opens it, and what that costs ------------
 await revealLocked(page, 'solo');
 if (await locked(page, '#room-rookie')) fail('Rookie should be open from the first match');
 for (const r of ['ai_pro', 'ai_elite', 'cyber', 'chaos']) {
@@ -154,10 +155,38 @@ for (const r of ['ai_pro', 'ai_elite', 'cyber', 'chaos']) {
 }
 const proLock = (await page.textContent('#room-ai_pro-lock')).trim();
 if (!proLock) fail('the Pro lock reason is empty');
-// A locked room is inert: tapping it must not open a sheet.
-await page.click('#room-ai_pro', { force: true }).catch(() => {});
+// `#room-{id}` stays on the BUTTON, and the button stays honestly disabled.
+// Asserted as `=== true` rather than truthily: `el.disabled` on a <div> is
+// `undefined`, so if the id ever drifted onto the wrapper this check would
+// pass vacuously here and take every "should be locked" assertion in
+// e2e-achievements down with it, silently and green.
+if ((await page.$eval('#room-ai_pro', (el) => el.disabled)) !== true) {
+  fail('#room-ai_pro is not a disabled <button> — the id has moved off the control');
+}
+// The row names the trophy and the trophy name alone; the REQUIREMENT lives
+// in that achievement's description, and a tap on the lock is the only way to
+// it on a device with no title attribute. Chaos is the one asserted because
+// its gate ("Beat the Cyber AI 10 times…") is the deepest on the ladder.
+await page.click('#room-chaos-lock-tap');
+await page.waitForSelector('#unlock-hint-sheet', { timeout: 5000 });
+// Reading the reason is not entering the room: the rung is still shut.
 if (await shown(page, '#prematch-modal')) fail('a locked room opened its pre-match sheet');
-ok(`a locked rung is inert and names its unlock ("${proLock}")`);
+const hint = (await page.textContent('#unlock-hint-sheet')).trim();
+const chaosLock = (await page.textContent('#room-chaos-lock')).trim();
+if (!hint.includes(chaosLock)) {
+  fail(`the hint sheet does not name the achievement the row shows ("${chaosLock}")`);
+}
+// The same bar the PvP lock line is held to in section 5 — and scoped to the
+// DESCRIPTION rather than to the sheet, which is the difference between a
+// test and a test that cannot fail: the reward chip renders `+800 XP`, so a
+// digit tested against the whole sheet is satisfied by the reward alone and
+// stays green with the requirement gone. The description is the only part
+// that says what to DO, so it is the part held to saying a number.
+const req = (await page.textContent('#unlock-hint-desc')).trim();
+if (!/\d/.test(req)) fail(`a locked rung should state its requirement, got "${req}"`);
+await page.click('#btn-close-unlock-hint');
+await page.waitForSelector('#unlock-hint-sheet', { state: 'detached', timeout: 5000 });
+ok(`a locked rung is inert and its lock reveals what opens it ("${chaosLock}")`);
 
 // ---- 5. PvP brackets gate on level and tier ------------------------------
 await page.click('#building-pvp');

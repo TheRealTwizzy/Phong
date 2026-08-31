@@ -37,6 +37,7 @@ import {
 } from '../venues';
 import {
   Button,
+  LockBadge,
   ProgressBar,
   RankBadge,
   SegmentedControl,
@@ -551,62 +552,78 @@ export const MainMenu: React.FC<MainMenuProps> = ({
             ? Math.round(winProbability(myRating, aiRating(room.difficulty, myRating.mu)) * 100)
             : null;
           return (
-            <button
-              key={room.id}
-              id={`room-${room.id}`}
-              data-locked={locked ? 'true' : 'false'}
-              disabled={locked}
-              onClick={() => {
-                if (locked) return;
-                handleRoomTap(room);
-              }}
-              className={`flex shrink-0 items-center gap-3 rounded-card border p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
-                locked ? 'border-line bg-surface-2/40 opacity-60' : 'border-line bg-surface-2/70'
-              }`}
-            >
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className="flex items-center gap-1.5">
-                  <span className="truncate text-2xs text-ink">{t(room.labelKey, lang)}</span>
-                  {/* Shown even on a LOCKED rung, deliberately: "this is the
-                      fair fight" is most worth saying about a rung the player
-                      has not reached yet, and it reads beside the unlock line
-                      rather than competing with it. */}
-                  {room.difficulty === bestDifficulty && (
-                    <span
-                      id="room-balanced"
-                      className="shrink-0 rounded-chip border border-accent/40 bg-accent/15 px-1.5 py-0.5 text-2xs text-accent uppercase"
-                    >
-                      {t('balanced', lang)}
+            <div key={room.id} className="relative shrink-0">
+              <button
+                id={`room-${room.id}`}
+                data-locked={locked ? 'true' : 'false'}
+                disabled={locked}
+                onClick={() => {
+                  if (locked) return;
+                  handleRoomTap(room);
+                }}
+                className={`flex w-full items-center gap-3 rounded-card border p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
+                  locked ? 'border-line bg-surface-2/40 opacity-60' : 'border-line bg-surface-2/70'
+                }`}
+              >
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="flex items-center gap-1.5">
+                    <span className="truncate text-2xs text-ink">{t(room.labelKey, lang)}</span>
+                    {/* Shown even on a LOCKED rung, deliberately: "this is the
+                        fair fight" is most worth saying about a rung the player
+                        has not reached yet, and it reads beside the unlock line
+                        rather than competing with it. */}
+                    {room.difficulty === bestDifficulty && (
+                      <span
+                        id="room-balanced"
+                        className="shrink-0 rounded-chip border border-accent/40 bg-accent/15 px-1.5 py-0.5 text-2xs text-accent uppercase"
+                      >
+                        {t('balanced', lang)}
+                      </span>
+                    )}
+                  </span>
+                  {room.descKey && (
+                    <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
+                      {t(room.descKey, lang)}
                     </span>
                   )}
-                </span>
-                {room.descKey && (
-                  <span className="truncate text-2xs leading-tight font-normal tracking-normal text-ink-muted">
-                    {t(room.descKey, lang)}
-                  </span>
-                )}
-                {locked && (
+                  {locked && (
+                    <span
+                      id={`room-${room.id}-lock`}
+                      className="mt-0.5 flex items-center gap-1 text-2xs font-normal tracking-normal text-warn"
+                    >
+                      <Lock className="h-3 w-3 shrink-0" />
+                      {ladderLock ? ladderLock.title : lockReason(verdict)}
+                    </span>
+                  )}
+                </div>
+                {chance !== null && (
                   <span
-                    id={`room-${room.id}-lock`}
-                    className="mt-0.5 flex items-center gap-1 text-2xs font-normal tracking-normal text-warn"
+                    id={`room-${room.id}-odds`}
+                    className={`shrink-0 text-2xs tnum font-normal tracking-normal ${
+                      chance >= 60 ? 'text-win' : chance >= 40 ? 'text-warn' : 'text-loss'
+                    }`}
                   >
-                    <Lock className="h-3 w-3 shrink-0" />
-                    {ladderLock ? ladderLock.title : lockReason(verdict)}
+                    {chance}%
                   </span>
                 )}
-              </div>
-              {chance !== null && (
-                <span
-                  id={`room-${room.id}-odds`}
-                  className={`shrink-0 text-2xs tnum font-normal tracking-normal ${
-                    chance >= 60 ? 'text-win' : chance >= 40 ? 'text-warn' : 'text-loss'
-                  }`}
-                >
-                  {chance}%
-                </span>
+                {!locked && <ChevronRight className="h-4 w-4 shrink-0 text-ink-dim" />}
+              </button>
+              {/* The reason a locked SOLO rung is shut is an achievement, and its
+                  own description is the only place the requirement is ever stated —
+                  the row can show the trophy NAME and nothing more. The button stays
+                  honestly disabled (two suites read `disabled` and `data-locked` off
+                  it), so the tap target is this sibling overlay, exactly as the
+                  winning-score picker does it. A PvP lock has no achievement behind
+                  it and needs none: `lockReason` already names the level or tier. */}
+              {ladderLock && (
+                <LockBadge
+                  id={`room-${room.id}-lock-tap`}
+                  achievement={ladderLock}
+                  onReveal={setGateHint}
+                  label={t('locked', lang)}
+                />
               )}
-              {!locked && <ChevronRight className="h-4 w-4 shrink-0 text-ink-dim" />}
-            </button>
+            </div>
           );
         })}
 
@@ -1035,6 +1052,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                     value={settings.winningScore}
                     onChange={(pts) => onUpdateSettings({ winningScore: pts })}
                     onLockTap={setGateHint}
+                    lockLabel={t('locked', lang)}
                     options={[3, 5, 10, 15].map((pts) => ({
                       value: pts,
                       id: `menu-pts-${pts}`,

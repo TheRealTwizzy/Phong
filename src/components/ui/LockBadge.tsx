@@ -59,6 +59,7 @@ export const UnlockHintSheet: React.FC<UnlockHintSheetProps> = ({
 }) => (
   <Sheet
     id="unlock-hint-sheet"
+    closeId="btn-close-unlock-hint"
     isOpen={Boolean(achievement)}
     onClose={onClose}
     size="xs"
@@ -72,7 +73,13 @@ export const UnlockHintSheet: React.FC<UnlockHintSheetProps> = ({
       </span>
     }
   >
-    <p className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted">
+    {/* Carries an id because it is the only part of this sheet that states
+        what to DO. A suite testing the sheet as a whole passes on the reward
+        chip's own digits, so the requirement could go missing unnoticed. */}
+    <p
+      id="unlock-hint-desc"
+      className="text-2xs leading-relaxed font-normal tracking-normal text-ink-muted"
+    >
       {achievement?.description}
     </p>
     {achievement != null && achievement.xpReward > 0 && (
