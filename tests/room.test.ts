@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  acceptRtcSignal,
   applyMatchSync,
   breakStreakOnPoint,
   clampInt,
@@ -14,6 +15,7 @@ import {
   reapRooms,
   Room,
   ROOM_CODE_ALPHABET,
+  MAX_SDP_CHARS,
   startMatch,
 } from '../server/room';
 import { normalizeRoomConfig } from '../src/matchRules';
@@ -952,5 +954,87 @@ describe('what a match earned, on the relay', () => {
     const r = room({ servingPlayer: 1 });
     applyMatchSync(r, sync({ p1Score: 1, servingPlayer: 7 as unknown as 0 | 1 }));
     expect(r.servingPlayer).toBe(1);
+  });
+});
+
+describe('acceptRtcSignal', () => {
+  // What this pins is the arming of match_sync, which is the single most
+  // expensive thing a seated attacker can reach: applyMatchSync takes the
+  // score as a MAXIMUM and declares the match decided on it, so one snapshot
+  // naming the winning score for your own seat files a real ranked win for the
+  // sender and a real ranked loss against an opponent whose client never
+  // rendered a point of it — match_sync broadcasts no score_update.
+  //
+  // The guard shipped as `p2pOffered = true` on any relayed rtc_signal, before
+  // the payload was looked at, so ONE frame of anything armed it and the
+  // attacker needed nothing at all from the victim. A handshake takes two
+  // seats and the relay stamps which seat each signal came from; that is the
+  // part a lone socket cannot manufacture.
+  const offer = { kind: 'offer', sdp: 'v=0' };
+  const answer = { kind: 'answer', sdp: 'v=0' };
+
+  it('does not arm a replica on one seat\'s signal', () => {
+    const r = room();
+    expect(acceptRtcSignal(r, 0, offer)).toBe(true);
+    expect(r.p2pOffered).toBeFalsy();
+  });
+
+  it('does not arm a replica on both halves from the SAME seat', () => {
+    // The attack, spelled out: a socket answering its own offer is not two
+    // peers, however many frames it sends.
+    const r = room();
+    acceptRtcSignal(r, 0, offer);
+    acceptRtcSignal(r, 0, answer);
+    expect(r.p2pOffered).toBeFalsy();
+  });
+
+  it('arms a replica on an offer and an answer from different seats', () => {
+    const r = room();
+    acceptRtcSignal(r, 0, offer);
+    acceptRtcSignal(r, 1, answer);
+    expect(r.p2pOffered).toBe(true);
+  });
+
+  it('arms it whichever seat opens the negotiation', () => {
+    const r = room();
+    acceptRtcSignal(r, 1, offer);
+    acceptRtcSignal(r, 0, answer);
+    expect(r.p2pOffered).toBe(true);
+  });
+
+  it('refuses anything that is not one of the three signal kinds', () => {
+    // Each of these was a valid signal before: the relay was a pure
+    // pass-through with no shape check at all, so `{}` armed the replica and
+    // was forwarded to the peer verbatim.
+    for (const junk of [null, undefined, 'offer', 42, [], {}, { kind: 'bogus' }, { kind: 3 }]) {
+      const r = room();
+      expect(acceptRtcSignal(r, 0, junk), JSON.stringify(junk) ?? 'undefined').toBe(false);
+      expect(r.p2pOffered).toBeFalsy();
+      expect(r.rtcOfferFrom).toBeUndefined();
+    }
+  });
+
+  it('refuses an offer or answer carrying no usable sdp', () => {
+    for (const bad of [{ kind: 'offer' }, { kind: 'offer', sdp: '' }, { kind: 'answer', sdp: 7 }]) {
+      const r = room();
+      expect(acceptRtcSignal(r, 0, bad)).toBe(false);
+      expect(r.rtcOfferFrom).toBeUndefined();
+    }
+  });
+
+  it('bounds the sdp a seat may ask the relay to ferry', () => {
+    const r = room();
+    expect(acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v'.repeat(MAX_SDP_CHARS) })).toBe(true);
+    expect(acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v'.repeat(MAX_SDP_CHARS + 1) })).toBe(false);
+  });
+
+  it('relays ice candidates but never arms a replica on them', () => {
+    // Candidates trickle in any order and from both seats, and a null one is
+    // the legitimate end-of-candidates marker — so counting them as evidence
+    // would hand back the one-frame arming through a different door.
+    const r = room();
+    expect(acceptRtcSignal(r, 0, { kind: 'ice', candidate: null })).toBe(true);
+    expect(acceptRtcSignal(r, 1, { kind: 'ice', candidate: { candidate: 'x' } })).toBe(true);
+    expect(r.p2pOffered).toBeFalsy();
   });
 });

@@ -401,6 +401,75 @@ describe('recording a duel', () => {
     p2.close();
   }, 45000);
 
+  it('refuses a forged snapshot on a table the victim never negotiated', async () => {
+    // The whole exploit, end to end, and the reason the p2pOffered guard could
+    // not be armed by a single frame. A seated attacker sends ONE rtc_signal —
+    // it did not have to be a valid one, `{}` was enough, because the relay was
+    // a pure pass-through with no shape check — and then a decisive match_sync
+    // naming the winning score for their own seat. applyMatchSync takes the
+    // score as a maximum and declares the match decided on it, so that filed a
+    // real ranked win for the sender and a real ranked loss for an opponent
+    // whose client never rendered a point of it: match_sync broadcasts no
+    // score_update. One preparatory frame, needing nothing from the victim.
+    //
+    // Seated by hand rather than through seatDuel, because seatDuel completes
+    // the handshake — which is the state this case is the absence of.
+    const attacker = await newDevice('SignalCheat');
+    const victim = await newDevice('SignalMark');
+    const p1 = await Phone.open(attacker);
+    p1.send({ type: 'create_room', playerId: attacker.id, config: { winningScore: 3, rules: {} } });
+    const created = await p1.await('room_created');
+    const p2 = await Phone.open(victim);
+    p2.send({ type: 'join_room', roomId: created.roomId, playerId: victim.id });
+    await p2.await('room_joined');
+    p2.send({ type: 'player_ready', ready: true });
+    await p1.await('ready_state');
+    p1.send({ type: 'start_match' });
+    const start = await p1.await('game_start');
+    await p2.await('game_start');
+
+    // Three shapes of arming frame, all from the one seat: junk, a real offer,
+    // and both halves of a handshake the attacker holds by itself. None of
+    // them is two peers.
+    p1.send({ type: 'rtc_signal', payload: {} });
+    p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
+    p1.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await sleep(60);
+    p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 3, p2Score: 0 });
+    await sleep(400);
+
+    for (const p of [await getProfile(attacker), await getProfile(victim)]) {
+      expect(p.matchesPlayed).toBe(0);
+      expect(p.matchesWon).toBe(0);
+      expect(p.matchesLost).toBe(0);
+      expect(p.rankedGames).toBe(0);
+      expect(p.xp).toBe(0);
+    }
+    expect(p1.all('match_recorded')).toHaveLength(0);
+    expect(p2.all('match_recorded')).toHaveLength(0);
+
+    // And the junk frame was not ferried to the victim either — the relay
+    // capped quick_chat at 100 characters and capped this at nothing.
+    expect(p2.all('rtc_signal').map((m) => (m.payload as { kind?: string })?.kind)).toEqual([
+      'offer',
+      'answer',
+    ]);
+
+    // The control, so this is a guard and not a wall: once the victim's own
+    // client answers, the table genuinely carries a replica and the very same
+    // snapshot is taken. Everything else in this file reaches match_sync
+    // through seatDuel, which is this handshake.
+    p2.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await p1.await('rtc_signal');
+    p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 2, p1Score: 3, p2Score: 0 });
+    const decided = await p1.await('match_recorded');
+    expect(decided.result.rankDirection).toBe('up');
+    expect((await getProfile(victim)).matchesLost).toBe(1);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
   it('does not file the WINNER a 0-0 loss when their POST outruns the sync', async () => {
     // The second route to two red arrows, and the likelier one: it needs no
     // malformed message, just an ordinary race. In a P2P duel the deciding
@@ -559,12 +628,16 @@ describe('recording a duel', () => {
     const start = await p1.await('game_start');
     await p2.await('game_start');
 
-    // Seated inline rather than through relay.seatDuel, so the WebRTC offer
-    // that helper sends has to be sent here too: match_sync is a replica's
-    // account of a match, and the relay refuses one from a table that never
-    // negotiated a DataChannel and therefore has no replica on it.
+    // Seated inline rather than through relay.seatDuel, so the WebRTC
+    // handshake that helper performs has to be performed here too: match_sync
+    // is a replica's account of a match, and the relay refuses one from a
+    // table that never negotiated a DataChannel and therefore has no replica
+    // on it. BOTH halves, from both seats — one seat's offer is not a
+    // handshake, which is what stopped a lone socket arming its own snapshot.
     p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
-    await sleep(30);
+    await p2.await('rtc_signal');
+    p2.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await p1.await('rtc_signal');
 
     p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 3, p2Score: 1 });
     const hostRecord = await p1.await('match_recorded');

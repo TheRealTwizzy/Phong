@@ -25,6 +25,7 @@ import { hasUnlock } from './src/achievements';
 import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import {
+  acceptRtcSignal,
   applyMatchSync,
   clearSeatStreaks,
   clampInt,
@@ -2910,11 +2911,13 @@ async function startServer() {
           // case p2p.ts already falls back from.
           if (room.config.spectators) return;
 
-          // This table is negotiating a DataChannel, so a replica may exist on
-          // it — which is what match_sync below is allowed to speak for.
-          room.p2pOffered = true;
-
           const me = playerIndex() as 0 | 1;
+          // Validates the payload and records what it advances of the
+          // handshake; see Room.p2pOffered for why one seat's signal is not
+          // enough to arm match_sync. A payload that is not one of the three
+          // kinds is not a signal and is not forwarded.
+          if (!acceptRtcSignal(room, me, msg.payload)) return;
+
           const oppIdx = me === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {

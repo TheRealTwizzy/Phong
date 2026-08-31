@@ -256,8 +256,16 @@ export async function startRelay(label: string): Promise<Relay> {
     // negotiation genuinely overlaps the countdown, and injecting a message
     // mid-handshake perturbs the very sequence tests/p2pParity.test.ts is
     // comparing message-for-message.
+    //
+    // BOTH halves, from both seats: one seat's signal does not arm the replica,
+    // because a lone socket sending itself an offer is not a handshake — see
+    // Room.p2pOffered. A helper that sent only the offer would leave every
+    // match_sync suite red for a reason that has nothing to do with what it is
+    // testing, which is exactly what happened when this was written one-sided.
     p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
-    await sleep(30);
+    await p2.await('rtc_signal');
+    p2.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await p1.await('rtc_signal');
 
     return { p1, p2, roomId: created.roomId, matchSeq: start.matchSeq };
   };

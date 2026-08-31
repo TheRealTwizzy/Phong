@@ -115,7 +115,7 @@ export interface Room {
    */
   matchOver: boolean;
   /**
-   * Whether a WebRTC offer has ever been relayed for this table.
+   * Whether BOTH seats have taken part in a WebRTC handshake for this table.
    *
    * match_sync is a REPLICA's account of a match the relay never saw, so it is
    * only meaningful from a peer that has one — and a peer only has one once
@@ -123,11 +123,31 @@ export interface Room {
    * here. On a table where that never happened there is no replica, and a
    * snapshot is simply a client asserting a score.
    *
+   * "An offer was relayed" is NOT enough, and shipping it that way was the
+   * bug: a seated attacker on an otherwise relayed table could send one
+   * rtc_signal — any payload at all, an empty object included — arm this, and
+   * then forge a decisive snapshot, filing a real ranked loss against an
+   * opponent whose client never rendered a thing. One preparatory frame,
+   * needing nothing from the victim. A handshake takes TWO seats and the relay
+   * stamps which one each signal came from, so an offer from one seat and an
+   * answer from the other is a thing a lone socket cannot manufacture.
+   *
+   * It narrows rather than closes, and the difference is worth stating: on a
+   * table where the victim's own client IS negotiating P2P, this becomes true
+   * legitimately and a modified peer can still lie in a snapshot. That is the
+   * client-authoritative trade the trust model already documents. What this
+   * removes is the case where the victim was never party to a DataChannel at
+   * all — a spectated table, a client with P2P off, a browser without WebRTC.
+   *
    * Set once and never cleared, because a link that opens and dies leaves a
    * peer that legitimately still holds the replica it built — that is the
    * one-sided fallback relayCounted exists for, and it must keep working.
    */
   p2pOffered?: boolean;
+  /** The seat whose valid `offer` was relayed, if any. See p2pOffered. */
+  rtcOfferFrom?: 0 | 1;
+  /** The seat whose valid `answer` was relayed, if any. See p2pOffered. */
+  rtcAnswerFrom?: 0 | 1;
   /**
    * The lobby handshake: the guest readies, and only then can the host start.
    * Cleared whenever the terms change — a guest readied under different rules
@@ -752,6 +772,51 @@ export function clearSeatStreaks(state: StreakState, seat: 0 | 1): void {
  * A ball crossed the net from `seat`. Returns whether it counted as a return —
  * false for the serve, which opens a point rather than continuing one.
  */
+/**
+ * The most SDP a signal may carry. Real offers and answers run a few kilobytes;
+ * this is generous enough never to bite an honest one and small enough that a
+ * seated player cannot make the relay ferry megabytes for free.
+ */
+export const MAX_SDP_CHARS = 16 * 1024;
+
+/**
+ * Take one `rtc_signal` from a seat: validate it, record what it advances of
+ * the handshake, and say whether it should be relayed to the peer.
+ *
+ * Validating here rather than passing SDP through untouched is half the point.
+ * The relay was a pure pass-through with no shape check at all — `quick_chat`
+ * caps at 100 characters and this capped at nothing — so `{}` was a signal, and
+ * a signal was enough to arm p2pOffered. Everything a client can put on the
+ * wire that is not one of the three kinds is now simply not a signal: it is not
+ * forwarded, and it advances nothing.
+ *
+ * `ice` deliberately advances nothing either. Candidates trickle in any order,
+ * arrive from both seats, and a null one is the legitimate end-of-candidates
+ * marker — so they are relayed but they are not evidence of anything, and
+ * treating them as evidence would put the one-frame arming straight back.
+ */
+export function acceptRtcSignal(room: Room, seat: 0 | 1, payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const { kind, sdp } = payload as { kind?: unknown; sdp?: unknown };
+  if (kind !== 'offer' && kind !== 'answer' && kind !== 'ice') return false;
+  if (kind === 'ice') return true;
+  if (typeof sdp !== 'string' || sdp.length === 0 || sdp.length > MAX_SDP_CHARS) return false;
+
+  if (kind === 'offer') room.rtcOfferFrom = seat;
+  else room.rtcAnswerFrom = seat;
+
+  // Both halves, from DIFFERENT seats. Same-seat is the whole attack: one
+  // socket sending itself an offer and an answer is not a handshake.
+  if (
+    room.rtcOfferFrom !== undefined &&
+    room.rtcAnswerFrom !== undefined &&
+    room.rtcOfferFrom !== room.rtcAnswerFrom
+  ) {
+    room.p2pOffered = true;
+  }
+  return true;
+}
+
 export function countReturn(state: StreakState, seat: 0 | 1): boolean {
   const isServe = state.crossingsThisPoint === 0 && seat === state.servingPlayer;
   state.crossingsThisPoint += 1;
