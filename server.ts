@@ -1880,7 +1880,15 @@ async function startServer() {
   });
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  // maxPayload, because ws defaults to 100 MiB and every frame is JSON.parsed
+  // synchronously on the event loop that serves every live match. The largest
+  // legitimate message here is an SDP offer relayed by rtc_signal, comfortably
+  // under 16KB; gameplay messages are tens of bytes.
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
+  // A ws server emits 'error' with no fallback, and an EventEmitter 'error'
+  // with no listener THROWS. See the per-socket listener in the connection
+  // handler below for why that is fatal here.
+  wss.on('error', (err) => console.warn('[ws] server error:', (err as Error)?.message));
 
   // Sweep the rooms nobody is in.
   //
@@ -1982,6 +1990,16 @@ async function startServer() {
     alive.set(ws, true);
     ws.on('pong', () => alive.set(ws, true));
     ws.addEventListener('close', () => alive.delete(ws));
+    // Every socket needs this, and its absence took the whole process down.
+    // ws raises receiver and socket faults as an 'error' emit, and an
+    // EventEmitter 'error' with no listener throws — from a raw-socket I/O
+    // callback, so the try/catch around the message handler below cannot see
+    // it. One invalid-UTF-8 text frame, one unmasked client frame, or RSV1 set
+    // with no permessage-deflate negotiated, from any unauthenticated socket
+    // (/ws accepts cookieless ones), exited the process. Rooms live in memory,
+    // so that dropped every live duel, every queued player and every spectator
+    // on the spot, without taking the graceful SIGTERM path.
+    ws.on('error', (err) => console.warn('[ws] socket error:', (err as Error)?.message));
 
     const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
 
@@ -3076,4 +3094,14 @@ async function startServer() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+// The backstop under the two listeners above: a single-instance relay holding
+// every room in memory should log and keep serving the other matches rather
+// than exit on one socket's fault. Deliberately last-resort — anything with a
+// known owner is handled where it happens.
+process.on('uncaughtException', (err) => console.error('[fatal] uncaught:', err));
+process.on('unhandledRejection', (err) => console.error('[fatal] unhandled rejection:', err));
+
+startServer().catch((err) => {
+  console.error('[fatal] server failed to start:', err);
+  process.exit(1);
+});
