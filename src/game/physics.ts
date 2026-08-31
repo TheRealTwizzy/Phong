@@ -544,7 +544,14 @@ function paramsForCompetence(c: number): AIParams {
     // difficulty lever than raw aim error. Deliberately capped below 1: an AI
     // that read curve perfectly would make spin worthless against the top
     // rung, which is exactly where a player most needs another option.
-    spinRead: clamp((c - 0.08) / 0.72, 0, MAX_SPIN_READ),
+    // The divisor is set so the cap is reached only at the top of the
+    // competence range, not partway up it. At /0.72 it saturated at c = 0.692
+    // — which an adapted Cyber passes at player mu 22.7 and an adapted Elite
+    // at 27.7 — so every rung a strong player ever meets read spin
+    // identically, and a lever the design leans on for the top of the ladder
+    // was doing nothing there. /0.86 puts the cap at c = 0.821, just past
+    // Chaos at its clamp.
+    spinRead: clamp((c - 0.08) / 0.86, 0, MAX_SPIN_READ),
   };
 }
 
