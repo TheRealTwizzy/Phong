@@ -15,6 +15,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY --from=build /app/dist ./dist
+# The backup tool ships with the image, or the documented
+# `docker compose exec phong node scripts/backup.mjs` has no file to run.
+# It is dependency-free (node:sqlite + node:fs) so it needs nothing else.
+COPY scripts/backup.mjs ./scripts/backup.mjs
 RUN mkdir -p /data && chown -R node:node /app /data
 USER node
 VOLUME /data

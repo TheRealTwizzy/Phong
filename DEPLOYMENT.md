@@ -90,6 +90,53 @@ The app then mints time-limited TURN credentials per client via `/api/rtc-config
 
 ### Backups
 
+**Every account, rating, level, achievement and match in Phong is one SQLite
+file.** Losing it is unrecoverable and nothing else in this runbook matters as
+much, so treat the schedule below as part of deploying rather than as an
+afterthought.
+
+`scripts/backup.mjs` takes a consistent snapshot of a running server, verifies
+it, and prunes old ones:
+
+```bash
+docker compose exec phong node scripts/backup.mjs --out /backups --keep 14
+```
+
+It uses `VACUUM INTO`, which takes a read transaction — WAL readers never block
+the writer, so this is safe against a live server and folds the WAL into the
+copy. **`cp phong.db` is not equivalent**: it races the WAL and can produce a
+file that opens fine and is missing the newest writes.
+
+Three things it does that the old hand-rolled one-liner did not:
+
+- **Writes outside `DATA_DIR`, and refuses not to.** A backup on the volume it
+  protects is lost with that volume, which is the exact failure it exists for.
+  On Render that disk is also 1GB with no retention, so snapshots accumulating
+  beside the database eventually take the live database down too.
+- **Opens the snapshot and runs `PRAGMA integrity_check`** before reporting
+  success, and prints the row count. A backup nobody has opened is a backup
+  nobody knows is good.
+- **Exits non-zero on any failure**, so a scheduler notices.
+
+It deliberately does not ship the file anywhere — where backups belong is a
+deployment decision. Mount a host directory at `/backups` and copy it offsite,
+or wrap it in `restic`/`rclone`. **A backup that never leaves the host is not a
+backup**, because the most likely thing you are recovering from is losing the
+host.
+
+Schedule it. On the Dokploy KVM, a nightly cron on the host:
+
+```cron
+17 4 * * * docker compose -f /path/to/docker-compose.yml exec -T phong \
+  node scripts/backup.mjs --out /backups --keep 14 >> /var/log/phong-backup.log 2>&1
+```
+
+**Restore**: stop the server, copy a snapshot to the volume as
+`/data/phong.db`, remove any stale `phong.db-wal` / `phong.db-shm` beside it,
+and start again. The boot log names the file it opened and counts the accounts
+in it (`[db] /data/phong.db — …, N account(s)`), which is how you confirm the
+restore took. Practise this once before you need it.
+
 ## Support: an account somebody can't get back into
 
 Identity is bound to the browser's device cookie, so "I lost my account" is a
@@ -130,16 +177,6 @@ The tool opens the database `readOnly` and has no write path — safe against a
 live server, since WAL readers never block the writer. It deliberately does not
 import `server/db.ts`, whose constructor would run migrations and seed the bot
 roster as a side effect of answering a question.
-
-All player data is one SQLite file on the `phong-data` volume. Online backup without stopping anything:
-
-```bash
-docker compose exec phong node -e \
-  "new (require('node:sqlite').DatabaseSync)('/data/phong.db').exec(\"VACUUM INTO '/data/backup-$(date +%F).db'\")"
-docker compose cp phong:/data/backup-$(date +%F).db ./
-```
-
-Restore = copy a backup to the volume as `/data/phong.db` and `docker compose restart phong`.
 
 A server that ran the pre-SQLite build imports its old `game_database.json` automatically on first boot if it sits in `/data`.
 
