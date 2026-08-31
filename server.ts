@@ -2684,6 +2684,14 @@ async function startServer() {
         } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
+          // Nothing crosses the net between matches. Without this, countReturn
+          // below kept counting after the final whistle: startMatchStreaks
+          // opens the next match's PEAK on room.streaks, recordRoomMatch sends
+          // that peak as bestStreak, and it lands in profile.highestRally — so
+          // a spam loop between two matches wrote a permanent career best and
+          // took the rally achievements and their cosmetics with it.
+          // startMatch clears matchOver, so a rematch is unaffected.
+          if (room.matchOver) return;
           room.lastActive = Date.now();
           // A ball over the net is the moment the terms stop being editable.
           room.inPlay = true;
@@ -2722,6 +2730,11 @@ async function startServer() {
         } else if (msg.type === 'point_scored' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
+          // The match is decided; there is no further point to report. The
+          // score was unbounded, so `decided` stayed true and every subsequent
+          // message re-ran recordRoomMatch — about thirty synchronous SQLite
+          // queries each, on the loop that serves every other match.
+          if (room.matchOver) return;
           room.lastActive = Date.now();
 
           // A point can be won off a serve that never crossed, so this is the
