@@ -805,6 +805,26 @@ class GameDatabase {
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_username
          ON players(username COLLATE NOCASE) WHERE initializedAt IS NOT NULL`
     );
+    // The leaderboard's four sorts. Each was a full SCAN of players plus a
+    // TEMP B-TREE for the ORDER BY, on an unauthenticated route.
+    //
+    // Here rather than in ensureBaseSchema, and that placement is load-bearing
+    // for the same reason the index above is here: every one of these is
+    // PARTIAL on initializedAt, and ensureBaseSchema runs before the addColumn
+    // migrations that create that column — so declaring them there fails a
+    // fresh database outright with "no such column: initializedAt", which is
+    // what tests/db-wipe.test.ts and tests/shutoutRecount.test.ts caught.
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_players_board_xp
+        ON players(xp DESC, id) WHERE initializedAt IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_players_board_rally
+        ON players(highestRally DESC, id) WHERE initializedAt IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_players_board_wins
+        ON players(matchesWon DESC, id) WHERE initializedAt IS NOT NULL;
+      -- Also serves db.ladderPosition, which counts rows above a rating.
+      CREATE INDEX IF NOT EXISTS idx_players_board_mu
+        ON players(rankMu DESC, id) WHERE initializedAt IS NOT NULL;
+    `);
     // Achievement ids are persisted in each player's JSON array, so renaming
     // one silently un-awards it — and re-awards it later, paying its XP twice.
     // 'rating_1400' was named for the ELO threshold it used to key on; it has
@@ -3336,6 +3356,9 @@ class GameDatabase {
    * counted as "rows above this one" cannot agree with an order that has no
    * answer. One deterministic key gives both the same one.
    */
+  /** Hard ceiling on one board query — a bound, not the public page size. */
+  private static readonly MAX_BOARD_ROWS = 1000;
+
   private static readonly LADDER_TIEBREAK = 'p.id ASC';
 
   /**
@@ -3394,6 +3417,24 @@ class GameDatabase {
     limit = 50,
     includeBots = false
   ): LeaderboardEntry[] {
+    // Both lookups below are keyed on sortBy, and an unrecognised key made
+    // BOTH of them undefined — which built `ORDER BY undefined` and
+    // `AND (undefined OR ...)`, so `?sort=anything` was a 500 echoing "no such
+    // column: undefined". Not injectable (every value here is a literal), but
+    // reachable by typing, and the route is unauthenticated. Defaulted here as
+    // well as at the route because this method is exported and has other
+    // callers.
+    const key: 'elo' | 'level' | 'rally' | 'wins' =
+      sortBy === 'level' || sortBy === 'rally' || sortBy === 'wins' ? sortBy : 'elo';
+    // NaN never satisfied `out.length >= limit`, so `?limit=abc` returned the
+    // ENTIRE board — an unauthenticated full scan plus every row serialized.
+    // Bounded here against non-finite and unbounded input only; the PUBLIC cap
+    // of 100 belongs at the route, because ladderPosition and its tests ask
+    // this method for more than a page on purpose.
+    const take = Number.isFinite(limit)
+      ? Math.max(1, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(limit)))
+      : 50;
+
     const orderBy = {
       level: 'xp DESC',
       rally: 'highestRally DESC',
@@ -3402,7 +3443,7 @@ class GameDatabase {
       // the same pair of conditions tierFor applies — from the constants, so
       // a rebalance of either cannot leave this ORDER BY sorting stale rules.
       elo: `(rankedGames >= ${PLACEMENT_GAMES} AND rankSigma <= ${PLACEMENT_SIGMA}) DESC, rankMu DESC`,
-    }[sortBy];
+    }[key];
 
     // A board only lists players with progress on the thing IT measures.
     // Rows of zeros are noise: a freshly onboarded profile is not "last
@@ -3415,25 +3456,38 @@ class GameDatabase {
       rally: 'p.highestRally > 0',
       wins: 'p.matchesWon > 0',
       elo: 'p.rankedGames > 0',
-    }[sortBy];
+    }[key];
 
     // Only initialized profiles compete — players who never finished
     // onboarding hold placeholder names and stay invisible.
+    // Bots are dropped in SQL rather than skipped in the loop below when they
+    // are not wanted. That is what lets LIMIT be exact: with them excluded
+    // every returned row is emitted, and with them included every returned row
+    // is emitted too, so `take` bounds the result either way and no over-fetch
+    // is needed. The output is identical — humanRank only ever counted
+    // non-bots, so removing rows that never incremented it changes nothing.
+    const botClause = includeBots ? '' : " AND p.id NOT LIKE 'bot-%'";
+    // LIMIT in the SQL, not just in the loop. Without it every eligible row
+    // was materialized as p.* and run through rowToProfile (which JSON.parses
+    // the achievements column) before the loop threw all but `take` away —
+    // 110ms at 10k players, synchronously, on the loop that relays paddle_move
+    // for every live match.
     const rows = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
-            AND (${progress} OR p.id LIKE 'bot-%')
-          ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}`
+            AND (${progress} OR p.id LIKE 'bot-%')${botClause}
+          ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
+          LIMIT ?`
       )
-      .all() as unknown as PlayerRow[];
+      .all(take) as unknown as PlayerRow[];
 
     // Ranks count human players only, so a human's number is identical
     // whether bot rows are interleaved into the view or not.
     const out: LeaderboardEntry[] = [];
     let humanRank = 0;
     for (const row of rows) {
-      if (out.length >= limit) break;
+      if (out.length >= take) break;
       const isBot = row.id.startsWith('bot-');
       if (isBot && !includeBots) continue;
       if (!isBot) humanRank++;

@@ -1769,8 +1769,17 @@ async function startServer() {
   // Global Leaderboard API
   app.get('/api/leaderboard', (req, res) => {
     try {
-      const sort = (req.query.sort as 'elo' | 'level' | 'rally' | 'wins') || 'elo';
-      const limit = Math.min(100, parseInt((req.query.limit as string) || '50', 10));
+      // Both validated at the edge as well as in db.getLeaderboard. `sort` was
+      // a bare cast, so any other value reached the query and 500'd with the
+      // SQL error text; `limit` was Math.min(100, parseInt('abc')) === NaN,
+      // and the loop guard `out.length >= NaN` is never true, so ?limit=abc
+      // returned the whole board from an unauthenticated route.
+      const asked = String(req.query.sort ?? 'elo');
+      const sort = (['elo', 'level', 'rally', 'wins'] as const).includes(asked as any)
+        ? (asked as 'elo' | 'level' | 'rally' | 'wins')
+        : 'elo';
+      const parsed = parseInt(String(req.query.limit ?? '50'), 10);
+      const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(100, parsed)) : 50;
       const includeBots = req.query.bots === '1' || req.query.bots === 'true';
       const leaderboard = db.getLeaderboard(sort, limit, includeBots);
       res.json({ leaderboard });
