@@ -446,6 +446,39 @@ describe('recording a duel', () => {
     p1.close();
   }, 45000);
 
+  it('does not let one seat farm rematches after a single real handshake', async () => {
+    // The farm the two-sided rematch check exists for, end to end. After ONE
+    // genuine handshake, a single socket could wait for the match to end and
+    // then send a decisive snapshot at matchSeq+1, over and over: adoption
+    // resets the room so the next one lands the same way, and every sequence
+    // mints a fresh duelMatchKey so the ledger deduplicates nothing.
+    //
+    // Measured against the parent commit over ten messages from one socket:
+    // the victim went rankMu 25.000 -> 20.185 with ten ranked losses, the
+    // sender to 34.437 with ten wins, and nothing bounded it but how long the
+    // victim stayed seated.
+    const farmer = await newDevice('RematchFarmer');
+    const mark = await newDevice('RematchMark');
+    const { p1, matchSeq } = await seatDuel(farmer, mark, 3);
+
+    for (let i = 0; i < 6; i++) {
+      p1.send({ type: 'match_sync', matchSeq: matchSeq + i, rev: i + 1, p1Score: 3, p2Score: 0 });
+      await sleep(60);
+    }
+    await sleep(400);
+
+    // Exactly one: the CURRENT match's own decisive snapshot, which is the
+    // documented client-authoritative limit after a real handshake — one
+    // forged result per match that genuinely started, and the matchKey stops
+    // it being paid twice. What is gone is walking the sequence forward.
+    const victim = await getProfile(mark);
+    expect(victim.matchesLost).toBe(1);
+    expect(victim.rankedGames).toBe(1);
+    expect((await getProfile(farmer)).matchesWon).toBe(1);
+
+    p1.close();
+  }, 45000);
+
   it('forgets a handshake when the seat that made it changes hands', async () => {
     // p2pOffered was documented as "set once and never cleared", and a room
     // outlives its occupants. So a pair negotiating P2P here left the table

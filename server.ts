@@ -2902,7 +2902,7 @@ async function startServer() {
           // score_update arriving a round-trip late, mid-serve.
           // Recording is the caller's job now: server/room.ts stays free of
           // the database so its guards can be tested without one.
-          const synced = applyMatchSync(room, msg);
+          const synced = applyMatchSync(room, playerIndex() as 0 | 1, msg);
           if (room.matchSeq !== seqBefore) duelStartRatings(room); // see the note there
           if (synced.decided) recordRoomMatch(room);
         } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex() !== null) {

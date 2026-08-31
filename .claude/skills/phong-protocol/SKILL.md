@@ -100,7 +100,10 @@ When you add a message:
   room outlives its occupants and the evidence is about the PAIR). Without the
   first, one frame on a relayed table decided a ranked duel; without the second,
   one pair having played P2P here left the table able to vouch for a stranger's
-  forged snapshot forever. **Validate the payload in
+  forged snapshot forever. **And a snapshot may not advance `matchSeq` on one
+  seat's word** (`room.seqClaims`): adoption resets the room and every sequence
+  mints a fresh `duelMatchKey`, so one socket could otherwise farm ranked losses
+  against a seated victim without limit. **Validate the payload in
   `acceptRtcSignal` when you add a signal kind**, and think about whether the new
   kind is EVIDENCE of a peer: `ice` is relayed and advances nothing, because
   candidates trickle from both seats in any order and treating them as evidence

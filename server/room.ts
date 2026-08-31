@@ -150,6 +150,12 @@ export interface Room {
    * resets it whenever a playing seat empties or changes hands.
    */
   p2pOffered?: boolean;
+  /**
+   * Which NEW matchSeq each playing seat has claimed, for the two-sided
+   * rematch check in applyMatchSync. Cleared by every adoption and by
+   * startMatch. See the branch there for why one seat's word is not enough.
+   */
+  seqClaims?: [number | null, number | null];
   /** The seat whose valid `offer` was relayed, if any. See p2pOffered. */
   rtcOfferFrom?: 0 | 1;
   /** The seat whose valid `answer` was relayed, if any. See p2pOffered. */
@@ -340,6 +346,8 @@ export function startMatch(room: Room, servingPlayer: 0 | 1): GameStartPayload {
   room.inPlay = false;
   room.ready = [false, false];
   room.matchSeq += 1;
+  // A relay-run start supersedes any half-agreed peer numbering.
+  room.seqClaims = [null, null];
   // Each match's snapshot revisions count from zero, so the last match's
   // high-water mark must not outlive it and reject all of this one's. And a
   // fresh match starts with the peers authoritative again: a fallback belongs
@@ -389,6 +397,8 @@ export function clampInt(value: unknown, lo: number, hi: number): number {
  */
 export function applyMatchSync(
   room: Room,
+  /** The seat this snapshot came from. The relay knows it; the payload does not. */
+  seat: 0 | 1,
   sync: {
     matchSeq: number;
     p1Score: number;
@@ -412,6 +422,27 @@ export function applyMatchSync(
   // take the result away from the other player.
   if (seq > room.matchSeq && !room.matchOver) return { decided: false };
   if (seq > room.matchSeq) {
+    // BOTH seats have to name the new number before the room adopts it, and
+    // that is the whole of what stops a farm. A rematch here is the peers
+    // agreeing BETWEEN THEMSELVES, so the relay has no vote to consult — but
+    // one seat's word let a single socket walk the sequence forward on its
+    // own: finish a match, send a decisive snapshot at matchSeq+1, and since
+    // adoption resets the room and every sequence mints a fresh
+    // duelMatchKey, the ledger deduplicates nothing. Measured over ten
+    // messages from one socket after a genuine handshake: the victim went
+    // 25.000 -> 20.185 with ten ranked losses, the sender to 34.437 with ten
+    // wins, and nothing bounded it but how long the victim stayed seated.
+    //
+    // Both peers run the same replica over the same events, so an agreed
+    // rematch is one BOTH of them number — an honest pair satisfies this in
+    // the ordinary course, at each side's first crossing of the new match.
+    // The claim is dropped rather than queued: a snapshot is absolute, so the
+    // first peer's next one re-carries whatever this one was going to say.
+    const claims = (room.seqClaims ??= [null, null]);
+    claims[seat] = seq;
+    if (claims[0] !== seq || claims[1] !== seq) return { decided: false };
+    room.seqClaims = [null, null];
+
     // The peers agreed a rematch between themselves, so the relay never ran
     // startMatch for it. Adopt their numbering and start the match over here,
     // or the new match's scores would read as a regression and be ignored.
