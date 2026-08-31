@@ -416,10 +416,22 @@ export function checkPaddleCollision(
  * The ceiling moved UP with the five-rung ladder — a deliberate reversal of
  * the 0.9 → 0.66 cut, taken knowingly: players reported the whole ladder too
  * easy, and two new top rungs need headroom above the old Cyber to be
- * distinct. 0.78 puts the hardest thing in the game (Chaos, and an adapted
- * Chaos at the clamp) near ~90% of balls returned — a genuine wall that still
- * drops roughly one ball in ten. The old lottery critique is honoured by the
- * hard rule in tests/physics.test.ts: no difficulty may ever return ≥93%.
+ * distinct. It rose again, 0.78 → 0.81, when the knots were extended past the
+ * top anchor so the top three rungs stop being the same opponent.
+ *
+ * It cannot rise much further, and the reason is worth knowing before anyone
+ * tries. This constant does FIVE jobs — the top knot, the clamp in
+ * competenceForMu, the lapse normaliser, the serve-skill normaliser, and the
+ * per-rally volatility clamp — so raising it changes every rung, not just the
+ * top. And the hard rule in tests/physics.test.ts, that no difficulty may ever
+ * return ≥93% of balls, binds: measured at the suite's own sample against a
+ * mu-40 player, the top rungs sit at 91.0-91.2%, and pushing the clamp to 0.86
+ * put them at 92.8% (93.0 on a smaller sample), which is a flaky CI job and a
+ * broken promise at the same time.
+ *
+ * One thing this bought back on the way up: at the old clamp all three top
+ * rungs had serve skill exactly 1.000 — identical serves by construction —
+ * because that is `competence / MAX_AI_COMPETENCE`. They now differ.
  */
 export const MAX_AI_COMPETENCE = 0.81;
 
@@ -427,12 +439,24 @@ export const MAX_AI_COMPETENCE = 0.81;
 //
 // Knots at the five anchors in rating.ts (rookie 20, pro 24, elite 30, cyber
 // 33, chaos 36), each calibrated against the rally simulation in
-// tests/physics.test.ts rather than chosen: the targets are roughly 72% of
-// balls returned at Rookie, 79% at Pro, 85% at Elite, 88% at Cyber and 90% at
-// Chaos. Return rate saturates near the top, so the top rungs sit closer
-// together in balls returned than in matches won — the measure players feel.
-// Above the top anchor the curve is flat at the clamp: an adapted Chaos plays
-// the ceiling, never past it.
+// tests/physics.test.ts rather than chosen: measured at player mu 25, roughly
+// 72% of balls returned at Rookie, 79% at Pro, 86% at Elite, 89% at Cyber and
+// 89% at Chaos.
+//
+// Two knots then continue PAST the top anchor to 43, which is 36 +
+// AI_ADAPT_BAND and therefore the furthest an adapted Chaos can reach. Without
+// them the curve went flat at 36 — and because effectiveAiMu measures its
+// deviation from START_MU, every rung receives the identical offset and they
+// all arrived at that flat section together: from player mu 30 upward Elite,
+// Cyber and Chaos were byte-identical opponents.
+//
+// The separation up there is deliberately small (0.784 / 0.795 / 0.810 against
+// a mu-40 player) and cannot be widened: return rate SATURATES near the top,
+// so a bigger competence spread buys almost no measurable difficulty, while
+// the hard 93% ceiling in tests/physics.test.ts caps how far the hardest rung
+// may go. What actually separates the top three is carried elsewhere — the
+// anchor each is rated at, how hard each plays for the corners (aimReturn),
+// how much spin each reads, and serve pace.
 const COMPETENCE_KNOTS: readonly (readonly [number, number])[] = [
   [12, 0.05],
   [20, 0.36],
@@ -523,8 +547,13 @@ function lapseForCompetence(c: number): number {
 // The paddle catches a ball within ~0.147 of its centre (half-width plus ball
 // radius plus the edge buffer), so `contactError` — the aim error still present
 // at the moment of contact — is what actually decides whether the AI returns.
-// Its curve is what sets the ladder: measured AI return rates come out at
-// roughly Rookie 57%, Pro 77%, Chaos 87%, Cyber 89% for an average player.
+//
+// This comment used to quote "Rookie 57%, Pro 77%, Chaos 87%, Cyber 89%" — the
+// PRE-FIX numbers, with the top two printed in the wrong order, and a Rookie
+// figure that tests/physics.test.ts asserts must be above 66% precisely
+// because 57% was the bug that was fixed. Current measured rates live in the
+// header note above competenceForMu, in one place, where the curve they
+// describe is.
 function paramsForCompetence(c: number): AIParams {
   return {
     reactionTime: lerp(0.34, 0.05, c),

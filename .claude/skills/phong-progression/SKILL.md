@@ -62,11 +62,22 @@ farming the hardest thing in the game. The values now sit 0.1 under a tier floor
 `START_MU`, pro 30.9, elite 33.9, cyber and chaos 36.9. **Legend is the solo ceiling; Cyber
 Overlord (37) is only ever reached through PvP.**
 
-**Adaptation is asymmetric on purpose** (`AI_ADAPT_STRENGTH` 0.6 up, `AI_ADAPT_DOWN_STRENGTH` 1
-down, `:114`/`:126`). Partial tracking leaves a residual gap that is fine above average and
-compounds below it — a player losing every match to Pro fell to μ13 while Pro stalled at 18, so
-their odds went 50% to 22% and every further loss widened it. **The ladder must never get harder
-because you are losing.**
+**Adaptation is asymmetric on purpose** (`AI_ADAPT_STRENGTH` 0.6 up, `AI_ADAPT_DOWN_STRENGTH`
+0.85 down, `:114`/`:126`), and it has been wrong in BOTH directions, so read the numbers before
+touching it. At 0.6 the residual gap compounded below average — a player losing every match to
+Pro fell to μ13 while Pro stalled at 18, odds 50% → 22%, each loss widening it. At a flat 1 the
+gap closed to exactly zero at every depth, which pinned `P(win)` at 56.4% forever: the pre-match
+odds, the XP surprise multiplier and `recommendedDifficulty` all key off that number, so a μ6
+player was shown the same 56% as a μ25 player while the AI they faced fell to the competence
+floor. It also flattened the BOTTOM of the ladder, putting Rookie and Pro on that same floor.
+
+0.85 leaves a residual that **converges** — 2.0 μ at the deepest point, inside one 3 μ tier band
+— rather than diverging, which is the distinction from the 0.6 spiral. **A falling player must
+always have a winnable rung, and that rung is Rookie**; a harder rung staying harder is not the
+bug. What this does NOT fix is recovery: climbing back from a collapsed μ takes 254 wins at 1.0
+and 211 at 0.85, because the binding constraint is σ, not the adaptation — at σ2.54 a win moves
+μ by 0.33 where at σ8.33 it moves 2.11. The player is confidently rated as bad and TrueSkill is
+behaving correctly. Fixing that means σ inflation or an asymmetric `k`, and is its own design.
 
 **The two placement conditions must agree.** `PLACEMENT_GAMES` is the promise the Profile modal
 makes; `PLACEMENT_SIGMA` is what actually releases a tier. At the ordinary PvP shrink, σ does not
@@ -115,3 +126,18 @@ well the opponent plays, not what the ladder is worth, and the bounds are measur
 chosen — `phong-ship-check` owns reading those failures, including why a bound on a sampled
 value is read off its own suite's distribution and never copied from a neighbouring one. Change
 an anchor here; change competence there.
+
+**But the two meet, and the seam is where the ladder collapsed.** `effectiveAiMu` takes its
+deviation from `START_MU`, so every anchor receives the IDENTICAL offset — which means the
+anchors here decide only where each rung SITS on the competence curve there, never how far
+apart they land. When that curve went flat above μ36 (Chaos's own anchor), all five rungs slid
+into the flat section together and the top three became byte-identical opponents from player
+μ30 upward. So: **an anchor change is not a difficulty change unless the curve has room at the
+place it lands**, and the curve's room is capped by the 93% rule, which binds hard — the top
+rungs measure 91.0-91.2% at the suite's own sample and a clamp of 0.86 put them at 92.8%.
+
+The guard for this is in `tests/rating.test.ts`, asserting
+`competenceForMu(effectiveAiMu(d, mu))` strictly increasing at seven player ratings.
+**Never assert ladder ordering on return rate**: it saturates near the top and across seven
+measured configurations never once ordered the top three, because the rally harness sees a
+rung's aggression as missed balls and never as the sharper return the player has to chase.
