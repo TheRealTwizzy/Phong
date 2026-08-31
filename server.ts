@@ -2683,14 +2683,21 @@ async function startServer() {
 
           const me = playerIndex() as 0 | 1;
           const oppIdx = me === 0 ? 1 : 0;
+          // Coerced and clamped exactly as ball_pos does fifteen lines below.
+          // This was the one gameplay stream forwarded raw: `1 - msg.x` on a
+          // string is NaN, which serializes as null and lands as 1 on the
+          // opponent; 1e308 drew their chevron at -1e308; and an object was
+          // relayed to the spectator whole, bounded only by ws's 100 MiB
+          // default. Every other message on this socket already validates.
+          const px = Math.max(0, Math.min(1, Number(msg.x) || 0));
           // Mirrored for the far side of the net — the opponent and anyone
           // watching over their shoulder get the identical bytes.
-          sendAll(viewersOf(room, oppIdx), { type: 'opponent_paddle', x: 1 - msg.x });
+          sendAll(viewersOf(room, oppIdx), { type: 'opponent_paddle', x: 1 - px });
           // RAW for the watcher on THIS side: they are drawing this player's
           // own court in this player's own coordinates, so a mirror here would
           // put the paddle on the wrong side of a screen nobody is mirroring.
           const mine = watcherBeside(room, me);
-          if (mine) mine.send(JSON.stringify({ type: 'watched_paddle', x: msg.x }));
+          if (mine) mine.send(JSON.stringify({ type: 'watched_paddle', x: px }));
         } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex() !== null) {
           // The sonar's ball feed: each phone streams its OWN half's ball at
           // ~15Hz so the other side's radar has something real to draw — a
