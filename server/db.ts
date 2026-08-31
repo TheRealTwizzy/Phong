@@ -32,6 +32,9 @@ import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '..
  * which is bounded by the same number.
  */
 const MAX_MATCH_SCORE = Math.max(...WINNING_SCORES);
+
+/** How often /api/health may actually WRITE. See GameDatabase.healthCheck. */
+const HEALTH_WRITE_PROBE_MS = 10_000;
 import { roomCountsForRank } from '../src/venues';
 import { ALL_ACHIEVEMENTS, achievementById, hasUnlock, isUnlockable } from '../src/achievements';
 import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
@@ -403,6 +406,10 @@ class GameDatabase {
    * re-prepares a cached statement itself if the schema changes underneath it.
    */
   private statements = new Map<string, StatementSync>();
+
+  /** See healthCheck: when the write probe last ran, and whether it worked. */
+  private lastWriteProbeAt = 0;
+  private lastWriteProbeOk = false;
 
   private stmt(sql: string): StatementSync {
     let cached = this.statements.get(sql);
@@ -3610,14 +3617,45 @@ class GameDatabase {
   }
 
   /**
-   * One indexed read, for /api/health.
+   * A read AND a write, for /api/health.
    *
    * Throws if the store is unreachable — a corrupt file, a full disk, a volume
    * that vanished — so the probe can answer 503 instead of reporting a
    * container healthy while every match write fails.
+   *
+   * The read alone did not deliver that promise, and the gap is the awkward
+   * shape: a SELECT succeeds on a filesystem that is FULL and on one remounted
+   * READ-ONLY, which are two of the three failures named above. The probe went
+   * on returning 200 while every match, every mission claim and every profile
+   * write failed — the orchestrator's whole reason for asking. Only a write
+   * can answer the question a write cares about.
+   *
+   * Rate-limited rather than run on every call, because /api/health is
+   * unauthenticated and unmetered: at one upsert per request a flood becomes a
+   * write amplifier, which is the shape of the very findings this probe shipped
+   * alongside. A healthy server therefore writes at most once per
+   * HEALTH_WRITE_PROBE_MS and answers everything in between from the cheap
+   * read, which is far under any orchestrator's polling interval. A FAILING one
+   * is deliberately re-probed every time: caching a failure would keep a
+   * recovered volume reported unhealthy for the rest of the window, and a
+   * server that cannot write is already not serving anything to amplify.
    */
   healthCheck(): void {
     this.stmt('SELECT COUNT(*) AS n FROM players').get();
+    const now = Date.now();
+    if (this.lastWriteProbeOk && now - this.lastWriteProbeAt < HEALTH_WRITE_PROBE_MS) return;
+    try {
+      this.stmt(
+        "INSERT INTO meta (key, value) VALUES ('health_probe', ?) " +
+          'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      ).run(String(now));
+      this.lastWriteProbeOk = true;
+    } catch (e) {
+      this.lastWriteProbeOk = false;
+      throw e;
+    } finally {
+      this.lastWriteProbeAt = now;
+    }
   }
 }
 
