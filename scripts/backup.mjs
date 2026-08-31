@@ -34,7 +34,7 @@ const arg = (flag, fallback) => {
 
 const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const dbFile = path.join(dataDir, 'phong.db');
-const outDir = path.resolve(arg('--out', process.env.BACKUP_DIR || path.join(process.cwd(), 'backups')));
+let outDir = path.resolve(arg('--out', process.env.BACKUP_DIR || path.join(process.cwd(), 'backups')));
 const keep = Math.max(1, parseInt(arg('--keep', '14'), 10) || 14);
 
 if (!fs.existsSync(dbFile)) {
@@ -45,7 +45,31 @@ if (!fs.existsSync(dbFile)) {
 // --out resolves to DATA_DIR ITSELF, which is the likeliest way to get this
 // wrong by hand and the one that lands the snapshot directly beside phong.db —
 // the exact outcome the check exists to refuse.
-const dataAbs = path.resolve(dataDir);
+//
+// And REAL paths, not lexical ones. `--out /backups` where /backups is a
+// symlink to /data/backups compares as somewhere else entirely while
+// VACUUM INTO follows the link and writes inside DATA_DIR — the check passes
+// and the snapshot lands on the volume it exists to survive. A destination
+// that does not exist yet is resolved through its nearest existing parent,
+// since realpath cannot resolve what is not there and the link is normally
+// higher up the path than the leaf we are about to create.
+const realish = (p) => {
+  let dir = path.resolve(p);
+  const tail = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(dir), ...tail);
+    } catch {
+      const parent = path.dirname(dir);
+      // Filesystem root, and still nothing exists: nothing to resolve.
+      if (parent === dir) return path.resolve(p);
+      tail.unshift(path.basename(dir));
+      dir = parent;
+    }
+  }
+};
+const dataAbs = realish(dataDir);
+outDir = realish(outDir);
 if (outDir === dataAbs || outDir.startsWith(dataAbs + path.sep)) {
   console.error(`[backup] refusing to write inside DATA_DIR (${dataDir}).`);
   console.error('[backup] a backup on the volume it protects is lost with it. Pass --out.');

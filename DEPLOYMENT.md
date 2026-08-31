@@ -112,7 +112,11 @@ Three things it does that the old hand-rolled one-liner did not:
 - **Writes outside `DATA_DIR`, and refuses not to** — `DATA_DIR` itself
   included, which the first version let through: it tested only for a path
   *below* the directory, so `--out $DATA_DIR`, the likeliest way to get this
-  wrong by hand, wrote the snapshot straight beside `phong.db` and exited 0. A
+  wrong by hand, wrote the snapshot straight beside `phong.db` and exited 0.
+  The comparison is on REAL paths too, since `--out /backups` where `/backups`
+  is a symlink into the data volume compares as somewhere else entirely while
+  `VACUUM INTO` follows the link; a destination that does not exist yet is
+  resolved through its nearest existing parent. A
   backup on the volume it protects is lost with that volume, which is the exact
   failure it exists for. On Render that disk is also 1GB with no retention, so
   snapshots accumulating beside the database eventually take the live database
