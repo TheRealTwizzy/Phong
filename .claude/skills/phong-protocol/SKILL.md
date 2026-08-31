@@ -71,6 +71,35 @@ Three more things that suite pins, worth knowing before you write code that trip
   behind "every match is recorded once"; a hand-rolled one is the copy that drifts, and the
   match gets paid twice.
 
+## Coerce every field you read off the wire
+
+The relay reads client JSON, so **a field is whatever the sender typed until you make it a
+number.** `Math.abs(undefined)`, `-'x'` and `1 - 'abc'` are all `NaN`, and `NaN` does not throw
+— it propagates into somebody else's court and makes every comparison there false.
+
+`paddle_move` was the one gameplay message forwarded raw, fifteen lines above `ball_pos`, which
+clamps properly. `transformBallForOpponent` coerced `x` and let the four velocity and spin
+fields through. A single `{ vy: 'x' }` froze the receiving player's point permanently — no
+bounce, no crossing, no score, and auto-serve never arms because `isServing` is false — so
+their only way out was quitting, which is recorded as an abandon and a real ranked loss.
+
+When you add a message:
+
+- **Clamp position-like fields to `[0,1]`** and velocity-like fields to a sanity bound. The
+  bound is protection from a hostile payload, not a game rule — the rules-aware clamp belongs
+  on the receiving client.
+- **Gate anything that scores, counts or records on `room.matchOver`.** `point_scored` and
+  `ball_cross_net` were not, and post-whistle crossings wrote a permanent `highestRally`
+  through `startMatchStreaks` into `recordRoomMatch`.
+- **Ask what this message is the ACCOUNT of, and refuse it where that thing cannot exist.**
+  `match_sync` is a replica's report, and a replica only exists once a DataChannel was
+  negotiated — so it is refused on a table where no `rtc_signal` was ever relayed
+  (`room.p2pOffered`). Without that, one frame on a relayed table decided a ranked duel.
+- **Never bound a snapshot by arithmetic instead.** Step-limiting `match_sync`'s score looked
+  like the cheaper guard and is wrong: a snapshot is absolute, applied as a maximum by design,
+  because a P2P relay never sees the intervening points. `tests/room.test.ts` fails loudly if
+  you try.
+
 ## Verifying
 
 ```bash

@@ -2,7 +2,7 @@
 
 Phong is a single Node service: Express serves the built client, the `ws` relay shares the same port, and player data lives in a SQLite file. Any host that can run a **long-lived Node process with WebSockets** works. The primary target is a **self-managed VPS/KVM** (e.g. Hostinger) behind Caddy with automatic HTTPS; a Render blueprint is kept as an alternative.
 
-Capacity note: the relay comfortably exceeds the "5 concurrent matches" requirement — the included load test (`node scripts/load-test.mjs`) drives 10 simultaneous matches (12,000+ messages over 20s) with 0% loss and ~1ms p95 relay latency on modest hardware.
+Capacity note: **there is no current measurement.** This line used to cite `node scripts/load-test.mjs` for "10 simultaneous matches, 0% loss, ~1ms p95". That script stopped working when the lobby handshake landed — it waits for a `game_start` that no longer follows a join, having never sent `player_ready` or `start_match` — so it dies on the first pair, and nothing in CI or the test suites covers it. The figure is removed rather than left standing; repair the script before quoting a number from it.
 
 > **One-time player wipe (`wipe_v1`)**: the first deploy of this version clears ALL existing player data on the volume — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). This runs exactly once, flagged in the DB `meta` table; later deploys never wipe. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.
 
