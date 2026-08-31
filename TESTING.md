@@ -278,8 +278,11 @@ identity: `scripts/e2e-venues.mjs` reads `data-locked` off `#room-ai_pro` and
 locked" assertion in that second suite pass vacuously, which is the same hazard as the vacuous
 `UNLOCKS` assertion above wearing different clothes. `e2e-venues` section 4 asserts the tag's
 `disabled` is `=== true` rather than truthy, that the tap opens `#unlock-hint-sheet` and NOT
-`#prematch-modal`, and that the sheet's text carries a digit — a non-empty check passes on a
-bare trophy name, which is the bug this replaced.
+`#prematch-modal`, and that `#unlock-hint-desc` carries a digit — a non-empty check passes on a
+bare trophy name, which is the bug this replaced. The digit is tested against the DESCRIPTION
+and not the sheet, and that distinction is the invariant above applied to this suite's own
+assertion: the reward chip renders `+800 XP`, so a sheet-wide digit test is satisfied by the
+reward alone and would stay green with the requirement gone.
 
 **A dealt task is one the player can play.** `elite_cyber_3` asks for three Cyber wins and pays
 a permanent theme, and was dealt to players who had not opened Cyber, against one elite reroll a

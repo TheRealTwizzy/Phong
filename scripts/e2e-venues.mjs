@@ -176,9 +176,14 @@ const chaosLock = (await page.textContent('#room-chaos-lock')).trim();
 if (!hint.includes(chaosLock)) {
   fail(`the hint sheet does not name the achievement the row shows ("${chaosLock}")`);
 }
-// The same bar the PvP lock line is held to in section 5: a bare trophy name
-// passes a non-empty check and tells the player nothing they can act on.
-if (!/\d/.test(hint)) fail(`a locked rung should state its requirement, got "${hint}"`);
+// The same bar the PvP lock line is held to in section 5 — and scoped to the
+// DESCRIPTION rather than to the sheet, which is the difference between a
+// test and a test that cannot fail: the reward chip renders `+800 XP`, so a
+// digit tested against the whole sheet is satisfied by the reward alone and
+// stays green with the requirement gone. The description is the only part
+// that says what to DO, so it is the part held to saying a number.
+const req = (await page.textContent('#unlock-hint-desc')).trim();
+if (!/\d/.test(req)) fail(`a locked rung should state its requirement, got "${req}"`);
 await page.click('#btn-close-unlock-hint');
 await page.waitForSelector('#unlock-hint-sheet', { state: 'detached', timeout: 5000 });
 ok(`a locked rung is inert and its lock reveals what opens it ("${chaosLock}")`);
