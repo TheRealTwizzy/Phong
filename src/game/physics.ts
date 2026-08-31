@@ -200,6 +200,18 @@ export const SPIN_PADDLE_CARRY = -0.35;
 /** No AI ever fully reads spin — it has to stay worth using at the top. */
 export const MAX_SPIN_READ = 0.85;
 
+/** The steepest a ball may leave any paddle, the AI's aggression included. */
+export const MAX_REBOUND_ANGLE_DEG = 62;
+
+/**
+ * How far aggression may bend the AI's OWN return, in degrees.
+ *
+ * Sized against the 62 degrees a paddle can produce at all: a fully aggressive
+ * rung adds up to 14, roughly a fifth of the range, which is a visibly
+ * cornered ball without turning every return into the extreme.
+ */
+export const AI_AGGRESSION_ANGLE_DEG = 14;
+
 /**
  * How strongly this contact couples the paddle's motion into the ball:
  * 0 at rest, toward 1 for a fast swing caught on the edge.
@@ -339,7 +351,7 @@ export function checkPaddleCollision(
 
       // Calculate rebound angle (max ~60 degrees), plus what the swing and the
       // incoming spin add.
-      const maxAngle = (Math.PI / 180) * 62;
+      const maxAngle = (Math.PI / 180) * MAX_REBOUND_ANGLE_DEG;
       const angle = clamp(
         hitOffset * maxAngle +
           (drive * DRIVE_ANGLE_DEG * Math.PI) / 180 +
@@ -409,7 +421,7 @@ export function checkPaddleCollision(
  * drops roughly one ball in ten. The old lottery critique is honoured by the
  * hard rule in tests/physics.test.ts: no difficulty may ever return ≥93%.
  */
-export const MAX_AI_COMPETENCE = 0.78;
+export const MAX_AI_COMPETENCE = 0.81;
 
 // The ladder as it is actually PLAYED, in competence.
 //
@@ -427,7 +439,20 @@ const COMPETENCE_KNOTS: readonly (readonly [number, number])[] = [
   [24, 0.49],
   [30, 0.66],
   [33, 0.72],
-  [36, MAX_AI_COMPETENCE],
+  [36, 0.78],
+  // Above the top ANCHOR, not above the ladder. The curve used to stop at
+  // Chaos's own anchor of 36 and go flat, and effectiveAiMu measures its
+  // deviation from START_MU — so every rung receives the IDENTICAL offset and
+  // they all reached that flat section together. Measured: from player mu 30
+  // upward Elite, Cyber and Chaos were byte-identical at 0.780, and every
+  // player who can select Chaos (cyber_10 gates it on Grandmaster) was inside
+  // that region. The ladder advertised five rungs and delivered three.
+  //
+  // These two carry the adaptation band (7) past the top anchor so an adapted
+  // Cyber and an adapted Chaos still separate. Nothing above 43 is reachable:
+  // 36 + AI_ADAPT_BAND is exactly 43.
+  [40, 0.795],
+  [43, MAX_AI_COMPETENCE],
 ];
 
 export function competenceForMu(mu: number): number {
@@ -455,10 +480,13 @@ const AI_STYLES: Record<AIDifficulty, AIStyle> = {
   pro: { volatility: 0.08, aggression: 0.58 },
   elite: { volatility: 0.05, aggression: 0.75 },
   cyber: { volatility: 0.04, aggression: 0.9 },
-  // Chaos recovers its historical identity — strength is the anchor, STYLE is
-  // volatility. At the competence clamp its swings can only reach downward,
-  // so it sometimes plays a rally like Elite: erratic, never superhuman.
-  chaos: { volatility: 0.11, aggression: 0.95 },
+  // Chaos's identity is the anchor it is rated at and how hard it plays for the
+  // corners, NOT volatility. It carried 0.11 while sitting on the competence
+  // clamp, where a swing can only reach downward — so the rung the ladder
+  // rates hardest measured as the WEAKEST of the top three (mean per-rally
+  // competence 0.7525 against Cyber's 0.7700). A style that can only subtract
+  // is a penalty wearing a style's name.
+  chaos: { volatility: 0, aggression: 0.95 },
 };
 
 interface AIParams {
@@ -480,7 +508,15 @@ interface AIParams {
 // 0.03): even Chaos stands a rally out roughly one time in thirty-three,
 // which is part of why the ceiling is not a wall.
 function lapseForCompetence(c: number): number {
-  return lerp(0.075, 0.03, clamp(c / MAX_AI_COMPETENCE, 0, 1));
+  // The floor rose with the aggression rework. Aggression used to be paid for
+  // in accuracy — it was added to targetX, so a rung played for the corners by
+  // standing off-centre and missing more. Moving it to the ball leaving made
+  // the AI strictly better, and the ladder's hardest rungs went straight at
+  // the 93% ceiling (measured 92.8, and 93.0 on a smaller sample). The
+  // difference is given back here rather than by capping competence, because
+  // competence is what ORDERS the rungs and lapses are what make any of them
+  // beatable.
+  return lerp(0.078, 0.048, clamp(c / MAX_AI_COMPETENCE, 0, 1));
 }
 
 // Calibrated by simulating rallies through the real checkPaddleCollision above.
@@ -601,7 +637,7 @@ export class OpponentAI {
   private entryY: number = 0;
   private contactBias: number = 0;
   private readBias: number = 0;
-  private aimShift: number = 0;
+  private aggressionBias: number = 0;
   private lapsed: boolean = false;
   private readsBounce: boolean = true;
   private spinRead: number = 1;
@@ -660,10 +696,37 @@ export class OpponentAI {
     // this ball. Re-deciding every tick would average out to a perfect read.
     this.spinRead = clamp(p.spinRead * (0.75 + Math.random() * 0.5), 0, 1);
     this.lapsed = Math.random() < p.lapseChance;
-    // Deliberate off-centre contact to return at a sharper angle. Bounded to
-    // the paddle's own half-width so ambition never becomes a guaranteed whiff.
-    this.aimShift = (Math.random() - 0.5) * 2 * style.aggression * 0.6;
+    // Which corner this rally is played for, committed once like every other
+    // read. Applied to the ball LEAVING (see aimReturn), never to where the
+    // paddle stands.
+    this.aggressionBias = (Math.random() - 0.5) * 2 * style.aggression;
     this.reactionDelayTimer = p.reactionTime; // plan immediately on arrival
+  }
+
+  /**
+   * Aggression, applied to the ball LEAVING rather than to where the paddle
+   * stands.
+   *
+   * It used to be added to `targetX`, so a rung played for the corners by
+   * deliberately standing off-centre from where the ball was going: it bought
+   * a sharper rebound with a higher chance of missing outright. That reads as
+   * a risk/reward style and measured as a self-handicap — the harder rungs
+   * carry MORE aggression, so the lever fought the competence curve that is
+   * supposed to order them, and Cyber returned fewer balls than Elite despite
+   * strictly better parameters.
+   *
+   * Here it costs the AI nothing and costs the PLAYER the width of the court:
+   * the return leaves at a steeper angle, so it has further to travel to reach
+   * it. That gives the top rungs the second separating axis they need, because
+   * return rate saturates near the top and cannot carry them on its own.
+   *
+   * Bounded by the same limit checkPaddleCollision applies, so the AI can
+   * never produce a ball the physics would not.
+   */
+  public aimReturn(angle: number): number {
+    const limit = (Math.PI / 180) * MAX_REBOUND_ANGLE_DEG;
+    const push = (this.aggressionBias * AI_AGGRESSION_ANGLE_DEG * Math.PI) / 180;
+    return clamp(angle + push, -limit, limit);
   }
 
   /**
@@ -720,8 +783,7 @@ export class OpponentAI {
           predicted +
           this.contactBias +
           this.readBias * (1 - travelled) +
-          gaussian() * p.jitter +
-          this.aimShift * (paddleWidth / 2);
+          gaussian() * p.jitter;
       } else {
         this.targetX = oppBall.x;
       }

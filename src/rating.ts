@@ -123,7 +123,7 @@ export const AI_ADAPT_BAND = 7;
  * so their odds went 50% -> 22% and every further loss widened the gap. The
  * ladder must never get harder because you are losing.
  */
-export const AI_ADAPT_DOWN_STRENGTH = 1;
+export const AI_ADAPT_DOWN_STRENGTH = 0.85;
 export const AI_ADAPT_DOWN_BAND = 20;
 
 /**

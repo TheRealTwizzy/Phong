@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { competenceForMu } from '../src/game/physics';
 import {
   AI_ADAPT_BAND,
   AI_ADAPT_DOWN_BAND,
@@ -96,22 +97,69 @@ describe('adaptive AI anchors', () => {
     }
   });
 
-  it('follows a falling player all the way down', () => {
-    // The regression this exists for: partial tracking left a residual gap of
-    // (1 - strength) x deviation, and the band capped the slide, so a player
-    // losing to Pro fell to mu 13 while Pro stalled at 18 — their odds went
-    // 50% -> 22% and every further loss made it worse. Losing must never make
-    // the ladder harder.
-    let worst = 1;
-    for (const mu of [25, 22, 19, 16, 13, 10, 7]) {
-      const p = winProbability({ mu, sigma: 2 }, aiRating('pro', mu));
-      expect(p).toBeGreaterThan(0.45);
-      worst = Math.min(worst, p);
+  it('follows a falling player down, leaving a gap that converges', () => {
+    // The regression this exists for: partial tracking at 0.6 left a residual
+    // of (1 - strength) x deviation while the BAND capped the slide at 7, so
+    // the gap DIVERGED — a player falling to mu 13, 10, 7 met a Pro stalled at
+    // 17 the whole way, gap 4.0 -> 7.0 -> 10.0 and odds 26% -> 13% -> 5.5%.
+    // Every further loss made it worse. That is the spiral, and it must not
+    // come back.
+    //
+    // Full tracking closed it and overcorrected: the gap became exactly zero
+    // at every depth, so P(win) was PINNED at 56.4% forever. The odds the
+    // pre-match sheet shows, the XP surprise multiplier and the AI's own
+    // adaptation all key off that number, so a player at mu 6 was told the
+    // same 56% as a player at mu 25 while the AI they faced fell from
+    // competence 0.490 to the 0.050 floor. It also flattened the bottom of the
+    // ladder: at player mu 12 both Rookie and Pro sat on that floor, which is
+    // the ordering collapse from the other end.
+    //
+    // 0.85 keeps a residual that CONVERGES instead of diverging, because the
+    // band (20) is wider than the residual can reach: the gap grows to 2.0 mu
+    // at the deepest point and stops, inside a single 3-mu tier band.
+    let worstGap = 0;
+    for (const mu of [25, 22, 19, 16, 13, 10, 7, 5]) {
+      const gap = effectiveAiMu('pro', mu) - mu;
+      worstGap = Math.max(worstGap, gap);
+      // Rookie is the rung that must stay winnable at any depth — that is what
+      // the beginner rung is FOR. A harder rung being harder is not a bug.
+      expect(winProbability({ mu, sigma: 2 }, aiRating('rookie', mu))).toBeGreaterThan(0.5);
     }
-    expect(worst).toBeGreaterThan(0.45);
-    // Full downward tracking means the gap closes entirely, not partially.
-    expect(effectiveAiMu('pro', 10)).toBeCloseTo(AI_RATINGS.pro.mu - 15, 6);
-    expect(AI_ADAPT_DOWN_STRENGTH).toBe(1);
+    expect(worstGap).toBeLessThan(3);
+    // ...and it is a real residual, or the odds go back to being a constant.
+    expect(worstGap).toBeGreaterThan(1);
+    expect(AI_ADAPT_DOWN_STRENGTH).toBeLessThan(1);
+  });
+
+  it('orders the rungs by the strength they are actually PLAYED at', () => {
+    // The one that matters, and the one nothing asserted. The test below
+    // orders effectiveAiMu, which is true by construction — deviation is
+    // measured from START_MU, so every anchor receives the IDENTICAL offset
+    // and the spread is preserved arithmetically whatever the curve does.
+    //
+    // What a player meets is competenceForMu(effectiveAiMu(...)), and that
+    // collapsed: the curve was flat at MAX_AI_COMPETENCE above mu 36, which is
+    // exactly Chaos's anchor, so from player mu 30 upward Elite, Cyber and
+    // Chaos were byte-identical opponents at 0.780. Every player who can
+    // select Chaos (cyber_10 gates it on Grandmaster) was in that region, and
+    // Chaos carried the highest volatility on an already-clamped base — a
+    // swing that can only subtract — so the hardest rung played the weakest.
+    //
+    // Asserted here rather than on return rate deliberately: return rate
+    // saturates near the top and cannot order the top three in ANY
+    // configuration (measured across four), because the rally harness sees
+    // aggression's cost in missed balls and never its benefit in sharper
+    // returns. This is exact, pure, and cannot go quiet.
+    for (const mu of [12, 18, 25, 30, 35, 40, 55]) {
+      for (let i = 1; i < AI_DIFFICULTIES.length; i++) {
+        const harder = competenceForMu(effectiveAiMu(AI_DIFFICULTIES[i], mu));
+        const easier = competenceForMu(effectiveAiMu(AI_DIFFICULTIES[i - 1], mu));
+        expect(
+          harder,
+          `${AI_DIFFICULTIES[i]} vs ${AI_DIFFICULTIES[i - 1]} at player mu ${mu}`
+        ).toBeGreaterThan(easier);
+      }
+    }
   });
 
   it('keeps the rungs ordered and distinct at every skill level', () => {
@@ -320,10 +368,17 @@ describe('solo is capped and always lighter than PvP', () => {
       r = updateRating(r, aiRating('pro', r.mu), won, soloVs('pro'));
     }
     expect(r.mu).toBeLessThan(newRating().mu);
-    // Pro tracks them all the way down at full strength, holding its fixed
-    // offset from START_MU (its 24 anchor sits one mu under it), so the odds
-    // must not have worsened as they fell.
-    expect(effectiveAiMu('pro', r.mu)).toBeCloseTo(r.mu + (AI_RATINGS.pro.mu - START_MU), 6);
+    // Pro follows them down — it does not stall at its anchor, which is the
+    // spiral — but at 0.85 it keeps a small residual, so the AI stays a little
+    // above where full tracking would have put it and the odds stay honest
+    // rather than pinned. Bounded well inside a tier band; see the converging-
+    // gap test above for the arithmetic and the history.
+    const fullTracking = r.mu + (AI_RATINGS.pro.mu - START_MU);
+    const actual = effectiveAiMu('pro', r.mu);
+    expect(actual).toBeGreaterThan(fullTracking);
+    expect(actual - fullTracking).toBeLessThan(3);
+    // ...and still far below its own anchor, or it has stopped following.
+    expect(actual).toBeLessThan(AI_RATINGS.pro.mu);
   });
 });
 

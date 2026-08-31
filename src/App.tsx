@@ -2754,8 +2754,12 @@ export default function App() {
         );
 
         if (oppHit.hit && oppHit.angle !== undefined && oppHit.speed !== undefined) {
-          ob.vy = -Math.abs(oppHit.speed * Math.cos(oppHit.angle));
-          ob.vx = oppHit.speed * Math.sin(oppHit.angle);
+          // Aggression bends the ball on its way out, not the paddle on its
+          // way to meet it — see OpponentAI.aimReturn for why that swap
+          // matters to the ladder's ordering.
+          const aimed = aiRef.current.aimReturn(oppHit.angle);
+          ob.vy = -Math.abs(oppHit.speed * Math.cos(aimed));
+          ob.vx = oppHit.speed * Math.sin(aimed);
           ob.y = PADDLE_Y - PADDLE_HEIGHT / 2 - ob.radius;
 
           sound.playOpponentPaddleHit();
