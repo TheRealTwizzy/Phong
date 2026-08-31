@@ -966,3 +966,92 @@ describe('the size of a day\'s hand', () => {
     expect(MISSION_POOL.length - REGULAR_SLOTS).toBeGreaterThanOrEqual(2 * REGULAR_SLOTS);
   });
 });
+
+describe('a dealt task is one the player can actually play', () => {
+  // `elite_cyber_3` asks for three Cyber wins, pays 600 XP and a permanent
+  // theme, and was dealt from the elite pool to players who had not opened
+  // Cyber — against a single elite reroll a day. The player was told to go and
+  // beat an opponent the menu would not let them select. A task nobody can
+  // complete is the most confusing kind there is.
+  const CYBER_CHAIN = ['ai_rookie', 'ai_pro', 'ai_pro_10', 'ai_elite', 'ai_elite_10'];
+
+  /**
+   * Give a profile the achievements it would have earned climbing the ladder.
+   * Written straight in rather than played for: what is under test here is the
+   * DEAL, and tests/achievements.test.ts already owns the climb itself.
+   */
+  const grant = (playerId: string, achievements: string[]) => {
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    try {
+      const changed = raw
+        .prepare('UPDATE players SET achievements = ? WHERE id = ?')
+        .run(JSON.stringify(achievements), playerId).changes;
+      expect(changed).toBe(1);
+    } finally {
+      raw.close();
+    }
+  };
+
+  it('never deals a difficulty task to somebody without the difficulty', () => {
+    init('m_lock', 'MissionLock');
+    // Deliberately swept across many days rather than one: the hand is dealt
+    // from a seeded shuffle of (playerId, dayKey), so a single day proves
+    // nothing about a pool that still contains the task.
+    for (let d = 1; d <= 28; d++) {
+      const day = new Date(Date.UTC(2026, 8, d, 12));
+      for (const m of db.getMissions('m_lock', day)) {
+        const def = findMission(m.id)!;
+        expect(def.difficulty, `${def.id} needs ${def.difficulty} and was dealt to a new player`)
+          .toBeUndefined();
+      }
+    }
+  });
+
+  it('deals it once the ladder has actually been climbed', () => {
+    init('m_open', 'MissionOpen');
+    grant('m_open', CYBER_CHAIN);
+    let sawCyber = false;
+    for (let d = 1; d <= 28 && !sawCyber; d++) {
+      const day = new Date(Date.UTC(2026, 9, d, 12));
+      sawCyber = db.getMissions('m_open', day).some((m) => m.id === 'elite_cyber_3');
+    }
+    // Guard the guard: if this never came up the test above proves nothing,
+    // since a filter that removed everything would also pass it.
+    expect(sawCyber, 'a player holding Cyber was never dealt the Cyber task').toBe(true);
+  });
+
+  it('still deals a full hand of both tiers to an account with nothing', () => {
+    // The filter must never trade an impossible task for a missing one. The
+    // worst case is a brand-new profile, which holds no unlocks at all.
+    init('m_full', 'MissionFull');
+    for (let d = 1; d <= 7; d++) {
+      const day = new Date(Date.UTC(2026, 10, d, 12));
+      const hand = db.getMissions('m_full', day);
+      expect(hand, `day ${d}`).toHaveLength(REGULAR_SLOTS + ELITE_SLOTS);
+      expect(hand.filter((m) => findMission(m.id)!.tier === 'elite')).toHaveLength(ELITE_SLOTS);
+    }
+  });
+
+  it('refills a slot left holding an impossible task by an older build', () => {
+    // Unlocks only accumulate, so a task cannot become unplayable after it was
+    // dealt — this only ever catches a slot filled before the deal was
+    // filtered. Those players are otherwise stuck with it until the UTC reset.
+    init('m_stuck', 'MissionStuck');
+    const day = new Date(Date.UTC(2026, 11, 3, 12));
+    db.getMissions('m_stuck', day); // deal the day first
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    try {
+      const changed = raw
+        .prepare(
+          `UPDATE daily_mission_slots SET missionId = 'elite_cyber_3'
+            WHERE playerId = ? AND dayKey = ? AND slot = ?`
+        )
+        .run('m_stuck', '2026-12-03', REGULAR_SLOTS).changes;
+      // A silent no-op would leave this asserting nothing at all.
+      expect(changed).toBe(1);
+    } finally {
+      raw.close();
+    }
+    expect(db.getMissions('m_stuck', day).some((m) => m.id === 'elite_cyber_3')).toBe(false);
+  });
+});

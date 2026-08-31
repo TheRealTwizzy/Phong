@@ -21,12 +21,26 @@ import {
   playableDifficulty,
   playableWinningScore,
 } from '../src/achievements';
-import { AI_DIFFICULTIES } from '../src/rating';
+import { AI_DIFFICULTIES, TIER_ORDER } from '../src/rating';
+import { SHUTOUT_MIN_POINTS } from '../src/matchRules';
 import type { AchievementBranch } from '../src/types';
 
 // Gate contexts used across the tree tests.
 const NEWBIE = { level: 1, tier: 'unranked' } as const;
 const VETERAN = { level: 99, tier: 'legend' } as const;
+
+/**
+ * Which difficulty each ladder rung is actually EARNED on — the thing a player
+ * has to be able to select in order to trigger it. Stated rather than inferred
+ * from the id, so a rung added to UNLOCKS without an entry here fails loudly
+ * instead of being skipped.
+ */
+const EARNED_ON: Record<string, string> = {
+  ai_rookie: 'rookie',
+  ai_pro_10: 'pro',
+  ai_elite_10: 'elite',
+  cyber_10: 'cyber',
+};
 
 const branchGate = (id: AchievementBranch) => BRANCHES.find((b) => b.id === id)?.gate;
 /** The achievement ids that open a branch, if any. */
@@ -355,6 +369,52 @@ describe('level and rank gates', () => {
     expect(db.getProfile('g_bank').achievements).toContain('rally_150');
   }, 30_000);
 
+  it('states its gate in its own description', () => {
+    // The description is the ONLY channel a gate has: the tree renders
+    // "Requires {parent}" and never the level or tier, so for a rung whose
+    // parent is already earned it names something the player is looking at
+    // with a green tick beside it. Five gated rungs said nothing at all about
+    // what was really holding them — `duel_50`, `ace_100`, `points_2000`,
+    // `streak_10`, `rally_150`.
+    for (const a of ALL_ACHIEVEMENTS.filter((x) => x.gate)) {
+      if (a.gate!.level !== undefined) {
+        expect(
+          a.description.includes(String(a.gate!.level)),
+          `${a.id} needs level ${a.gate!.level} and its description never says so: "${a.description}"`
+        ).toBe(true);
+      }
+      if (a.gate!.tier !== undefined) {
+        expect(
+          a.description.toLowerCase().includes(a.gate!.tier),
+          `${a.id} needs ${a.gate!.tier} tier and its description never says so: "${a.description}"`
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('quotes the shutout floor everywhere it depends on it', () => {
+    // Copy that quotes a threshold is checked against the threshold — the rule
+    // tests/themes.test.ts held for theme unlock lines until that file was
+    // deleted, restated here where it is now load-bearing.
+    //
+    // A shutout needs the opponent on zero AND a match of at least
+    // SHUTOUT_MIN_POINTS, and the second half was written down nowhere. Every
+    // one of these said "without conceding a point", which is true and
+    // incomplete: at first-to-3 the match caps at 3, so a player winning 3-0
+    // against Cyber over and over moved no counter and was told nothing.
+    for (const id of ['shutout', 'cyber_shutout', 'duel_shutout', 'shutout_5', 'shutout_15']) {
+      const a = achievementById(id)!;
+      expect(a, `${id} is missing from the catalogue`).toBeTruthy();
+      expect(
+        a.description.includes(`first-to-${SHUTOUT_MIN_POINTS}`),
+        `${id} depends on the shutout floor and never quotes it: "${a.description}"`
+      ).toBe(true);
+      // "Conceding" named only half the requirement, which is how it hid the
+      // other half for so long.
+      expect(a.description.toLowerCase()).not.toContain('conced');
+    }
+  });
+
   it('never gates a rung behind a level the game does not reach', () => {
     // A gate is a delay, not a dead end. Level 25 is the deepest milestone the
     // tree itself celebrates, so nothing may ask for more than that.
@@ -425,6 +485,51 @@ describe('parent gating in play', () => {
     expect(hasUnlock(climbed.achievements, 'difficulty', 'chaos')).toBe(false);
   });
 
+  it('reaches Chaos by playing the ladder, with no shutout anywhere', () => {
+    // The bug this exists for. `cyber_10` opens Chaos, and it used to hang off
+    // `cyber_shutout` — a HIDDEN rung asking for a clean sheet against Cyber.
+    // Gating is strict, so a shutout was mandatory to finish the AI ladder,
+    // while being invisible in the tree and impossible outright at first-to-3,
+    // where the match caps at 3 and the shutout floor is 5. A player who beat
+    // Cyber 3-0 repeatedly climbed nothing and had nothing on screen to say
+    // why. Every table-driven test in this file passed throughout, because
+    // they add ids to a list instead of playing for them.
+    //
+    // So this one plays. Every match concedes a point, so no shutout can fire
+    // anywhere along the way.
+    init('g_chaos', 'GateChaos');
+    const play = (difficulty: string) =>
+      db.recordMatch({
+        playerId: 'g_chaos', username: 'GateChaos', playerScore: 5, opponentScore: 1,
+        bestStreak: 5, endStreak: 0, earnedStreak: 5, mode: 'solo', difficulty, isWinner: true,
+      } as never);
+    const earned = () => db.getProfile('g_chaos').achievements;
+    const canPlay = (d: string) => hasUnlock(earned(), 'difficulty', d);
+
+    play('rookie');
+    expect(canPlay('pro')).toBe(true);
+    for (let i = 0; i < 120 && !canPlay('elite'); i++) play('pro');
+    expect(canPlay('elite'), 'the Pro climb never opened Elite').toBe(true);
+    for (let i = 0; i < 200 && !canPlay('cyber'); i++) play('elite');
+    expect(canPlay('cyber'), 'the Elite climb never opened Cyber').toBe(true);
+    for (let i = 0; i < 300 && !canPlay('chaos'); i++) play('cyber');
+
+    const done = db.getProfile('g_chaos');
+    // Guard the guard: a loop that silently stopped climbing would make the
+    // assertions below vacuous rather than red.
+    expect(done.cyberWins, 'the Cyber climb did not happen').toBeGreaterThanOrEqual(10);
+    expect(
+      TIER_ORDER.indexOf(done.tier),
+      `the climb never reached Grandmaster (got ${done.tier})`
+    ).toBeGreaterThanOrEqual(TIER_ORDER.indexOf('grandmaster'));
+
+    expect(canPlay('chaos'), 'the full ladder did not open Chaos').toBe(true);
+    // And the whole thing was walked without a single clean sheet.
+    expect(done.shutoutsWon).toBe(0);
+    expect(done.achievements).not.toContain('cyber_shutout');
+    expect(done.achievements).not.toContain('shutout');
+  }, 60_000);
+
   it('lets one result climb a chain when it genuinely satisfies every rung', () => {
     init('g_rally', 'GateRally');
     // A 50-hit rally really is also a 25 and a 10, so all three land at once.
@@ -479,14 +584,35 @@ describe('the tree gates the game', () => {
   it('never gates something behind an achievement that needs it', () => {
     // A gate you can only open by using what it locks is a dead end. Walking
     // the ladder must be possible from an empty account.
+    //
+    // This assertion used to concat `id` into the earned set before asking
+    // `unlockedKeys` what that set opened — so it looked for exactly the entry
+    // it had just put there, and could not fail. What it checks now is what
+    // the comment always claimed: the difficulty a rung is EARNED on is open
+    // to everything strictly above it in the chain.
     for (const [id, unlocks] of Object.entries(UNLOCKS)) {
       for (const u of unlocks) {
         if (u.kind !== 'difficulty') continue;
-        // The achievement that opens a difficulty must itself be earnable on
-        // a difficulty that is already open at that point.
-        const openedBefore = unlockedKeys(ancestorsOf(id).map((a) => a.id).concat(id));
-        expect(openedBefore.has(`difficulty:${u.value}`)).toBe(true);
+        const earnedOn = EARNED_ON[id];
+        expect(earnedOn, `${id} opens a difficulty but is not listed in EARNED_ON`).toBeTruthy();
+        const openedBefore = unlockedKeys(ancestorsOf(id).map((a) => a.id));
+        expect(
+          openedBefore.has(`difficulty:${earnedOn}`),
+          `${id} opens ${u.value} but is earned at ${earnedOn}, which its own ancestors do not open`
+        ).toBe(true);
       }
+    }
+  });
+
+  it('never hides a rung that unlocks something', () => {
+    // A hidden rung is a silhouette until its parent is earned — fine for a
+    // feat, wrong for a gate. `cyber_10` was hidden while the solo room list
+    // printed its title ("Machine Ender") beside locked Chaos, so the two
+    // surfaces disagreed about whether the name was a secret and a player
+    // sent looking for it found `??? Hidden`.
+    for (const id of Object.keys(UNLOCKS)) {
+      expect(achievementById(id), `UNLOCKS names ${id}, which is not an achievement`).toBeTruthy();
+      expect(achievementById(id)!.hidden, `${id} unlocks something and must not be hidden`).toBeFalsy();
     }
   });
 
@@ -504,8 +630,17 @@ describe('the tree gates the game', () => {
     expect(reachable()).toEqual(['rookie', 'pro', 'elite']);
     earned = [...earned, 'ai_elite', 'ai_elite_10'];
     expect(reachable()).toEqual(['rookie', 'pro', 'elite', 'cyber']);
-    earned = [...earned, 'cyber_slayer', 'cyber_shutout', 'cyber_10'];
+    // The last step is a win count like every other one. It used to run
+    // through `cyber_shutout` as well — a clean sheet against Cyber, hidden
+    // until earned and impossible at first-to-3 — so the ladder's final rung
+    // was a feat beside the ladder, and this walk passed anyway because it
+    // adds ids to a list rather than playing for them.
+    earned = [...earned, 'cyber_slayer'];
+    expect(reachable()).toEqual(['rookie', 'pro', 'elite', 'cyber']);
+    earned = [...earned, 'cyber_10'];
     expect(reachable()).toEqual(['rookie', 'pro', 'elite', 'cyber', 'chaos']);
+    // And no feat is required anywhere along it.
+    expect(earned).not.toContain('cyber_shutout');
   });
 
   it('makes each upper rung a real climb, not a first-session accident', () => {
@@ -523,8 +658,11 @@ describe('the tree gates the game', () => {
     // top of the solo ladder demands a real rating, not just hours played.
     const chaosGate = unlockedBy('difficulty', 'chaos')!;
     expect(chaosGate.gate?.tier).toBe('grandmaster');
-    expect(isUnlockable(chaosGate.id, ['cyber_shutout'], { level: 40, tier: 'ace' })).toBe(false);
-    expect(isUnlockable(chaosGate.id, ['cyber_shutout'], { level: 40, tier: 'grandmaster' })).toBe(true);
+    expect(isUnlockable(chaosGate.id, ['cyber_slayer'], { level: 40, tier: 'ace' })).toBe(false);
+    expect(isUnlockable(chaosGate.id, ['cyber_slayer'], { level: 40, tier: 'grandmaster' })).toBe(true);
+    // And a shutout is not on the path: holding one instead of the win rung
+    // opens nothing.
+    expect(isUnlockable(chaosGate.id, ['cyber_shutout'], { level: 40, tier: 'grandmaster' })).toBe(false);
   });
 });
 

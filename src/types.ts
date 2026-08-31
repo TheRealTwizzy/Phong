@@ -241,7 +241,7 @@ export interface PlayerProfile {
   /** Consecutive wins right now, reset by any loss. */
   winStreak: number;
   bestWinStreak: number;
-  /** Matches won without conceding a point. */
+  /** Matches won with the opponent on zero, at SHUTOUT_MIN_POINTS or longer. */
   shutoutsWon: number;
   /** Solo wins per difficulty — what the ladder branch is measured on. */
   rookieWins: number;
