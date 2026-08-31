@@ -41,7 +41,12 @@ if (!fs.existsSync(dbFile)) {
   console.error(`[backup] no database at ${dbFile} — is DATA_DIR right?`);
   process.exit(1);
 }
-if (path.resolve(outDir).startsWith(path.resolve(dataDir) + path.sep)) {
+// Equality as well as descent. `startsWith(dataDir + sep)` alone is false when
+// --out resolves to DATA_DIR ITSELF, which is the likeliest way to get this
+// wrong by hand and the one that lands the snapshot directly beside phong.db —
+// the exact outcome the check exists to refuse.
+const dataAbs = path.resolve(dataDir);
+if (outDir === dataAbs || outDir.startsWith(dataAbs + path.sep)) {
   console.error(`[backup] refusing to write inside DATA_DIR (${dataDir}).`);
   console.error('[backup] a backup on the volume it protects is lost with it. Pass --out.');
   process.exit(1);
