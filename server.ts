@@ -1019,6 +1019,17 @@ async function startServer() {
 
   // Health check
   app.get('/api/health', (req, res) => {
+    // Touch the store. This answered 'ok' off nothing but process liveness,
+    // and Docker's HEALTHCHECK, Render's healthCheckPath, Dokploy's probe and
+    // the e2e runner all key on it — so a container with a corrupt database, a
+    // full disk or a vanished volume reported healthy while every match write
+    // threw. One indexed read; the cost is nil.
+    try {
+      db.healthCheck();
+    } catch (e: any) {
+      console.error('[health] datastore unreachable:', e?.message);
+      return res.status(503).json({ status: 'degraded', build: buildId() });
+    }
     res.json({ status: 'ok', activeRooms: rooms.size, build: buildId() });
   });
 
@@ -3142,6 +3153,28 @@ async function startServer() {
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Split-Screen Half Pong server running at http://0.0.0.0:${PORT}`);
+    // Say which file this process is actually persisting to, and how much is
+    // already in it. An unmounted volume is otherwise completely silent: the
+    // Dockerfile mkdir's /data as well as setting DATA_DIR, so a missing mount
+    // leaves a writable directory in the image layer and the server starts
+    // from zero players without a word. "0 players" in the log on a server
+    // that had thousands is a five-second diagnosis; nothing was a permanent
+    // loss discovered later.
+    try {
+      const d = db.describe();
+      console.log(
+        `[db] ${d.file} — ${(d.bytes / 1024).toFixed(0)}KB, ` +
+          `${d.humans} account(s), ${d.players} row(s) incl. bots`
+      );
+      if (process.env.NODE_ENV === 'production' && d.humans === 0) {
+        console.warn(
+          '[db] WARNING: no accounts in this database. If this is not a first ' +
+            'boot, DATA_DIR is not pointing at the volume you think it is.'
+        );
+      }
+    } catch (e: any) {
+      console.error('[db] could not describe the datastore:', e?.message);
+    }
   });
 
   // Render stops the old instance on every deploy of a disk-backed service;

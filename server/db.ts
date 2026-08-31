@@ -3525,6 +3525,46 @@ class GameDatabase {
       .all(...binds, limit, offset) as unknown as MatchRecord[];
     return { matches, total };
   }
+
+  /**
+   * Where this process actually persisted to, and how much is in it.
+   *
+   * DATA_DIR falls back to a cwd-relative ./data, and the Dockerfile both sets
+   * DATA_DIR=/data AND mkdir's it — so a missing or misconfigured volume mount
+   * leaves a writable /data in the image layer and the server boots happily
+   * onto an ephemeral database. Every deploy then starts from zero players
+   * with no error and nothing in the log naming the file it opened.
+   * DEPLOYMENT.md warns about this in prose; nothing in the code said a word.
+   */
+  describe(): { file: string; bytes: number; players: number; humans: number } {
+    let bytes = 0;
+    try {
+      bytes = fs.statSync(DB_FILE).size;
+    } catch {
+      /* a fresh database has no file on disk yet */
+    }
+    const row = this.stmt('SELECT COUNT(*) AS n FROM players').get() as { n: number };
+    // Humans separately, and that distinction is the whole point: the bot
+    // roster is re-seeded onto every fresh database at boot, so a server that
+    // has just lost its volume reports eight players rather than none. Only
+    // the initialized non-bot count actually distinguishes "empty" from
+    // "populated".
+    const human = this.stmt(
+      "SELECT COUNT(*) AS n FROM players WHERE initializedAt IS NOT NULL AND id NOT LIKE 'bot-%'"
+    ).get() as { n: number };
+    return { file: path.resolve(DB_FILE), bytes, players: row.n, humans: human.n };
+  }
+
+  /**
+   * One indexed read, for /api/health.
+   *
+   * Throws if the store is unreachable — a corrupt file, a full disk, a volume
+   * that vanished — so the probe can answer 503 instead of reporting a
+   * container healthy while every match write fails.
+   */
+  healthCheck(): void {
+    this.stmt('SELECT COUNT(*) AS n FROM players').get();
+  }
 }
 
 export const db = new GameDatabase();
