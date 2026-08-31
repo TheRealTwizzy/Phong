@@ -24,7 +24,14 @@ import {
   DELETED_PLAYER_ID,
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
-import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS } from '../src/matchRules';
+import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
+
+/**
+ * The most points a single match can legitimately put on either side: the
+ * longest format anyone can pick. An abandon records at the standing score,
+ * which is bounded by the same number.
+ */
+const MAX_MATCH_SCORE = Math.max(...WINNING_SCORES);
 import { roomCountsForRank } from '../src/venues';
 import { ALL_ACHIEVEMENTS, achievementById, hasUnlock, isUnlockable } from '../src/achievements';
 import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
@@ -2512,6 +2519,25 @@ class GameDatabase {
       const n = Math.floor(Number(v));
       return Number.isFinite(n) ? Math.max(0, Math.min(100000, n)) : 0;
     };
+    // The scores are read off the payload too, and were the one pair that
+    // never was. playerScore reaches matchXp raw, which multiplies it by
+    // XP_PER_POINT — so `1e307` produced Infinity, and levelFromXp's
+    // `while (xp >= next)` then never terminated, wedging the single-threaded
+    // process that holds every live room in memory. `1e9` was the quiet
+    // version: level 24,492 in 448ms of blocked event loop, permanently, since
+    // XP never regresses. And because `+=` on a string concatenates,
+    // `"5"` turned totalPointsScored 100 into 1005 while matchXp still
+    // computed numerically, so nothing else looked wrong.
+    //
+    // Bounded by the longest match anybody can play rather than by bound()'s
+    // 100000: a score above the largest winning score is not a big number, it
+    // is a lie, and clamping to the streak cap would still hand out a level in
+    // the hundreds. A room-vouched result overwrites both fields below anyway.
+    const boundScore = (v: unknown): number =>
+      Math.max(0, Math.min(MAX_MATCH_SCORE, bound(v)));
+    payload.playerScore = boundScore(payload.playerScore);
+    payload.opponentScore = boundScore(payload.opponentScore);
+
     const bestStreak = bound(payload.bestStreak);
     payload.bestStreak = bestStreak;
     // The run cannot end higher than it ever reached.
