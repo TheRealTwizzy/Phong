@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   acceptRtcSignal,
   applyMatchSync,
+  clearP2PEvidence,
   breakStreakOnPoint,
   clampInt,
   countReturn,
@@ -1026,6 +1027,32 @@ describe('acceptRtcSignal', () => {
     const r = room();
     expect(acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v'.repeat(MAX_SDP_CHARS) })).toBe(true);
     expect(acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v'.repeat(MAX_SDP_CHARS + 1) })).toBe(false);
+  });
+
+  it('forgets the handshake when a playing seat changes hands', () => {
+    // The evidence belongs to the PAIR, not to the table. A room outlives its
+    // occupants — a seat vacated by one player is taken by the next — so a
+    // flag documented as "set once and never cleared" let a newcomer forge a
+    // decisive snapshot against an opponent who had never been on a
+    // DataChannel with anybody. The original exploit back, needing only that
+    // somebody once played P2P at this table.
+    const r = room();
+    acceptRtcSignal(r, 0, offer);
+    acceptRtcSignal(r, 1, answer);
+    expect(r.p2pOffered).toBe(true);
+
+    clearP2PEvidence(r);
+    expect(r.p2pOffered).toBe(false);
+    // Both halves, or the next occupant inherits one of them and needs only
+    // to supply the other from their own single socket.
+    expect(r.rtcOfferFrom).toBeUndefined();
+    expect(r.rtcAnswerFrom).toBeUndefined();
+
+    // ...and the new pair has to negotiate for themselves.
+    acceptRtcSignal(r, 0, offer);
+    expect(r.p2pOffered).toBe(false);
+    acceptRtcSignal(r, 1, answer);
+    expect(r.p2pOffered).toBe(true);
   });
 
   it('relays ice candidates but never arms a replica on them', () => {

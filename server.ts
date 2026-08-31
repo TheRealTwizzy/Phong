@@ -27,6 +27,7 @@ import { transformBallForOpponent } from './server/transform';
 import {
   acceptRtcSignal,
   applyMatchSync,
+  clearP2PEvidence,
   clearSeatStreaks,
   clampInt,
   generateRoomCode,
@@ -1735,18 +1736,44 @@ async function startServer() {
         // The branch above deliberately stands aside for a room that cannot
         // decide — a rematch has reset it, or in a P2P duel the winner's own
         // POST legitimately outran the deciding match_sync — and in all of
-        // those the caller still holds a seat, the relay is recording its own
-        // copy, and roomId+matchSeq already gave the result a matchKey.
+        // those the relay is recording its own copy and roomId+matchSeq
+        // already gave the result a matchKey.
         //
-        // No seat is the different case, and it was unguarded in three ways at
-        // once. The client's scores stood; matchKey is only derived when a
-        // roomId is present, so a POST without one skipped the
-        // recorded_matches ledger entirely and could be replayed without
-        // limit; and isRankedRules(undefined) and roomCountsForRank(undefined)
-        // are both true, so it rated, against an even fallback opponent. About
-        // 25 scripted POSTs carried rankMu from 25 to 37 — Cyber Overlord, the
-        // top-100 ladder position, tier_overlord, legend-aurora,
-        // duel_10/duel_50, and elite_duel_3's permanent theme.
+        // Vouching asks three things, and it took two goes to get past the
+        // first. Originally none of them were asked: the client's scores
+        // stood; matchKey is only derived when a roomId is present, so a POST
+        // without one skipped the recorded_matches ledger entirely and could
+        // be replayed without limit; and isRankedRules(undefined) and
+        // roomCountsForRank(undefined) are both true, so it rated, against an
+        // even fallback opponent. About 25 scripted POSTs carried rankMu from
+        // 25 to 37 — Cyber Overlord, the top-100 ladder position,
+        // tier_overlord, legend-aurora, duel_10/duel_50, and elite_duel_3's
+        // permanent theme.
+        //
+        // Asking only for a live seat closed the roomless version and left the
+        // same exploit one step away, which review found: CREATE a room, sit
+        // in it alone, and POST stock-rule wins against it. The room exists and
+        // the seat is yours, so it vouched — and since a fresh room mints a
+        // fresh matchKey, the whole thing repeats without limit. Measured:
+        // rankMu 25.000 -> 45.817 and tier overlord over 25 rooms, no opponent
+        // and no match ever started.
+        //
+        // So: a live seat, an opponent in the other one, and a claimed
+        // sequence naming a match this room ACTUALLY STARTED. matchSeq is 0 on
+        // a fresh room and startMatch is the only thing that bumps it, and
+        // start_match is refused until a guest has readied — so `seq >= 1` is
+        // exactly "two people agreed to play this", which no lone socket can
+        // manufacture. The legitimate P2P race still passes all three: the
+        // room is on this matchSeq with both seats filled, and it is only the
+        // SCORE that is behind.
+        //
+        // The strictness costs one narrow case, taken deliberately: a pure-P2P
+        // duel in which no deciding match_sync ever reached the relay AND the
+        // opponent's socket closed before this POST landed would rate as
+        // unvouched. The replica syncs on every crossing, so the relay has
+        // almost always already recorded that match itself — and the failure
+        // modes are not symmetric. Being strict costs an unusual duel its rank
+        // while still paying its XP; being loose costs the ladder.
         //
         // XP is still paid: that is the documented trade for a match the server
         // cannot fully verify, and the same one a solo result already gets. The
@@ -2661,6 +2688,9 @@ async function startServer() {
             // SEEDED from it — so there is nothing to write back, and the
             // player's own stored run is untouched and will seed them again.
             clearSeatStreaks(room, leaving);
+            // Same reason as vacateSeat: a playing seat changing hands ends
+            // whatever handshake its previous occupant was party to.
+            clearP2PEvidence(room);
           } else {
             room.spectators[seat.slot] = null;
           }
@@ -3110,6 +3140,11 @@ async function startServer() {
       room.players[mine] = null;
       room.rematchVotes[mine] = false;
       room.ready[mine] = false;
+      // The handshake belonged to the pair, not to the table. A room outlives
+      // its occupants, so leaving this set let the next person to take this
+      // seat forge a snapshot against an opponent who had never been on a
+      // DataChannel with anybody — see Room.p2pOffered.
+      clearP2PEvidence(room);
       const oppIdx = mine === 0 ? 1 : 0;
       const opp = room.players[oppIdx];
       if (opp?.ws && opp.ws.readyState === WebSocket.OPEN) {

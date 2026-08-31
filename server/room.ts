@@ -139,9 +139,15 @@ export interface Room {
    * removes is the case where the victim was never party to a DataChannel at
    * all — a spectated table, a client with P2P off, a browser without WebRTC.
    *
-   * Set once and never cleared, because a link that opens and dies leaves a
-   * peer that legitimately still holds the replica it built — that is the
-   * one-sided fallback relayCounted exists for, and it must keep working.
+   * Kept across a transport fallback, because a link that opens and dies leaves
+   * a peer that legitimately still holds the replica it built — that is the
+   * one-sided fallback relayCounted exists for, and it must keep working. But
+   * it belongs to the PAIR that negotiated it, not to the table: a room
+   * outlives its occupants, so one left set forever meant a player could leave,
+   * a stranger take the empty seat, and that newcomer forge a snapshot against
+   * a victim who was never party to any DataChannel — the original exploit
+   * back, needing only that somebody once played P2P here. clearP2PEvidence
+   * resets it whenever a playing seat empties or changes hands.
    */
   p2pOffered?: boolean;
   /** The seat whose valid `offer` was relayed, if any. See p2pOffered. */
@@ -778,6 +784,24 @@ export function clearSeatStreaks(state: StreakState, seat: 0 | 1): void {
  * seated player cannot make the relay ferry megabytes for free.
  */
 export const MAX_SDP_CHARS = 16 * 1024;
+
+/**
+ * Forget that this table ever negotiated a DataChannel.
+ *
+ * Called whenever a PLAYING seat empties or changes hands, and for exactly one
+ * reason: p2pOffered is what lets match_sync speak for a match the relay never
+ * saw, and it is evidence about the two people who exchanged the handshake. A
+ * room survives its occupants — a seat vacated by one player is taken by the
+ * next — so a flag that outlived them let a newcomer forge a decisive snapshot
+ * against an opponent who had never been on a DataChannel with anybody. It is
+ * NOT called on a transport fallback: that is the same pair, still holding the
+ * replica they built, which is the case relayCounted exists to handle.
+ */
+export function clearP2PEvidence(room: Room): void {
+  room.p2pOffered = false;
+  room.rtcOfferFrom = undefined;
+  room.rtcAnswerFrom = undefined;
+}
 
 /**
  * Take one `rtc_signal` from a seat: validate it, record what it advances of

@@ -401,6 +401,47 @@ describe('recording a duel', () => {
     p2.close();
   }, 45000);
 
+  it('forgets a handshake when the seat that made it changes hands', async () => {
+    // p2pOffered was documented as "set once and never cleared", and a room
+    // outlives its occupants. So a pair negotiating P2P here left the table
+    // permanently able to vouch for a replica: the guest leaves, a stranger
+    // takes the seat, and that newcomer can forge a decisive snapshot against
+    // a victim who was never party to any DataChannel.
+    const host = await newDevice('SeatKeeper');
+    const first = await newDevice('SeatLeaver');
+    const later = await newDevice('SeatTaker');
+
+    // A real pair, a real handshake — seatDuel performs both halves.
+    const { p1, p2 } = await seatDuel(host, first, 3);
+    p2.send({ type: 'leave_room' });
+    p2.close();
+    await sleep(150);
+
+    // A stranger takes the empty seat and the host restarts the match.
+    const roomId = (p1.last('room_created') as { roomId: string }).roomId;
+    const p3 = await Phone.open(later);
+    p3.send({ type: 'join_room', roomId, playerId: later.id });
+    await p3.await('room_joined');
+    p3.send({ type: 'player_ready', ready: true });
+    await p1.await('ready_state');
+    p1.clear();
+    p1.send({ type: 'start_match' });
+    const start = await p1.await('game_start');
+
+    // No handshake has happened between THESE two, so the snapshot is refused.
+    p3.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 0, p2Score: 3 });
+    await sleep(400);
+    for (const d of [host, later]) {
+      const p = await getProfile(d);
+      expect(p.matchesLost).toBe(0);
+      expect(p.matchesWon).toBe(0);
+      expect(p.rankedGames).toBe(0);
+    }
+
+    p1.close();
+    p3.close();
+  }, 45000);
+
   it('refuses a forged snapshot on a table the victim never negotiated', async () => {
     // The whole exploit, end to end, and the reason the p2pOffered guard could
     // not be armed by a single frame. A seated attacker sends ONE rtc_signal —
