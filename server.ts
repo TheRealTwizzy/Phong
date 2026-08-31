@@ -2040,7 +2040,18 @@ async function startServer() {
       // Streaks only, and no abandon: that is a penalty for walking out on
       // somebody who was still playing, and a room reaped for going quiet for
       // half an hour has nobody left to have walked out on.
-      persistDuelStreaks(room);
+      // Guarded, and per room, for the same reason the queue sweep below is:
+      // reapRooms has ALREADY deleted these from the map, so a throw here —
+      // a full disk, a volume remounted read-only — would abort the sweep with
+      // the rooms gone and their occupants' sockets never closed, sitting on
+      // courts the relay no longer knows about. The close below is what
+      // returns them to the menu, and it must not be skipped because a write
+      // failed. Losing a run to a failing disk is the small half of that.
+      try {
+        persistDuelStreaks(room);
+      } catch (e) {
+        console.error(`room ${id}: could not persist streaks on reap:`, e);
+      }
       // An empty room has nothing attached by definition; the other two can
       // still have somebody sitting on a court that no longer exists. Closing
       // their socket is what returns them to the menu — the client reads an
@@ -3296,7 +3307,11 @@ async function startServer() {
 
   // Render stops the old instance on every deploy of a disk-backed service;
   // close sockets and the listener cleanly instead of dying mid-request.
-  const shutdown = (signal: string) => {
+  const shutdown = (signal: string, code = 0) => {
+    // Re-entrant guard first of all: a fatal raised while we are already
+    // shutting down must not restart the whole dance, and the shutdown path
+    // itself is what would raise it.
+    if (shuttingDown) return;
     // Before a single socket is closed: every close below runs vacateSeat.
     shuttingDown = true;
     console.log(`${signal} received, shutting down`);
@@ -3304,19 +3319,51 @@ async function startServer() {
       client.close(1001, 'Server restarting');
     }
     wss.close();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 5000).unref();
+    server.close(() => process.exit(code));
+    setTimeout(() => process.exit(code), 5000).unref();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+  fatalShutdown = shutdown;
 }
 
-// The backstop under the two listeners above: a single-instance relay holding
-// every room in memory should log and keep serving the other matches rather
-// than exit on one socket's fault. Deliberately last-resort — anything with a
-// known owner is handled where it happens.
-process.on('uncaughtException', (err) => console.error('[fatal] uncaught:', err));
-process.on('unhandledRejection', (err) => console.error('[fatal] unhandled rejection:', err));
+/**
+ * The last resort, and it EXITS. Set by startServer once the listener exists.
+ *
+ * These two handlers first shipped as bare `console.error`, on the reasoning
+ * that a single-instance relay holding every room in memory should keep
+ * serving the other matches rather than die on one socket's fault. That
+ * reasoning was answering the wrong question: the thing it was written for —
+ * one malformed frame ending the process — is closed by the `error` listeners
+ * on `ws` and `wss`, where the fault has a known owner. What was left here was
+ * a handler that suppresses Node's default termination for faults that have no
+ * owner at all, and resuming after one of those is documented as unsafe
+ * because the process may be halfway through a mutation.
+ *
+ * It is not hypothetical here. The room reaper's interval calls
+ * `persistDuelStreaks(room)` unguarded, AFTER `reapRooms` has already deleted
+ * rooms from the map — so a throw there (a full disk, a volume remounted
+ * read-only) aborts the sweep with rooms gone and their sockets never closed,
+ * and the old handler kept the process serving in exactly that state. Worse,
+ * a process that never exits is one Docker's `restart: unless-stopped` and
+ * Dokploy's supervisor cannot recover: the crash-and-restart they exist for
+ * was being suppressed.
+ *
+ * So: log, then take the SAME controlled shutdown a SIGTERM takes, and exit
+ * non-zero. Going through `shutdown` rather than `process.exit` directly is
+ * what makes this safe for the players: it sets `shuttingDown` first, so the
+ * close of every live socket falls through to `persistDuelStreaks` instead of
+ * charging both seats of every duel in progress an abandon. A crash costs the
+ * match; it must not also cost the rating.
+ */
+let fatalShutdown: ((signal: string, code?: number) => void) | null = null;
+const onFatal = (label: string) => (err: unknown) => {
+  console.error(`[fatal] ${label}:`, err);
+  if (fatalShutdown) fatalShutdown(label, 1);
+  else process.exit(1);
+};
+process.on('uncaughtException', onFatal('uncaught exception'));
+process.on('unhandledRejection', onFatal('unhandled rejection'));
 
 startServer().catch((err) => {
   console.error('[fatal] server failed to start:', err);
