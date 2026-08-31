@@ -3025,15 +3025,24 @@ async function startServer() {
     const distPath = fs.existsSync(path.join(bundleDir, 'index.html'))
       ? bundleDir
       : path.join(process.cwd(), 'dist');
+    // ONLY /assets is served. Mounting the whole of dist/ published
+    // `server.cjs.map` — a 667KB source map carrying `sourcesContent`, so every
+    // line of server.ts, server/auth.ts and server/db.ts was a public GET, cookie
+    // HMAC construction and session gates included — plus server.cjs and
+    // admin.cjs beside it. dist/ holds exactly index.html, assets/ and those
+    // three build outputs (there is no public/ dir), so naming the one directory
+    // the client needs is both the fix and the complete list.
+    //
     // The hashed assets under /assets are immutable and may be cached hard;
     // index.html must NOT be, or a client told its session is stale would
-    // reload straight back onto the build it was already running and the
-    // deploy would never reach it.
+    // reload straight back onto the build it was already running and the deploy
+    // would never reach it. It is served by the app.get('*') handler below,
+    // which sets that header itself — so this mount needs no setHeaders at all.
     app.use(
-      express.static(distPath, {
-        setHeaders: (res, filePath) => {
-          if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
-        },
+      '/assets',
+      express.static(path.join(distPath, 'assets'), {
+        immutable: true,
+        maxAge: '1y',
       })
     );
     app.get('*', (req, res) => {
