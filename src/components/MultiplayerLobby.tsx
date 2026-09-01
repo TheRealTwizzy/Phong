@@ -206,7 +206,21 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   const opponentLinkable = onViewProfile && isLinkableId(opponentId);
   // The host owns the room's terms; the guest sees exactly the same panel
   // with every control disabled.
-  const isHost = playerIndex === 0;
+  /**
+   * Whether this player actually holds the HOST's playing seat.
+   *
+   * Not `playerIndex === 0`, which is overloaded: `table_state` sets
+   * `playerIndex` to the SIDE a watcher is sitting beside, so a spectator in
+   * seat 2 reports 0 and read as the host — seeing the host's controls live
+   * and editable while the relay refused every one of them (`playerIndex()`
+   * is null for a watcher), and, once the opponent chair became a tap target,
+   * opening a CPU picker where the swap-back-into-play control should be.
+   *
+   * `yourSeat` is the WIRE seat and answers the question directly. The
+   * fallback covers the beat between `room_created` and the `table_state`
+   * that follows it, where the old reading was correct.
+   */
+  const isHost = tableState ? tableState.yourSeat === 0 : playerIndex === 0;
   const config = roomConfig || DEFAULT_ROOM_CONFIG;
   const guestReady = readyStates[1];
   const myReady = playerIndex !== null ? readyStates[playerIndex] : false;

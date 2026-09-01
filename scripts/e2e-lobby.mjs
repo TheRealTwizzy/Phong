@@ -359,16 +359,25 @@ console.log('\nA machine in the opponent chair');
   if (seated !== 'cpu') fail(`the seat did not take the machine (data-occupant=${seated})`);
   ok('the chair holds the machine');
 
-  // The badge is about the SOLO match this now is, not about a duel. Read as
-  // data rather than as prose — the sentence has seven translations and the
-  // verdict is the thing that has to be right.
+  // The badge is about the SOLO match this now is, not about a duel — so it
+  // answers with the solo verdicts. Read as data rather than as prose: the
+  // sentence has seven translations and the verdict is what has to be right.
+  //
+  // Rookie is all a fresh account can pick and Rookie never rates, so shut
+  // seats read `difficulty`. That makes this a stronger check than a bare
+  // ranked/unranked flip: `unrankedReasons` is ORDERED and the panel renders
+  // blockers[0] alone, so `watched` appearing here proves it outranks
+  // `difficulty` — which is what stops the badge telling a host that picking
+  // a harder rung would restore a ladder the open seats have already taken.
   const shutBadge = await cpu.getAttribute('#lobby-rules-status', 'data-blocker');
-  if (shutBadge !== 'none') fail(`a table nobody may watch read as unranked (${shutBadge})`);
+  if (shutBadge !== 'difficulty') {
+    fail(`a Rookie table nobody may watch read as ${shutBadge}, not difficulty`);
+  }
   await cpu.click('#toggle-spectators input');
   await sleep(600);
   const openBadge = await cpu.getAttribute('#lobby-rules-status', 'data-blocker');
   if (openBadge !== 'watched') fail(`opening the watching seats read as ${openBadge}, not watched`);
-  ok('opening the watching seats says so before the first ball');
+  ok('opening the watching seats outranks every other reason it is unrated');
   await cpu.click('#toggle-spectators input');
   await sleep(400);
 
