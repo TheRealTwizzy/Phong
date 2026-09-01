@@ -12,7 +12,7 @@ import {
   soloAdjustedXp,
   SOLO_MOMENTUM_MAX,
   SOLO_FATIGUE_FLOOR,
-  SOLO_XP_MATCH_CAP,
+  SOLO_XP_MAX_MULTIPLIER,
   AI_DIFFICULTIES,
   AI_RATINGS,
   aiRating,
@@ -246,9 +246,18 @@ describe('solo XP momentum and fatigue', () => {
   });
 
   it('never exceeds the cap, however long the unbroken streak runs', () => {
-    // "Continues to win, theoretically forever."
+    // "Continues to win, theoretically forever." The bound is on the
+    // MULTIPLIER now, not on the product: a flat product cap flattened the
+    // ladder, because a long streak pushed Elite, Cyber and Chaos all onto the
+    // same 450 and a player on a run was paid the same for the easiest of the
+    // top three as for the hardest.
     for (let w = 0; w < 500; w++) {
-      expect(soloAdjustedXp(10000, w, w)).toBeLessThanOrEqual(SOLO_XP_MATCH_CAP);
+      expect(soloAdjustedXp(10000, w, w)).toBeLessThanOrEqual(10000 * SOLO_XP_MAX_MULTIPLIER);
+    }
+    // Ordering survives a streak, which is the whole point of the change: a
+    // bigger base still pays more at every streak length.
+    for (const w of [0, 1, 3, 8, 40]) {
+      expect(soloAdjustedXp(400, w, 0)).toBeGreaterThan(soloAdjustedXp(300, w, 0));
     }
     // And the cap is a constant — momentum saturates INSIDE it, fatigue
     // floors, so the bound itself never diminishes.

@@ -126,6 +126,28 @@ a loss. `tests/protocolParity.test.ts` reads the source and fails the moment a m
 added to one side only; `tests/p2pParity.test.ts` runs one identical script through both
 transports and compares what each player is told.
 
+**A relay message costs its sender only, or it is a bug.** "Gameplay is
+client-authoritative" has always meant a client can lie about its *own* match. Four handlers
+were outside that and each let one socket spend something belonging to somebody else — a
+rating, a career-best rally, or the process. `paddle_move` forwarded an uncoerced `x`;
+`transformBallForOpponent` coerced only `x`, so `{vy:'x'}` froze the opponent's point forever
+and made quitting-as-abandon their only exit; `point_scored` and `ball_cross_net` ran past
+`matchOver`, so post-whistle crossings wrote a permanent `highestRally`; and `match_sync` was
+accepted on tables that never negotiated a DataChannel, where one frame moved two players'
+ratings 8.4μ apart. `tests/transform.test.ts` holds the coercion at a 100% branch floor —
+which is what caught the hardening arriving untested — `tests/room.test.ts` holds that a
+snapshot stays absolute rather than step-limited, and `tests/duelRecord.test.ts` drives a
+seated duel whose room sits at 0-0, so it fails if the vouching guard is ever widened from
+"can this room vouch" to "has this room decided".
+
+**A number in these files names the command that produces it.** `scripts/load-test.mjs`
+stopped running when the lobby handshake landed — it awaits a `game_start` that no longer
+follows a join — and nothing noticed, because `lint:suites` covers only `e2e-*.mjs`, `npm test`
+never touches it, `tsc` does not check `.mjs`, and CI never invokes it. Its "10 concurrent
+matches, 0% loss" went on being quoted in `CLAUDE.md` §10 and `DEPLOYMENT.md` the whole time.
+The claim is removed rather than restated; **an unrunnable script is worse than no script,
+because its last output keeps being cited.**
+
 **A presentation flag is free, except the one that is not.** Telemetry, quick chat and
 auto-serve never touch the ball and never touch the rating. The **opponent sonar** draws the
 half the whole game exists to hide, so it unranks the match — and `DEFAULT_MATCH_RULES` has to

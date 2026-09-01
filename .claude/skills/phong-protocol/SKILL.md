@@ -71,6 +71,62 @@ Three more things that suite pins, worth knowing before you write code that trip
   behind "every match is recorded once"; a hand-rolled one is the copy that drifts, and the
   match gets paid twice.
 
+## Coerce every field you read off the wire
+
+The relay reads client JSON, so **a field is whatever the sender typed until you make it a
+number.** `Math.abs(undefined)`, `-'x'` and `1 - 'abc'` are all `NaN`, and `NaN` does not throw
+— it propagates into somebody else's court and makes every comparison there false.
+
+`paddle_move` was the one gameplay message forwarded raw, fifteen lines above `ball_pos`, which
+clamps properly. `transformBallForOpponent` coerced `x` and let the four velocity and spin
+fields through. A single `{ vy: 'x' }` froze the receiving player's point permanently — no
+bounce, no crossing, no score, and auto-serve never arms because `isServing` is false — so
+their only way out was quitting, which is recorded as an abandon and a real ranked loss.
+
+When you add a message:
+
+- **Clamp position-like fields to `[0,1]`** and velocity-like fields to a sanity bound. The
+  bound is protection from a hostile payload, not a game rule — the rules-aware clamp belongs
+  on the receiving client.
+- **Gate anything that scores, counts or records on `room.matchOver`.** `point_scored` and
+  `ball_cross_net` were not, and post-whistle crossings wrote a permanent `highestRally`
+  through `startMatchStreaks` into `recordRoomMatch`.
+- **Ask what this message is the ACCOUNT of, and refuse it where that thing cannot exist.**
+  `match_sync` is a replica's report, and a replica only exists once a DataChannel was
+  negotiated — so it is refused on a table where no `rtc_signal` was ever relayed
+  (`room.p2pOffered`, armed only by an offer and an answer from DIFFERENT seats —
+  a lone socket answering its own offer is not two peers — and **cleared by
+  `clearP2PEvidence` whenever a playing seat empties or changes hands**, since a
+  room outlives its occupants and the evidence is about the PAIR). Without the
+  first, one frame on a relayed table decided a ranked duel; without the second,
+  one pair having played P2P here left the table able to vouch for a stranger's
+  forged snapshot forever. **And a snapshot may not advance `matchSeq` on one
+  seat's word** (`room.seqClaims`): adoption resets the room and every sequence
+  mints a fresh `duelMatchKey`, so one socket could otherwise farm ranked losses
+  against a seated victim without limit.
+
+**The standing rule underneath all three, because it has now been found five
+times.** A `Room` outlives its occupants, so before you add a field to it,
+decide whether it describes the TABLE (`id`, `config`, `venueRoomId`,
+`visibility`, `joinKey`, the watching seats) or the PAIR sitting at it. If it is
+the pair, it goes in `resetTableForNextPair` (`server/room.ts`) **in the same
+commit** — that is the one place `vacateSeat` and `swap_seat` both answer, and
+every entry on its list got there by being read as the next pair's: a
+handshake, a half-made rematch claim, a score, a pre-match rating sample, and
+four streak arrays. Two of those five were found by review *immediately after*
+the fix for the one before it, which is the actual reason this rule is written
+down rather than left to judgement. And the guards are the other half: a
+gameplay message from a room with an empty seat is refused, because a table
+with one player at it has nothing to report about a match. **Validate the payload in
+  `acceptRtcSignal` when you add a signal kind**, and think about whether the new
+  kind is EVIDENCE of a peer: `ice` is relayed and advances nothing, because
+  candidates trickle from both seats in any order and treating them as evidence
+  puts the one-frame arming back.
+- **Never bound a snapshot by arithmetic instead.** Step-limiting `match_sync`'s score looked
+  like the cheaper guard and is wrong: a snapshot is absolute, applied as a maximum by design,
+  because a P2P relay never sees the intervening points. `tests/room.test.ts` fails loudly if
+  you try.
+
 ## Verifying
 
 ```bash

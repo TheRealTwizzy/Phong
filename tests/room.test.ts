@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  acceptRtcSignal,
   applyMatchSync,
+  clearP2PEvidence,
+  resetTableForNextPair,
   breakStreakOnPoint,
   clampInt,
   countReturn,
@@ -14,6 +17,7 @@ import {
   reapRooms,
   Room,
   ROOM_CODE_ALPHABET,
+  MAX_SDP_CHARS,
   startMatch,
 } from '../server/room';
 import { normalizeRoomConfig } from '../src/matchRules';
@@ -64,7 +68,7 @@ const room = (over: Partial<Room> = {}): Room => ({
 let revCounter = 0;
 const nextRev = (): number => (revCounter += 1);
 
-const sync = (over: Partial<Parameters<typeof applyMatchSync>[1]> = {}) => ({
+const sync = (over: Partial<Parameters<typeof applyMatchSync>[2]> = {}) => ({
   matchSeq: 1,
   p1Score: 0,
   p2Score: 0,
@@ -86,15 +90,45 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // The replica only reports from game_start onward, so a sync against a
     // room still in its lobby did not come from a match.
     const r = room({ matchSeq: 0 });
-    expect(applyMatchSync(r, sync({ matchSeq: 1, p1Score: 5 })).decided).toBe(false);
+    expect(applyMatchSync(r, 0, sync({ matchSeq: 1, p1Score: 5 })).decided).toBe(false);
     expect(r.scores).toEqual([0, 0]);
     expect(r.inPlay).toBe(false);
   });
 
   it('ignores a report from a match that has already been replaced', () => {
     const r = room({ matchSeq: 3 });
-    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 4 }));
+    applyMatchSync(r, 0, sync({ matchSeq: 2, p1Score: 4 }));
     expect(r.scores).toEqual([0, 0]);
+  });
+
+  it('REFUSES to let one seat walk the match sequence forward on its own', () => {
+    // The farm, and the reason a rematch needs both seats. After ONE genuine
+    // handshake a single socket could wait for the match to end, then send a
+    // decisive snapshot at matchSeq+1, again and again: adoption resets the
+    // room, so the next one lands the same way, and every sequence mints a
+    // fresh duelMatchKey so the idempotency ledger deduplicates nothing.
+    // Measured over ten messages from one socket: the victim went 25.000 ->
+    // 20.185 with ten ranked losses, the sender to 34.437 with ten wins, and
+    // nothing bounded it but how long the victim stayed seated.
+    const r = room({ matchSeq: 1, scores: [3, 0], matchOver: true });
+    for (let seq = 2; seq <= 6; seq++) {
+      const out = applyMatchSync(r, 0, sync({ matchSeq: seq, p1Score: 3, p2Score: 0 }));
+      expect(out.decided, `seq ${seq} decided a match on one seat's word`).toBe(false);
+    }
+    expect(r.matchSeq).toBe(1);
+
+    // ...and the honest pair is not blocked: both replicas run the same events
+    // in the same order, so both name the new match at their first crossing.
+    const agreed = sync({ matchSeq: 2, p1Score: 0, p2Score: 0 });
+    applyMatchSync(r, 0, agreed);
+    applyMatchSync(r, 1, agreed);
+    expect(r.matchSeq).toBe(2);
+
+    // A claim does not survive its own adoption, or the next sequence would be
+    // half-agreed before anybody had said anything about it.
+    expect(r.seqClaims).toEqual([null, null]);
+    expect(applyMatchSync(r, 0, sync({ matchSeq: 3, p1Score: 3 })).decided).toBe(false);
+    expect(r.matchSeq).toBe(2);
   });
 
   it('REFUSES to adopt a match number invented mid-rally', () => {
@@ -102,18 +136,21 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // to be playing match 9. Adopting that would blank the score and take the
     // other player's result away from them.
     const r = room({ matchSeq: 1, scores: [3, 1], inPlay: true, matchOver: false });
-    const result = applyMatchSync(r, sync({ matchSeq: 9, p1Score: 0, p2Score: 0 }));
+    const result = applyMatchSync(r, 0, sync({ matchSeq: 9, p1Score: 0, p2Score: 0 }));
     expect(result.decided).toBe(false);
     expect(r.matchSeq).toBe(1);
     expect(r.scores).toEqual([3, 1]);
   });
 
-  it('adopts a higher match number once the last match is genuinely over', () => {
+  it('adopts a higher match number once BOTH seats have named it', () => {
     // The peers agreed a rematch between themselves; the relay never ran
     // startMatch for it, so their numbering is the only thing that tells the
-    // two results apart.
+    // two results apart. Both of them have to say so, though — see the next
+    // test for what one seat's word alone bought.
     const r = room({ matchSeq: 1, scores: [5, 2], matchOver: true, ready: [true, true] });
-    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 1, p2Score: 0, bestStreaks: [4, 4] as any }));
+    applyMatchSync(r, 0, sync({ matchSeq: 2, p1Score: 1, p2Score: 0, bestStreaks: [4, 4] as any }));
+    expect(r.matchSeq).toBe(1);
+    applyMatchSync(r, 1, sync({ matchSeq: 2, p1Score: 1, p2Score: 0, bestStreaks: [4, 4] as any }));
     expect(r.matchSeq).toBe(2);
     expect(r.scores).toEqual([1, 0]);
     expect(r.matchOver).toBe(false);
@@ -125,8 +162,8 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // Reports are absolute, not deltas, and arrive from both peers over an
     // unordered link. A late one carrying an older score must not undo a point.
     const r = room();
-    applyMatchSync(r, sync({ p1Score: 3, p2Score: 2, bestStreaks: [12, 12] as any }));
-    applyMatchSync(r, sync({ p1Score: 1, p2Score: 0, bestStreaks: [2, 2] as any }));
+    applyMatchSync(r, 0, sync({ p1Score: 3, p2Score: 2, bestStreaks: [12, 12] as any }));
+    applyMatchSync(r, 0, sync({ p1Score: 1, p2Score: 0, bestStreaks: [2, 2] as any }));
     expect(r.scores).toEqual([3, 2]);
     expect(r.bestStreaks[0]).toBe(12);
   });
@@ -134,13 +171,13 @@ describe('applyMatchSync — a score reported by a peer', () => {
   it('holds a reported score inside the room own winning score', () => {
     // Nothing stops a modified client claiming 9999. The room's terms do.
     const r = room();
-    applyMatchSync(r, sync({ p1Score: 9999, p2Score: -40 }));
+    applyMatchSync(r, 0, sync({ p1Score: 9999, p2Score: -40 }));
     expect(r.scores).toEqual([5, 0]);
   });
 
   it('survives junk in every numeric field', () => {
     const r = room();
-    applyMatchSync(r, sync({ p1Score: NaN, p2Score: Infinity, bestStreaks: [-12, -12] as any } as any));
+    applyMatchSync(r, 0, sync({ p1Score: NaN, p2Score: Infinity, bestStreaks: [-12, -12] as any } as any));
     // Note Infinity lands on 0, not on the winning score. clampInt treats a
     // non-finite number as unusable rather than as "very large", so claiming
     // an infinite score does not hand anyone the match — it reports nothing.
@@ -148,33 +185,33 @@ describe('applyMatchSync — a score reported by a peer', () => {
     expect(r.bestStreaks[0]).toBe(0);
 
     const r2 = room();
-    applyMatchSync(r2, sync({ p1Score: 'three', bestStreaks: ['lots', 'lots'] as any } as any));
+    applyMatchSync(r2, 0, sync({ p1Score: 'three', bestStreaks: ['lots', 'lots'] as any } as any));
     expect(r2.scores).toEqual([0, 0]);
     expect(Number.isFinite(r2.bestStreaks[0])).toBe(true);
   });
 
   it('does not let a NaN match number pass for the current one', () => {
     const r = room({ matchSeq: 2, scores: [1, 1] });
-    applyMatchSync(r, sync({ matchSeq: NaN, p1Score: 5 } as any));
+    applyMatchSync(r, 0, sync({ matchSeq: NaN, p1Score: 5 } as any));
     expect(r.scores).toEqual([1, 1]);
   });
 
   it('puts the match in play, which is what makes a walk-out an abandon', () => {
     const r = room();
     expect(r.inPlay).toBe(false);
-    applyMatchSync(r, sync({ p1Score: 1 }));
+    applyMatchSync(r, 0, sync({ p1Score: 1 }));
     expect(r.inPlay).toBe(true);
   });
 
   it('reports the match decided exactly once, and leaves the loser serving', () => {
     const r = room();
-    expect(applyMatchSync(r, sync({ p1Score: 4, p2Score: 1 })).decided).toBe(false);
-    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 1 })).decided).toBe(true);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 4, p2Score: 1 })).decided).toBe(false);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 5, p2Score: 1 })).decided).toBe(true);
     expect(r.matchOver).toBe(true);
     expect(r.servingPlayer).toBe(1);
     // A second report of the same finished match must not record it again —
     // that is the difference between a duel being paid once and twice.
-    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 1 })).decided).toBe(false);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 5, p2Score: 1 })).decided).toBe(false);
   });
 
   it('refuses a snapshot claiming BOTH seats won, rather than repairing it', () => {
@@ -185,11 +222,11 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // recordRoomMatch's `mine > theirs` false for BOTH seats: two ranked
     // losses and two red down-arrows off one message.
     const r = room();
-    applyMatchSync(r, sync({ p1Score: 3, p2Score: 2, bestStreaks: [7, 7] as any }));
+    applyMatchSync(r, 0, sync({ p1Score: 3, p2Score: 2, bestStreaks: [7, 7] as any }));
 
-    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 5 })).decided).toBe(false);
-    expect(applyMatchSync(r, sync({ p1Score: 999, p2Score: 999 })).decided).toBe(false);
-    expect(applyMatchSync(r, sync({ p1Score: 6, p2Score: 5 })).decided).toBe(false);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 5, p2Score: 5 })).decided).toBe(false);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 999, p2Score: 999 })).decided).toBe(false);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 6, p2Score: 5 })).decided).toBe(false);
 
     // Nothing of the refused snapshots is kept — not the score, and not the
     // fields a snapshot ASSIGNS. A peer that is wrong about who won is not one
@@ -200,7 +237,7 @@ describe('applyMatchSync — a score reported by a peer', () => {
 
     // And the room is still able to hear the real result afterwards, so the
     // refusal costs the honest peer nothing.
-    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 2 })).decided).toBe(true);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 5, p2Score: 2 })).decided).toBe(true);
     expect(r.scores).toEqual([5, 2]);
   });
 
@@ -210,15 +247,15 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // set, or a walk-out during the countdown becomes an abandon for a match
     // nobody played. Same reasoning as the 0-0 guard below.
     const r = room();
-    applyMatchSync(r, sync({ p1Score: 5, p2Score: 5, rev: 40, crossingsThisPoint: 9 }));
+    applyMatchSync(r, 0, sync({ p1Score: 5, p2Score: 5, rev: 40, crossingsThisPoint: 9 }));
     expect(r.inPlay).toBe(false);
     expect(r.syncRev).toBe(0);
-    expect(applyMatchSync(r, sync({ p1Score: 5, p2Score: 1, rev: 40 })).decided).toBe(true);
+    expect(applyMatchSync(r, 0, sync({ p1Score: 5, p2Score: 1, rev: 40 })).decided).toBe(true);
   });
 
   it('clears rematch votes when the match decides, so none are banked early', () => {
     const r = room({ rematchVotes: [true, false] });
-    applyMatchSync(r, sync({ p1Score: 5 }));
+    applyMatchSync(r, 0, sync({ p1Score: 5 }));
     expect(r.rematchVotes).toEqual([false, false]);
   });
 
@@ -230,7 +267,9 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // before the first serve, an abandon: a ranked rating penalty for a match
     // nobody played.
     const r = room({ matchOver: true, inPlay: true, scores: [5, 3] });
-    applyMatchSync(r, sync({ matchSeq: 2, p1Score: 0, p2Score: 0, crossingsThisPoint: 0 }));
+    // Both seats, since one alone no longer advances the sequence.
+    applyMatchSync(r, 0, sync({ matchSeq: 2, p1Score: 0, p2Score: 0, crossingsThisPoint: 0 }));
+    applyMatchSync(r, 1, sync({ matchSeq: 2, p1Score: 0, p2Score: 0, crossingsThisPoint: 0 }));
 
     expect(r.matchSeq).toBe(2); // the snapshot still did its actual job
     expect(r.scores).toEqual([0, 0]);
@@ -245,10 +284,11 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // The other side of the same rule — this must not become "a P2P duel is
     // never in play", which would take abandon detection away entirely.
     const r = room({ matchOver: true, inPlay: true, scores: [5, 3] });
-    applyMatchSync(r, sync({ matchSeq: 2, crossingsThisPoint: 0 }));
+    applyMatchSync(r, 0, sync({ matchSeq: 2, crossingsThisPoint: 0 }));
+    applyMatchSync(r, 1, sync({ matchSeq: 2, crossingsThisPoint: 0 }));
     expect(r.inPlay).toBe(false);
 
-    applyMatchSync(r, sync({ matchSeq: 2, crossingsThisPoint: 1 }));
+    applyMatchSync(r, 0, sync({ matchSeq: 2, crossingsThisPoint: 1 }));
     expect(r.inPlay).toBe(true);
   });
 
@@ -257,7 +297,7 @@ describe('applyMatchSync — a score reported by a peer', () => {
     // snapshot reporting a score carries no crossings — the score itself is
     // the evidence.
     const r = room();
-    applyMatchSync(r, sync({ p1Score: 1, crossingsThisPoint: 0 }));
+    applyMatchSync(r, 0, sync({ p1Score: 1, crossingsThisPoint: 0 }));
     expect(r.inPlay).toBe(true);
   });
 });
@@ -752,7 +792,7 @@ describe('what a match earned, on the relay', () => {
     // what gets recorded as the run to carry. A run can legitimately fall to
     // zero, so a maximum is exactly the wrong operator.
     const r = room({ streaks: [10, 10], bestStreaks: [10, 10] });
-    applyMatchSync(r, sync({ p1Score: 1, bestStreaks: [14, 12], streaks: [14, 0], earnedBests: [4, 2] }));
+    applyMatchSync(r, 0, sync({ p1Score: 1, bestStreaks: [14, 12], streaks: [14, 0], earnedBests: [4, 2] }));
     expect(r.streaks).toEqual([14, 0]);
     expect(r.bestStreaks).toEqual([14, 12]);
     expect(r.earnedBests).toEqual([4, 2]);
@@ -760,7 +800,7 @@ describe('what a match earned, on the relay', () => {
 
   it('refuses a peer’s claim to stand higher than its own peak', () => {
     const r = room();
-    applyMatchSync(r, sync({ p1Score: 1, bestStreaks: [5, 5], streaks: [900, 900], earnedBests: [900, 900] }));
+    applyMatchSync(r, 0, sync({ p1Score: 1, bestStreaks: [5, 5], streaks: [900, 900], earnedBests: [900, 900] }));
     expect(r.streaks).toEqual([5, 5]);
     expect(r.earnedBests).toEqual([5, 5]);
   });
@@ -772,7 +812,7 @@ describe('what a match earned, on the relay', () => {
     // these two fields. Left where the last relayed point put them, the first
     // crossing after the handover is read as a serve and dropped.
     const r = room({ servingPlayer: 0, crossingsThisPoint: 0 });
-    applyMatchSync(r, sync({ p1Score: 1, servingPlayer: 1, crossingsThisPoint: 3 }));
+    applyMatchSync(r, 0, sync({ p1Score: 1, servingPlayer: 1, crossingsThisPoint: 3 }));
     expect(r.servingPlayer).toBe(1);
     expect(r.crossingsThisPoint).toBe(3);
 
@@ -788,12 +828,12 @@ describe('what a match earned, on the relay', () => {
     // would walk a live run backwards to a moment the rally has passed, and a
     // fallback to the relay in that window would resume from it.
     const r = room({ syncRev: 0 });
-    applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
+    applyMatchSync(r, 0, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
     expect(r.streaks).toEqual([9, 4]);
     expect(r.crossingsThisPoint).toBe(6);
 
     // Crossing 3's snapshot, arriving after crossing 5's.
-    const stale = applyMatchSync(r, sync({ rev: 3, p1Score: 1, bestStreaks: [7, 4], streaks: [7, 4], earnedBests: [7, 4], crossingsThisPoint: 4 }));
+    const stale = applyMatchSync(r, 0, sync({ rev: 3, p1Score: 1, bestStreaks: [7, 4], streaks: [7, 4], earnedBests: [7, 4], crossingsThisPoint: 4 }));
     expect(stale.decided).toBe(false);
     expect(r.streaks).toEqual([9, 4]);
     expect(r.crossingsThisPoint).toBe(6);
@@ -803,12 +843,12 @@ describe('what a match earned, on the relay', () => {
     // the moment the link goes DOWN it is a duplicate still in flight carrying
     // a revision the relay has already counted past itself, and applying it
     // would undo the return the relay has since counted.
-    const duplicate = applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
+    const duplicate = applyMatchSync(r, 0, sync({ rev: 5, p1Score: 1, bestStreaks: [9, 4], streaks: [9, 4], earnedBests: [9, 4], crossingsThisPoint: 6 }));
     expect(duplicate.decided).toBe(false);
     expect(r.streaks).toEqual([9, 4]);
 
     // And the rally moves on.
-    applyMatchSync(r, sync({ rev: 6, p1Score: 1, bestStreaks: [9, 5], streaks: [9, 5], earnedBests: [9, 5], crossingsThisPoint: 7 }));
+    applyMatchSync(r, 0, sync({ rev: 6, p1Score: 1, bestStreaks: [9, 5], streaks: [9, 5], earnedBests: [9, 5], crossingsThisPoint: 7 }));
     expect(r.streaks).toEqual([9, 5]);
   });
 
@@ -818,7 +858,7 @@ describe('what a match earned, on the relay', () => {
     // It carries the revision already applied, so it is refused — without
     // which it would put the streak back to before the relay's return.
     const r = room({ syncRev: 0, servingPlayer: 0 });
-    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    applyMatchSync(r, 0, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
     expect(r.streaks).toEqual([3, 0]);
 
     // Fallback: the relay counts the next crossing itself, as server.ts does —
@@ -827,7 +867,7 @@ describe('what a match earned, on the relay', () => {
     expect(r.streaks).toEqual([4, 0]);
 
     // The duplicate of event 4 lands, describing the state one crossing ago.
-    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    applyMatchSync(r, 0, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
     expect(r.streaks).toEqual([4, 0]);
     expect(r.crossingsThisPoint).toBe(5);
   });
@@ -845,7 +885,7 @@ describe('what a match earned, on the relay', () => {
     // one. The maxed fields keep being applied, because a peer still scoring
     // over its own link knows things the relay does not.
     const r = room({ syncRev: 0, servingPlayer: 0, config: normalizeRoomConfig({ winningScore: 5 }) });
-    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    applyMatchSync(r, 0, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
 
     countReturn(r, 0); // relayed by the peer that fell back
     r.relayCounted = true; // as server.ts sets it beside that call
@@ -853,7 +893,7 @@ describe('what a match earned, on the relay', () => {
     expect(r.crossingsThisPoint).toBe(5);
 
     // The diverged peer's next event. Later revision, older picture.
-    applyMatchSync(r, sync({ rev: 5, p1Score: 1, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], servingPlayer: 1, crossingsThisPoint: 4 }));
+    applyMatchSync(r, 0, sync({ rev: 5, p1Score: 1, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], servingPlayer: 1, crossingsThisPoint: 4 }));
 
     // The run and the point phase are the relay's now.
     expect(r.streaks).toEqual([4, 0]);
@@ -874,7 +914,7 @@ describe('what a match earned, on the relay', () => {
     // and report one hit too many — and a maximum makes that permanent, into
     // the career best, the XP, the daily tasks and the performance weight.
     const r = room({ syncRev: 0, servingPlayer: 0 });
-    applyMatchSync(r, sync({ rev: 1, bestStreaks: [2, 2], streaks: [2, 2], earnedBests: [2, 2], crossingsThisPoint: 3 }));
+    applyMatchSync(r, 0, sync({ rev: 1, bestStreaks: [2, 2], streaks: [2, 2], earnedBests: [2, 2], crossingsThisPoint: 3 }));
     expect(r.bestStreaks).toEqual([2, 2]);
 
     countReturn(r, 0);
@@ -882,7 +922,7 @@ describe('what a match earned, on the relay', () => {
     expect(r.bestStreaks).toEqual([3, 2]);
 
     // The diverged peer claims a peak the relay never saw it earn.
-    applyMatchSync(r, sync({ rev: 2, bestStreaks: [9, 9], streaks: [9, 9], earnedBests: [9, 9], crossingsThisPoint: 3 }));
+    applyMatchSync(r, 0, sync({ rev: 2, bestStreaks: [9, 9], streaks: [9, 9], earnedBests: [9, 9], crossingsThisPoint: 3 }));
     expect(r.bestStreaks).toEqual([3, 2]);
     // Held where the last trustworthy snapshot and the relay's own count left
     // them — the claimed 9 lands nowhere.
@@ -894,7 +934,9 @@ describe('what a match earned, on the relay', () => {
     // link as far as this is concerned — and the peers can agree one between
     // themselves, which the relay only learns about through applyMatchSync.
     const r = room({ syncRev: 9, servingPlayer: 0, relayCounted: true, matchOver: true, matchSeq: 1, scores: [5, 2] });
-    applyMatchSync(r, sync({ matchSeq: 2, rev: 1, p1Score: 0, bestStreaks: [2, 2], streaks: [2, 2], earnedBests: [0, 0], servingPlayer: 1, crossingsThisPoint: 3 }));
+    const fields = { matchSeq: 2, p1Score: 0, bestStreaks: [2, 2] as [number, number], streaks: [2, 2] as [number, number], earnedBests: [0, 0] as [number, number], servingPlayer: 1 as 0 | 1, crossingsThisPoint: 3 };
+    applyMatchSync(r, 0, sync({ ...fields, rev: 1 }));
+    applyMatchSync(r, 1, sync({ ...fields, rev: 1 }));
     expect(r.matchSeq).toBe(2);
     expect(r.relayCounted).toBe(false);
     expect(r.streaks).toEqual([2, 2]);
@@ -914,10 +956,10 @@ describe('what a match earned, on the relay', () => {
     // taken, and its report — carrying the streak and possibly the final
     // score — was refused as stale.
     const r = room({ syncRev: 0, servingPlayer: 0 });
-    applyMatchSync(r, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
+    applyMatchSync(r, 0, sync({ rev: 4, p1Score: 0, bestStreaks: [3, 0], streaks: [3, 0], earnedBests: [3, 0], crossingsThisPoint: 4 }));
     countReturn(r, 0); // the relay handles one itself for the peer that fell back
 
-    const late = applyMatchSync(r, sync({ rev: 5, p1Score: 0, bestStreaks: [3, 2], streaks: [3, 2], earnedBests: [3, 2], crossingsThisPoint: 5 }));
+    const late = applyMatchSync(r, 0, sync({ rev: 5, p1Score: 0, bestStreaks: [3, 2], streaks: [3, 2], earnedBests: [3, 2], crossingsThisPoint: 5 }));
     expect(late.decided).toBe(false);
     expect(r.streaks).toEqual([3, 2]);
     expect(r.syncRev).toBe(5);
@@ -928,11 +970,11 @@ describe('what a match earned, on the relay', () => {
     // one: unknown means current, not refused. It must also not claim the
     // mark, or the next real revision would look stale beside it.
     const r = room({ syncRev: 7 });
-    const out = applyMatchSync(r, {
+    const out = applyMatchSync(r, 0, {
       matchSeq: 1, p1Score: 2, p2Score: 0,
       bestStreaks: [3, 1], streaks: [3, 1], earnedBests: [3, 1],
       servingPlayer: 0, crossingsThisPoint: 2,
-    } as unknown as Parameters<typeof applyMatchSync>[1]);
+    } as unknown as Parameters<typeof applyMatchSync>[2]);
     expect(out.decided).toBe(false);
     expect(r.scores).toEqual([2, 0]);
     expect(r.syncRev).toBe(7);
@@ -942,7 +984,9 @@ describe('what a match earned, on the relay', () => {
     // Revisions count from zero per match, so the last match's high-water mark
     // must not outlive it and reject every snapshot of the next one.
     const r = room({ syncRev: 400, matchOver: true, matchSeq: 1, scores: [5, 2] });
-    applyMatchSync(r, sync({ matchSeq: 2, rev: 1, p1Score: 1, bestStreaks: [1, 0], streaks: [1, 0], earnedBests: [1, 0] }));
+    const rematch = sync({ matchSeq: 2, rev: 1, p1Score: 1, bestStreaks: [1, 0], streaks: [1, 0], earnedBests: [1, 0] });
+    applyMatchSync(r, 0, rematch);
+    applyMatchSync(r, 1, rematch);
     expect(r.matchSeq).toBe(2);
     expect(r.scores).toEqual([1, 0]);
     expect(r.streaks).toEqual([1, 0]);
@@ -950,7 +994,191 @@ describe('what a match earned, on the relay', () => {
 
   it('does not let a peer name a seat that does not exist as the server', () => {
     const r = room({ servingPlayer: 1 });
-    applyMatchSync(r, sync({ p1Score: 1, servingPlayer: 7 as unknown as 0 | 1 }));
+    applyMatchSync(r, 0, sync({ p1Score: 1, servingPlayer: 7 as unknown as 0 | 1 }));
     expect(r.servingPlayer).toBe(1);
+  });
+});
+
+describe('acceptRtcSignal', () => {
+  // What this pins is the arming of match_sync, which is the single most
+  // expensive thing a seated attacker can reach: applyMatchSync takes the
+  // score as a MAXIMUM and declares the match decided on it, so one snapshot
+  // naming the winning score for your own seat files a real ranked win for the
+  // sender and a real ranked loss against an opponent whose client never
+  // rendered a point of it — match_sync broadcasts no score_update.
+  //
+  // The guard shipped as `p2pOffered = true` on any relayed rtc_signal, before
+  // the payload was looked at, so ONE frame of anything armed it and the
+  // attacker needed nothing at all from the victim. A handshake takes two
+  // seats and the relay stamps which seat each signal came from; that is the
+  // part a lone socket cannot manufacture.
+  const offer = { kind: 'offer', sdp: 'v=0' };
+  const answer = { kind: 'answer', sdp: 'v=0' };
+
+  it('does not arm a replica on one seat\'s signal', () => {
+    const r = room();
+    expect(acceptRtcSignal(r, 0, offer)).toBe(true);
+    expect(r.p2pOffered).toBeFalsy();
+  });
+
+  it('does not arm a replica on both halves from the SAME seat', () => {
+    // The attack, spelled out: a socket answering its own offer is not two
+    // peers, however many frames it sends.
+    const r = room();
+    acceptRtcSignal(r, 0, offer);
+    acceptRtcSignal(r, 0, answer);
+    expect(r.p2pOffered).toBeFalsy();
+  });
+
+  it('arms a replica on an offer and an answer from different seats', () => {
+    const r = room();
+    acceptRtcSignal(r, 0, offer);
+    acceptRtcSignal(r, 1, answer);
+    expect(r.p2pOffered).toBe(true);
+  });
+
+  it('arms it whichever seat opens the negotiation', () => {
+    const r = room();
+    acceptRtcSignal(r, 1, offer);
+    acceptRtcSignal(r, 0, answer);
+    expect(r.p2pOffered).toBe(true);
+  });
+
+  it('refuses anything that is not one of the three signal kinds', () => {
+    // Each of these was a valid signal before: the relay was a pure
+    // pass-through with no shape check at all, so `{}` armed the replica and
+    // was forwarded to the peer verbatim.
+    for (const junk of [null, undefined, 'offer', 42, [], {}, { kind: 'bogus' }, { kind: 3 }]) {
+      const r = room();
+      expect(acceptRtcSignal(r, 0, junk), JSON.stringify(junk) ?? 'undefined').toBe(false);
+      expect(r.p2pOffered).toBeFalsy();
+      expect(r.rtcOfferFrom).toBeUndefined();
+    }
+  });
+
+  it('refuses an offer or answer carrying no usable sdp', () => {
+    for (const bad of [{ kind: 'offer' }, { kind: 'offer', sdp: '' }, { kind: 'answer', sdp: 7 }]) {
+      const r = room();
+      expect(acceptRtcSignal(r, 0, bad)).toBe(false);
+      expect(r.rtcOfferFrom).toBeUndefined();
+    }
+  });
+
+  it('bounds the sdp a seat may ask the relay to ferry', () => {
+    const r = room();
+    expect(acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v'.repeat(MAX_SDP_CHARS) })).toBe(true);
+    expect(acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v'.repeat(MAX_SDP_CHARS + 1) })).toBe(false);
+  });
+
+  it('forgets a half-made rematch claim when a playing seat changes hands', () => {
+    // The p2pOffered bug returning through the state added to fix it. A claim
+    // is one seat's half of an agreed rematch, so one left behind by a
+    // departing player completed the pair for whoever sat down next: the
+    // SURVIVOR's lone snapshot then decided a match against a newcomer who had
+    // never agreed to anything. Measured before this: 25.000 -> 23.001 and a
+    // real ranked loss.
+    const r = room({ matchSeq: 1, matchOver: true, scores: [3, 0] });
+    applyMatchSync(r, 1, sync({ matchSeq: 2, p1Score: 0, p2Score: 0 }));
+    expect(r.seqClaims).toEqual([null, 2]); // half a pair, waiting on seat 0
+
+    clearP2PEvidence(r);
+    expect(r.seqClaims).toEqual([null, null]);
+
+    // ...so the survivor alone still cannot advance it.
+    applyMatchSync(r, 0, sync({ matchSeq: 2, p1Score: 3, p2Score: 0 }));
+    expect(r.matchSeq).toBe(1);
+  });
+
+  it('forgets the handshake when a playing seat changes hands', () => {
+    // The evidence belongs to the PAIR, not to the table. A room outlives its
+    // occupants — a seat vacated by one player is taken by the next — so a
+    // flag documented as "set once and never cleared" let a newcomer forge a
+    // decisive snapshot against an opponent who had never been on a
+    // DataChannel with anybody. The original exploit back, needing only that
+    // somebody once played P2P at this table.
+    const r = room();
+    acceptRtcSignal(r, 0, offer);
+    acceptRtcSignal(r, 1, answer);
+    expect(r.p2pOffered).toBe(true);
+
+    clearP2PEvidence(r);
+    expect(r.p2pOffered).toBe(false);
+    // Both halves, or the next occupant inherits one of them and needs only
+    // to supply the other from their own single socket.
+    expect(r.rtcOfferFrom).toBeUndefined();
+    expect(r.rtcAnswerFrom).toBeUndefined();
+
+    // ...and the new pair has to negotiate for themselves.
+    acceptRtcSignal(r, 0, offer);
+    expect(r.p2pOffered).toBe(false);
+    acceptRtcSignal(r, 1, answer);
+    expect(r.p2pOffered).toBe(true);
+  });
+
+  it('relays ice candidates but never arms a replica on them', () => {
+    // Candidates trickle in any order and from both seats, and a null one is
+    // the legitimate end-of-candidates marker — so counting them as evidence
+    // would hand back the one-frame arming through a different door.
+    const r = room();
+    expect(acceptRtcSignal(r, 0, { kind: 'ice', candidate: null })).toBe(true);
+    expect(acceptRtcSignal(r, 1, { kind: 'ice', candidate: { candidate: 'x' } })).toBe(true);
+    expect(r.p2pOffered).toBeFalsy();
+  });
+});
+
+describe('resetTableForNextPair', () => {
+  // A room outlives its occupants, and every field below is about the pair
+  // that has just been broken up. `swap_seat` had always cleared most of them;
+  // `vacateSeat` cleared only the handshake, so each one was read as the NEW
+  // pair's. This is the whole class in one assertion.
+  it('leaves nothing of the previous pair for the next one to inherit', () => {
+    const r = room({
+      matchSeq: 4,
+      scores: [3, 1],
+      inPlay: true,
+      matchOver: true,
+      crossingsThisPoint: 6,
+      streaks: [9, 12],
+      bestStreaks: [14, 20],
+      earnedStreaks: [9, 12],
+      earnedBests: [14, 20],
+      startRatings: [
+        { mmr: { mu: 30, sigma: 2 }, rank: { mu: 30, sigma: 2 } },
+        { mmr: { mu: 20, sigma: 2 }, rank: { mu: 20, sigma: 2 } },
+      ] as never,
+      startRatingsSeq: 4,
+      seatSince: [0, 2],
+    });
+    acceptRtcSignal(r, 0, { kind: 'offer', sdp: 'v=0' });
+    acceptRtcSignal(r, 1, { kind: 'answer', sdp: 'v=0' });
+    applyMatchSync(r, 1, sync({ matchSeq: 5, p1Score: 0, p2Score: 0 }));
+
+    resetTableForNextPair(r, 1);
+
+    // A score the newcomer did not play — and the door it opened: a lone
+    // socket could drive this to one short of the cap and land the decisive
+    // point the instant a stranger sat down.
+    expect(r.scores).toEqual([0, 0]);
+    // The mirror case, which failed CLOSED and bricked the table: start_match
+    // requires both of these false, so a new guest could ready up and the
+    // host's Start button did nothing at all, with no error.
+    expect(r.inPlay).toBe(false);
+    expect(r.matchOver).toBe(false);
+    expect(r.crossingsThisPoint).toBe(0);
+    // A run belongs to a player, not to a chair, and a peak is permanent.
+    expect(r.bestStreaks[1]).toBe(0);
+    expect(r.earnedBests[1]).toBe(0);
+    // The pre-match rating pair is about a pair of players.
+    expect(r.startRatings).toBeNull();
+    expect(r.startRatingsSeq).toBe(0);
+    // And the two kinds of P2P evidence.
+    expect(r.p2pOffered).toBe(false);
+    expect(r.seqClaims).toEqual([null, null]);
+    // Occupancy, so a newcomer cannot vouch for what this seat played.
+    expect(r.seatSince).toEqual([0, null]);
+
+    // The seat that STAYED keeps its own run — it is the same player.
+    expect(r.bestStreaks[0]).toBe(14);
+    expect(r.seatSince?.[0]).toBe(0);
   });
 });

@@ -2,7 +2,7 @@
 
 Phong is a single Node service: Express serves the built client, the `ws` relay shares the same port, and player data lives in a SQLite file. Any host that can run a **long-lived Node process with WebSockets** works. The primary target is a **self-managed VPS/KVM** (e.g. Hostinger) behind Caddy with automatic HTTPS; a Render blueprint is kept as an alternative.
 
-Capacity note: the relay comfortably exceeds the "5 concurrent matches" requirement — the included load test (`node scripts/load-test.mjs`) drives 10 simultaneous matches (12,000+ messages over 20s) with 0% loss and ~1ms p95 relay latency on modest hardware.
+Capacity note: **there is no current measurement.** This line used to cite `node scripts/load-test.mjs` for "10 simultaneous matches, 0% loss, ~1ms p95". That script stopped working when the lobby handshake landed — it waits for a `game_start` that no longer follows a join, having never sent `player_ready` or `start_match` — so it dies on the first pair, and nothing in CI or the test suites covers it. The figure is removed rather than left standing; repair the script before quoting a number from it.
 
 > **One-time player wipe (`wipe_v1`)**: the first deploy of this version clears ALL existing player data on the volume — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). This runs exactly once, flagged in the DB `meta` table; later deploys never wipe. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.
 
@@ -99,6 +99,93 @@ The app then mints time-limited TURN credentials per client via `/api/rtc-config
 
 ### Backups
 
+**Every account, rating, level, achievement and match in Phong is one SQLite
+file.** Losing it is unrecoverable and nothing else in this runbook matters as
+much, so treat the schedule below as part of deploying rather than as an
+afterthought.
+
+`scripts/backup.mjs` takes a consistent snapshot of a running server, verifies
+it, and prunes old ones:
+
+```bash
+docker compose exec phong node scripts/backup.mjs --out /backups --keep 14
+```
+
+**`/backups` is mounted by `docker-compose.yml`, and it has to be.** This
+command shipped once with nothing mounted there, and it could not work at all:
+the container runs as the unprivileged `node` user and `/` is root-owned, so it
+died on `EACCES: permission denied, mkdir '/backups'` — a raw stack trace in a
+cron log, and an operator following this runbook exactly ended up with no
+backups. It is a **named volume** (`phong-backups`) rather than a bind mount so
+this works with no host-side setup: Docker seeds a fresh named volume from the
+image, where the `Dockerfile` has already created the directory and given it to
+`node`. The script now also refuses a destination it cannot write, with a
+message instead of a stack trace.
+
+To put backups on a host path instead — worth doing, since the offsite step
+below is then a plain `rsync` — swap the mount for `- ./backups:/backups` and
+create it first, or Docker will make it root-owned and you are back to
+`EACCES`:
+
+```bash
+mkdir -p backups && sudo chown 1000:1000 backups   # 1000 is the `node` user
+```
+
+It uses `VACUUM INTO`, which takes a read transaction — WAL readers never block
+the writer, so this is safe against a live server and folds the WAL into the
+copy. **`cp phong.db` is not equivalent**: it races the WAL and can produce a
+file that opens fine and is missing the newest writes.
+
+Three things it does that the old hand-rolled one-liner did not:
+
+- **Writes outside `DATA_DIR`, and refuses not to** — `DATA_DIR` itself
+  included, which the first version let through: it tested only for a path
+  *below* the directory, so `--out $DATA_DIR`, the likeliest way to get this
+  wrong by hand, wrote the snapshot straight beside `phong.db` and exited 0.
+  The comparison is on REAL paths too, since `--out /backups` where `/backups`
+  is a symlink into the data volume compares as somewhere else entirely while
+  `VACUUM INTO` follows the link; a destination that does not exist yet is
+  resolved through its nearest existing parent. A
+  backup on the volume it protects is lost with that volume, which is the exact
+  failure it exists for. On Render that disk is also 1GB with no retention, so
+  snapshots accumulating beside the database eventually take the live database
+  down too.
+- **Prunes only files it made itself.** The pattern is the exact timestamp shape
+  it writes, not `phong-*.db`: a hand-made `phong-before-upgrade.db` in the same
+  directory used to count toward `--keep` and sort *after* every ISO stamp, so
+  it took the newest slot and real backups were deleted in its place — three
+  backups at `--keep 2` left one. Put your own snapshots there safely.
+- **Opens the snapshot and runs `PRAGMA integrity_check`** before reporting
+  success, and prints the row count. A backup nobody has opened is a backup
+  nobody knows is good.
+- **Exits non-zero on any failure**, so a scheduler notices.
+
+It deliberately does not ship the file anywhere — where backups belong is a
+deployment decision. From the named volume, out to the host:
+
+```bash
+docker compose cp phong:/backups ./backups
+```
+
+...and then offsite with `rsync`/`restic`/`rclone`, or use the bind-mount
+variant above and skip the copy. **A backup that never leaves the host is not a
+backup**, because the most likely thing you are recovering from is losing the
+host — and a second Docker volume survives a wiped `phong-data`, a changed
+mount and a full data disk, but not the machine.
+
+Schedule it. On the Dokploy KVM, a nightly cron on the host:
+
+```cron
+17 4 * * * docker compose -f /path/to/docker-compose.yml exec -T phong \
+  node scripts/backup.mjs --out /backups --keep 14 >> /var/log/phong-backup.log 2>&1
+```
+
+**Restore**: stop the server, copy a snapshot to the volume as
+`/data/phong.db`, remove any stale `phong.db-wal` / `phong.db-shm` beside it,
+and start again. The boot log names the file it opened and counts the accounts
+in it (`[db] /data/phong.db — …, N account(s)`), which is how you confirm the
+restore took. Practise this once before you need it.
+
 ## Support: an account somebody can't get back into
 
 Identity is bound to the browser's device cookie, so "I lost my account" is a
@@ -139,16 +226,6 @@ The tool opens the database `readOnly` and has no write path — safe against a
 live server, since WAL readers never block the writer. It deliberately does not
 import `server/db.ts`, whose constructor would run migrations and seed the bot
 roster as a side effect of answering a question.
-
-All player data is one SQLite file on the `phong-data` volume. Online backup without stopping anything:
-
-```bash
-docker compose exec phong node -e \
-  "new (require('node:sqlite').DatabaseSync)('/data/phong.db').exec(\"VACUUM INTO '/data/backup-$(date +%F).db'\")"
-docker compose cp phong:/data/backup-$(date +%F).db ./
-```
-
-Restore = copy a backup to the volume as `/data/phong.db` and `docker compose restart phong`.
 
 A server that ran the pre-SQLite build imports its old `game_database.json` automatically on first boot if it sits in `/data`.
 

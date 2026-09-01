@@ -249,7 +249,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
 
         // Player 1's paddle sits exactly where the shared half-court collision
         // routine expects one, so it is reused as-is.
-        const p1Hit = checkPaddleCollision(b, p1PaddleRef.current, geom.paddleWidth, p1Vx, activeRules);
+        const p1Hit = checkPaddleCollision(b, p1PaddleRef.current, geom.paddleWidth, p1Vx, 0, activeRules);
         if (p1Hit.hit && p1Hit.angle !== undefined && p1Hit.speed !== undefined) {
           const speed = Math.max(geom.speedMin, Math.min(p1Hit.speed, geom.speedCap));
           b.vy = -Math.abs(speed * Math.cos(p1Hit.angle));
@@ -265,7 +265,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         // back — the paddle's own velocity with it, since left and right swap
         // across the mirror too.
         const mirrored = { ...b, y: 1 - b.y, vy: -b.vy };
-        const p2Hit = checkPaddleCollision(mirrored, p2PaddleRef.current, geom.paddleWidth, -p2Vx, activeRules);
+        const p2Hit = checkPaddleCollision(mirrored, p2PaddleRef.current, geom.paddleWidth, -p2Vx, 0, activeRules);
         if (p2Hit.hit && p2Hit.angle !== undefined && p2Hit.speed !== undefined) {
           const speed = Math.max(geom.speedMin, Math.min(p2Hit.speed, geom.speedCap));
           b.vy = Math.abs(speed * Math.cos(p2Hit.angle));

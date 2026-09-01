@@ -123,7 +123,7 @@ export const AI_ADAPT_BAND = 7;
  * so their odds went 50% -> 22% and every further loss widened the gap. The
  * ladder must never get harder because you are losing.
  */
-export const AI_ADAPT_DOWN_STRENGTH = 1;
+export const AI_ADAPT_DOWN_STRENGTH = 0.85;
 export const AI_ADAPT_DOWN_BAND = 20;
 
 /**
@@ -548,7 +548,7 @@ export function matchXp(params: {
 // inside recordMatch — a client still never sends an XP amount, and PvP XP is
 // untouched:
 //
-//   soloXp = clamp(matchXp × momentum(w) × fatigue(n), XP_FLOOR, SOLO_XP_MATCH_CAP)
+//   soloXp = max(XP_FLOOR, matchXp × min(momentum(w) × fatigue(n), SOLO_XP_MAX_MULTIPLIER))
 //
 // MOMENTUM rewards consecutive solo wins, ramping with diminishing increments
 // toward saturation. `w` is the solo win streak the player CARRIES INTO the
@@ -588,8 +588,25 @@ export const SOLO_FATIGUE_FREE_GAMES = 3;
  * fatigue is there to tax streak-LESS grinding, not to cancel momentum.
  */
 export const SOLO_FATIGUE_STEP = 0.02;
-/** No solo match ever pays more than this, however long the streak. */
-export const SOLO_XP_MATCH_CAP = 450;
+/**
+ * The most momentum and fatigue may multiply a solo match's own XP by.
+ *
+ * This bounds the MULTIPLIER, not the product, and the difference is the
+ * ladder's ordering. A flat 450 cap on the product flattened the top: on a
+ * three-win streak Cyber and Chaos both paid exactly 450, and on an eight-win
+ * streak so did Elite — so a player on a run was paid the same for the easiest
+ * of the top three as for the hardest. rating.ts's own claim that "a harder
+ * rung always pays more, with no per-difficulty XP table anywhere" is true of
+ * matchXp and was false of what actually reached the player.
+ *
+ * A multiplier cap cannot do that, because it scales a base that is already
+ * ordered by winProbability. The honest cost is that the ceiling rises with
+ * the rung rather than sitting at one number: a Chaos win on an eight-win
+ * streak goes 450 -> 560. Preserving ordering under a streak means raising the
+ * top or lowering the middle, and lowering the middle would take XP away from
+ * players who did nothing wrong.
+ */
+export const SOLO_XP_MAX_MULTIPLIER = 2.0;
 
 /** Concave, saturating: increments diminish as the streak grows. */
 export const soloMomentum = (winStreak: number): number => {
@@ -611,8 +628,11 @@ export const soloFatigue = (gamesToday: number): number => {
  * recorded this UTC day, before this one.
  */
 export function soloAdjustedXp(baseXp: number, winStreak: number, gamesToday: number): number {
-  const adjusted = Math.round(baseXp * soloMomentum(winStreak) * soloFatigue(gamesToday));
-  return Math.min(SOLO_XP_MATCH_CAP, Math.max(XP_FLOOR, adjusted));
+  const multiplier = Math.min(
+    SOLO_XP_MAX_MULTIPLIER,
+    soloMomentum(winStreak) * soloFatigue(gamesToday)
+  );
+  return Math.max(XP_FLOOR, Math.round(baseXp * multiplier));
 }
 
 // ---------------------------------------------------------------------------
@@ -680,19 +700,36 @@ export const ACHIEVEMENT_BAND_CAP = 0.6;
 export const achievementXpCap = (level: number): number =>
   Math.round(levelBand(level) * ACHIEVEMENT_BAND_CAP);
 
-/** Cumulative XP required to REACH `level`. */
+/**
+ * Cumulative XP required to REACH `level`.
+ *
+ * Closed form of `sum(levelBand(l)) for l in 1..level-1`, which with
+ * `levelBand(l) = 250 + 60(l-1)` is `(L-1)(250 + 30(L-2))`. Pinned against the
+ * old accumulating loop in tests/xp.test.ts — it is what makes levelFromXp
+ * below O(1) instead of O(level^2).
+ */
 export function xpForLevel(level: number): number {
-  let total = 0;
-  for (let l = 1; l < level; l++) total += levelBand(l);
-  return total;
+  if (level <= 1) return 0;
+  return (level - 1) * (250 + 30 * (level - 2));
 }
 
+/**
+ * The level a total of `xp` has reached, and the total the next one opens at.
+ *
+ * Solved rather than counted. This was `while (xp >= next)` over an
+ * accumulating xpForLevel — O(level^2) — and levelFromXp(Infinity) therefore
+ * never returned at all: one POST carrying a large enough playerScore reached
+ * it through matchXp and wedged the process for good. The score is bounded at
+ * its own end now (server/db.ts), and this end cannot loop regardless.
+ *
+ * Inverting `xp = 30L^2 + 160L - 220` gives the root below; the correction
+ * steps absorb float error at the band edges and run at most once each.
+ */
 export function levelFromXp(xp: number): { level: number; xpNext: number } {
-  let level = 1;
-  let next = xpForLevel(2);
-  while (xp >= next) {
-    level++;
-    next = xpForLevel(level + 1);
-  }
-  return { level, xpNext: next };
+  if (!Number.isFinite(xp) || xp <= 0) return { level: 1, xpNext: xpForLevel(2) };
+  let level = Math.floor((-160 + Math.sqrt(25600 + 120 * (220 + xp))) / 60);
+  if (level < 1) level = 1;
+  while (xpForLevel(level + 1) <= xp) level++;
+  while (level > 1 && xpForLevel(level) > xp) level--;
+  return { level, xpNext: xpForLevel(level + 1) };
 }
