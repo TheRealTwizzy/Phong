@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
+import { useMotion } from './ui/motion';
 import { BallState, GameSettings, Particle, Ripple, LanguageCode } from '../types';
 import { Cosmetic } from '../game/cosmetics';
 import {
@@ -112,11 +113,28 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   const ballPropRef = useRef(ball);
   ballPropRef.current = ball;
 
+  /**
+   * `prefers-reduced-motion`, for the effects the canvas draws itself.
+   *
+   * `useMotion()` governs every DOM animation in the app and the canvas is
+   * outside its reach, so screen shake, the impact particles and the ball
+   * trail all ignored the setting entirely — and camera shake is the canonical
+   * vestibular trigger, which is the one this most needed to respect. Read
+   * through a ref because the render loop is armed once per match and must not
+   * re-arm to learn about it.
+   */
+  const { reduced: reducedMotion } = useMotion();
+  const reducedRef = useRef(reducedMotion);
+  reducedRef.current = reducedMotion;
+  // Multiplied into every shake, so a single `0` switches all of them off at
+  // once and no future call site can forget to ask.
+  const shakeScale = () => (reducedRef.current ? 0 : (settings.screenShakeIntensity ?? 60) / 100);
+
   // External trigger for screen shake (e.g. from Settings test button or goal)
   useEffect(() => {
     if (shakeTrigger !== prevShakeTriggerRef.current) {
       prevShakeTriggerRef.current = shakeTrigger;
-      const intensity = ((settings.screenShakeIntensity ?? 60) / 100);
+      const intensity = shakeScale();
       shakeAmountRef.current = Math.min(24, shakeAmountRef.current + 12 * intensity);
     }
   }, [shakeTrigger, settings.screenShakeIntensity]);
@@ -166,11 +184,19 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       keysPressed.delete(e.code);
     };
 
-    const keyLoop = () => {
+    // Per SECOND, not per frame. It was a flat 0.025 added every animation
+    // frame, so the paddle moved exactly twice as fast on a 120Hz display as
+    // on a 60Hz one — the same defect the pointer path had, on the one input
+    // a desktop actually uses.
+    const KEY_PADDLE_SPEED = 0.025 * 60;
+    let keyLast = performance.now();
+    const keyLoop = (now: number) => {
+      const dt = Math.min((now - keyLast) / 1000, 0.05);
+      keyLast = now;
       if (keysPressed.size > 0) {
         let delta = 0;
-        if (keysPressed.has('ArrowLeft') || keysPressed.has('KeyA')) delta -= 0.025;
-        if (keysPressed.has('ArrowRight') || keysPressed.has('KeyD')) delta += 0.025;
+        if (keysPressed.has('ArrowLeft') || keysPressed.has('KeyA')) delta -= KEY_PADDLE_SPEED * dt;
+        if (keysPressed.has('ArrowRight') || keysPressed.has('KeyD')) delta += KEY_PADDLE_SPEED * dt;
 
         if (delta !== 0) {
           const halfP = paddleWidthRef.current / 2;
@@ -194,6 +220,10 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
 
   // Create particle burst helper
   const addParticles = useCallback((x: number, y: number, count: number, color: string) => {
+    // A burst of moving objects is motion too, and every call site goes
+    // through here, so one check covers the impacts, the sidewalls and the
+    // net crossing rather than three that could each be forgotten.
+    if (reducedRef.current) return;
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
       const speed = 0.2 + Math.random() * 0.8;
@@ -249,7 +279,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     }
 
     // Check paddle hit detection in canvas for particle effects & haptic
-    const intensity = ((settings.screenShakeIntensity ?? 60) / 100);
+    const intensity = shakeScale();
 
     if (ball.active && prevBallVyRef.current > 0 && ball.vy < 0 && ball.y > 0.85) {
       addParticles(ball.x, PADDLE_Y, 20, theme.playerPaddleGlow);
@@ -267,8 +297,16 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       }
     }
 
-    // Check sidewall collision shake
-    if (ball.active && ((prevBallVxRef.current < 0 && ball.vx > 0) || (prevBallVxRef.current > 0 && ball.vx < 0))) {
+    // Check sidewall collision shake. The proximity test matters: a PADDLE hit
+    // that returns the ball across the court reverses `vx` too, and without it
+    // the sparks were drawn at the court edge for a contact that happened at
+    // the baseline.
+    const nearWall = ball.x <= 0.06 || ball.x >= 0.94;
+    if (
+      ball.active &&
+      nearWall &&
+      ((prevBallVxRef.current < 0 && ball.vx > 0) || (prevBallVxRef.current > 0 && ball.vx < 0))
+    ) {
       shakeAmountRef.current = Math.min(16, shakeAmountRef.current + 4 * intensity);
       addParticles(ball.x <= 0.05 ? 0.01 : 0.99, ball.y, 8, theme.courtBorder);
     }
@@ -453,6 +491,41 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => releasePointer(e, true);
   const handlePointerCancel = (e: React.PointerEvent<HTMLCanvasElement>) =>
     releasePointer(e, false);
+
+  /**
+   * Every finger is gone, and none of them served.
+   *
+   * CLAUDE.md §17 reads as though this file already had the abort paths
+   * `useMenuSwipe` has, and it did not: only `pointerup` and `pointercancel`
+   * ever removed a pointer. A pointer that goes away without either — the
+   * documented Android `intent://` hand-off to another browser, the app
+   * switcher, a tab change — left its id at the head of `pointerOrderRef`
+   * forever. The paddle then follows a finger that is not on the glass, and
+   * the next real finger down is rank 1, which makes it the JOYSTICK: the
+   * paddle is dead, and the only control that answers is one that exists only
+   * during a serve.
+   */
+  const abortPointers = () => {
+    if (!pointerOrderRef.current.length && !pointerPosRef.current.size) return;
+    pointerOrderRef.current = [];
+    pointerPosRef.current.clear();
+    syncRoles();
+  };
+  const abortRef = useRef(abortPointers);
+  abortRef.current = abortPointers;
+
+  useEffect(() => {
+    const bail = () => {
+      if (document.visibilityState !== 'visible') abortRef.current();
+    };
+    const gone = () => abortRef.current();
+    document.addEventListener('visibilitychange', bail);
+    window.addEventListener('pagehide', gone);
+    return () => {
+      document.removeEventListener('visibilitychange', bail);
+      window.removeEventListener('pagehide', gone);
+    };
+  }, []);
 
   // Main Canvas Render Loop Optimized for Modern Smartphones (DPR 2.0-3.5)
   useEffect(() => {
@@ -978,6 +1051,11 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         onPointerDown={readOnly ? undefined : handlePointerDown}
         onPointerMove={readOnly ? undefined : handlePointerMove}
         onPointerUp={readOnly ? undefined : handlePointerUp}
+        // This canvas CAPTURES on pointerdown (it is a `touch-none` surface
+        // with no competing scroller and no inner button), so losing that
+        // capture means the pointer has genuinely been taken away. Treated
+        // exactly like a cancel: the finger is gone and it did not serve.
+        onLostPointerCapture={readOnly ? undefined : handlePointerCancel}
         onPointerCancel={readOnly ? undefined : handlePointerCancel}
       />
 

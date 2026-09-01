@@ -59,7 +59,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         if (response === 'granted') {
           onUpdateSettings({ tiltEnabled: true });
         } else {
-          alert('Motion sensor permission was denied in your browser settings.');
+          alert(t('motion_permission_denied', lang));
         }
       } catch (err) {
         console.error(err);
@@ -156,7 +156,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <button
               onClick={() => onUpdateSettings({ sfxVolume: (settings.sfxVolume ?? 80) === 0 ? 80 : 0 })}
               className="text-ink-muted hover:text-ink p-0.5"
-              title="Mute SFX"
+              title={t('mute_sfx', lang)}
+              aria-label={t('mute_sfx', lang)}
             >
               {(settings.sfxVolume ?? 80) === 0 ? (
                 <VolumeX className="w-4 h-4 text-loss" />
@@ -190,7 +191,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <button
               onClick={() => onUpdateSettings({ bgmVolume: (settings.bgmVolume ?? 50) === 0 ? 50 : 0 })}
               className="text-ink-muted hover:text-ink p-0.5"
-              title="Mute Music"
+              title={t('mute_music', lang)}
+              aria-label={t('mute_music', lang)}
             >
               {(settings.bgmVolume ?? 50) === 0 ? (
                 <VolumeX className="w-4 h-4 text-loss" />
@@ -375,7 +377,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <Flame className="w-4 h-4 text-warn" />
             <div>
               <div className="text-xs font-mono font-medium">{t('ball_trails', lang)}</div>
-              <div className="text-[10px] text-ink-muted">Decaying velocity comet trail for high-speed tracking</div>
+              <div className="text-[10px] text-ink-muted">{t('ball_trails_desc', lang)}</div>
             </div>
           </div>
           <button
@@ -399,7 +401,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <Smartphone className="w-4 h-4 text-accent" />
             <div>
               <div className="text-xs font-mono font-medium">{t('tilt_gyro', lang)}</div>
-              <div className="text-[10px] text-ink-muted">Tilt phone left/right to move paddle</div>
+              <div className="text-[10px] text-ink-muted">{t('tilt_gyro_desc', lang)}</div>
             </div>
           </div>
           <button
@@ -423,7 +425,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <Eye className="w-4 h-4 text-win" />
             <div>
               <div className="text-xs font-mono font-medium">{t('opponent_radar', lang)}</div>
-              <div className="text-[10px] text-ink-muted">Mini overlay preview of hidden court</div>
+              <div className="text-[10px] text-ink-muted">{t('opponent_radar_desc', lang)}</div>
             </div>
           </div>
           <button

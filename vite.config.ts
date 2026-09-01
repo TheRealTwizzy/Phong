@@ -9,7 +9,7 @@ import { defineConfig } from 'vitest/config';
 // Coverage floors, and why they are shaped like this.
 //
 // There is deliberately NO global threshold. Most of src/components is at zero
-// because this project bets on Playwright for UI — eleven browser suites drive
+// because this project bets on Playwright for UI — twenty-one browser suites drive
 // the real thing against a real server — and a global number would either fail
 // on that bet or be set so low it measured nothing.
 //
@@ -63,6 +63,18 @@ const FLOORS = {
   // together is worth arguing about in a test rather than on a live server.
   'server/matchmaking.ts': { statements: 95, branches: 92 },
   'server/db.ts': { statements: 90, branches: 88 },
+  // The cookie and session layer — the one file where a regression is somebody
+  // losing their account. The STATEMENT number is low and honest about why:
+  // most of this file is exercised by the suites that boot a real server, and
+  // those run out of process where V8 cannot see them (TESTING.md says the
+  // same about `server.ts`). The BRANCH floor is the real one — the decisions
+  // this file makes are covered, and that is what must not slide.
+  'server/auth.ts': { statements: 35, branches: 90 },
+  // Small, pure, and 100% today. Floored now that the report can see them at
+  // all: they were inside `src/components`, which the include never matched,
+  // so thirteen passing tests read as absent.
+  'src/components/ui/meterMemory.ts': { statements: 95, branches: 95 },
+  'src/components/ui/ladderTone.ts': { statements: 95, branches: 95 },
   'server/image.ts': { statements: 90, branches: 88 },
   'server/bots.ts': { statements: 100, branches: 100 },
 };
@@ -70,6 +82,33 @@ const FLOORS = {
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    build: {
+      rollupOptions: {
+        output: {
+          /**
+           * Split the libraries out of the app chunk.
+           *
+           * Everything shipped as one 820KB file, so every deployment — and
+           * this project force-refreshes sessions on every deployment by
+           * design (see `server/build.ts`) — invalidated React, Motion and the
+           * icon set along with the twenty lines of game code that actually
+           * changed. Separated, a deploy re-downloads the app chunk and the
+           * vendor chunk stays in the browser cache it was already in, which
+           * is what the `immutable, max-age=1y` on `/assets` is for.
+           *
+           * Deliberately coarse: three buckets, matched on the dependency
+           * path, so nothing here has to be kept in step with the import graph
+           * — a library that moves between them still lands in a vendor chunk.
+           */
+          manualChunks(id: string) {
+            if (!id.includes('node_modules')) return undefined;
+            if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return 'react';
+            if (/[\\/]node_modules[\\/](motion|framer-motion|canvas-confetti)/.test(id)) return 'motion';
+            return 'vendor';
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
@@ -95,6 +134,17 @@ export default defineConfig(() => {
           'src/game/**/*.ts',
           'src/media/**/*.ts',
           'src/net/**/*.ts',
+          // The non-component logic that lives among the components:
+          // meterMemory, ladderTone and motion are plain modules with real
+          // unit tests, and the report could not see any of it. A module with
+          // thirteen tests reading as absent is the same blind spot as one
+          // with none.
+          'src/components/**/*.ts',
+          // 600-odd lines with no tests at all. Reported rather than floored,
+          // deliberately: procedural Web Audio needs an AudioContext, so this
+          // is honest visibility of a gap and not a threshold anybody is being
+          // asked to meet today.
+          'src/audio/**/*.ts',
           'server/**/*.ts',
         ],
         exclude: ['src/types.ts', 'src/vite-env.d.ts'],

@@ -111,8 +111,12 @@ export interface GameSettings {
   // Telemetry visibility is deliberately NOT a stored setting: the panel is
   // per-match, starting hidden and toggled from the court (see App.tsx).
   showTrails: boolean;
-  // Paddle width and ball speed are deliberately NOT settings — they are
-  // fixed constants in game/physics.ts and must never be player-editable.
+  // Paddle width and ball speed are not DEVICE settings: they are terms of
+  // the MATCH, chosen pre-match in `rules` below and shared with the opponent
+  // through `RoomMatchConfig`. This comment used to say they "must never be
+  // player-editable", which `PHYSICS_RULES` contradicted thirty lines away —
+  // what is actually true is that they are never a per-phone preference,
+  // because the two halves of one rally have to obey one set of numbers.
   difficulty: AIDifficulty;
   winningScore: number;
   // Pre-match only, like difficulty and winningScore: chosen on the menu and
@@ -187,6 +191,24 @@ export interface PlayerStats {
    */
   earnedStreak: number;
   earnedBest: number;
+  /**
+   * How many returns were made here IN TOTAL — a count, not a run.
+   *
+   * `earnedBest` is the longest UNBROKEN run built here, because `ownMiss`
+   * resets `earnedStreak` and this is its high-water mark. That is the right
+   * number for a reward keyed on a rally and the wrong one for counting work,
+   * and the Practice Wall's daily curve needed the second: fed the peak, three
+   * returns and a miss repeated thirty times in one visit banked three
+   * returns, while leaving after each miss banked ninety for identical play.
+   * The session-splitting exploit the day curve exists to remove, surviving in
+   * the shape of the number handed to it.
+   *
+   * A miss does not touch this. Nothing else reads it: XP per rally, the
+   * rating weight and the daily rally tasks all still key on `earnedBest`,
+   * because those are about how long a run was and this is about how much was
+   * done.
+   */
+  earnedReturns: number;
   /** The same two, for the opponent. Tracked separately, never mixed in. */
   oppStreak: number;
   oppBestStreak: number;

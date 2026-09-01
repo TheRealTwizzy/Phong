@@ -397,7 +397,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           <div className="min-h-4 text-[10px] font-mono flex items-center gap-1">
             {nameStatus.kind === 'checking' && (
               <span className="text-ink-muted flex items-center gap-1">
-                <Loader2 className="w-3 h-3 animate-spin" />
+                <Loader2 className="w-3 h-3 animate-spin" data-motion-essential />
                 {t('username_checking', language)}
               </span>
             )}
@@ -443,7 +443,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           disabled={!canSubmit}
           className="w-full py-3.5 rounded-2xl font-mono text-sm font-black tracking-widest uppercase bg-accent hover:bg-accent disabled:bg-surface-3 disabled:text-ink-muted text-ink-on-accent transition active:scale-95 shadow-lg flex items-center justify-center gap-2"
         >
-          {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+          {submitting ? <Loader2 className="w-4 h-4 animate-spin" data-motion-essential /> : <Play className="w-4 h-4" />}
           {t('lock_in_start', language)}
         </button>
 
@@ -474,7 +474,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 disabled={claimBusy || !claimCode.trim()}
                 className="px-3 py-2.5 rounded-xl font-mono text-[11px] font-bold bg-surface-3 hover:bg-surface-4 disabled:opacity-50 text-accent border border-line-strong transition active:scale-95"
               >
-                {claimBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t('restore_profile', language)}
+                {claimBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" data-motion-essential /> : t('restore_profile', language)}
               </button>
             </div>
           )}

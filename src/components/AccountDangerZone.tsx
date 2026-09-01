@@ -229,7 +229,7 @@ export const AccountDangerZone: React.FC<AccountDangerZoneProps> = ({
                   onClick={() => void handleConfirmDelete()}
                   icon={
                     deleteBusy ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <Loader2 className="h-4 w-4 animate-spin" data-motion-essential />
                     ) : (
                       <Trash2 className="h-4 w-4" />
                     )

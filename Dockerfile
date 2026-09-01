@@ -1,4 +1,12 @@
 # ---- build stage: compile client bundle + server bundle ----
+# The MAJOR is the pin, deliberately, and it is a considered choice rather
+# than an oversight. Pinning the minor would stop this image picking up
+# security patches within 22.x, which for a public-facing server is a worse
+# trade than the reproducibility it buys; Node LTS minors are
+# backwards-compatible, and `node:sqlite` — the one runtime API this depends
+# on — is a 22.x feature. If byte-reproducibility ever matters more than
+# patching, the answer is a digest pin (`node:22-alpine@sha256:...`) and a bot
+# to bump it, not a minor tag that ages silently.
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./

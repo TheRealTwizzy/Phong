@@ -84,6 +84,22 @@ const confirmed = await solo.waitForSelector('#leave-lobby-confirm-modal', { tim
 if (!confirmed) fail('dismissing a lobby with a live room asked nothing — the host is on the court again');
 ok('dismissing a lobby with a room open asks first');
 
+// Escape is the keyboard's close button, and it is gated on there being an
+// `onClose` rather than on the BACKDROP being dismissible. The two are
+// different questions: this lobby disables backdrop dismissal deliberately,
+// because a stray tap outside must not leave the room — and conflating them
+// left keyboard users with no way out of the one sheet in the app that
+// disables it. It raises the same confirmation the X does, and cancels the
+// same way.
+await solo.click('#btn-leave-lobby-cancel');
+await sleep(400);
+await solo.keyboard.press('Escape');
+const byKey = await solo
+  .waitForSelector('#leave-lobby-confirm-modal', { timeout: 5000 })
+  .catch(() => null);
+if (!byKey) fail('Escape did nothing in a lobby that disables backdrop dismissal');
+ok('Escape closes a sheet whose backdrop is deliberately not dismissible');
+
 // Cancelling has to put them back in the LOBBY, not behind it. This is the
 // exact failure being fixed: a court with a paddle and no way to serve.
 await solo.click('#btn-leave-lobby-cancel');

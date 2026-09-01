@@ -23,6 +23,15 @@ The too-many-coins.com KVM runs Dokploy, whose Traefik terminates TLS for every 
    - **Environment**: nothing required — the Dockerfile defaults `NODE_ENV=production`, `PORT=3000`, `DATA_DIR=/data`. (Add `TURN_URL`/`TURN_STATIC_SECRET` here later if you enable TURN.)
    - **Advanced → Mounts**: add a **Volume Mount**, name `phong-data`, mount path `/data`. **This is the step that keeps player data across deploys** — skip it and every deploy silently resets profiles, ELO, and history.
    - **Domains**: add `phong.too-many-coins.com`, container port **3000**, HTTPS on (Let's Encrypt).
+   - **Advanced → Replicas: leave it at 1.** This is not a performance
+     preference, it is a correctness requirement, and Dokploy will happily let
+     you raise it. Rooms, the matchmaking queue and every live socket live in
+     **process memory** — the app is single-instance by design (CLAUDE.md §10)
+     — so a second replica gets its own empty room map behind the same domain.
+     Two phones typing the same 4-letter code land on different instances and
+     the second is told "room not found"; a queued player is only ever paired
+     with somebody the load balancer sent to the same process. Nothing crashes
+     and nothing logs, which is what makes it worth writing down here.
    - **Deploy.** Optionally enable auto-deploy on push (Dokploy sets up the GitHub webhook).
 
 3. **Verify** — `curl -s https://phong.too-many-coins.com/api/health` returns `{"status":"ok",...}`, then the real test: two phones, create a room, scan the QR, rally across the net. The in-game badge shows `P2P` when the phones connect directly, `RELAY` otherwise.

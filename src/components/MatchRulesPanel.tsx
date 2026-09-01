@@ -10,6 +10,7 @@ import {
   isRuleRanked,
   clampRule,
   unrankedReasons,
+  autoServeForced,
 } from '../matchRules';
 import { t } from '../i18n/translations';
 import { SegmentedControl } from './ui';
@@ -47,6 +48,12 @@ interface Props {
    * ladder, so a duel no longer rates on its rules alone.
    */
   venueRoomId?: string | null;
+  /**
+   * Solo only: the player's visible ladder rating, so the badge can say when
+   * a rung has been outgrown. Above that rung's own ceiling it moves no
+   * rating, and promising otherwise is the same lie the Rookie case fixes.
+   */
+  rankMu?: number;
 }
 
 const SLIDERS: { key: PhysicsRuleKey; labelKey: string }[] = [
@@ -71,6 +78,8 @@ const UNRANKED_COPY_KEY = (reason: UnrankedReason | undefined): string => {
       return 'rules_unranked_mode';
     case 'difficulty':
       return 'rules_unranked_difficulty';
+    case 'outgrown':
+      return 'rules_unranked_outgrown';
     case 'venue':
       return 'rules_unranked_venue';
     case 'sonar':
@@ -89,13 +98,22 @@ export const MatchRulesPanel: React.FC<Props> = ({
   readOnly = false,
   idPrefix = 'menu',
   venueRoomId = null,
+  rankMu,
 }) => {
   const [open, setOpen] = useState(false);
   // Everything standing between this match and the ladder, not just the
   // sliders: the mode, the difficulty and the sonar count too.
-  const blockers = unrankedReasons({ rules, mode, difficulty, venueRoomId });
+  const blockers = unrankedReasons({ rules, mode, difficulty, venueRoomId, rankMu });
   const ranked = blockers.length === 0;
   const sonarUnranks = blockers.includes('sonar');
+  // A DIFFERENT question from the badge above, and one this panel must not
+  // answer for itself: it has been wrong in both directions, first too narrow
+  // (the whole verdict, so a Casual table offered "Off" and the server
+  // overwrote it) and then too broad (the rules alone, so Practice, Split and
+  // Rookie solo lost "Off" though nothing was ever going to force it on).
+  // `autoServeForced` states it once, beside the `normalizeRoomConfig` that
+  // does the forcing, so the control and the server cannot drift again.
+  const forced = autoServeForced(mode, rules);
 
   const toggles: { key: 'opponentSonar' | 'trackTelemetry' | 'quickChat'; labelKey: string; shown: boolean }[] = [
     { key: 'opponentSonar', labelKey: 'rule_sonar', shown: mode === 'solo' || mode === 'multiplayer' },
@@ -237,10 +255,10 @@ export const MatchRulesPanel: React.FC<Props> = ({
                   label: secs === 0 ? t('rule_off', lang) : `${secs}s`,
                   // Ranked play always carries a timer — "off" is only on the
                   // table once the rules have left the ranked bands.
-                  disabled: secs === 0 && ranked,
+                  disabled: secs === 0 && forced,
                 }))}
               />
-              {ranked && (
+              {forced && (
                 <span id={`${idPrefix}-autoserve-ranked-note`} className="text-2xs font-normal tracking-normal text-ink-dim">
                   {t('rule_autoserve_ranked', lang)}
                 </span>

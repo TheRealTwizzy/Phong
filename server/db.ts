@@ -59,9 +59,10 @@ import {
   PLACEMENT_GAMES,
   surpriseMultiplier,
   normalizeDifficulty,
-  practiceXp,
+  practiceDayXp,
   achievementXpCap,
   PRACTICE_XP_DAILY_CAP,
+  PRACTICE_RETURNS_MAX,
   soloAdjustedXp,
   LADDER_TOP_N,
   RANK_MOVE_EPSILON,
@@ -231,6 +232,31 @@ const RETIRED_SLOT = '';
  * tests/identity.test.ts reads the schema and fails if a playerId-keyed table
  * exists that this list does not name.
  */
+const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long after a UTC day ends its finished-but-unclaimed tasks can still be
+ * collected. Long enough that "I finished it just before midnight" always
+ * works, short enough that this is a grace and not a backlog.
+ */
+const MISSION_CLAIM_GRACE_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Whether a failed write was the username unique index and not something else.
+ *
+ * Both username paths caught EVERY error from `upsertProfile` and answered
+ * `USERNAME_TAKEN`, so a full disk or a read-only volume told the player their
+ * name had gone and sent them to pick another one — which then failed the same
+ * way. `node:sqlite` puts the SQLite result code on the error; the message is
+ * checked too, because that is a runtime detail and this must not go back to
+ * swallowing everything if it changes.
+ */
+function isUniqueViolation(e: unknown): boolean {
+  const err = e as { code?: string; errcode?: number; message?: string };
+  if (err?.errcode === 2067 || err?.errcode === 1555) return true; // CONSTRAINT_UNIQUE / PRIMARYKEY
+  if (typeof err?.code === 'string' && err.code.includes('CONSTRAINT')) return true;
+  return typeof err?.message === 'string' && /UNIQUE constraint failed/i.test(err.message);
+}
+
 export const PLAYER_KEYED_TABLES = [
   'avatars',
   'player_mode_stats',
@@ -433,6 +459,14 @@ class GameDatabase {
     // recovers fully; only a power loss can drop the last few commits, which
     // for match history and XP is a trade worth making.
     this.sql.exec('PRAGMA synchronous = NORMAL');
+    // WAL lets a reader and the writer run together, but two WRITERS still
+    // serialize — and without this the loser of that race fails instantly with
+    // SQLITE_BUSY rather than waiting. There is one writer in the server
+    // process, so this is about the OTHER openers: `npm run db:backup`'s
+    // `VACUUM INTO` takes a read transaction against a live database, and the
+    // admin CLI opens the same file. Five seconds is far longer than any
+    // statement here takes and far shorter than a request timeout.
+    this.sql.exec('PRAGMA busy_timeout = 5000');
     this.ensureBaseSchema();
     this.applyWipeV1();
     this.migrateSchema();
@@ -601,6 +635,10 @@ class GameDatabase {
         playerId TEXT NOT NULL,
         dayKey TEXT NOT NULL,
         xpAwarded INTEGER NOT NULL DEFAULT 0,
+        -- How many returns have been EARNED today. The XP curve is measured
+        -- against this rather than against one session, so leaving and
+        -- re-entering the wall cannot restart it at its steepest point.
+        returns INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (playerId, dayKey)
       );
       -- Solo matches recorded today, for the XP fatigue curve: same-day solo
@@ -761,6 +799,15 @@ class GameDatabase {
       .all() as unknown as Array<{ name: string }>;
     if (modeCols.length && !modeCols.some((c) => c.name === 'streakAt')) {
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakAt INTEGER NOT NULL DEFAULT 0');
+    }
+    // daily_practice grew a `returns` column when the XP curve stopped being
+    // per-session. An existing row reads 0, which means today's practice is
+    // paid from the start of the curve once — the same as a fresh day.
+    const practiceCols = this.sql
+      .prepare('PRAGMA table_info(daily_practice)')
+      .all() as unknown as Array<{ name: string }>;
+    if (practiceCols.length && !practiceCols.some((c) => c.name === 'returns')) {
+      this.sql.exec('ALTER TABLE daily_practice ADD COLUMN returns INTEGER NOT NULL DEFAULT 0');
     }
     if (modeCols.length && !modeCols.some((c) => c.name === 'streakChainId')) {
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakChainId TEXT');
@@ -1352,8 +1399,12 @@ class GameDatabase {
     profile.lastActive = now;
     try {
       this.upsertProfile(profile);
-    } catch {
-      // Unique-index race: someone claimed the name between check and write.
+    } catch (e) {
+      // The unique index is the only constraint this write can violate, and
+      // losing that race genuinely means the name went. Anything ELSE — a full
+      // disk, a read-only volume — is not the player's name being taken, and
+      // reporting it as one sent them to change a username that was fine.
+      if (!isUniqueViolation(e)) throw e;
       return { ok: false, code: 'USERNAME_TAKEN' };
     }
     return { ok: true, profile: this.readProfile(id)! };
@@ -1386,7 +1437,9 @@ class GameDatabase {
     profile.lastActive = now;
     try {
       this.upsertProfile(profile);
-    } catch {
+    } catch (e) {
+      // See initializeProfile: only a unique-index violation is a taken name.
+      if (!isUniqueViolation(e)) throw e;
       return { ok: false, code: 'USERNAME_TAKEN' };
     }
     return { ok: true, profile: this.readProfile(id)! };
@@ -1759,6 +1812,8 @@ class GameDatabase {
     session: {
       bestStreak: number;
       earnedStreak?: number;
+      /** Total returns made this visit — a count, not a run. */
+      earnedReturns?: number;
       endStreak?: number;
       ageMs?: number;
       chainId?: string | null;
@@ -1782,12 +1837,32 @@ class GameDatabase {
     // Neither of these can stand higher than the run ever reached.
     const earned = Math.min(peak, whole(session.earnedStreak));
     const ended = Math.min(peak, whole(session.endStreak));
+    // What the DAY curve counts, and it is not `earned`. `earnedBest` is the
+    // longest unbroken run built this visit, because a miss resets the run it
+    // is the high-water mark of — so feeding it to the curve left the
+    // session-splitting exploit standing in a new shape: three returns and a
+    // miss repeated thirty times in ONE visit banked three returns, while
+    // leaving after each miss submitted thirty threes and banked ninety, for
+    // identical play. Floored at `earned`, since a run of N is N returns, and
+    // an older bundle that sends nothing falls back to it — which is what it
+    // did before, so nothing regresses.
+    const returns = Math.max(earned, Math.min(whole(session.earnedReturns), PRACTICE_RETURNS_MAX));
+
+    // Whether anything happened here at all, asked ONCE. The history row below
+    // was gated on it and `played` was not, ten lines apart, so the two records
+    // of one visit disagreed: no row, and a session counted. Reachable by
+    // pressing Reset on the wall while carrying a run and having returned
+    // nothing — the report still goes out, because the carried run has to be
+    // persisted, so every press added a phantom session to the Profile's
+    // practice count. The report is still SENT for a run that earned nothing;
+    // it is only the "you played a session" part that is withheld.
+    const isSession = earned >= 1;
 
     // Practice has no opponent, so it has no wins, losses or aces — a session
     // and a streak are all there is to keep. Banked whatever the daily XP cap
     // says, because the cap is about XP, not about what happened.
     this.bumpModeStats(playerId, 'practice', {
-      played: 1,
+      played: isSession ? 1 : 0,
       bestStreak: peak,
       endStreak: ended,
       // Ordered like every other write to the run. Two sessions can be left
@@ -1808,8 +1883,9 @@ class GameDatabase {
     // winnerId is NOT NULL filler — a wall session has no winner and the UI
     // never renders W/L for practice. Sessions where no ball was returned
     // (earned 0 — including one that only broke a carried run) record
-    // nothing: there is no session to remember.
-    if (earned >= 1) {
+    // nothing: there is no session to remember, which is the same `isSession`
+    // the played counter above asks, deliberately shared rather than restated.
+    if (isSession) {
       this.insertMatch({
         id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         player1Id: playerId,
@@ -1828,13 +1904,26 @@ class GameDatabase {
     }
 
     const dayKey = missionDayKey(now);
-    const row = this.stmt(`SELECT xpAwarded FROM daily_practice WHERE playerId = ? AND dayKey = ?`)
-      .get(playerId, dayKey) as { xpAwarded: number } | undefined;
+    const row = this.stmt(
+        `SELECT xpAwarded, returns FROM daily_practice WHERE playerId = ? AND dayKey = ?`
+      )
+      .get(playerId, dayKey) as { xpAwarded: number; returns: number } | undefined;
     const alreadyPaid = row?.xpAwarded ?? 0;
+    const returnsBefore = row?.returns ?? 0;
+    const returnsAfter = returnsBefore + returns;
 
+    // The MARGINAL value of today's returns, not a fresh session curve. Paid
+    // per session, the curve restarted at its steepest point every time the
+    // player left and re-entered the wall: 90 returns in one sitting paid 57,
+    // and the same 90 split into thirty sittings of three paid the full daily
+    // 300. The Nth return of a day is worth the same whichever session it
+    // happened in now, so splitting buys nothing.
     const earnedXp = Math.max(
       0,
-      Math.min(practiceXp(earned), PRACTICE_XP_DAILY_CAP - alreadyPaid)
+      Math.min(
+        practiceDayXp(returnsAfter) - practiceDayXp(returnsBefore),
+        PRACTICE_XP_DAILY_CAP - alreadyPaid
+      )
     );
 
     // The rally branch's wall rungs are the only achievements a player who
@@ -1859,6 +1948,19 @@ class GameDatabase {
     if (streak >= 30) grantWall('wall_30');
     if (streak >= 90) grantWall('wall_90');
     if (streak >= 200) grantWall('wall_200');
+
+    // The day's RETURNS are banked whatever the XP came to — the curve is
+    // measured against how much has been played today, so a session that paid
+    // nothing (the cap was already spent, or the marginal value rounded to
+    // zero) still has to advance it, or the next session would be paid as
+    // though those returns had not happened.
+    if (earned > 0) {
+      this.stmt(
+          `INSERT INTO daily_practice (playerId, dayKey, xpAwarded, returns) VALUES (?, ?, 0, ?)
+           ON CONFLICT(playerId, dayKey) DO UPDATE SET returns = returns + excluded.returns`
+        )
+        .run(playerId, dayKey, earned);
+    }
 
     if (earnedXp > 0 || newAchievements.length > 0) {
       if (earnedXp > 0) {
@@ -2281,17 +2383,55 @@ class GameDatabase {
     const def: MissionDef | undefined = findMission(missionId);
     if (!def) return { ok: false, code: 'MISSION_UNKNOWN' };
 
-    const dayKey = missionDayKey(now);
-    const row = this.missionRows(playerId, dayKey).get(def.id);
+    const today = missionDayKey(now);
+    let dayKey = today;
+    let row = this.missionRows(playerId, today).get(def.id);
+
+    // A task finished at 23:59 and claimed at 00:01 was refused as
+    // MISSION_INCOMPLETE. Everything here is day-keyed, so the new day's row
+    // for that mission is empty (or the mission is not even held any more) and
+    // the reward the player watched themselves earn simply evaporated — with
+    // an error message saying they had not finished it.
+    //
+    // The reward belongs to the day the PROGRESS was made, so it is paid
+    // against that day. One day back, and only inside a grace window, so this
+    // is "you just finished it" rather than an indefinite backlog of
+    // yesterdays. The claim needs no UI of its own: the page the player is
+    // looking at is the one from before midnight, which is exactly how they
+    // got here.
+    // Which slot this task sits in, resolved BEFORE it is stamped claimed:
+    // once it is, sweepClaimed would refill the slot on the next read and this
+    // claim would have no replacement of its own to report.
+    const slots = this.ensureSlots(playerId, today, now);
+    const heldToday = slots.some((sl) => sl.missionId === def.id);
+
+    // The grace applies only to a task that is NOT held today. If it was dealt
+    // again this morning, the player is looking at today's copy and today's
+    // answer is the right one — including "you have not finished it".
+    if (!heldToday) {
+      const yesterday = missionDayKey(new Date(now.getTime() - DAY_MS));
+      const prev = this.missionRows(playerId, yesterday).get(def.id);
+      const endOfThatDay = Date.parse(`${yesterday}T24:00:00Z`);
+      const inGrace = Number.isFinite(endOfThatDay)
+        ? now.getTime() - endOfThatDay <= MISSION_CLAIM_GRACE_MS
+        : false;
+      // Adopted even when it is already CLAIMED, so a second tap is answered
+      // MISSION_CLAIMED by the check below rather than being reported as
+      // unfinished — a claimed task and an unfinished one are different facts
+      // and the player is owed the right one.
+      if (prev && prev.progress >= def.target && inGrace) {
+        dayKey = yesterday;
+        row = prev;
+      }
+    }
+
     const progress = row?.progress ?? 0;
     if (row?.claimedAt) return { ok: false, code: 'MISSION_CLAIMED' };
     if (progress < def.target) return { ok: false, code: 'MISSION_INCOMPLETE' };
 
-    // Which slot this task sits in, resolved BEFORE it is stamped claimed:
-    // once it is, sweepClaimed would refill the slot on the next read and this
-    // claim would have no replacement of its own to report.
-    const slots = this.ensureSlots(playerId, dayKey, now);
-    const mine = slots.find((sl) => sl.missionId === def.id);
+    // A grace claim against yesterday has no slot of its own to refill, and
+    // dealing into a day that is over would be dealing into nothing.
+    const mine = dayKey === today ? slots.find((sl) => sl.missionId === def.id) : undefined;
 
     // Stamp the claim FIRST and only pay out if this call is the one that
     // stamped it, so two concurrent claims cannot both award the reward.
@@ -2330,7 +2470,7 @@ class GameDatabase {
     // The pool is finite, so an unusually productive day can run it dry; the
     // claimed mission then simply stays in its slot.
     const newMissionId = mine
-      ? this.fillSlot(playerId, dayKey, mine.slot, def.tier, slots, now) ?? undefined
+      ? this.fillSlot(playerId, today, mine.slot, def.tier, slots, now) ?? undefined
       : undefined;
 
     return {
@@ -2646,7 +2786,19 @@ class GameDatabase {
     // from the match and the pre-match odds stay honest, while the visible
     // tier, rankedGames and the history row's `ranked` column stand still.
     const venueRates = roomCountsForRank(context.venueRoomId);
-    const ranksThisMatch = ranked && venueRates && (isPvp || soloCountsForRank(difficulty));
+    // A rung this player has OUTGROWN moves no rating in either direction, so
+    // it does not rate — the same answer `unrankedReasons` gives the pre-match
+    // badge, given here so the two cannot disagree. Gating only the arithmetic
+    // and not this flag was the half-fix: `updateRating` returned the rating
+    // untouched while `rankedGames` still incremented and the history row still
+    // recorded as ranked. For an UNPLACED player that is the placement trap the
+    // comment below exists for, reached by another door — sigma never shrinks
+    // and the count still climbs, so they reach "5/5" no closer to being
+    // placed. Reachable without anything exotic: two placement wins carry a
+    // player past Pro's 30.9 ceiling.
+    const soloOutgrown = !isPvp && profile.rankMu > soloMuCap(difficulty);
+    const ranksThisMatch =
+      ranked && venueRates && (isPvp || (soloCountsForRank(difficulty) && !soloOutgrown));
     // Sampled before the update so the overlay can say which way the ladder
     // went. Only the DIRECTION ever leaves the server — the mu itself is not
     // something the client renders (see src/components/ui/RankBadge.tsx).

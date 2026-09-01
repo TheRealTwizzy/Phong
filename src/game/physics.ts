@@ -4,8 +4,11 @@ import { AI_RATINGS, START_MU, effectiveAiMu } from '../rating';
 
 export const PADDLE_Y = 0.92;
 export const PADDLE_HEIGHT = 0.024;
-// Fixed for every player and mode — fairness rule: paddle width and ball
-// speed are never exposed as user settings.
+// The STOCK game. A match may scale this and the ball speeds through
+// `src/matchRules.ts`, which is why every helper below takes rules; what is
+// never true is that a phone can set them for itself, because both halves of
+// one rally have to obey one set of numbers. Tuning inside the ranked band
+// still rates; past it the match pays XP and moves no rating.
 export const PADDLE_WIDTH_RATIO = 0.22;
 
 /**
@@ -308,6 +311,31 @@ export function bounceOffWall(
 }
 
 /**
+ * The Practice Wall's RETURN LINE: the same surface rule, rotated a quarter
+ * turn.
+ *
+ * The net is a wall in that mode — the ball bounces straight back and never
+ * leaves the player's screen — and it was the one surface in the game that did
+ * not spend spin: `b.vy = Math.abs(b.vy)` and nothing else, so a spun ball came
+ * off it exactly as it went in. Every other surface reverses the spin, damps
+ * it, tilts the rebound and trades angle against pace.
+ *
+ * Rather than a second copy of that arithmetic, the ball is rotated into
+ * `bounceOffWall`'s frame and back: swapping the axes maps a horizontal normal
+ * onto a vertical one, and a ball arriving at the return line is moving
+ * upward, which in that frame is the left wall.
+ */
+export function bounceOffReturnLine(
+  vx: number,
+  vy: number,
+  spin: number | undefined,
+  rules?: Partial<MatchRules>
+): { vx: number; vy: number; spin: number } {
+  const turned = bounceOffWall(vy, vx, spin, true, rules);
+  return { vx: turned.vy, vy: turned.vx, spin: turned.spin };
+}
+
+/**
  * Where a ball will cross the paddle line, folding side-wall rebounds. Shared
  * with the AI so its prediction uses the same rules the ball does.
  *
@@ -367,7 +395,16 @@ export function checkPaddleCollision(
    * spun ball a boost where it should have been scrubbed. Folded in here, the
    * angle, the pace and the returned spin cannot disagree by construction.
    */
-  angleBias: number = 0
+  angleBias: number = 0,
+  // The band this match is played under. `bounceOffWall` above has taken this
+  // since spin shipped, and the paddle not taking it is the asymmetry that
+  // made CLAUDE.md §3's "every rebound is held inside the match's own speed
+  // band" false: the wall let a rally climb to `MAX_BALL_SPEED * ballSpeedMax`
+  // while every paddle contact snapped it back to the stock 2.4. Measured with
+  // `ballSpeedMax: 2` — 3.37 after three bounces, 4.80 after nine, and 2.4 off
+  // the paddle in between. Optional, so the stock game and every existing
+  // caller behave exactly as before.
+  rules?: Partial<MatchRules>
 ): HitResult {
   const paddleTop = PADDLE_Y - PADDLE_HEIGHT / 2;
   const paddleBottom = PADDLE_Y + PADDLE_HEIGHT / 2;
@@ -416,7 +453,7 @@ export function checkPaddleCollision(
           (1.04 +
             Math.abs(drive) * DRIVE_SPEED_GAIN +
             spinPace(incoming, outgoingVx) * SPIN_PADDLE_SPEED_GAIN),
-        MAX_BALL_SPEED
+        rules ? maxBallSpeedFor(rules) : MAX_BALL_SPEED
       );
 
       return {

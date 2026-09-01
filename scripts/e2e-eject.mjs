@@ -21,10 +21,22 @@ if (!EXEC) {
   console.error('Set CHROMIUM_PATH to a Chromium binary.');
   process.exit(2);
 }
+// The DATA_DIR is a temp directory this suite owns, so it goes on EVERY exit
+// rather than only on the happy path at the bottom of the file — a failing
+// run used to leak one per attempt, which is the state a suite is in exactly
+// when somebody is running it repeatedly.
+let dataDirForCleanup = null;
+const cleanupDataDir = () => {
+  if (!dataDirForCleanup) return;
+  try { fs.rmSync(dataDirForCleanup, { recursive: true, force: true }); } catch {}
+  dataDirForCleanup = null;
+};
+process.on('exit', cleanupDataDir);
 const fail = (m) => { console.error('FAIL:', m); process.exit(1); };
 const ok = (m) => console.log('  ✓', m);
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-eject-'));
+dataDirForCleanup = dataDir;
 const srv = spawn('node', ['dist/server.cjs'], {
   env: { ...process.env, NODE_ENV: 'production', PORT, DATA_DIR: dataDir },
   stdio: 'ignore',
@@ -163,5 +175,5 @@ if (await loner.$('#multiplayer-lobby-modal')) fail('the lobby stayed open over 
 ok('and the lone host is told their room expired, not that they were ejected');
 
 await browser.close();
-fs.rmSync(dataDir, { recursive: true, force: true });
+cleanupDataDir();
 console.log('\nEJECTION CHECKS PASSED');

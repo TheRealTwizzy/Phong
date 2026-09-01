@@ -1,8 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import os from 'os';
 import path from 'path';
 import type { MatchEndPayload, MatchRules } from '../src/types';
+import { soloMuCap } from '../src/rating';
 import {
   DEFAULT_MATCH_RULES,
   PHYSICS_RULES,
@@ -15,6 +18,7 @@ import {
   duelMatchKey,
   unrankedRuleKeys,
   unrankedReasons,
+  autoServeForced,
   isRankedMatch,
   normalizeRules,
   AUTO_SERVE_OPTIONS,
@@ -523,5 +527,172 @@ describe('a match can always be started', () => {
       rules: { ...DEFAULT_MATCH_RULES, paddleScale: 1.6, autoServeSeconds: 0 },
     });
     expect(party.rules.autoServeSeconds).toBe(0);
+  });
+});
+
+describe('normalizeRules is cheap enough to call from the game loop', () => {
+  // It is called several times per FRAME while a ball is in play: the four
+  // physics helpers each call it, `clampBallSpeed` calls it twice on its own,
+  // and `predictLanding` calls it inside its integration loop. Every one of
+  // those rebuilt an eleven-field object and ran six clamps — each with a
+  // `toFixed` string allocation — to produce a value identical to the last.
+  it('answers the same object for the same input', () => {
+    const rules = { ...DEFAULT_MATCH_RULES, paddleScale: 1.1 };
+    expect(normalizeRules(rules)).toBe(normalizeRules(rules));
+  });
+
+  it('still answers a fresh input freshly', () => {
+    const a = normalizeRules({ paddleScale: 1.1 });
+    const b = normalizeRules({ paddleScale: 1.3 });
+    expect(a.paddleScale).toBeCloseTo(1.1, 6);
+    expect(b.paddleScale).toBeCloseTo(1.3, 6);
+    expect(a).not.toBe(b);
+  });
+
+  it('hands back something a caller cannot corrupt for everyone else', () => {
+    // The result is shared now, so a caller writing into it would rewrite the
+    // rules for every other holder of the same input. `normalizeRoomConfig`
+    // was doing exactly that with the ranked auto-serve floor.
+    const rules = { ...DEFAULT_MATCH_RULES, paddleScale: 1.05 };
+    const first = normalizeRules(rules);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(() => {
+      (first as { paddleScale: number }).paddleScale = 99;
+    }).toThrow();
+    expect(normalizeRules(rules).paddleScale).toBeCloseTo(1.05, 6);
+  });
+
+  it('still forces the ranked auto-serve floor without touching the shared object', () => {
+    const rules = { ...DEFAULT_MATCH_RULES, autoServeSeconds: 0 as const };
+    const shared = normalizeRules(rules);
+    const room = normalizeRoomConfig({ winningScore: 5, rules });
+    expect(room.rules.autoServeSeconds).toBe(RANKED_AUTO_SERVE_SECONDS);
+    expect(shared.autoServeSeconds).toBe(0);
+  });
+
+  it('clamps and snaps identically to the string-rounding it replaced', () => {
+    for (const v of [0.5999999, 1.0000001, 1.234567, 1.7999999, 2.5, -1, 0]) {
+      const viaString = Math.min(
+        1.8,
+        Math.max(0.6, Number((Math.round(v / 0.05) * 0.05).toFixed(4)))
+      );
+      expect(clampRule('ballScale', v)).toBeCloseTo(viaString, 10);
+    }
+  });
+});
+
+describe('every consumer asks the verdict the same way', () => {
+  // `unrankedReasons` exists so the pre-match sheet, the lobby badge and the
+  // quit confirmation cannot each answer differently. The 'outgrown' arm is
+  // skipped when `rankMu` is absent, which is right for a caller that has no
+  // rating to give — and made the quit dialog silently disagree with the sheet
+  // that had just been shown: told the match could not move rank, then warned
+  // about the ranked loss it was never going to file. The source is what can
+  // be checked, the same way the paddle call sites are.
+  const CONSUMERS = ['src/App.tsx', 'src/components/MatchRulesPanel.tsx'];
+
+  function callArgs(src: string): string[] {
+    const calls: string[] = [];
+    const needle = 'unrankedReasons(';
+    for (let at = src.indexOf(needle); at !== -1; at = src.indexOf(needle, at + 1)) {
+      let depth = 0;
+      let i = at + needle.length - 1;
+      for (; i < src.length; i++) {
+        if (src[i] === '(') depth++;
+        else if (src[i] === ')' && --depth === 0) break;
+      }
+      calls.push(src.slice(at + needle.length, i));
+    }
+    return calls;
+  }
+
+  it('finds the calls, so a rename cannot make this vacuous', () => {
+    const found = CONSUMERS.flatMap((f) => callArgs(readFileSync(resolve(__dirname, '..', f), 'utf8')));
+    expect(found.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it.each(CONSUMERS)('%s gives it a rankMu, so the outgrown arm is reachable', (file) => {
+    for (const args of callArgs(readFileSync(resolve(__dirname, '..', file), 'utf8'))) {
+      expect(args).toMatch(/rankMu/);
+    }
+  });
+
+  it('would otherwise call a match ranked that the sheet calls outgrown', () => {
+    const ctx = { rules: {}, mode: 'solo', difficulty: 'pro' } as const;
+    const above = soloMuCap('pro') + 1;
+    expect(unrankedReasons({ ...ctx, rankMu: above })).toContain('outgrown');
+    // The same match, asked without the rating: reads as fully ranked.
+    expect(unrankedReasons(ctx)).toHaveLength(0);
+  });
+});
+
+describe('autoServeForced', () => {
+  // The control has been wrong in BOTH directions, which is why the rule lives
+  // beside `normalizeRoomConfig` rather than in the panel: too narrow (the
+  // whole ranked verdict, so a Casual table offered "Off" and the server
+  // overwrote it with 5s) and then too broad (the rules alone, so Practice,
+  // Split and unranked solo rungs lost "Off" though nothing forces it there).
+  const stock = {};
+  const tuned = { paddleScale: 1.6 };
+
+  it('forces the timer for a ranked-legal duel', () => {
+    expect(autoServeForced('multiplayer', stock)).toBe(true);
+  });
+
+  it('forces it on a CASUAL table too, where the venue unranks the match', () => {
+    // The venue is not part of this question: two humans on ranked-legal rules
+    // can still stall each other, which is what the floor exists for.
+    expect(autoServeForced('multiplayer', stock)).toBe(true);
+    expect(unrankedReasons({ rules: stock, mode: 'multiplayer', venueRoomId: 'casual' })).toContain(
+      'venue'
+    );
+  });
+
+  it('leaves a duel on non-ranked rules alone', () => {
+    expect(autoServeForced('multiplayer', tuned)).toBe(false);
+  });
+
+  it('never forces it where no room normalization runs', () => {
+    // `normalizeRoomConfig` is the only thing that forces the timer and it is
+    // reached by a ROOM alone; these three go through `normalizeRules`.
+    for (const mode of ['solo', 'practice', 'split'] as const) {
+      expect(autoServeForced(mode, stock)).toBe(false);
+      expect(autoServeForced(mode, tuned)).toBe(false);
+    }
+  });
+
+  it('agrees with what normalizeRoomConfig actually does', () => {
+    // The two must not drift: whenever the panel says Off is not a choice, the
+    // server must in fact overwrite it, and whenever it says Off is a choice,
+    // the server must leave it alone.
+    for (const rules of [stock, tuned, { ballSpeedMax: 2 }]) {
+      const config = normalizeRoomConfig({
+        rules: normalizeRules({ ...rules, autoServeSeconds: 0 }),
+      });
+      const overwritten = config.rules.autoServeSeconds !== 0;
+      expect(overwritten).toBe(autoServeForced('multiplayer', rules));
+    }
+  });
+});
+
+describe('normalizeRules survives a value that is not an object', () => {
+  // The memo key is the caller's own object and `WeakMap.set` THROWS on a
+  // primitive, so memoizing turned a value this function exists to normalize
+  // into a crash. Reachable from a corrupted `half_pong_settings` at startup
+  // and from an untyped `create_room`/`set_room_config` over the wire, where
+  // the throw is swallowed by the outer logger and no response is sent at all,
+  // so the client waits forever. The reads already treat a primitive as having
+  // no keys; only the caching had to sit it out.
+  it.each([['a string', 'x'], ['a number', 5], ['a boolean', true], ['a symbol-free NaN', NaN]])(
+    'falls back to the defaults for %s',
+    (_label, bad) => {
+      expect(() => normalizeRules(bad as never)).not.toThrow();
+      expect(normalizeRules(bad as never)).toEqual(DEFAULT_MATCH_RULES);
+    }
+  );
+
+  it('still memoizes a real object, which is the point of the cache', () => {
+    const input = { paddleScale: 1.1 };
+    expect(normalizeRules(input)).toBe(normalizeRules(input));
   });
 });

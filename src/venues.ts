@@ -327,11 +327,24 @@ export function roomEntryVerdict(
   if (!room?.gate) return OK;
   if (!profile) return OK; // nothing to judge yet; the relay re-checks on seat
   const gate = room.gate;
-  if (gate.level !== undefined && (profile.level ?? 1) < gate.level) {
-    return { ok: false, reason: 'level', needLevel: gate.level };
-  }
   const tier = profile.tier ?? 'unranked';
   const rank = tierRank(tier);
+  // The level gate is a PROXY for experience; the tier floor is a measurement
+  // of it. A player who already clears the floor has demonstrably done the
+  // thing the level was standing in for, so the level does not also have to be
+  // met — it is an alternative qualification for the unplaced, not a second
+  // barrier for the placed.
+  //
+  // Without this a strong new player is locked out of EVERY bracket. Placement
+  // is five ranked games; five games is roughly level 3-4, and winning most of
+  // them lands Ace. Ace is above BEGINNER's ceiling and below INTERMEDIATE's
+  // level 5, so both refuse — and so does every room above. Casual was the
+  // only room in the game they could enter, which is the opposite of what
+  // being rated Ace should mean.
+  const tierClearsFloor = gate.tierMin !== undefined && rank >= tierRank(gate.tierMin);
+  if (gate.level !== undefined && !tierClearsFloor && (profile.level ?? 1) < gate.level) {
+    return { ok: false, reason: 'level', needLevel: gate.level };
+  }
   if (gate.tierMin !== undefined && rank < tierRank(gate.tierMin)) {
     // Covers `unranked` too: indexOf returns -1, which is below every floor.
     return { ok: false, reason: 'tier_low', needTier: gate.tierMin };

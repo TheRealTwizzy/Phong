@@ -50,16 +50,32 @@ makes the badge lie:
 2. **`isRankedRules()`** — the server re-derives this in `recordMatch` from the rules
    themselves. A client-set `ranked` flag is ignored, always.
 3. **`unrankedReasons()`** — the whole verdict in one ordered list: mode, then **venue**,
-   then difficulty, then sonar, then the physics keys. This is a **display** predicate; the
-   server still derives its own half from `isRankedRules`, `soloCountsForRank` and
-   `roomCountsForRank` and never trusts it.
+   then difficulty, then **outgrown** (the player is past that rung's `SOLO_MU_CAPS`
+   ceiling, where it moves no rating in either direction), then sonar, then the physics
+   keys. This is a **display** predicate; the server still derives its own half from
+   `isRankedRules`, `soloCountsForRank` and `roomCountsForRank` and never trusts it.
 4. **`normalizeRules()`** — clamp and snap it, because it arrives from a client and from
-   storage.
+   storage. Its result is MEMOIZED on the input object and FROZEN: it is called several
+   times per frame from the game loop, so a caller that writes into what it returns is
+   rewriting the rules for everyone else holding the same input. Build a copy.
 5. **`MatchRulesPanel`** so it can be set, in the pre-match sheet *and* the duel lobby (same
    component, both places).
 6. **The P2P replica**, if it changes what the ball does. `src/net/p2p.ts` runs the rules
    itself during a DataChannel match.
-7. **All seven locales** for any label — see the `phong-i18n` skill.
+7. **EVERY mode that runs a ball, one call site at a time.** A rule reaching
+   `PHYSICS_RULES` and `MatchRulesPanel` means the sheet OFFERS it; it does nothing until
+   some loop reads it, and nothing fails when one does not — the slider moves, the value
+   is stored and normalized and rated on, and the ball ignores it. Walk them: `src/App.tsx`
+   (the player's contact, the AI's contact, the serve, the walls), `SplitScreenMatch`
+   (both paddles, the serve, the walls) and the Practice Wall's return line. Split Screen
+   accepted and ignored all six for as long as it existed, then took two goes to finish:
+   the first pass reached its three hardcoded constants and its paddle velocity and left
+   the SERVE on a hardcoded random angle and a fixed speed, so two of the six were still
+   dead. **The optional-parameter shape is what makes this silent** — `rules?` and
+   `paddleVx = 0` mean a caller that forgets compiles, runs, and is merely wrong — so the
+   guard has to read the SOURCE. `tests/physics.test.ts` walks both callers of
+   `checkPaddleCollision` by balanced parens and fails one that is not handed the rules.
+8. **All seven locales** for any label — see the `phong-i18n` skill.
 
 ## The badge answers the whole question, not just the sliders
 

@@ -137,6 +137,22 @@ player equipped — including inside `PublicProfileModal`, which paints in someb
   placement 1/5 → 5/5, so a green-to-red ramp would paint the fullest bar — somebody about to
   be promoted — in the colour that means a loss. Its ramp is cool for exactly that reason.
 
+## An input rate is not a frame rate
+
+A paddle driven by a flat delta added per animation frame moves exactly twice as fast on a
+120Hz display as on a 60Hz one. `CourtCanvas` and `SplitScreenMatch` both drive a keyboard
+paddle and only the first was fixed, in the commit that fixed it — so when you fix a rate,
+grep for the other component that has the same loop. In Split Screen it is worse than a
+speed: those positions are differentiated into the paddle velocity that feeds
+`driveCoupling`, so the refresh rate decided the angle, the pace and the SPIN of an otherwise
+identical return.
+
+Declare it per second (`const KEY_PADDLE_SPEED = 0.025 * 60`) and multiply by a clamped `dt`.
+The guard reads the SOURCE — `tests/physics.test.ts` walks both components — because this
+lives inside a `useEffect` in a `.tsx` and a frame-rate dependence compiles, runs, and looks
+correct on whatever display you happen to own. That is the same reason the paddle-rules call
+sites are checked by reading the file rather than by calling the function.
+
 ## Verifying, in a repo that bet against component tests
 
 ```bash

@@ -112,7 +112,7 @@ export const QuickChat: React.FC<QuickChatProps> = ({
             >
               <div className="flex items-center justify-between pb-1.5 border-b border-line text-[11px] font-mono text-ink-muted font-bold px-1">
                 <span>{t('quick_chat_title', language)}</span>
-                <span className="text-accent text-[10px]">TAP TO SEND</span>
+                <span className="text-accent text-[10px]">{t('tap_to_send', language)}</span>
               </div>
 
               <div className="grid grid-cols-2 gap-1.5 max-h-48 scroll-y pt-1">

@@ -45,6 +45,7 @@ import {
   BALL_BASE_RADIUS,
   BASE_BALL_SPEED,
   physicsSubsteps,
+  bounceOffReturnLine,
   checkPaddleCollision,
   OpponentAI,
   ServeAim,
@@ -132,7 +133,23 @@ import {
 } from './net/session';
 import { DIFFICULTY_ORDER, playableDifficulty, playableWinningScore } from './achievements';
 import { TierBadge } from './components/TierBadge';
-import confetti from 'canvas-confetti';
+import rawConfetti from 'canvas-confetti';
+
+/**
+ * Confetti, unless the player has asked for less motion.
+ *
+ * `useMotion()` governs every DOM animation in the app; confetti is drawn to
+ * its own canvas and was outside it, so a celebration fired a few hundred
+ * moving objects across the screen for somebody who had explicitly asked not
+ * to have that. Read at call time rather than once at module load, because
+ * the preference can change while the app is open.
+ */
+const confetti: typeof rawConfetti = ((opts?: Parameters<typeof rawConfetti>[0]) => {
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    return undefined;
+  }
+  return rawConfetti(opts);
+}) as typeof rawConfetti;
 import { Trophy, RefreshCw, Home, ArrowUp, ArrowDown, Circle } from 'lucide-react';
 
 /** How many times a lost invitation socket is retried before giving up. */
@@ -228,6 +245,14 @@ const newSoloMatchKey = (): string =>
  * court wondering.
  */
 const BALL_STALL_MS = 6000;
+
+/**
+ * How old a ping reading may be before it stops being reported as one. The
+ * probe runs every 5s, so anything past this has missed at least one round
+ * trip and the number on screen is describing a connection that no longer
+ * exists.
+ */
+const PING_STALE_MS = 8000;
 
 export default function App() {
   const [settings, setSettings] = useState<GameSettings>(() => {
@@ -382,6 +407,7 @@ export default function App() {
     bestStreak: 0,
     earnedStreak: 0,
     earnedBest: 0,
+    earnedReturns: 0,
     oppStreak: 0,
     oppBestStreak: 0,
     aces: 0,
@@ -420,6 +446,39 @@ export default function App() {
   const [opponentId, setOpponentId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [pingMs, setPingMs] = useState<number>(0);
+  // When that reading was taken. The number only moves on a `pong`, so a
+  // connection that has stopped answering went on showing its last good ping,
+  // unchanged and reassuring, for as long as the stall lasted.
+  const [pingAt, setPingAt] = useState<number>(0);
+  /**
+   * Whether that reading has gone stale, as STATE rather than as a
+   * `Date.now()` read during render. A render-time comparison never schedules
+   * the render that would show the transition, so the badge only went stale if
+   * something unrelated happened to re-render App — and the case it exists for
+   * is precisely the quiet one: a relay that stops answering while the court
+   * is idle on a held serve, which an unranked duel can sit on indefinitely
+   * because `autoServeSeconds` is only forced on inside the ranked bands. The
+   * last good latency sat there reading healthy.
+   *
+   * Keyed on `pingAt` alone, per the timer rule in CLAUDE.md §14: an effect
+   * that depended on anything App rebuilds each render would tear this timeout
+   * down and re-arm it once a frame and never fire.
+   */
+  const [pingStale, setPingStale] = useState<boolean>(false);
+  useEffect(() => {
+    if (!pingAt) {
+      setPingStale(false);
+      return;
+    }
+    const due = pingAt + PING_STALE_MS - Date.now();
+    if (due <= 0) {
+      setPingStale(true);
+      return;
+    }
+    setPingStale(false);
+    const id = window.setTimeout(() => setPingStale(true), due);
+    return () => window.clearTimeout(id);
+  }, [pingAt]);
   const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
   /**
    * Which side of a table this page is WATCHING, or null when it is playing.
@@ -2094,6 +2153,7 @@ export default function App() {
 
       case 'pong':
         setPingMs(Date.now() - msg.timestamp);
+        setPingAt(Date.now());
         break;
 
       case 'error':
@@ -2729,7 +2789,11 @@ export default function App() {
             b,
             paddleXRef.current,
             paddleWidthRef.current,
-            paddleVxRef.current
+            paddleVxRef.current,
+            // The player's aggression is their own thumb; only the AI biases
+            // its outgoing angle.
+            0,
+            rulesRef.current
           );
 
           if (hitResult.hit && hitResult.angle !== undefined && hitResult.speed !== undefined) {
@@ -2751,7 +2815,13 @@ export default function App() {
           if (currentMode === 'practice') {
             if (b.y - b.radius <= 0) {
               b.y = b.radius;
-              b.vy = Math.abs(b.vy);
+              // The return line is a SURFACE, so it spends spin like every
+              // other one: it used to be a bare `Math.abs(b.vy)`, and a spun
+              // ball came off it exactly as it went in.
+              const off = bounceOffReturnLine(b.vx, b.vy, b.spin, rulesRef.current);
+              b.vx = off.vx;
+              b.vy = Math.abs(off.vy);
+              b.spin = off.spin;
               sound.playWallBounce();
             }
           } else if (b.y <= 0) {
@@ -2907,12 +2977,18 @@ export default function App() {
           // applied to the angle it returns, because the contact derives its
           // own pace from the direction the ball leaves in: see the
           // angleBias parameter.
-          aiRef.current.aimBias()
+          aiRef.current.aimBias(),
+          rulesRef.current
         );
 
         if (oppHit.hit && oppHit.angle !== undefined && oppHit.speed !== undefined) {
-          ob.vy = -Math.abs(oppHit.speed * Math.cos(oppHit.angle));
-          ob.vx = oppHit.speed * Math.sin(oppHit.angle);
+          // The AI's return went through no band clamp at all, where the
+          // player's has had one since the rules shipped — so with a raised
+          // `ballSpeedMin` the AI could hand back a ball slower than the match
+          // permits, and the two halves of one rally obeyed different rules.
+          const oppSpeed = clampBallSpeed(oppHit.speed, rulesRef.current);
+          ob.vy = -Math.abs(oppSpeed * Math.cos(oppHit.angle));
+          ob.vx = oppSpeed * Math.sin(oppHit.angle);
           // The spin the contact produced, which this line used to drop on the
           // floor: oppHit.spin was computed and never read, so the ball left
           // the AI's paddle still carrying the PLAYER's spin, un-reversed and
@@ -3069,7 +3145,7 @@ export default function App() {
   // is worth and holds a daily cap, since a guaranteed-return drill would
   // otherwise be the fastest XP in the game.
   const submitPracticeSession = useCallback(
-    async (bestStreak: number, earnedStreak: number, endStreak: number) => {
+    async (bestStreak: number, earnedStreak: number, endStreak: number, earnedReturns: number) => {
       // Where the run stood when the wall opened — read before the stamp
       // below replaces it, because it is what decides whether this session
       // has anything to say at all.
@@ -3093,7 +3169,8 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now(), chainId, runSeq,
+            bestStreak, earnedStreak, endStreak, earnedReturns,
+            endedAt, clientNow: Date.now(), chainId, runSeq,
           }),
         })
       );
@@ -3186,7 +3263,8 @@ export default function App() {
       void submitPracticeSession(
         statsRef.current.bestStreak,
         statsRef.current.earnedBest,
-        statsRef.current.streak
+        statsRef.current.streak,
+        statsRef.current.earnedReturns
       );
     } else {
       // Walking out of an UNFINISHED match still ends wherever the run ends.
@@ -3285,7 +3363,21 @@ export default function App() {
       // wins are ever recorded. The run still carries (a restart is not a
       // miss); it is the MATCH that ends here, as a loss.
       if (abandoningLiveSoloMatch()) void recordMatchCompletion(false);
-      else void reportStreak(modeRef.current, run);
+      // The Practice Wall banks through its own report, and Reset had it
+      // reporting the STREAK alone — so the session's XP and its history row
+      // were simply discarded, for work the player had already done. Restart
+      // is the same ending as walking out as far as the wall is concerned: the
+      // run carries either way (a restart is not a miss), and `resetMatch`
+      // below opens the next session's earned counters at zero, so nothing is
+      // banked twice.
+      else if (modeRef.current === 'practice') {
+        void submitPracticeSession(
+          statsRef.current.bestStreak,
+          statsRef.current.earnedBest,
+          run,
+          statsRef.current.earnedReturns
+        );
+      } else void reportStreak(modeRef.current, run);
     }
     resetMatch(modeRef.current, run);
   };
@@ -3575,6 +3667,14 @@ export default function App() {
                   // The table's own venue, so a Casual duel is not threatened
                   // with a rank it was never going to move.
                   venueRoomId: tableState?.venueRoomId ?? null,
+                  // And this player's own rating, or the 'outgrown' verdict is
+                  // skipped here and nowhere else: the pre-match sheet passes
+                  // it, so a player above the rung's ceiling was told the match
+                  // could not move rank and then warned, on quitting it, about
+                  // the ranked loss it was never going to file. One verdict,
+                  // asked the same way by every consumer, is the whole reason
+                  // this predicate exists.
+                  rankMu: profile?.rankMu,
                 }).length === 0
                   ? 'quit_confirm_ranked'
                   : 'quit_confirm_unranked',
@@ -3750,6 +3850,7 @@ export default function App() {
             settings={settings}
             theme={currentTheme}
             winningScore={activeConfig.winningScore}
+            rules={activeConfig.rules}
             onExitSplitMode={quitToMenu}
           />
         )}
@@ -3810,14 +3911,28 @@ export default function App() {
             activeConfig.rules.opponentSonar &&
             (mode === 'solo' || mode === 'multiplayer')
           }
-          topClass={mode === 'multiplayer' ? 'top-[5.5rem]' : 'top-14'}
+          // Clears the connection column above it — which is TWO rows when
+          // the ping is showing. The ping chip sat at exactly the offset this
+          // used for multiplayer, on the same edge and a higher z, so it
+          // painted straight over the sonar; permanently, for a spectator,
+          // since a watched table is forced onto the relay and the ping is
+          // only ever shown on the relay.
+          topClass={
+            mode !== 'multiplayer'
+              ? 'top-14'
+              : pingMs > 0 && linkStatus !== 'p2p'
+                ? 'top-[7rem]'
+                : 'top-[5.5rem]'
+          }
         />
 
-        {/* Connection badge: direct P2P vs server relay (multiplayer only) */}
+        {/* Connection badge and its ping, as ONE column so they cannot overlap
+            each other or anything positioned to clear them. */}
+        <div className="absolute top-14 right-2 z-30 flex flex-col items-end gap-1">
         {mode === 'multiplayer' && opponentId && (
           <div
             id="link-status-badge"
-            className={`absolute top-14 right-2 z-30 rounded-chip border px-2 py-0.5 text-2xs select-none ${
+            className={`rounded-chip border px-2 py-0.5 text-2xs select-none ${
               linkStatus === 'p2p'
                 ? 'bg-win/15 border-win/50 text-win'
                 : linkStatus === 'connecting'
@@ -3842,11 +3957,15 @@ export default function App() {
         {inCourtMatch && mode === 'multiplayer' && pingMs > 0 && linkStatus !== 'p2p' && (
           <div
             id="link-ping"
-            className="absolute top-[5.5rem] right-2 z-30 rounded-chip border border-line bg-surface-0/80 px-1.5 text-2xs tnum text-ink-dim select-none"
+            data-stale={pingStale ? '1' : '0'}
+            className={`rounded-chip border bg-surface-0/80 px-1.5 py-0.5 text-2xs tnum select-none ${
+              pingStale ? 'border-warn/50 text-warn' : 'border-line text-ink-dim'
+            }`}
           >
-            {pingMs}ms
+            {pingStale ? '···' : `${pingMs}ms`}
           </div>
         )}
+        </div>
 
         {/* Main Single Half-Court View (The Half-Pong Table) */}
         <main className="flex-1 w-full h-full pt-14 relative flex items-center justify-center">

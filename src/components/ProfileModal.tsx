@@ -303,6 +303,9 @@ export const ProfileModal: React.FC<Props> = ({
             <button
               id="close-profile-btn"
               onClick={onClose}
+              // Icon-only, so the icon is not the name: without this the
+              // sheet's PRIMARY close control announced nothing at all.
+              aria-label={t('close', language)}
               className="absolute top-4 right-4 p-2 text-ink-muted hover:text-ink rounded-full hover:bg-white/10 transition-colors"
             >
               <X className="w-5 h-5" />
@@ -327,7 +330,10 @@ export const ProfileModal: React.FC<Props> = ({
                     onClick={() => avatarInputRef.current?.click()}
                     disabled={avatarBusy}
                     title={profile.hasAvatar ? t('change_avatar', language) : t('upload_avatar', language)}
-                    className="p-1 rounded-lg bg-surface-3/95 hover:bg-surface-4 text-accent border border-line-strong shadow transition active:scale-95 disabled:opacity-50"
+                    aria-label={
+                      profile.hasAvatar ? t('change_avatar', language) : t('upload_avatar', language)
+                    }
+                    className="p-1.5 rounded-lg bg-surface-3/95 hover:bg-surface-4 text-accent border border-line-strong shadow transition active:scale-95 disabled:opacity-50"
                   >
                     <ImagePlus className="w-3 h-3" />
                   </button>
@@ -337,7 +343,8 @@ export const ProfileModal: React.FC<Props> = ({
                       onClick={handleRemoveAvatar}
                       disabled={avatarBusy}
                       title={t('remove_avatar', language)}
-                      className="p-1 rounded-lg bg-surface-3/95 hover:bg-surface-4 text-loss border border-line-strong shadow transition active:scale-95 disabled:opacity-50"
+                      aria-label={t('remove_avatar', language)}
+                      className="p-1.5 rounded-lg bg-surface-3/95 hover:bg-surface-4 text-loss border border-line-strong shadow transition active:scale-95 disabled:opacity-50"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
@@ -610,6 +617,9 @@ export const ProfileModal: React.FC<Props> = ({
                       id="btn-copy-recovery"
                       onClick={copyRecoveryCode}
                       title={t('copy_code', language)}
+                      // `title` is not an accessible name on touch, which is
+                      // the only input this game has.
+                      aria-label={t('copy_code', language)}
                       className="p-2.5 rounded-xl bg-surface-3 hover:bg-surface-4 text-ink border border-line-strong transition active:scale-95"
                     >
                       {codeCopied ? <Check className="w-4 h-4 text-win" /> : <Copy className="w-4 h-4" />}

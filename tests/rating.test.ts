@@ -590,3 +590,48 @@ describe('how far the ladder moved, as arrows', () => {
     expect(rankMoveSize(won.mu - me.mu)).toBe('minor');
   });
 });
+
+describe('a rung you have outgrown moves nothing', () => {
+  // The cap was applied on the WIN branch only, so above it a win moved
+  // 0.0000 and a loss moved the full step down: a solo match at an earned
+  // difficulty was strictly rating-NEGATIVE while the pre-match sheet promised
+  // it counted for rank.
+  const proCap = soloMuCap('pro');
+  const above = { mu: proCap + 3, sigma: 2.5 };
+  const opts = { ...SOLO_UPDATE, cap: proCap };
+  const opponent = aiRating('pro', above.mu);
+
+  it('does not move on a win, and did not before either', () => {
+    expect(updateRating(above, opponent, true, opts).mu).toBeCloseTo(above.mu, 10);
+  });
+
+  it('no longer moves on a LOSS, which is the whole defect', () => {
+    const lost = updateRating(above, opponent, false, opts);
+    expect(lost.mu).toBeCloseTo(above.mu, 10);
+    expect(lost.sigma).toBeCloseTo(above.sigma, 10);
+  });
+
+  it('cannot drift a player down a tier by winning', () => {
+    // A player well past Pro's ceiling beats it about nineteen times in
+    // twenty. Two hundred matches used to cost about 3.6 mu — more than a
+    // tier band — every point of it from the losses.
+    let r = { ...above };
+    for (let i = 0; i < 200; i++) {
+      r = updateRating(r, aiRating('pro', r.mu), i % 20 !== 0, opts);
+    }
+    expect(r.mu).toBeCloseTo(above.mu, 10);
+  });
+
+  it('still converges from BELOW, which is what the cap is for', () => {
+    let r = { mu: 25, sigma: 8.33 };
+    for (let i = 0; i < 200; i++) r = updateRating(r, aiRating('pro', r.mu), true, opts);
+    expect(r.mu).toBeLessThanOrEqual(proCap + 1e-9);
+    expect(r.mu).toBeGreaterThan(25);
+  });
+
+  it('still lets a rung you have NOT outgrown take rating away', () => {
+    const below = { mu: proCap - 2, sigma: 2.5 };
+    const lost = updateRating(below, aiRating('pro', below.mu), false, opts);
+    expect(lost.mu).toBeLessThan(below.mu);
+  });
+});

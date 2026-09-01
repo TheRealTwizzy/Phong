@@ -330,6 +330,19 @@ export function updateRating(
   const perf = clamp(opts.performance ?? 1, 0.5, 1.5);
   const delta = opts.k * perf * ((sigma * sigma) / c) * vWin(t);
 
+  // A rung the player has already outgrown says NOTHING about them, in either
+  // direction. The cap used to be applied on the win branch only, so above it
+  // a win moved 0.0000 and a loss moved the full step down — a solo match at
+  // an earned difficulty was then strictly rating-NEGATIVE while the pre-match
+  // sheet promised it counted for rank. It is not a small effect: a Legend
+  // beats Pro about 95% of the time, so the expected drift is about -0.018 per
+  // match, and two hundred matches of a rung they win nearly all of costs them
+  // a tier. The rung converges and then stops, which is what "farming one rung
+  // converges on it and stops" has always meant.
+  if (opts.cap !== undefined && me.mu > opts.cap) {
+    return { mu: me.mu, sigma: me.sigma };
+  }
+
   let mu = won ? me.mu + delta : me.mu - delta;
   if (opts.cap !== undefined && won && mu > opts.cap) {
     // Never drag a player DOWN to the cap — only stop the climb at it.
@@ -633,17 +646,46 @@ export function soloAdjustedXp(baseXp: number, winStreak: number, gamesToday: nu
 // wide margin precisely because it cannot be lost.
 
 export const PRACTICE_XP_PER_RETURN = 2;
-export const PRACTICE_XP_SESSION_CAP = 90;
+
 export const PRACTICE_XP_DAILY_CAP = 300;
 
+/**
+ * A sanity rail on the return COUNT one visit may claim, not a game rule.
+ *
+ * The count is client-reported like every other practice figure, and inflating
+ * it is self-harming — the curve is marginal, so claimed returns only make the
+ * rest of the day pay LESS — which is why this is a bound against nonsense
+ * (an overflow, a corrupted payload) rather than an anti-cheat measure. 2500 is
+ * far past where the daily cap has been reached: the curve tops out at 2500
+ * returns exactly, so nothing legitimate is ever clipped.
+ */
+export const PRACTICE_RETURNS_MAX = 2500;
+
 /** XP for one Practice Wall session, from its best return streak. */
-export function practiceXp(bestStreak: number): number {
-  const streak = Math.max(0, Math.floor(bestStreak || 0));
-  if (streak < 3) return 0; // a couple of taps is not a session
-  // Square-root shaped: early returns are worth the most, so a long grind
-  // cannot out-earn simply playing real matches.
-  const raw = PRACTICE_XP_PER_RETURN * Math.sqrt(streak) * 3;
-  return Math.min(PRACTICE_XP_SESSION_CAP, Math.round(raw));
+/**
+ * What a DAY of practice returns is worth in total.
+ *
+ * Square-root shaped: early returns are worth the most, so a long grind cannot
+ * out-earn simply playing real matches. What matters is that the curve is
+ * measured over the DAY and not over a session, because a session is whatever
+ * the player says it is — leaving and re-entering the Practice Wall used to
+ * restart the curve at its steepest point. Measured against the shipped
+ * constants, when it was per-session: **90 returns in one sitting paid 57 XP,
+ * and the same 90 returns split into thirty sittings of three paid the full
+ * daily 300.** A 5.3x difference for identical work, in favour of the version
+ * that is less effort per return, which is exactly backwards.
+ *
+ * The payout is therefore the MARGINAL value of the day's returns: the Nth
+ * return of a day is worth the same whichever session it happened in, and
+ * splitting buys nothing. There is no per-session cap any more — a session was
+ * the wrong unit, and a second ceiling measured in it could only ever
+ * UNDER-pay an honest day against this curve.
+ */
+export function practiceDayXp(dayReturns: number): number {
+  const n = Math.max(0, Math.floor(dayReturns || 0));
+  if (n < 3) return 0;
+  const raw = PRACTICE_XP_PER_RETURN * Math.sqrt(n) * 3;
+  return Math.min(PRACTICE_XP_DAILY_CAP, Math.round(raw));
 }
 
 // Level curve: each level costs a bit more than the last, growing linearly

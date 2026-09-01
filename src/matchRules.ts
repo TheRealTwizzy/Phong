@@ -1,5 +1,5 @@
 import { AIDifficulty, GameMode, MatchRules, RoomMatchConfig } from './types';
-import { soloCountsForRank } from './rating';
+import { soloCountsForRank, soloMuCap } from './rating';
 import { roomCountsForRank } from './venues';
 
 // Pre-match match rules, shared by client and server like profileRules.ts and
@@ -129,12 +129,49 @@ export function clampRule(key: PhysicsRuleKey, value: number): number {
   const spec = PHYSICS_RULES[key];
   if (!Number.isFinite(value)) return spec.default;
   const snapped = Math.round(value / spec.step) * spec.step;
-  return Math.min(spec.max, Math.max(spec.min, Number(snapped.toFixed(4))));
+  // Four decimal places, by arithmetic. This was `Number(snapped.toFixed(4))`,
+  // which allocates a string per rule per call — and `normalizeRules` below is
+  // called several times per FRAME while a ball is in play.
+  return Math.min(spec.max, Math.max(spec.min, Math.round(snapped * 1e4) / 1e4));
 }
+
+/**
+ * Everything `normalizeRules` has already answered, keyed on the object it was
+ * asked about.
+ *
+ * The rules for a match are fixed once the first ball crosses the net and are
+ * held in a ref, so the same object is asked about over and over: the physics
+ * helpers alone (`paddleWidthFor`, `ballRadiusFor`, `minBallSpeedFor`,
+ * `maxBallSpeedFor`) call this four times, `clampBallSpeed` calls it twice on
+ * its own, and `predictLanding` calls it inside its integration loop —
+ * measured at 12.6us with rules against 2.4us without, five times the cost of
+ * the prediction itself. Each call rebuilt an eleven-field object and ran six
+ * clamps to produce a value identical to the last one.
+ *
+ * A WeakMap rather than a cache with a size limit: the key IS the caller's own
+ * object, so an entry lives exactly as long as the rules it describes and a
+ * match that ends takes its entry with it. The result is frozen, because a
+ * shared cached object that a caller could mutate would be a far worse bug
+ * than the allocation this avoids.
+ */
+const NORMALIZED = new WeakMap<object, MatchRules>();
+const DEFAULT_NORMALIZED: MatchRules = Object.freeze({ ...DEFAULT_MATCH_RULES }) as MatchRules;
 
 /** Normalize anything arriving from a client or from storage. */
 export function normalizeRules(input: Partial<MatchRules> | null | undefined): MatchRules {
-  const raw = input || {};
+  if (input === null || input === undefined) return DEFAULT_NORMALIZED;
+  // A WeakMap key must be an object, and `set` THROWS on anything else — so a
+  // primitive here turned a value this function is supposed to normalize into
+  // a crash. Reachable from a corrupted `half_pong_settings` at startup and
+  // from an untyped `create_room`/`set_room_config` over the wire, where the
+  // throw is swallowed by the outer logger and no response is sent at all, so
+  // the client waits forever. The reads below already treat a primitive as
+  // having no keys and fall through to the defaults, which is the right
+  // answer; only the caching had to learn to sit it out.
+  const cacheable = typeof input === 'object';
+  const cached = cacheable ? NORMALIZED.get(input) : undefined;
+  if (cached) return cached;
+  const raw = input;
   const rules: MatchRules = { ...DEFAULT_MATCH_RULES };
   for (const key of PHYSICS_RULE_KEYS) {
     if (raw[key] !== undefined) rules[key] = clampRule(key, Number(raw[key]));
@@ -148,6 +185,8 @@ export function normalizeRules(input: Partial<MatchRules> | null | undefined): M
     : DEFAULT_MATCH_RULES.autoServeSeconds;
   // A minimum above the maximum would make the speed clamp meaningless.
   if (rules.ballSpeedMin > rules.ballSpeedMax) rules.ballSpeedMin = rules.ballSpeedMax;
+  Object.freeze(rules);
+  if (cacheable) NORMALIZED.set(input, rules);
   return rules;
 }
 
@@ -209,7 +248,13 @@ export function unrankedRuleKeys(rules: Partial<MatchRules> | null | undefined):
  * replace that and is never trusted by it. It is the same rule stated once
  * for display.
  */
-export type UnrankedReason = 'mode' | 'venue' | 'difficulty' | 'sonar' | PhysicsRuleKey;
+export type UnrankedReason =
+  | 'mode'
+  | 'venue'
+  | 'difficulty'
+  | 'outgrown'
+  | 'sonar'
+  | PhysicsRuleKey;
 
 export interface RankedMatchContext {
   rules: Partial<MatchRules> | null | undefined;
@@ -226,6 +271,13 @@ export interface RankedMatchContext {
    * the live room either way.
    */
   venueRoomId?: string | null;
+  /**
+   * Solo only, and only when this phone knows it: the player's VISIBLE ladder
+   * rating. Above a rung's own ceiling that rung moves no rating at all, so
+   * the badge has to stop promising one. Absent reports nothing rather than
+   * guessing, exactly as `venueRoomId` above does.
+   */
+  rankMu?: number;
 }
 
 /** Modes that never write a rating for anybody, whatever the rules say. */
@@ -247,6 +299,17 @@ export function unrankedReasons(ctx: RankedMatchContext): UnrankedReason[] {
   }
   if (ctx.mode === 'solo' && ctx.difficulty && !soloCountsForRank(ctx.difficulty)) {
     reasons.push('difficulty');
+  } else if (
+    ctx.mode === 'solo' &&
+    ctx.difficulty &&
+    ctx.rankMu !== undefined &&
+    ctx.rankMu > soloMuCap(ctx.difficulty)
+  ) {
+    // Every solo rung has a ceiling it converges on, and above that ceiling
+    // the match moves no rating at all. Said out loud here, because the badge
+    // otherwise promises a ladder move for a match that cannot make one — the
+    // same lie the Rookie case above exists to prevent, one rung up.
+    reasons.push('outgrown');
   }
   const r = normalizeRules(ctx.rules);
   if (r.opponentSonar) reasons.push('sonar');
@@ -280,19 +343,49 @@ export const DEFAULT_ROOM_CONFIG: RoomMatchConfig = {
  * score was two private matches that happened to share a ball, and the shorter
  * one ending first left the other player stranded mid-rally.
  */
+/**
+ * Whether the auto-serve timer is forced ON, i.e. whether "Off" is a real
+ * choice or a setting the server is about to overwrite.
+ *
+ * Two conditions, and leaving either out makes the control lie in a different
+ * direction. `normalizeRoomConfig` is the only thing that forces the timer and
+ * it runs for a ROOM and nowhere else — solo, Practice and Split Screen reach
+ * `normalizeRules` alone — so the mode is half the question. The other half is
+ * the rules ALONE and not the whole ranked verdict: on a Casual table the
+ * venue unranks the match, so the full verdict said "not ranked", so "Off" was
+ * offered and then silently overwritten with 5s. A Casual duel is still two
+ * humans on ranked-legal rules, which is exactly the stall the floor exists
+ * for.
+ *
+ * Asking `isRankedRules` alone was the swing back too far: it disabled "Off"
+ * in Practice and Split, which are unranked always and pass through no room
+ * normalization at all, and on unranked solo rungs like Rookie.
+ */
+export function autoServeForced(mode: GameMode, rules: Partial<MatchRules> | null | undefined): boolean {
+  return mode === 'multiplayer' && isRankedRules(normalizeRules(rules));
+}
+
 export function normalizeRoomConfig(
   input: Partial<RoomMatchConfig> | null | undefined
 ): RoomMatchConfig {
   const raw = input || {};
-  const rules = normalizeRules(raw.rules);
+  const normalized = normalizeRules(raw.rules);
   // Ranked play MUST carry an auto-serve timer. With rating on the line,
   // "off" would let a losing player stall the match indefinitely by simply
   // never serving; the timer is what makes a ranked result something the
   // other player can always reach. An unranked party match may still stall —
   // nothing is at stake there.
-  if (isRankedRules(rules) && rules.autoServeSeconds === 0) {
-    rules.autoServeSeconds = RANKED_AUTO_SERVE_SECONDS;
-  }
+  //
+  // A COPY, never a write into `normalized`: that object is shared (see the
+  // cache above `normalizeRules`) and frozen, so mutating it would have
+  // rewritten the rules for everyone else holding the same input. Harmless
+  // while every call built a fresh object, and a real bug the moment one did
+  // not — which is what the freeze is there to make impossible rather than
+  // merely unlikely.
+  const rules: MatchRules =
+    isRankedRules(normalized) && normalized.autoServeSeconds === 0
+      ? { ...normalized, autoServeSeconds: RANKED_AUTO_SERVE_SECONDS }
+      : normalized;
   return {
     winningScore: normalizeWinningScore(raw.winningScore),
     rules,

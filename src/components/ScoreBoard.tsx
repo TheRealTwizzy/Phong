@@ -192,7 +192,7 @@ export const ScoreBoard: React.FC<ScoreBoardProps> = ({
           <div className="flex flex-col items-center">
             <span className="text-2xs text-ink-dim">:</span>
             <span className="text-2xs font-normal tracking-normal text-ink-dim">
-              to {winningScore}
+              {t('score_to', language, { n: winningScore })}
             </span>
           </div>
 

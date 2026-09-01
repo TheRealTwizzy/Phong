@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AIDifficulty, BallState } from '../src/types';
 import {
@@ -17,6 +19,10 @@ import {
   aimFromPush,
   serveVelocity,
   SERVE_BALL_Y,
+  SERVE_MIN_POWER,
+  minBallSpeedFor,
+  maxBallSpeedFor,
+  SERVE_MAX_POWER,
   PADDLE_HEIGHT,
   AIM_FULL_PUSH,
   AIM_DEADZONE,
@@ -27,6 +33,7 @@ import {
   BALL_BASE_RADIUS,
   MAX_PHYSICS_SUBSTEPS,
   physicsSubsteps,
+  bounceOffWall,
 } from '../src/game/physics';
 import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
@@ -615,5 +622,267 @@ describe('physicsSubsteps keeps the ball inside the paddle it is passing', () =>
     const steps = physicsSubsteps(speed, dt, radius);
     const hits = Array.from({ length: steps }, (_, i) => sample(startY + speed * (dt / steps) * (i + 1)));
     expect(hits.some(Boolean)).toBe(true);
+  });
+});
+
+describe('the paddle obeys the match speed band', () => {
+  // CLAUDE.md §3 promises "every rebound is held inside the match's own speed
+  // band". `bounceOffWall` has taken the rules since spin shipped and
+  // `checkPaddleCollision` did not, so the wall let a rally climb to
+  // `MAX_BALL_SPEED * ballSpeedMax` while every paddle contact snapped it back
+  // to the stock 2.4 — a rule that only ever made the game slower, and only in
+  // one half of the rally.
+  const arriving = (speed: number) =>
+    ({
+      x: 0.5,
+      y: PADDLE_Y - PADDLE_HEIGHT / 2,
+      vx: 0,
+      vy: speed,
+      radius: BALL_BASE_RADIUS,
+      spin: 0,
+      active: true,
+    }) as BallState;
+
+  it('still caps at the stock ceiling when the rules are stock', () => {
+    const stock = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, 0, {});
+    expect(stock.speed).toBeCloseTo(MAX_BALL_SPEED, 10);
+  });
+
+  it('behaves exactly as before when given no rules at all', () => {
+    const bare = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO);
+    expect(bare.speed).toBe(MAX_BALL_SPEED);
+  });
+
+  it('lets a raised ceiling actually raise it', () => {
+    const fast = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, 0, {
+      ballSpeedMax: 2,
+    });
+    expect(fast.speed).toBeGreaterThan(MAX_BALL_SPEED);
+    expect(fast.speed).toBeLessThanOrEqual(MAX_BALL_SPEED * 2 + 1e-9);
+  });
+
+  it('agrees with the wall about where the ceiling is', () => {
+    // The two surfaces disagreeing is the whole bug: a ball could be sped up
+    // by a wall past a ceiling the paddle would then pull it back under.
+    for (const ballSpeedMax of [1, 1.2, 1.5, 2]) {
+      const rules = { ballSpeedMax };
+      const paddle = checkPaddleCollision(arriving(MAX_BALL_SPEED * 4), 0.5, PADDLE_WIDTH_RATIO, 0, 0, rules);
+      expect(paddle.speed).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
+      const wall = bounceOffWall(-MAX_BALL_SPEED * 4, 0.1, 0, true, rules);
+      expect(Math.hypot(wall.vx, wall.vy)).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
+    }
+  });
+});
+
+describe('every paddle contact in the app is told the match rules', () => {
+  // `checkPaddleCollision`'s cap is the LAST word on a contact: called without
+  // rules it pins the ball to the stock `MAX_BALL_SPEED`, and the
+  // `clampBallSpeed` that follows each call site clamps into [min, max], so it
+  // can raise a slow ball to the floor but can never restore a ceiling the
+  // contact already took away. A call site that forgets the argument therefore
+  // fails exactly the way the asymmetry this parameter exists to remove failed:
+  // silently, in one half of the rally, only on a non-stock band.
+  //
+  // Nothing else can see this. `tsc` accepts the short call because the
+  // parameter is optional, and the tests above call the function directly, so
+  // they stay green while the game does not. Reading the source is what the
+  // stylesheet, schema and `t()` checks elsewhere in this suite do for the same
+  // reason: the fact under test lives at a call site, not behind an export.
+  const CALLERS = ['src/App.tsx', 'src/components/SplitScreenMatch.tsx'];
+
+  /** The argument list of every `checkPaddleCollision(` call in `src`, by balanced parens. */
+  function callArgs(src: string): string[] {
+    const calls: string[] = [];
+    const needle = 'checkPaddleCollision(';
+    for (let at = src.indexOf(needle); at !== -1; at = src.indexOf(needle, at + 1)) {
+      let depth = 0;
+      let i = at + needle.length - 1;
+      for (; i < src.length; i++) {
+        if (src[i] === '(') depth++;
+        else if (src[i] === ')' && --depth === 0) break;
+      }
+      calls.push(src.slice(at + needle.length, i));
+    }
+    return calls;
+  }
+
+  it('finds the calls at all, so a rename cannot make this vacuous', () => {
+    const found = CALLERS.flatMap((f) => callArgs(readFileSync(resolve(__dirname, '..', f), 'utf8')));
+    expect(found.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it.each(CALLERS)('%s passes the rules to every contact', (file) => {
+    for (const args of callArgs(readFileSync(resolve(__dirname, '..', file), 'utf8'))) {
+      expect(args).toMatch(/rulesRef\.current|activeRules/);
+    }
+  });
+});
+
+describe('the split-screen mirror is in Y alone', () => {
+  // Split screen is ONE screen, not two phones head to head, so the transform
+  // that lets player 2's paddle reuse the half-court routine flips y and vy and
+  // leaves world x alone. Everything along x therefore passes through
+  // untouched — the paddle's own velocity going in, the `sin(angle)` coming
+  // back — while spin FLIPS, because a reflection reverses the sense of a
+  // rotation. Negating the paddle velocity instead made player 2's drive push
+  // the ball the opposite way from their swipe.
+  const arriving = (vy: number, spin = 0) =>
+    ({
+      x: 0.5,
+      y: PADDLE_Y - PADDLE_HEIGHT / 2,
+      vx: 0,
+      vy,
+      radius: BALL_BASE_RADIUS,
+      spin,
+      active: true,
+    }) as BallState;
+
+  /**
+   * What the split-screen loop does for player 2, as one function. The ball
+   * starts where a ball reaching the TOP paddle actually is — mirroring one
+   * already sitting on the bottom paddle line lands it at the far end of the
+   * court, where nothing is hit and every sign test passes on a zero.
+   */
+  const p2Return = (paddleVx: number) => {
+    const b = { ...arriving(-0.9), y: 1 - (PADDLE_Y - PADDLE_HEIGHT / 2) } as BallState;
+    const mirrored = { ...b, y: 1 - b.y, vy: -b.vy, spin: -(b.spin ?? 0) } as BallState;
+    const hit = checkPaddleCollision(mirrored, 0.5, PADDLE_WIDTH_RATIO, paddleVx, 0, {});
+    return { vx: (hit.speed ?? 0) * Math.sin(hit.angle ?? 0), spin: -(hit.spin ?? 0) };
+  };
+
+  it('sends the ball the way the paddle was actually moving, for both players', () => {
+    // Player 1 is the unmirrored case and is the reference for "correct".
+    const p1 = checkPaddleCollision(arriving(0.9), 0.5, PADDLE_WIDTH_RATIO, 0.9, 0, {});
+    const p1Vx = (p1.speed ?? 0) * Math.sin(p1.angle ?? 0);
+    expect(p1Vx).toBeGreaterThan(0);
+    // A rightward swipe is a rightward swipe on either side of one screen.
+    expect(p2Return(0.9).vx).toBeGreaterThan(0);
+    expect(p2Return(-0.9).vx).toBeLessThan(0);
+  });
+
+  it('gives the two halves mirror-image drive, not identical drive', () => {
+    expect(p2Return(0.9).vx).toBeCloseTo(-p2Return(-0.9).vx, 12);
+  });
+
+  it('puts OPPOSITE world spin on the same swipe, because the paddles touch opposite faces', () => {
+    // Not a sign slip: player 1's paddle is under the ball and player 2's is
+    // over it, so one drags the bottom of the ball rightward and the other
+    // drags the top of it rightward. Identical swipes, mirror-image rotation —
+    // which is the reflection reversing the sense of a rotation, seen from the
+    // other end. What has to hold is that world spin is then read back
+    // consistently: `bounceOffWall` takes it as-is and player 2's next contact
+    // mirrors it in again.
+    const p1 = checkPaddleCollision(arriving(0.9), 0.5, PADDLE_WIDTH_RATIO, 0.9, 0, {});
+    expect(p1.spin ?? 0).not.toBe(0);
+    expect(Math.sign(p2Return(0.9).spin)).toBe(-Math.sign(p1.spin ?? 0));
+  });
+
+  it('bounces a wall in the frame the speed band was written in', () => {
+    // Split screen runs every speed at SPEED_SCALE, because a full court is
+    // ~2.2x the travel of a half-court leg, while `bounceOffWall` holds its
+    // result inside `[minBallSpeedFor, maxBallSpeedFor]` — the band UNSCALED.
+    // This mode's ENTIRE legal range sits below that floor, so handed raw
+    // values the clamp is not a ceiling, it is a launch: every wall bounce
+    // speeds the ball up to the half-court minimum and pins it there. The loop
+    // converts into that frame and back, which is what this states.
+    const SPEED_SCALE = 0.55;
+    const rules = {};
+    const floor = minBallSpeedFor(rules) * SPEED_SCALE;
+    const cap = maxBallSpeedFor(rules) * SPEED_SCALE;
+    const vx = -0.5 * SPEED_SCALE;
+    const vy = 0.4 * SPEED_SCALE;
+    const started = Math.hypot(vx, vy);
+    expect(started).toBeGreaterThan(floor);
+    expect(started).toBeLessThan(cap);
+
+    // Converted: an unspun bounce is a pure reflection, and a spun one stays
+    // inside the band this mode actually plays at.
+    for (const spin of [-SPIN_MAX, 0, SPIN_MAX]) {
+      const off = bounceOffWall(vx / SPEED_SCALE, vy / SPEED_SCALE, spin, true, rules);
+      const speed = Math.hypot(off.vx * SPEED_SCALE, off.vy * SPEED_SCALE);
+      expect(speed).toBeGreaterThanOrEqual(floor - 1e-9);
+      expect(speed).toBeLessThanOrEqual(cap + 1e-9);
+    }
+    expect(
+      Math.hypot(
+        bounceOffWall(vx / SPEED_SCALE, vy / SPEED_SCALE, 0, true, rules).vx * SPEED_SCALE,
+        bounceOffWall(vx / SPEED_SCALE, vy / SPEED_SCALE, 0, true, rules).vy * SPEED_SCALE
+      )
+    ).toBeCloseTo(started, 12);
+
+    // Raw, which is what this mode did: the ball is dragged up to the
+    // half-court floor whatever it arrived at, so two different legal speeds
+    // leave the same wall at one identical speed.
+    const raw = bounceOffWall(vx, vy, 0, true, rules);
+    const slower = bounceOffWall(vx * 0.5, vy * 0.5, 0, true, rules);
+    expect(Math.hypot(raw.vx, raw.vy)).toBeCloseTo(minBallSpeedFor(rules), 12);
+    expect(Math.hypot(slower.vx, slower.vy)).toBeCloseTo(minBallSpeedFor(rules), 12);
+    expect(Math.hypot(raw.vx, raw.vy)).toBeGreaterThan(started);
+  });
+});
+
+describe('the split-screen serve obeys the match rules', () => {
+  // Two of the six physics rules this mode's own pre-match sheet offers reached
+  // nothing: the launch used a hardcoded random `vx` and a fixed base speed, so
+  // `serveAngleMax: 0` still served at an angle and `servePowerMax` did nothing
+  // whatever. This states the mapping the component uses.
+  const SPREAD = 0.5;
+  const POWER_FRAC = (1 - SERVE_MIN_POWER) / (SERVE_MAX_POWER - SERVE_MIN_POWER);
+
+  it('leaves the stock serve exactly where it was', () => {
+    const { vx, vy } = serveVelocity({ angle: 0, power: POWER_FRAC }, {});
+    expect(Math.hypot(vx, vy)).toBeCloseTo(BASE_BALL_SPEED, 10);
+  });
+
+  it('serves straight when the match forbids an angle', () => {
+    for (const angle of [-SPREAD, 0, SPREAD]) {
+      const { vx } = serveVelocity({ angle, power: POWER_FRAC }, { serveAngleMax: 0 });
+      expect(Math.abs(vx)).toBeCloseTo(0, 12);
+    }
+  });
+
+  it('widens and narrows with serveAngleMax', () => {
+    const wide = serveVelocity({ angle: SPREAD, power: POWER_FRAC }, { serveAngleMax: 1.4 });
+    const stock = serveVelocity({ angle: SPREAD, power: POWER_FRAC }, {});
+    expect(Math.abs(wide.vx)).toBeGreaterThan(Math.abs(stock.vx));
+  });
+
+  it('scales with servePowerMax', () => {
+    const hard = serveVelocity({ angle: 0, power: POWER_FRAC }, { servePowerMax: 1.5 });
+    const stock = serveVelocity({ angle: 0, power: POWER_FRAC }, {});
+    expect(Math.hypot(hard.vx, hard.vy)).toBeGreaterThan(Math.hypot(stock.vx, stock.vy));
+  });
+
+  it('keeps the spread inside the match limit, so a random aim is always legal', () => {
+    const { vx, vy } = serveVelocity({ angle: SPREAD, power: POWER_FRAC }, {});
+    const deg = (Math.abs(Math.atan2(vx, -vy)) * 180) / Math.PI;
+    expect(deg).toBeLessThanOrEqual(SERVE_MAX_ANGLE_DEG + 1e-9);
+    expect(deg).toBeCloseTo(SERVE_MAX_ANGLE_DEG * SPREAD, 9);
+  });
+});
+
+describe('keyboard paddles move per SECOND, in every component that has one', () => {
+  // A flat delta added on every animation frame moves the paddle exactly twice
+  // as fast on a 120Hz display as on a 60Hz one. `CourtCanvas` was fixed and
+  // `SplitScreenMatch` was missed by the same commit — and there it is not
+  // only a speed, because those positions are differentiated into the paddle
+  // velocity that feeds `driveCoupling`, so the refresh rate decided the
+  // angle, the pace and the spin of an otherwise identical return.
+  //
+  // Read from the source for the same reason the paddle call sites are: this
+  // lives inside a `useEffect` in a `.tsx`, and a frame-rate dependence
+  // compiles, runs, and looks correct on whatever display you happen to own.
+  const DRIVERS = ['src/components/CourtCanvas.tsx', 'src/components/SplitScreenMatch.tsx'];
+
+  it.each(DRIVERS)('%s scales its keyboard delta by dt', (file) => {
+    const src = readFileSync(resolve(__dirname, '..', file), 'utf8');
+    const uses = src
+      .split('\n')
+      .filter((l) => l.includes('KEY_PADDLE_SPEED') && !l.includes('const KEY_PADDLE_SPEED'));
+    // It has to be there at all, or the assertion below is vacuous.
+    expect(uses.length).toBeGreaterThan(0);
+    for (const line of uses) expect(line).toMatch(/KEY_PADDLE_SPEED \* dt/);
+    // And the per-second constant is declared, rather than a bare literal.
+    expect(src).toMatch(/const KEY_PADDLE_SPEED = [\d.]+ \* 60;/);
   });
 });

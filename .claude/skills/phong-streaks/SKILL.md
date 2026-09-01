@@ -22,6 +22,7 @@ either scored, so a player's rally number was mostly a statement about their opp
 ## The three numbers, and which one anything is paid on
 
 `MatchEndPayload` carries all three because they answer different questions. Pick deliberately.
+(There is a FOURTH, `earnedReturns`, and it is not one of these — see below.)
 
 1. **`bestStreak` — the peak the run reached**, opening on whatever was carried in. This is what
    the career best, the mode best and the rally achievements are about. It is a maximum, so it
@@ -29,7 +30,7 @@ either scored, so a player's rally number was mostly a statement about their opp
 2. **`endStreak` — where the run stands when the match ends.** This is what the next match
    starts from, and the only one of the three that legitimately goes *down*.
 3. **`earnedStreak` — how much of the peak was built here, counted from zero.** **This is the
-   only one anything is paid or rated on**: `matchXp`, `practiceXp`, `performanceWeight` and the
+   only one anything is paid or rated on**: `matchXp`, `practiceDayXp`, `performanceWeight` and the
    daily rally tasks.
 
 **Paying on the peak is a farm with no work in it.** Carry a run in, open the Practice Wall,
@@ -38,6 +39,32 @@ its worst it paid an elite task's 600 XP and its permanent theme unlock for noth
 
 How easy is the mix-up? `matchXp`'s parameter is *named* `bestStreak` (`src/rating.ts:445`)
 while `server/db.ts` correctly passes `earnedStreak` into it. Do not follow the name.
+
+## `earnedReturns` is a COUNT, and all three above are runs
+
+A fourth field, and the distinction is not pedantry — it is a live exploit twice over.
+`earnedStreak` is reset by `ownMiss`, so `earnedBest` is the longest UNBROKEN run built in this
+match or visit. Anything asking **how much work was done** needs a count instead, and the
+Practice Wall's daily curve is exactly that question.
+
+Fed `earnedBest`, the session-splitting exploit the day curve exists to remove survived in a
+new shape: three returns and a miss repeated thirty times in ONE visit banked three returns,
+while leaving the wall after each miss reported thirty threes and banked ninety, for identical
+play. The *first* fix moved the curve from the session to the day, which was necessary and not
+sufficient, because the number handed to it was still a high-water mark.
+
+So: `earnedReturns` is incremented by `ownReturn`, untouched by `ownMiss`, opened at zero by
+`startMatchStreaks`, and read by **nothing but the day curve**. XP per rally, the rating weight
+and the daily rally tasks all still key on `earnedBest`, because those ask how long a run was.
+When you add a reward, ask which question it is: *how long a run* takes `earnedBest`, *how much
+was done* takes `earnedReturns`, and picking the wrong one does not crash — it pays for a run
+the player did not have, or under-counts a session with misses in it by however many times they
+missed.
+
+It is bounded server-side by `PRACTICE_RETURNS_MAX` and floored at the earned peak (a run of N
+is at least N returns). Inflating it is self-harming rather than an exploit, since the curve is
+marginal — claimed returns make the REST of the day pay less — so the bound is a rail against
+nonsense, not an anti-cheat measure.
 
 ## The rule is written three times and must not drift
 

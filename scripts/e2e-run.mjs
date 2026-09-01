@@ -238,16 +238,26 @@ async function runSuite(suite) {
   };
 
   let server = null;
+  let serverLog = '';
   const started = Date.now();
   let result;
   try {
     if (!suite.ownsServer) {
-      server = spawn('node', ['dist/server.cjs'], { cwd: ROOT, env, stdio: 'ignore', detached: true });
+      // Its output is CAPTURED, not discarded. With `stdio: 'ignore'` a server
+      // that crashed on boot left the suite failing on "server never became
+      // healthy" and nothing whatsoever about why — the one line that would
+      // have said so was thrown away.
+      server = spawn('node', ['dist/server.cjs'], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      serverLog = '';
+      server.stdout.on('data', (d) => { serverLog += d; });
+      server.stderr.on('data', (d) => { serverLog += d; });
       await waitForHealth(base, server);
     }
     result = await run('node', [file], env);
   } catch (err) {
-    result = { code: 1, out: `harness: ${err.message}` };
+    // The server's own output goes with the harness error, because "never
+    // became healthy" on its own names a symptom and never a cause.
+    result = { code: 1, out: `harness: ${err.message}${serverLog ? `\n--- server ---\n${serverLog.slice(-4000)}` : ''}` };
   } finally {
     await stop(server);
     fs.rmSync(dataDir, { recursive: true, force: true });

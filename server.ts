@@ -233,18 +233,40 @@ function sendAll(sockets: WebSocket[], payload: unknown): void {
  * both: a key that collided with a room id would open a table its holder was
  * never given.
  */
+function codeIsFree(code: string): boolean {
+  if (rooms.has(code)) return false;
+  for (const room of rooms.values()) {
+    if (room.joinKey === code) return false;
+  }
+  return true;
+}
+
 function mintJoinKey(): string {
   for (let i = 0; i < 200; i++) {
     const key = generateRoomCode();
-    if (rooms.has(key)) continue;
-    let taken = false;
-    for (const room of rooms.values()) {
-      if (room.joinKey === key) { taken = true; break; }
-    }
-    if (!taken) return key;
+    if (codeIsFree(key)) return key;
   }
   // 32^4 codes against a single-instance room map: unreachable in practice,
   // and a null key is refused rather than silently opening the table.
+  return '';
+}
+
+/**
+ * A fresh ROOM ID, unique against the same two namespaces a join key is.
+ *
+ * `mintJoinKey` above has always checked both, and minting an id checked only
+ * `rooms` — which is the same collision from the other side. `roomForCode`
+ * resolves a typed code against ids and keys together, so a new table given an
+ * id equal to a live table's join key would answer to that key: the four
+ * characters somebody was privately handed would start opening a stranger's
+ * table, and the table they were invited to would become unreachable by the
+ * only code that opens it.
+ */
+function mintRoomCode(): string {
+  for (let i = 0; i < 200; i++) {
+    const code = generateRoomCode();
+    if (codeIsFree(code)) return code;
+  }
   return '';
 }
 
@@ -426,10 +448,8 @@ function queueCandidate(entry: QueueEntry): Candidate | null {
  * `game_start` and runs when each player actually reaches the court.
  */
 function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
-  let code = generateRoomCode();
-  let guard = 0;
-  while (rooms.has(code) && guard++ < 50) code = generateRoomCode();
-  if (rooms.has(code)) return; // absurd, but never overwrite a live table
+  const code = mintRoomCode();
+  if (!code) return; // absurd, but never overwrite a live table or a live key
 
   const session = (entry: QueueEntry, index: 0 | 1): PlayerSession => ({
     ws: entry.ws,
@@ -534,17 +554,24 @@ function sweepQueue(now: number): void {
   for (let i = queue.length - 1; i >= 0; i--) {
     if (queue[i].ws.readyState !== WebSocket.OPEN) queue.splice(i, 1);
   }
+  // Built ONCE, then drained. It used to be rebuilt inside the loop, so a
+  // sweep that made K pairs asked the database for every queued entry K+1
+  // times — every two seconds, synchronously, on the loop that also relays
+  // `paddle_move` for every live match. Nothing in a rating changes between
+  // two pairings of one sweep, so the rebuild could only ever produce the list
+  // it already had, minus the two just seated.
+  const byId = new Map<string, QueueEntry>();
+  let candidates: Candidate[] = [];
+  for (const entry of queue) {
+    const candidate = queueCandidate(entry);
+    // A cookieless socket has no rating to pair on and no profile to record
+    // onto. It can play a private duel; it cannot be matchmade.
+    if (!candidate || byId.has(candidate.deviceId)) continue;
+    byId.set(candidate.deviceId, entry);
+    candidates.push(candidate);
+  }
+
   for (;;) {
-    const byId = new Map<string, QueueEntry>();
-    const candidates: Candidate[] = [];
-    for (const entry of queue) {
-      const candidate = queueCandidate(entry);
-      // A cookieless socket has no rating to pair on and no profile to record
-      // onto. It can play a private duel; it cannot be matchmade.
-      if (!candidate || byId.has(candidate.deviceId)) continue;
-      byId.set(candidate.deviceId, entry);
-      candidates.push(candidate);
-    }
     const pair = findPair(candidates, now);
     if (!pair) return;
     const a = byId.get(pair[0].deviceId)!;
@@ -552,6 +579,10 @@ function sweepQueue(now: number): void {
     leaveQueue(a.ws);
     leaveQueue(b.ws);
     seatQueuePair(a, b);
+    // The two seated leave the list rather than the list being rebuilt around
+    // them. `findPair` is pure over this array, so this is the same answer.
+    const seated = new Set([pair[0].deviceId, pair[1].deviceId]);
+    candidates = candidates.filter((c) => !seated.has(c.deviceId));
   }
 }
 
@@ -984,6 +1015,21 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
+  /**
+   * A 500, without telling the caller what broke.
+   *
+   * Twenty-three routes answered `{ error: e.message }`, so an internal
+   * failure handed the client the SQLite error text — table and column names,
+   * constraint names, and file paths. That is the same class of leak as
+   * publishing the server source map, arriving one exception at a time, and
+   * every one of these routes is reachable by anybody who can load the page.
+   * The message still goes to the log, which is where it is useful.
+   */
+  const serverError = (res: express.Response, e: unknown): void => {
+    console.error('[500]', e);
+    if (!res.headersSent) res.status(500).json({ error: 'SERVER_ERROR' });
+  };
+
   // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies).
   //
   // The HOP COUNT is load-bearing, and `true` was wrong for more than cookies.
@@ -1175,7 +1221,7 @@ async function startServer() {
       closeDisplacedSockets(req.deviceId!, sessionId);
       res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(req.deviceId!) });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1211,7 +1257,7 @@ async function startServer() {
       closeDisplacedSockets(previous, sessionId);
       res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(deviceId) });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1361,7 +1407,7 @@ async function startServer() {
       const profile = db.getProfile(req.deviceId!);
       res.json(profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1377,7 +1423,7 @@ async function startServer() {
       }
       res.json(result.profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1391,7 +1437,7 @@ async function startServer() {
       }
       res.json({ valid: true, available: db.isUsernameAvailable(u, req.deviceId!) });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1438,7 +1484,7 @@ async function startServer() {
       }
       res.json(profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1470,7 +1516,7 @@ async function startServer() {
         const avatarVersion = db.setAvatar(req.deviceId!, buf);
         res.json({ hasAvatar: true, avatarVersion });
       } catch (e: any) {
-        res.status(500).json({ error: e.message });
+        serverError(res, e);
       }
     }
   );
@@ -1480,7 +1526,7 @@ async function startServer() {
       db.deleteAvatar(req.deviceId!);
       res.json({ hasAvatar: false });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1496,7 +1542,7 @@ async function startServer() {
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       res.send(Buffer.from(avatar.data));
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1590,7 +1636,7 @@ async function startServer() {
       evictStaleSockets();
       res.json(profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1603,7 +1649,7 @@ async function startServer() {
       if (!code) return res.status(404).json({ error: 'PROFILE_NOT_FOUND' });
       res.json({ recoveryCode: code });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1648,7 +1694,7 @@ async function startServer() {
       clearSessionCookie(req, res);
       res.json({ deleted: true, username: result.username });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1699,7 +1745,7 @@ async function startServer() {
       });
       res.json({ matches, total, page, pageSize: HISTORY_PAGE_SIZE });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1715,7 +1761,7 @@ async function startServer() {
       }
       res.json({ profile });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1909,7 +1955,7 @@ async function startServer() {
       const result = db.recordMatch(payload, context);
       res.json(result);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1931,7 +1977,7 @@ async function startServer() {
       const leaderboard = db.getLeaderboard(sort, limit, includeBots);
       res.json({ leaderboard });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1964,7 +2010,7 @@ async function startServer() {
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
       res.json({ modeStats: out.modeStats });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1985,13 +2031,20 @@ async function startServer() {
           bestStreak: streak,
           earnedStreak: Number(req.body?.earnedStreak),
           endStreak: Number(req.body?.endStreak),
+          // How many returns this visit made in total, which is a COUNT and
+          // not a run — see recordPractice for why the daily curve cannot be
+          // fed the peak. Absent from an older bundle, and recordPractice
+          // falls back to the peak there, which is exactly what it did before.
+          earnedReturns: req.body?.earnedReturns === undefined
+            ? undefined
+            : Number(req.body?.earnedReturns),
           ageMs: clientAgeMs(req.body),
           chainId: chainIdOf(req.body),
           runSeq: Number(req.body?.runSeq),
         })
       );
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -2004,7 +2057,7 @@ async function startServer() {
         rerolls: db.rerollsRemaining(req.deviceId!),
       });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -2030,7 +2083,7 @@ async function startServer() {
         rerolls: db.rerollsRemaining(req.deviceId!),
       });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -2053,7 +2106,7 @@ async function startServer() {
         newMissionId: result.newMissionId,
       });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -2063,7 +2116,7 @@ async function startServer() {
       const list = db.getAchievementsList(req.deviceId!);
       res.json({ achievements: list });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -2083,7 +2136,7 @@ async function startServer() {
       // the deploy reads data.matches and slices ten for itself.
       res.json({ matches, total, page, pageSize: HISTORY_PAGE_SIZE });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -2394,9 +2447,16 @@ async function startServer() {
             );
             return;
           }
-          let code = generateRoomCode();
-          while (rooms.has(code)) {
-            code = generateRoomCode();
+          const code = mintRoomCode();
+          if (!code) {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'ROOM_NOT_FOUND',
+                message: 'Could not open a table right now. Try again.',
+              })
+            );
+            return;
           }
           // Taking a seat means giving up the one this socket already holds.
           // The handlers below just overwrite currentRoomId and the seat, so
@@ -2820,8 +2880,13 @@ async function startServer() {
           }
           ws.send(JSON.stringify({ type: 'queue_state', status: 'searching' }));
           // Answer immediately when there is already somebody waiting, rather
-          // than making the newcomer sit out a tick of the sweep.
-          sweepQueue(Date.now());
+          // than making the NEWCOMER sit out a tick of the sweep — which is
+          // why a re-join does not force one. Re-joining changes nothing the
+          // sweep reads except an `rttMs` tiebreak, so sweeping for it is work
+          // with no possible new answer, and it is work an unmetered message
+          // could ask for in a loop: the sweep is O(N) reads and O(N^2) erf
+          // over the queue.
+          if (!already) sweepQueue(Date.now());
         } else if (msg.type === 'queue_cancel') {
           leaveQueue(ws);
           ws.send(JSON.stringify({ type: 'queue_state', status: 'cancelled' }));
@@ -3326,7 +3391,14 @@ async function startServer() {
       // closing its socket, so the close handler arrives moments later. The
       // seat is already empty by then, and re-running would count a second
       // abandon for one departure.
-      if (!room.players[mine]) return;
+      // Filled AND ours. The spectator branch above has always checked
+      // `?.ws === ws`; this one only asked whether the seat was occupied, so
+      // it would have run the whole abandon computation against a seat that
+      // now belongs to somebody else. Not reachable today — a socket's own
+      // `seat` is cleared the moment it gives one up — but the two branches
+      // answering the same question differently is how the next path in
+      // becomes a real one, and this is the branch that files a ranked loss.
+      if (room.players[mine]?.ws !== ws) return;
 
       // A socket dying with a live, undecided ball is an abandon — the
       // opponent was denied a match they were in the middle of. Judged
@@ -3453,6 +3525,21 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  /**
+   * The last handler, for anything no route caught.
+   *
+   * Express's default error handler answers with the stack trace in
+   * development and, more importantly, leaves an unhandled synchronous throw
+   * with no JSON shape at all — so a client parsing the body gets a parse
+   * error instead of a status it can act on. Registered AFTER every route and
+   * after the static mounts, which is the only place a four-argument handler
+   * works.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    serverError(res, err);
+  });
 
   // The leaderboard's pace-setters. One-shot and flagged in the DB, so this
   // is a no-op on every boot after the first — it lives here rather than in

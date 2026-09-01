@@ -12,6 +12,7 @@ import {
   OpponentAI,
   bounceOffWall,
   checkPaddleCollision,
+  bounceOffReturnLine,
   driveCoupling,
   predictLanding,
 } from '../src/game/physics';
@@ -369,6 +370,39 @@ describe('spin reading as a difficulty lever', () => {
         expect({ playAt, spin, pushover: r <= 0.3 }).toEqual({ playAt, spin, pushover: false });
         expect({ playAt, spin, wall: r >= 0.98 }).toEqual({ playAt, spin, wall: false });
       }
+    }
+  });
+});
+
+describe('the Practice Wall return line spends spin like any other surface', () => {
+  // It was the one surface that did not: `b.vy = Math.abs(b.vy)` and nothing
+  // else, so a spun ball came off the net in Practice exactly as it went in
+  // while every wall and paddle in the game reversed, damped and traded it.
+  const arriving = { vx: 0.4, vy: -1.4 };
+
+  it('reverses and damps the spin', () => {
+    const out = bounceOffReturnLine(arriving.vx, arriving.vy, SPIN_MAX);
+    expect(Math.sign(out.spin)).toBe(-Math.sign(SPIN_MAX));
+    expect(Math.abs(out.spin)).toBeLessThan(SPIN_MAX);
+  });
+
+  it('sends the ball back down the court', () => {
+    const out = bounceOffReturnLine(arriving.vx, arriving.vy, 0);
+    expect(Math.sign(out.vy)).toBe(1);
+  });
+
+  it('tilts the rebound sideways, which is what spin buys on a surface', () => {
+    const plain = bounceOffReturnLine(0, -1.4, 0);
+    const right = bounceOffReturnLine(0, -1.4, SPIN_MAX);
+    const left = bounceOffReturnLine(0, -1.4, -SPIN_MAX);
+    expect(right.vx).not.toBeCloseTo(plain.vx, 3);
+    expect(Math.sign(right.vx)).toBe(-Math.sign(left.vx));
+  });
+
+  it('stays inside the match speed band', () => {
+    for (const ballSpeedMax of [1, 1.5, 2]) {
+      const out = bounceOffReturnLine(2, -4, SPIN_MAX, { ballSpeedMax });
+      expect(Math.hypot(out.vx, out.vy)).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
     }
   });
 });
