@@ -3337,7 +3337,19 @@ export default function App() {
             : theirs?.active
               ? { side: 1, x: theirs.x, y: theirs.y }
               : null,
-          scores: [statsRef.current.score, statsRef.current.opponentScore],
+          // In SEAT order, because that is how the relay reads it
+          // (`room.scores[me]`, `room.scores[cpuIdx]`) — not because the two
+          // differ today. Only seat 0 can seat a machine, since
+          // `set_room_config` is host-only and the host is whoever holds seat
+          // 0 right now, so `cpuSeatOf` is always 1 and mine-first would give
+          // the same array. Written by seat because the cost is nothing and
+          // the failure if that ever stops being true is silent: both
+          // watchers' scoreboards inverted, and the relay reading the
+          // MACHINE's score as the one that ends the match.
+          scores:
+            (playerIndexRef.current ?? 0) === 0
+              ? [statsRef.current.score, statsRef.current.opponentScore]
+              : [statsRef.current.opponentScore, statsRef.current.score],
           // The loop's effect lists `winner` in its deps, so this closure is
           // rebuilt when it changes and reads the current value. `live` is
           // what sets `room.inPlay`, which is what decides whether a joiner
