@@ -43,6 +43,13 @@ import {
   countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
+import {
+  createRateLimit,
+  limitSpent,
+  noteAttempt,
+  sweepExpired,
+  RateLimitState,
+} from './server/rateLimit';
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
@@ -1146,6 +1153,99 @@ async function startServer() {
 
   app.use('/api', deviceIdentity, sessionIdentity);
 
+  // -------------------------------------------------------------------------
+  // Rate limits. The rules live in server/rateLimit.ts, which is pure and
+  // unit-tested; this is the express wiring and the calibration.
+  //
+  // Keyed on the DEVICE and the IP together, and the IP is what actually binds
+  // here — a caller with no cookie is handed a NEW device id by
+  // `deviceIdentity` on every request, so the device key cannot see a burst
+  // from one. It is kept anyway because it is the half that survives a shared
+  // NAT, where one IP is a building. See the `trust proxy` note above for why
+  // req.ip is a hop count and not `true`: with `true` it is the client's own
+  // X-Forwarded-For entry, which is an unlimited allowance.
+  const limitKeysFor = (req: express.Request): string[] => [`d:${req.deviceId}`, `i:${req.ip}`];
+
+  /**
+   * Requests that originate ON THIS HOST are not counted.
+   *
+   * Not a convenience: it is what keeps the ceilings meaningful. Every test in
+   * this repo drives a real server from 127.0.0.1 — `tests/duelRecord.test.ts`
+   * alone onboards 87 accounts in about twenty seconds — and that is the exact
+   * shape of the attack. No single number can permit it and refuse an
+   * attacker, so a ceiling loose enough for the harness would be decoration.
+   *
+   * Exempting loopback is sound because a caller that can reach this process
+   * from the same host already has the host, and every deployment path here
+   * puts a proxy in front (DEPLOYMENT.md): behind Traefik or Caddy the socket
+   * peer is the proxy's container address and `req.ip` resolves to the real
+   * client through the one trusted hop, so a remote player is never loopback.
+   *
+   * It does mean the browser suites never exercise the 429, so the coverage
+   * has to be deliberate rather than incidental: the rules are unit-tested in
+   * `server/rateLimit.ts`, and `tests/rateLimit.test.ts` drives a real route
+   * past its ceiling with an `X-Forwarded-For`, which the single trusted hop
+   * turns into a non-loopback `req.ip`.
+   */
+  const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+  const isLocalCaller = (req: express.Request): boolean => LOOPBACK.has(String(req.ip || ''));
+
+  /**
+   * Count every REQUEST, not every failure.
+   *
+   * The sign-in limiter below counts failures, because a correct code is not
+   * an attack however often it is presented. These routes are the opposite: a
+   * SUCCESSFUL call is the one that costs a row or a username, so counting
+   * failures alone would leave the thing being defended undefended.
+   */
+  const limited =
+    (state: RateLimitState) =>
+    (req: express.Request, res: express.Response, next: express.NextFunction): void => {
+      if (isLocalCaller(req)) {
+        next();
+        return;
+      }
+      const now = Date.now();
+      const keys = limitKeysFor(req);
+      if (limitSpent(state, keys, now)) {
+        res.status(429).json({ error: 'TOO_MANY_REQUESTS' });
+        return;
+      }
+      noteAttempt(state, keys, now);
+      next();
+    };
+
+  const MINUTE = 60 * 1000;
+  /**
+   * Each ceiling is set against what ONE PLAYER does, with room for a bad
+   * connection retrying, and nothing else. The harness is not a consideration
+   * here — it is exempt as loopback — which is what lets these be tight
+   * enough to matter rather than loose enough to be decoration.
+   */
+  // A page load mints one session and a reload mints another. Ten a minute is
+  // a player mashing refresh; a hundred is a script making a players row per
+  // call.
+  const sessionLimit = createRateLimit(MINUTE, 20);
+  // Onboarding happens once per account, ever. This allowance is for somebody
+  // retrying a name that was taken, not for a script walking a dictionary —
+  // and an initialized row is never pruned, so every call it permits is
+  // permanent.
+  const onboardLimit = createRateLimit(10 * MINUTE, 10);
+  // The picker checks as the player types, debounced, so this has to tolerate
+  // real typing while refusing enumeration of the account namespace.
+  const usernameCheckLimit = createRateLimit(MINUTE, 40);
+  // 512KB of BLOB per call, and a player changes their avatar approximately
+  // never.
+  const avatarLimit = createRateLimit(10 * MINUTE, 10);
+
+  // Bounded, for the reason sweepExpired documents.
+  setInterval(() => {
+    const now = Date.now();
+    for (const state of [sessionLimit, onboardLimit, usernameCheckLimit, avatarLimit]) {
+      sweepExpired(state, now);
+    }
+  }, 10 * MINUTE).unref?.();
+
   // Health check
   app.get('/api/health', (req, res) => {
     // Touch the store. This answered 'ok' off nothing but process liveness,
@@ -1190,7 +1290,7 @@ async function startServer() {
   // Take the account for this browser. Called on every load, and after any
   // status the client cannot play under. A device that was transferred away
   // cannot start a session at all — it has no account to start one on.
-  app.post('/api/session', (req, res) => {
+  app.post('/api/session', limited(sessionLimit), (req, res) => {
     try {
       if (req.session!.status === 'released') {
         return res.status(409).json({ error: 'DEVICE_RELEASED', sessionStatus: 'released', build: buildId() });
@@ -1413,7 +1513,7 @@ async function startServer() {
 
   // First-arrival onboarding: claim a unique username (starts the 365-day
   // rename lock). One-shot per profile.
-  app.post('/api/profile/initialize', requireActiveSession, (req, res) => {
+  app.post('/api/profile/initialize', requireActiveSession, limited(onboardLimit), (req, res) => {
     try {
       const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
       const result = db.initializeProfile(req.deviceId!, username);
@@ -1428,7 +1528,7 @@ async function startServer() {
   });
 
   // Live availability probe for the onboarding / rename forms.
-  app.get('/api/username-check', (req, res) => {
+  app.get('/api/username-check', limited(usernameCheckLimit), (req, res) => {
     try {
       const u = typeof req.query.u === 'string' ? req.query.u.trim() : '';
       const check = validateUsername(u);
@@ -1494,6 +1594,7 @@ async function startServer() {
   app.post(
     '/api/profile/me/avatar',
     requireActiveSession,
+    limited(avatarLimit),
     express.raw({ type: 'image/png', limit: '600kb' }),
     (req, res) => {
       try {

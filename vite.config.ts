@@ -77,6 +77,10 @@ const FLOORS = {
   'src/components/ui/ladderTone.ts': { statements: 95, branches: 95 },
   'server/image.ts': { statements: 90, branches: 88 },
   'server/bots.ts': { statements: 100, branches: 100 },
+  // Pure and complete, like transform.ts. It is small enough that anything
+  // below 100 means a rule went in without a case, and the rules here decide
+  // whether three unauthenticated routes have a ceiling at all.
+  'server/rateLimit.ts': { statements: 100, branches: 100 },
 };
 
 export default defineConfig(() => {

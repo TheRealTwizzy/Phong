@@ -384,10 +384,22 @@ describe('the replica applies the relay rules it owns alone', () => {
 
   it('clips a chat message to the same 100 characters the relay does', async () => {
     const [a, b] = await pairedPeers();
-    a.link.sendGame({ type: 'quick_chat', text: 'x'.repeat(250) });
+    // A FORGED senderName rides along, because the assertion below is about
+    // ignoring it. This test read the same and proved nothing for a release:
+    // it sent no `senderName` at all, so `msg.senderName || playerNames[opp]`
+    // fell through to the fallback and the branch that preferred the payload
+    // was never executed. A parity test that cannot fail is worse than none.
+    a.link.sendGame({
+      type: 'quick_chat',
+      text: 'x'.repeat(250),
+      senderName: 'Guest',
+    });
     const chat = b.got.find((m) => m.type === 'quick_chat') as any;
     expect(chat.text).toHaveLength(100);
-    // And it is attributed to the sender, not to whoever the payload claims.
+    // Attributed to whoever the LINK says is on the other end, never to
+    // whoever the payload claims — the relay resolves the name from
+    // server-held seat state and the replica must answer identically, or a
+    // modified peer can put words in another player's mouth.
     expect(chat.senderIdx).toBe(0);
     expect(chat.senderName).toBe('Host');
   });
