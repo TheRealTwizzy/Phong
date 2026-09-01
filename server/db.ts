@@ -888,6 +888,10 @@ class GameDatabase {
     this.renameAchievement('rating_1400', 'master_tier');
 
     this.releaseStrandedPlacements();
+    // Order against the rescue above does not matter, in either direction: run
+    // first, the rescue then finds rankedGames = 0 and matches nobody; run
+    // second, this supersedes what the rescue just clamped. Both correct.
+    this.resetRankedLadder();
     this.resetActiveTasks();
     // Order matters between these two: the backfill classifies legacy rows
     // from mode + difficulty, and a legacy 'chaos' row (which meant the old
@@ -934,6 +938,68 @@ class GameDatabase {
     this.setMeta(KEY, new Date().toISOString());
     if (stranded.changes) {
       console.log(`placement_sigma_v1: placed ${stranded.changes} player(s) stranded by the old placement rule`);
+    }
+  }
+
+  /**
+   * Start the visible ladder over, without taking anything else with it.
+   *
+   * A run of rating exploits was closed at source — the roomless POST that
+   * vouched for itself, the lone socket driving a room's score, the newcomer
+   * POSTing under a `matchSeq` they never played, the one-frame `match_sync`
+   * forge. Each of them wrote a real rating, so what is on disk is not what
+   * anybody played for. Measured on the worst of them: 25.000 to 47.177 and
+   * thirty ranked games in about a second of wall clock.
+   *
+   * It cannot be recomputed. `matches` stores no pre-match rating, no
+   * opponent rating, no venue and no rules — and `insertMatch` trims it to the
+   * newest 500 rows per player — so there is no replay to run and no honest
+   * arithmetic that turns the stored numbers back into earned ones.
+   *
+   * So the ladder starts over and NOTHING ELSE DOES. This is deliberately not
+   * a `wipe_v5`: the corruption is confined to these five columns, while
+   * usernames, XP, levels, achievements, cosmetic unlocks, history and
+   * per-mode stats were all earned under rules that still stand. A wipe would
+   * also `DELETE FROM meta`, which rotates `auth_secret` — every device cookie
+   * retired, every recovery code gone, every username back in the pool against
+   * a 365-day lock, so re-onboarding becomes a race for your own name. That is
+   * a large price for nothing extra.
+   *
+   * BOTH estimators go, not just the visible one. `ranked` gated both updates,
+   * so the same forged matches moved hidden MMR too — and `rankMu` at 25
+   * beside an `mmrMu` of 47 is a state the code never produces on its own: it
+   * hands a freshly-unranked player Cyber-grade AI adaptation through
+   * `effectiveAiMu` and mis-shapes every pairing `queueCandidate` offers.
+   * Hidden MMR re-converges quickly, since solo matches move it too.
+   *
+   * THE BOT EXCLUSION IS LOAD-BEARING AND MUST NOT BE DROPPED. `seedBotRoster`
+   * is one-shot behind `bot_roster_v1` and runs from `server.ts` AFTER this,
+   * so on any database that has already booted once the flag is stamped and
+   * nothing will ever seed the roster again. A blanket update would therefore
+   * flatten all eight curated ladder bots to unranked permanently, and the
+   * roster exists precisely so the board is not empty for the players deciding
+   * whether to climb it.
+   *
+   * Values come from `newRating()` rather than literals, so a reset row is
+   * byte-identical to what `getProfile`'s lazy mint produces and cannot drift
+   * if the start values move. `matches` is untouched — those rows are a
+   * factual record of games that really were played, and progression here is
+   * banked, not lost. The tier and the ladder position are derived on read
+   * (`rowToProfile`), so every badge follows on the next request.
+   */
+  private resetRankedLadder(): void {
+    const KEY = 'ranked_reset_v1';
+    if (this.getMeta(KEY)) return;
+    const start = newRating();
+    const reset = this.stmt(
+        `UPDATE players
+            SET mmrMu = ?, mmrSigma = ?, rankMu = ?, rankSigma = ?, rankedGames = 0
+          WHERE id NOT LIKE 'bot-%'`
+      )
+      .run(start.mu, start.sigma, start.mu, start.sigma);
+    this.setMeta(KEY, new Date().toISOString());
+    if (reset.changes) {
+      console.log(`ranked_reset_v1: reset the ladder for ${reset.changes} player(s); the bot roster is untouched`);
     }
   }
 

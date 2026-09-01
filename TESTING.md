@@ -59,7 +59,7 @@ coverage number.
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `p2pParity` `headers` | Ten suites that boot the real server (see §4) |
-| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` | The one-shot migrations |
+| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` `rankedReset` | The one-shot migrations |
 
 ### Browser layer
 
@@ -556,6 +556,17 @@ pinning `competenceForMu` bit-for-bit at and above the old Cyber anchor, written
 was raised on the explicit condition that the ceiling did not move. Raising the ceiling IS this
 change, so the test was not updated but removed, and the hard bound it protected (`no
 difficulty may ever return ≥88%`) restated at the new ceiling as `≥93%`.
+
+**A migration that writes to `players` excludes the bot roster.** The eight curated ladder bots
+are seeded once per database behind `bot_roster_v1`, from `server.ts` and AFTER the constructor's
+migrations — so on any database that has booted once, that flag is stamped and nothing will ever
+seed them again. A blanket `UPDATE players SET …` therefore does not merely dirty the roster, it
+destroys it permanently, taking out the rows that exist so the leaderboard is not empty for the
+players deciding whether to climb it. `ranked_reset_v1` carries `id NOT LIKE 'bot-%'` for exactly
+this, and `tests/rankedReset.test.ts` holds it by seeding the roster, re-arming the flag and
+re-booting — dropping the clause turns that case red and leaves the other two green, which is the
+shape to want: it is the only one of the three failures the migration cannot be talked out of
+after the fact.
 
 ## 6. Writing a new test here
 
