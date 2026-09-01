@@ -640,7 +640,7 @@ describe('the paddle obeys the match speed band', () => {
     }) as BallState;
 
   it('still caps at the stock ceiling when the rules are stock', () => {
-    const stock = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, {});
+    const stock = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, 0, {});
     expect(stock.speed).toBeCloseTo(MAX_BALL_SPEED, 10);
   });
 
@@ -650,7 +650,7 @@ describe('the paddle obeys the match speed band', () => {
   });
 
   it('lets a raised ceiling actually raise it', () => {
-    const fast = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, {
+    const fast = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, 0, {
       ballSpeedMax: 2,
     });
     expect(fast.speed).toBeGreaterThan(MAX_BALL_SPEED);
@@ -662,7 +662,7 @@ describe('the paddle obeys the match speed band', () => {
     // by a wall past a ceiling the paddle would then pull it back under.
     for (const ballSpeedMax of [1, 1.2, 1.5, 2]) {
       const rules = { ballSpeedMax };
-      const paddle = checkPaddleCollision(arriving(MAX_BALL_SPEED * 4), 0.5, PADDLE_WIDTH_RATIO, 0, rules);
+      const paddle = checkPaddleCollision(arriving(MAX_BALL_SPEED * 4), 0.5, PADDLE_WIDTH_RATIO, 0, 0, rules);
       expect(paddle.speed).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
       const wall = bounceOffWall(-MAX_BALL_SPEED * 4, 0.1, 0, true, rules);
       expect(Math.hypot(wall.vx, wall.vy)).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
