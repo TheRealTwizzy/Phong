@@ -3168,7 +3168,14 @@ async function startServer() {
       // closing its socket, so the close handler arrives moments later. The
       // seat is already empty by then, and re-running would count a second
       // abandon for one departure.
-      if (!room.players[mine]) return;
+      // Filled AND ours. The spectator branch above has always checked
+      // `?.ws === ws`; this one only asked whether the seat was occupied, so
+      // it would have run the whole abandon computation against a seat that
+      // now belongs to somebody else. Not reachable today — a socket's own
+      // `seat` is cleared the moment it gives one up — but the two branches
+      // answering the same question differently is how the next path in
+      // becomes a real one, and this is the branch that files a ranked loss.
+      if (room.players[mine]?.ws !== ws) return;
 
       // A socket dying with a live, undecided ball is an abandon — the
       // opponent was denied a match they were in the middle of. Judged

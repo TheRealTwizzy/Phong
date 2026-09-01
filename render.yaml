@@ -7,6 +7,12 @@ services:
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
+      # Render reads NODE_VERSION or .node-version — NOT .nvmrc, which is what
+      # this repo has — and package.json's `engines: ">=22"` permits Node 24.
+      # So without this the runtime was whatever Render defaulted to that
+      # month, against a server that uses `node:sqlite`.
+      - key: NODE_VERSION
+        value: "22"
       - key: NODE_ENV
         value: production
       - key: DATA_DIR
