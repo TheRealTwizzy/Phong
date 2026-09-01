@@ -2708,18 +2708,43 @@ class GameDatabase {
       playerScore: payload.playerScore,
       opponentScore: payload.opponentScore,
     });
-    if (shutOut) profile.shutoutsWon += 1;
-    if (isWin && payload.mode === 'solo') {
-      if (difficulty === 'rookie') profile.rookieWins += 1;
-      else if (difficulty === 'pro') profile.proWins += 1;
-      else if (difficulty === 'elite') profile.eliteWins += 1;
-      else if (difficulty === 'cyber') profile.cyberWins += 1;
-      else if (difficulty === 'chaos') profile.chaosWins += 1;
-    }
-    // The career best rally STREAK — this player's own consecutive returns,
-    // never the opponent's, and never a whole point's worth of both.
-    if (payload.bestStreak > profile.highestRally) {
-      profile.highestRally = payload.bestStreak;
+    // ------------------------------------------------------------------
+    // Counters that gate a PERMANENT unlock only advance on ranked-legal
+    // rules.
+    //
+    // `ranked` gated the two rating updates and nothing else, so a match on
+    // `paddleScale: 1.6` + `ballScale: 1.8` + `ballSpeedMax: 1.0` — correctly
+    // refused a rating, and correctly paid XP, which is the documented trade —
+    // still moved every one of these. That bought `rally_150` (900 XP),
+    // `perpetual-blue` and `quantum-gold` off a 160% paddle; the whole shutout
+    // chain and `flawless-white` off a clean sheet nobody had to earn; and,
+    // worst of the three because it is the game's own pacing, the Elite and
+    // Cyber unlocks — `ai_pro_10` then `ai_elite_10` — so the ladder CLAUDE.md
+    // §7 calls "walked, not jumped" could be walked on a 160% paddle.
+    //
+    // XP is not on this list and must not join it: paying for unranked play is
+    // the deliberate trade, and levels never regress. What a permanent unlock
+    // is, though, is the reward ITSELF, and handing one over for a feat the
+    // rules performed is the same mistake as rating the match would have been.
+    //
+    // The line is drawn at counters a permanent unlock reads, not at every
+    // career stat: `aces` and `totalPointsScored` keep counting on any rules,
+    // because they answer "how much have you played" and freezing them would
+    // make a profile under-report matches the player really did play.
+    if (ranked) {
+      if (shutOut) profile.shutoutsWon += 1;
+      if (isWin && payload.mode === 'solo') {
+        if (difficulty === 'rookie') profile.rookieWins += 1;
+        else if (difficulty === 'pro') profile.proWins += 1;
+        else if (difficulty === 'elite') profile.eliteWins += 1;
+        else if (difficulty === 'cyber') profile.cyberWins += 1;
+        else if (difficulty === 'chaos') profile.chaosWins += 1;
+      }
+      // The career best rally STREAK — this player's own consecutive returns,
+      // never the opponent's, and never a whole point's worth of both.
+      if (payload.bestStreak > profile.highestRally) {
+        profile.highestRally = payload.bestStreak;
+      }
     }
     profile.lastActive = new Date().toISOString();
 
