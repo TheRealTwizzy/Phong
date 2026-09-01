@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AIDifficulty, BallState } from '../src/types';
 import {
@@ -627,6 +629,50 @@ describe('the paddle obeys the match speed band', () => {
       expect(paddle.speed).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
       const wall = bounceOffWall(-MAX_BALL_SPEED * 4, 0.1, 0, true, rules);
       expect(Math.hypot(wall.vx, wall.vy)).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
+    }
+  });
+});
+
+describe('every paddle contact in the app is told the match rules', () => {
+  // `checkPaddleCollision`'s cap is the LAST word on a contact: called without
+  // rules it pins the ball to the stock `MAX_BALL_SPEED`, and the
+  // `clampBallSpeed` that follows each call site clamps into [min, max], so it
+  // can raise a slow ball to the floor but can never restore a ceiling the
+  // contact already took away. A call site that forgets the argument therefore
+  // fails exactly the way the asymmetry this parameter exists to remove failed:
+  // silently, in one half of the rally, only on a non-stock band.
+  //
+  // Nothing else can see this. `tsc` accepts the short call because the
+  // parameter is optional, and the tests above call the function directly, so
+  // they stay green while the game does not. Reading the source is what the
+  // stylesheet, schema and `t()` checks elsewhere in this suite do for the same
+  // reason: the fact under test lives at a call site, not behind an export.
+  const CALLERS = ['src/App.tsx', 'src/components/SplitScreenMatch.tsx'];
+
+  /** The argument list of every `checkPaddleCollision(` call in `src`, by balanced parens. */
+  function callArgs(src: string): string[] {
+    const calls: string[] = [];
+    const needle = 'checkPaddleCollision(';
+    for (let at = src.indexOf(needle); at !== -1; at = src.indexOf(needle, at + 1)) {
+      let depth = 0;
+      let i = at + needle.length - 1;
+      for (; i < src.length; i++) {
+        if (src[i] === '(') depth++;
+        else if (src[i] === ')' && --depth === 0) break;
+      }
+      calls.push(src.slice(at + needle.length, i));
+    }
+    return calls;
+  }
+
+  it('finds the calls at all, so a rename cannot make this vacuous', () => {
+    const found = CALLERS.flatMap((f) => callArgs(readFileSync(resolve(__dirname, '..', f), 'utf8')));
+    expect(found.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it.each(CALLERS)('%s passes the rules to every contact', (file) => {
+    for (const args of callArgs(readFileSync(resolve(__dirname, '..', file), 'utf8'))) {
+      expect(args).toMatch(/rulesRef\.current|activeRules/);
     }
   });
 });

@@ -2759,7 +2759,8 @@ export default function App() {
             b,
             paddleXRef.current,
             paddleWidthRef.current,
-            paddleVxRef.current
+            paddleVxRef.current,
+            rulesRef.current
           );
 
           if (hitResult.hit && hitResult.angle !== undefined && hitResult.speed !== undefined) {
