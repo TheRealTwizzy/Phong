@@ -998,6 +998,21 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
+  /**
+   * A 500, without telling the caller what broke.
+   *
+   * Twenty-three routes answered `{ error: e.message }`, so an internal
+   * failure handed the client the SQLite error text — table and column names,
+   * constraint names, and file paths. That is the same class of leak as
+   * publishing the server source map, arriving one exception at a time, and
+   * every one of these routes is reachable by anybody who can load the page.
+   * The message still goes to the log, which is where it is useful.
+   */
+  const serverError = (res: express.Response, e: unknown): void => {
+    console.error('[500]', e);
+    if (!res.headersSent) res.status(500).json({ error: 'SERVER_ERROR' });
+  };
+
   // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies).
   //
   // The HOP COUNT is load-bearing, and `true` was wrong for more than cookies.
@@ -1178,7 +1193,7 @@ async function startServer() {
       closeDisplacedSockets(req.deviceId!, sessionId);
       res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(req.deviceId!) });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1214,7 +1229,7 @@ async function startServer() {
       closeDisplacedSockets(previous, sessionId);
       res.json({ status: 'active', sessionId, build: buildId(), profile: db.getProfile(deviceId) });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1364,7 +1379,7 @@ async function startServer() {
       const profile = db.getProfile(req.deviceId!);
       res.json(profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1380,7 +1395,7 @@ async function startServer() {
       }
       res.json(result.profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1394,7 +1409,7 @@ async function startServer() {
       }
       res.json({ valid: true, available: db.isUsernameAvailable(u, req.deviceId!) });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1441,7 +1456,7 @@ async function startServer() {
       }
       res.json(profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1473,7 +1488,7 @@ async function startServer() {
         const avatarVersion = db.setAvatar(req.deviceId!, buf);
         res.json({ hasAvatar: true, avatarVersion });
       } catch (e: any) {
-        res.status(500).json({ error: e.message });
+        serverError(res, e);
       }
     }
   );
@@ -1483,7 +1498,7 @@ async function startServer() {
       db.deleteAvatar(req.deviceId!);
       res.json({ hasAvatar: false });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1499,7 +1514,7 @@ async function startServer() {
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       res.send(Buffer.from(avatar.data));
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1593,7 +1608,7 @@ async function startServer() {
       evictStaleSockets();
       res.json(profile);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1606,7 +1621,7 @@ async function startServer() {
       if (!code) return res.status(404).json({ error: 'PROFILE_NOT_FOUND' });
       res.json({ recoveryCode: code });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1651,7 +1666,7 @@ async function startServer() {
       clearSessionCookie(req, res);
       res.json({ deleted: true, username: result.username });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1702,7 +1717,7 @@ async function startServer() {
       });
       res.json({ matches, total, page, pageSize: HISTORY_PAGE_SIZE });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1718,7 +1733,7 @@ async function startServer() {
       }
       res.json({ profile });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1830,7 +1845,7 @@ async function startServer() {
       const result = db.recordMatch(payload, context);
       res.json(result);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1843,7 +1858,7 @@ async function startServer() {
       const leaderboard = db.getLeaderboard(sort, limit, includeBots);
       res.json({ leaderboard });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1876,7 +1891,7 @@ async function startServer() {
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
       res.json({ modeStats: out.modeStats });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1903,7 +1918,7 @@ async function startServer() {
         })
       );
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1916,7 +1931,7 @@ async function startServer() {
         rerolls: db.rerollsRemaining(req.deviceId!),
       });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1942,7 +1957,7 @@ async function startServer() {
         rerolls: db.rerollsRemaining(req.deviceId!),
       });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1965,7 +1980,7 @@ async function startServer() {
         newMissionId: result.newMissionId,
       });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1975,7 +1990,7 @@ async function startServer() {
       const list = db.getAchievementsList(req.deviceId!);
       res.json({ achievements: list });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -1995,7 +2010,7 @@ async function startServer() {
       // the deploy reads data.matches and slices ten for itself.
       res.json({ matches, total, page, pageSize: HISTORY_PAGE_SIZE });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      serverError(res, e);
     }
   });
 
@@ -3261,6 +3276,21 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  /**
+   * The last handler, for anything no route caught.
+   *
+   * Express's default error handler answers with the stack trace in
+   * development and, more importantly, leaves an unhandled synchronous throw
+   * with no JSON shape at all — so a client parsing the body gets a parse
+   * error instead of a status it can act on. Registered AFTER every route and
+   * after the static mounts, which is the only place a four-argument handler
+   * works.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    serverError(res, err);
+  });
 
   // The leaderboard's pace-setters. One-shot and flagged in the DB, so this
   // is a no-op on every boot after the first — it lives here rather than in

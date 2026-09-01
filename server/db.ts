@@ -229,6 +229,23 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 const MISSION_CLAIM_GRACE_MS = 12 * 60 * 60 * 1000;
 
+/**
+ * Whether a failed write was the username unique index and not something else.
+ *
+ * Both username paths caught EVERY error from `upsertProfile` and answered
+ * `USERNAME_TAKEN`, so a full disk or a read-only volume told the player their
+ * name had gone and sent them to pick another one — which then failed the same
+ * way. `node:sqlite` puts the SQLite result code on the error; the message is
+ * checked too, because that is a runtime detail and this must not go back to
+ * swallowing everything if it changes.
+ */
+function isUniqueViolation(e: unknown): boolean {
+  const err = e as { code?: string; errcode?: number; message?: string };
+  if (err?.errcode === 2067 || err?.errcode === 1555) return true; // CONSTRAINT_UNIQUE / PRIMARYKEY
+  if (typeof err?.code === 'string' && err.code.includes('CONSTRAINT')) return true;
+  return typeof err?.message === 'string' && /UNIQUE constraint failed/i.test(err.message);
+}
+
 export const PLAYER_KEYED_TABLES = [
   'avatars',
   'player_mode_stats',
@@ -427,6 +444,14 @@ class GameDatabase {
     // recovers fully; only a power loss can drop the last few commits, which
     // for match history and XP is a trade worth making.
     this.sql.exec('PRAGMA synchronous = NORMAL');
+    // WAL lets a reader and the writer run together, but two WRITERS still
+    // serialize — and without this the loser of that race fails instantly with
+    // SQLITE_BUSY rather than waiting. There is one writer in the server
+    // process, so this is about the OTHER openers: `npm run db:backup`'s
+    // `VACUUM INTO` takes a read transaction against a live database, and the
+    // admin CLI opens the same file. Five seconds is far longer than any
+    // statement here takes and far shorter than a request timeout.
+    this.sql.exec('PRAGMA busy_timeout = 5000');
     this.ensureBaseSchema();
     this.applyWipeV1();
     this.migrateSchema();
@@ -1339,8 +1364,12 @@ class GameDatabase {
     profile.lastActive = now;
     try {
       this.upsertProfile(profile);
-    } catch {
-      // Unique-index race: someone claimed the name between check and write.
+    } catch (e) {
+      // The unique index is the only constraint this write can violate, and
+      // losing that race genuinely means the name went. Anything ELSE — a full
+      // disk, a read-only volume — is not the player's name being taken, and
+      // reporting it as one sent them to change a username that was fine.
+      if (!isUniqueViolation(e)) throw e;
       return { ok: false, code: 'USERNAME_TAKEN' };
     }
     return { ok: true, profile: this.readProfile(id)! };
@@ -1373,7 +1402,9 @@ class GameDatabase {
     profile.lastActive = now;
     try {
       this.upsertProfile(profile);
-    } catch {
+    } catch (e) {
+      // See initializeProfile: only a unique-index violation is a taken name.
+      if (!isUniqueViolation(e)) throw e;
       return { ok: false, code: 'USERNAME_TAKEN' };
     }
     return { ok: true, profile: this.readProfile(id)! };

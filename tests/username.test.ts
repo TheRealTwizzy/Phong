@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -125,5 +125,29 @@ describe('365-day username lock', () => {
     const result = db.changeUsername('dev_aaaaaaaaaaaaaaaa22', 'SneakyName');
     expect(result.ok).toBe(false);
     expect(result.code).toBe('PROFILE_NOT_INITIALIZED');
+  });
+});
+
+describe('a failed write is not automatically a taken name', () => {
+  // Both username paths caught EVERY error from `upsertProfile` and answered
+  // USERNAME_TAKEN. So a full disk or a read-only volume told the player their
+  // name had gone and sent them to pick another one — which then failed the
+  // same way, forever, with the real fault never surfacing anywhere.
+  it('reports a genuine collision as taken', () => {
+    db.getProfile('u_taken_a');
+    db.getProfile('u_taken_b');
+    expect(db.initializeProfile('u_taken_a', 'CollideMe').ok).toBe(true);
+    expect(db.initializeProfile('u_taken_b', 'collideme').code).toBe('USERNAME_TAKEN');
+  });
+
+  it('lets any other write failure through instead of mislabelling it', () => {
+    db.getProfile('u_disk');
+    const boom = vi
+      .spyOn(db as unknown as { upsertProfile: (p: unknown) => void }, 'upsertProfile')
+      .mockImplementationOnce(() => {
+        throw new Error('disk I/O error');
+      });
+    expect(() => db.initializeProfile('u_disk', 'DiskFull')).toThrow(/disk I\/O error/);
+    boom.mockRestore();
   });
 });
