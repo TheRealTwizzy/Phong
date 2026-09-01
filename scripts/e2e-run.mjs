@@ -161,14 +161,51 @@ function stop(child) {
   return Promise.race([done, new Promise((r) => setTimeout(r, 5000))]);
 }
 
-function run(cmd, args, env) {
+// How long one suite may take before it is killed and reported as hung.
+// Nothing here had a timer: `child.on('close')` was the only way out, so a
+// wedged suite never settled, its worker never advanced, and `Promise.all`
+// never resolved. CI's job-level `timeout-minutes` eventually killed the whole
+// run — and because output is buffered until a suite completes, the hung one
+// printed NOTHING, so which suite it was had to be inferred from the missing
+// lines. Locally it hung indefinitely.
+//
+// Generous, because the point is to name a hang rather than to police pace:
+// the slowest suite in the tree plays real matches against a 120s per-match
+// budget of its own.
+const SUITE_TIMEOUT_MS = Number(process.env.E2E_SUITE_TIMEOUT_MS) || 10 * 60 * 1000;
+
+function run(cmd, args, env, timeoutMs = SUITE_TIMEOUT_MS) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, {
+      cwd: ROOT,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Its own group, so a suite that has spawned a browser is killed whole
+      // rather than leaving the browser holding the pipe open.
+      detached: true,
+    });
     let out = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
+    }, timeoutMs);
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
-    child.on('close', (code) => resolve({ code, out }));
-    child.on('error', (err) => resolve({ code: 1, out: `${out}\n${err.message}` }));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        // The partial output is the whole value of the timeout: it says how
+        // far the suite got before it stopped.
+        resolve({ code: 124, out: `${out}\nTIMEOUT: no exit within ${Math.round(timeoutMs / 1000)}s` });
+      } else {
+        resolve({ code, out });
+      }
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ code: 1, out: `${out}\n${err.message}` });
+    });
   });
 }
 

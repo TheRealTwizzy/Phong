@@ -143,7 +143,9 @@ await readyBtn.click();
 await sleep(1200);
 const canStart = await host.evaluate(() => {
   const b = document.querySelector('#btn-ready-play');
-  return b ? !b.disabled : false;
+  // Strictly `=== false`: `b.disabled` is `undefined` on a non-control, and
+  // `!undefined` would report a moved id as "enabled and ready to click".
+  return b ? b.disabled === false : false;
 });
 if (!canStart) fail('host cannot start after the guest readied');
 await host.click('#btn-ready-play');

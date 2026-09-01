@@ -42,7 +42,19 @@ await page.waitForSelector('#room-rookie', { timeout: 5000 });
 // it is part of onboarding now, not a menu row. Every suite past this point
 // wants the menu, so it is waved away here. Tolerant: a suite that reaches
 // this another way is not broken by its absence.
-const dis = async (sel) => page.$eval(sel, (el) => el.disabled);
+// `el.disabled` is `undefined` on anything that is not a form control, and
+// `!undefined` is TRUE — so every "should be locked" assertion in this file
+// would pass VACUOUSLY if `#room-{id}` or `#menu-pts-{n}` ever drifted off the
+// <button> onto a wrapper. Green, and testing nothing. e2e-venues hardened one
+// of these ids for exactly that reason; this makes the whole family strict, so
+// the id moving is a failure rather than a silent loss of coverage.
+const dis = async (sel) => {
+  const read = await page.$eval(sel, (el) => ({ tag: el.tagName, disabled: el.disabled }));
+  if (typeof read.disabled !== 'boolean') {
+    fail(`${sel} is a <${read.tag.toLowerCase()}> with no boolean .disabled — the id has moved off the control`);
+  }
+  return read.disabled;
+};
 const there = (sel) => page.$(sel).then((el) => !!el);
 
 // A list is a list of places you can go, so the four rungs a new player has
