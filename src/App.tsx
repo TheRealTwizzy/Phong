@@ -1730,7 +1730,8 @@ export default function App() {
             // The relay's number, not the profile's: it seeded the seat from
             // the store and it is what this match will be recorded on, so a
             // phone that disagrees is a phone showing something else.
-            msg.streaks?.[playerIndexRef.current] ?? carriedStreak('multiplayer'),
+            (playerIndexRef.current !== null ? msg.streaks?.[playerIndexRef.current] : undefined) ??
+              carriedStreak('multiplayer'),
             // The other seat's, for the telemetry overlay. Shown, never
             // counted: what the opponent is paid and rated on is their own
             // phone's business and the relay's.

@@ -2784,7 +2784,11 @@ async function startServer() {
           // A ball over the net from this seat is that player's return — and
           // it belongs to their streak alone. The serve is not one, which is
           // the only thing crossingsThisPoint is consulted for.
-          countReturn(room, playerIndex());
+          // Read once into a local: the branch above already established this
+          // is not null, but that is a call the compiler cannot narrow across.
+          const crossingSeat = playerIndex();
+          if (crossingSeat === null) return;
+          countReturn(room, crossingSeat);
           // The relay is counting this match now, so it owns where the run and
           // the point are — and both phones are told to come off P2P, because
           // this crossing reaches the other one as a ball_incoming that its
@@ -2919,7 +2923,9 @@ async function startServer() {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
-          room.ready[playerIndex()] = !!msg.ready;
+          const readySeat = playerIndex();
+          if (readySeat === null) return;
+          room.ready[readySeat] = !!msg.ready;
           broadcast(room, { type: 'ready_state', ready: room.ready });
         } else if (msg.type === 'start_match' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
@@ -2978,7 +2984,9 @@ async function startServer() {
           room.lastActive = Date.now();
           // A vote only means anything once the room agrees the match is done.
           if (!room.matchOver) return;
-          room.rematchVotes[playerIndex()] = true;
+          const voteSeat = playerIndex();
+          if (voteSeat === null) return;
+          room.rematchVotes[voteSeat] = true;
 
           if (room.rematchVotes[0] && room.rematchVotes[1] && room.players[0] && room.players[1]) {
             // Both agreed: fresh match, the other side opens this time.

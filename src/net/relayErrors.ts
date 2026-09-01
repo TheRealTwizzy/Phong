@@ -43,11 +43,17 @@ const RELAY_ERROR_KEY: Record<Exclude<RelayErrorCode, 'VENUE_LOCKED'>, string> =
  */
 export function lockReason(verdict: EntryVerdict, lang: LanguageCode): string {
   if (verdict.ok) return '';
-  if (verdict.reason === 'level') return t('room_locked_level', lang, { level: verdict.needLevel });
-  if (verdict.reason === 'tier_low') {
+  // Each field is optional on the shared shape and only set for its own
+  // reason, so each is checked rather than asserted — this now arrives over
+  // the wire from the relay, where a malformed verdict is a thing that can
+  // happen, and an undefined tier would index TIER_LABEL_KEY with `undefined`.
+  if (verdict.reason === 'level' && verdict.needLevel !== undefined) {
+    return t('room_locked_level', lang, { level: verdict.needLevel });
+  }
+  if (verdict.reason === 'tier_low' && verdict.needTier) {
     return t('room_locked_tier_low', lang, { tier: t(TIER_LABEL_KEY[verdict.needTier], lang) });
   }
-  if (verdict.reason === 'tier_high') {
+  if (verdict.reason === 'tier_high' && verdict.maxTier) {
     return t('room_locked_tier_high', lang, { tier: t(TIER_LABEL_KEY[verdict.maxTier], lang) });
   }
   return '';

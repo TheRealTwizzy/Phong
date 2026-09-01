@@ -563,7 +563,9 @@ export const MainMenu: React.FC<MainMenuProps> = ({
               >
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span className="flex items-center gap-1.5">
-                    <span className="truncate text-2xs text-ink">{t(room.labelKey, lang)}</span>
+                    <span className="truncate text-2xs text-ink">
+                      {room.labelKey ? t(room.labelKey, lang) : room.id}
+                    </span>
                     {/* Shown even on a LOCKED rung, deliberately: "this is the
                         fair fight" is most worth saying about a rung the player
                         has not reached yet, and it reads beside the unlock line

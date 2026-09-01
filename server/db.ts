@@ -236,12 +236,14 @@ export const PLAYER_KEYED_TABLES = [
 ] as const;
 
 // Result of any operation that (re)names a profile. Optional fields rather
-// than a discriminated union — strictNullChecks is off in this repo, so
-// union narrowing wouldn't apply at the call sites.
+// than a discriminated union — originally because strictNullChecks was off and
+// union narrowing would not have applied at the call sites; now a convention
+// shared with EntryVerdict and UsernameResult.
 /**
- * Matches UsernameResult's shape rather than being a discriminated union: this
- * project does not compile with `strict`, so narrowing on a literal `ok: true`
- * does not hold and the caller cannot reach `.code`.
+ * Matches UsernameResult's shape rather than being a discriminated union. The
+ * project compiles with `strict` now, so this is consistency rather than
+ * necessity — the shape is read widely enough that changing it is its own
+ * change.
  */
 export interface CosmeticResult {
   ok: boolean;
@@ -1123,7 +1125,9 @@ class GameDatabase {
         p.chaosWins || 0,
         p.abandons || 0,
         p.dailyStreak,
-        p.lastDailyDate,
+        // Optional on the shape, and the column is nullable — bound explicitly
+        // rather than letting `undefined` reach the driver, which rejects it.
+        p.lastDailyDate ?? null,
         JSON.stringify(p.achievements),
         p.createdAt,
         p.lastActive,
