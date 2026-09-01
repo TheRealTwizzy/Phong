@@ -299,6 +299,31 @@ export function bounceOffWall(
 }
 
 /**
+ * The Practice Wall's RETURN LINE: the same surface rule, rotated a quarter
+ * turn.
+ *
+ * The net is a wall in that mode — the ball bounces straight back and never
+ * leaves the player's screen — and it was the one surface in the game that did
+ * not spend spin: `b.vy = Math.abs(b.vy)` and nothing else, so a spun ball came
+ * off it exactly as it went in. Every other surface reverses the spin, damps
+ * it, tilts the rebound and trades angle against pace.
+ *
+ * Rather than a second copy of that arithmetic, the ball is rotated into
+ * `bounceOffWall`'s frame and back: swapping the axes maps a horizontal normal
+ * onto a vertical one, and a ball arriving at the return line is moving
+ * upward, which in that frame is the left wall.
+ */
+export function bounceOffReturnLine(
+  vx: number,
+  vy: number,
+  spin: number | undefined,
+  rules?: Partial<MatchRules>
+): { vx: number; vy: number; spin: number } {
+  const turned = bounceOffWall(vy, vx, spin, true, rules);
+  return { vx: turned.vy, vy: turned.vx, spin: turned.spin };
+}
+
+/**
  * Where a ball will cross the paddle line, folding side-wall rebounds. Shared
  * with the AI so its prediction uses the same rules the ball does.
  *

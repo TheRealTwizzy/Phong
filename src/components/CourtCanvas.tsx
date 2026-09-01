@@ -184,11 +184,19 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       keysPressed.delete(e.code);
     };
 
-    const keyLoop = () => {
+    // Per SECOND, not per frame. It was a flat 0.025 added every animation
+    // frame, so the paddle moved exactly twice as fast on a 120Hz display as
+    // on a 60Hz one — the same defect the pointer path had, on the one input
+    // a desktop actually uses.
+    const KEY_PADDLE_SPEED = 0.025 * 60;
+    let keyLast = performance.now();
+    const keyLoop = (now: number) => {
+      const dt = Math.min((now - keyLast) / 1000, 0.05);
+      keyLast = now;
       if (keysPressed.size > 0) {
         let delta = 0;
-        if (keysPressed.has('ArrowLeft') || keysPressed.has('KeyA')) delta -= 0.025;
-        if (keysPressed.has('ArrowRight') || keysPressed.has('KeyD')) delta += 0.025;
+        if (keysPressed.has('ArrowLeft') || keysPressed.has('KeyA')) delta -= KEY_PADDLE_SPEED * dt;
+        if (keysPressed.has('ArrowRight') || keysPressed.has('KeyD')) delta += KEY_PADDLE_SPEED * dt;
 
         if (delta !== 0) {
           const halfP = paddleWidthRef.current / 2;
@@ -289,8 +297,16 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       }
     }
 
-    // Check sidewall collision shake
-    if (ball.active && ((prevBallVxRef.current < 0 && ball.vx > 0) || (prevBallVxRef.current > 0 && ball.vx < 0))) {
+    // Check sidewall collision shake. The proximity test matters: a PADDLE hit
+    // that returns the ball across the court reverses `vx` too, and without it
+    // the sparks were drawn at the court edge for a contact that happened at
+    // the baseline.
+    const nearWall = ball.x <= 0.06 || ball.x >= 0.94;
+    if (
+      ball.active &&
+      nearWall &&
+      ((prevBallVxRef.current < 0 && ball.vx > 0) || (prevBallVxRef.current > 0 && ball.vx < 0))
+    ) {
       shakeAmountRef.current = Math.min(16, shakeAmountRef.current + 4 * intensity);
       addParticles(ball.x <= 0.05 ? 0.01 : 0.99, ball.y, 8, theme.courtBorder);
     }

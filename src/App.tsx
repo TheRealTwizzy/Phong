@@ -45,6 +45,7 @@ import {
   BALL_BASE_RADIUS,
   BASE_BALL_SPEED,
   physicsSubsteps,
+  bounceOffReturnLine,
   checkPaddleCollision,
   OpponentAI,
   ServeAim,
@@ -2780,7 +2781,13 @@ export default function App() {
           if (currentMode === 'practice') {
             if (b.y - b.radius <= 0) {
               b.y = b.radius;
-              b.vy = Math.abs(b.vy);
+              // The return line is a SURFACE, so it spends spin like every
+              // other one: it used to be a bare `Math.abs(b.vy)`, and a spun
+              // ball came off it exactly as it went in.
+              const off = bounceOffReturnLine(b.vx, b.vy, b.spin, rulesRef.current);
+              b.vx = off.vx;
+              b.vy = Math.abs(off.vy);
+              b.spin = off.spin;
               sound.playWallBounce();
             }
           } else if (b.y <= 0) {
