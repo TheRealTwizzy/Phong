@@ -43,6 +43,7 @@ import {
   PADDLE_WIDTH_RATIO,
   BALL_BASE_RADIUS,
   BASE_BALL_SPEED,
+  physicsSubsteps,
   checkPaddleCollision,
   OpponentAI,
   ServeAim,
@@ -2595,40 +2596,76 @@ export default function App() {
       // ==============================================================
       if (ballRef.current.active) {
         let b = { ...ballRef.current };
-        b.x += b.vx * dt;
-        b.y += b.vy * dt;
 
-        // Sidewall bounces. Spin never bends the flight — it spends itself
-        // here, tilting the angle the ball leaves the wall at.
-        if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
-          const atLeft = b.x - b.radius <= 0;
-          b.x = atLeft ? b.radius : 1 - b.radius;
-          const bounced = bounceOffWall(b.vx, b.vy, b.spin, atLeft, rulesRef.current);
-          b.vx = bounced.vx;
-          b.vy = bounced.vy;
-          b.spin = bounced.spin;
-          sound.playWallBounce();
+        // The flight is integrated in SUBSTEPS, not one jump. The paddle only
+        // catches a ball inside a window `PADDLE_HEIGHT + 2r` tall — about
+        // 0.068 at stock — while a ball at the 2.4 cap covers 0.12 in the
+        // 0.05s the frame clamp allows, so a point-sampled test misses 43% of
+        // sub-frame phases and the ball passes THROUGH the paddle. With a
+        // legal `ballSpeedMax: 2` a wall rebound reaches 4.8 and tunnels 15%
+        // of the time at a perfect 60fps. Stepping to the collision's own
+        // scale is what makes the test reliable, and it holds the sidewalls
+        // and the Practice Wall's return line to the same standard.
+        const steps = physicsSubsteps(Math.hypot(b.vx, b.vy), dt, b.radius);
+        const sdt = dt / steps;
+        let contacted = false;
+
+        for (let step = 0; step < steps; step++) {
+          b.x += b.vx * sdt;
+          b.y += b.vy * sdt;
+
+          // Sidewall bounces. Spin never bends the flight — it spends itself
+          // here, tilting the angle the ball leaves the wall at.
+          if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
+            const atLeft = b.x - b.radius <= 0;
+            b.x = atLeft ? b.radius : 1 - b.radius;
+            const bounced = bounceOffWall(b.vx, b.vy, b.spin, atLeft, rulesRef.current);
+            b.vx = bounced.vx;
+            b.vy = bounced.vy;
+            b.spin = bounced.spin;
+            sound.playWallBounce();
+          }
+
+          // Paddle Collision at bottom (y ~ 0.92)
+          const hitResult = checkPaddleCollision(
+            b,
+            paddleXRef.current,
+            paddleWidthRef.current,
+            paddleVxRef.current
+          );
+
+          if (hitResult.hit && hitResult.angle !== undefined && hitResult.speed !== undefined) {
+            // Hold the rally inside the speed band this match is played under.
+            const hitSpeed = clampBallSpeed(hitResult.speed, rulesRef.current);
+            b.vy = -Math.abs(hitSpeed * Math.cos(hitResult.angle));
+            b.vx = hitSpeed * Math.sin(hitResult.angle);
+            // A fresh contact defines the spin: how fast the paddle was moving,
+            // weighted by how far from centre the ball caught it.
+            b.spin = hitResult.spin ?? 0;
+            b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
+
+            sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
+            contacted = true;
+          }
+
+          // The Practice Wall's return line is a surface like any other, so it
+          // is swept here rather than tested once at the end of the frame.
+          if (currentMode === 'practice') {
+            if (b.y - b.radius <= 0) {
+              b.y = b.radius;
+              b.vy = Math.abs(b.vy);
+              sound.playWallBounce();
+            }
+          } else if (b.y <= 0) {
+            // Left this half. Stop the sweep HERE so the crossing is reported
+            // from the point it actually happened at, rather than from
+            // wherever the rest of the frame would have carried it.
+            break;
+          }
+          if (b.y >= 1.05) break;
         }
 
-        // Paddle Collision at bottom (y ~ 0.92)
-        const hitResult = checkPaddleCollision(
-          b,
-          paddleXRef.current,
-          paddleWidthRef.current,
-          paddleVxRef.current
-        );
-
-        if (hitResult.hit && hitResult.angle !== undefined && hitResult.speed !== undefined) {
-          // Hold the rally inside the speed band this match is played under.
-          const hitSpeed = clampBallSpeed(hitResult.speed, rulesRef.current);
-          b.vy = -Math.abs(hitSpeed * Math.cos(hitResult.angle));
-          b.vx = hitSpeed * Math.sin(hitResult.angle);
-          // A fresh contact defines the spin: how fast the paddle was moving,
-          // weighted by how far from centre the ball caught it.
-          b.spin = hitResult.spin ?? 0;
-          b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
-
-          sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
+        if (contacted) {
           setTotalTouches((t) => t + 1);
           // My own return, and my own streak. The serve never reaches here —
           // handleServe sets the ball's velocity directly and seeds it clear
@@ -2636,19 +2673,22 @@ export default function App() {
           setStats(ownReturn);
         }
 
+        // How fast the rally is actually going, in units of the base serve.
+        // It used to be read off THIS FRAME's paddle hit, which cannot be
+        // truthy on the frame the ball crosses the net — a contact leaves the
+        // ball at y≈0.9 and the net is a whole court away — so it was the
+        // constant 1 on the wire and never set at all on the local ball. The
+        // canvas's high-speed spark trail and its impact shake both key off
+        // it, so neither had ever rendered.
+        b.speedMultiplier = Math.hypot(b.vx, b.vy) / BASE_BALL_SPEED;
+
         // ==============================================================
         // 2. BALL REACHES TOP NET (Y <= 0)
-        //    - Practice Wall: the net is a RETURN LINE — the ball bounces
-        //      straight back; it never leaves the player's screen.
+        //    - Practice Wall: handled in the sweep above — the net is a
+        //      RETURN LINE and the ball never leaves the player's screen.
         //    - Everything else: it disappears across the divide!
         // ==============================================================
-        if (currentMode === 'practice') {
-          if (b.y - b.radius <= 0) {
-            b.y = b.radius;
-            b.vy = Math.abs(b.vy);
-            sound.playWallBounce();
-          }
-        } else if (b.y <= 0) {
+        if (currentMode !== 'practice' && b.y <= 0) {
           // Ball disappears from player's screen!
           b.active = false;
 
@@ -2661,7 +2701,7 @@ export default function App() {
                 vx: b.vx,
                 vy: b.vy,
                 spin: b.spin || 0,
-                speedMultiplier: hitResult.speed ? hitResult.speed / BASE_BALL_SPEED : 1,
+                speedMultiplier: b.speedMultiplier,
               },
             });
           } else if (currentMode === 'solo') {

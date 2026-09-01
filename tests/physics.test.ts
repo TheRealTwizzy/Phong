@@ -21,6 +21,9 @@ import {
   AIM_FULL_PUSH,
   AIM_DEADZONE,
   SERVE_MAX_ANGLE_DEG,
+  BALL_BASE_RADIUS,
+  MAX_PHYSICS_SUBSTEPS,
+  physicsSubsteps,
 } from '../src/game/physics';
 import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
@@ -503,5 +506,77 @@ describe('difficulty normalization', () => {
 
   it('carries all five rungs on the ladder', () => {
     expect(AI_DIFFICULTIES).toEqual(['rookie', 'pro', 'elite', 'cyber', 'chaos']);
+  });
+});
+
+
+describe('physicsSubsteps keeps the ball inside the paddle it is passing', () => {
+  // The rule the whole substep exists for: whatever the frame and whatever the
+  // rules, one integration step must never carry the ball further than the
+  // window the paddle can catch it in. A point-sampled test that jumps further
+  // than its own window does not miss OCCASIONALLY, it misses a fixed fraction
+  // of sub-frame phases — measured at 43% for a stock ball at the speed cap
+  // and the frame clamp.
+  const catchWindow = (radius: number) => PADDLE_HEIGHT + 2 * radius;
+
+  it('never steps further than the catch window, across the whole legal envelope', () => {
+    // ballScale bottoms out at 0.6 (the smallest window) and ballSpeedMax tops
+    // out at 2 — and a wall rebound is not held to that cap, so the envelope is
+    // taken to double it again rather than to the nominal maximum.
+    const radii = [BALL_BASE_RADIUS * 0.6, BALL_BASE_RADIUS, BALL_BASE_RADIUS * 1.8];
+    const speeds = [0.5, 1, BASE_BALL_SPEED, MAX_BALL_SPEED, MAX_BALL_SPEED * 2, MAX_BALL_SPEED * 4];
+    // 1/120 is a fast phone, 1/60 an ordinary one, 0.05 the frame clamp.
+    const dts = [1 / 240, 1 / 120, 1 / 60, 1 / 30, 0.05];
+
+    for (const radius of radii) {
+      for (const speed of speeds) {
+        for (const dt of dts) {
+          const steps = physicsSubsteps(speed, dt, radius);
+          expect(steps).toBeGreaterThanOrEqual(1);
+          expect(steps).toBeLessThanOrEqual(MAX_PHYSICS_SUBSTEPS);
+          expect((speed * dt) / steps).toBeLessThanOrEqual(catchWindow(radius));
+        }
+      }
+    }
+  });
+
+  it('does not substep a ball that is not going anywhere', () => {
+    expect(physicsSubsteps(0, 1 / 60, BALL_BASE_RADIUS)).toBe(1);
+    expect(physicsSubsteps(BASE_BALL_SPEED, 0, BALL_BASE_RADIUS)).toBe(1);
+  });
+
+  it('returns a usable count for junk rather than looping forever', () => {
+    expect(physicsSubsteps(Number.NaN, 1 / 60, BALL_BASE_RADIUS)).toBe(1);
+    expect(physicsSubsteps(Number.POSITIVE_INFINITY, 1 / 60, BALL_BASE_RADIUS)).toBe(1);
+    expect(physicsSubsteps(-5, 1 / 60, BALL_BASE_RADIUS)).toBeGreaterThanOrEqual(1);
+    expect(physicsSubsteps(BASE_BALL_SPEED, -1, BALL_BASE_RADIUS)).toBe(1);
+  });
+
+  it('a swept flight catches a contact a single jump passes through', () => {
+    // The concrete failure: one integration at the speed cap over a clamped
+    // frame steps from clear above the paddle to past the baseline, and the
+    // point sample in between never happens.
+    const radius = BALL_BASE_RADIUS;
+    const dt = 0.05;
+    const speed = MAX_BALL_SPEED;
+    const paddleX = 0.5;
+
+    const sample = (y: number) =>
+      checkPaddleCollision(
+        { x: paddleX, y, vx: 0, vy: speed, radius, spin: 0, active: true } as BallState,
+        paddleX,
+        PADDLE_WIDTH_RATIO,
+        0
+      ).hit;
+
+    const startY = PADDLE_Y - PADDLE_HEIGHT / 2 - radius - 0.004;
+    expect(sample(startY)).toBe(false);
+    // One jump: straight past the whole window.
+    expect(sample(startY + speed * dt)).toBe(false);
+
+    // Swept: at least one step lands inside it.
+    const steps = physicsSubsteps(speed, dt, radius);
+    const hits = Array.from({ length: steps }, (_, i) => sample(startY + speed * (dt / steps) * (i + 1)));
+    expect(hits.some(Boolean)).toBe(true);
   });
 });
