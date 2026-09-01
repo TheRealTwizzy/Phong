@@ -2293,26 +2293,59 @@ export default function App() {
   // Display names ride the device cookie server-side; the client never sends
   // one (usernames are unique identities, not free-text callsigns).
   /**
-   * Send once the socket is up. The relay can now REFUSE a socket outright —
-   * a device that no longer holds the account is closed at the upgrade — and
-   * a closed socket never becomes OPEN, so a bare retry would tick every
-   * 100ms for the life of the page against a door that is never opening. It
-   * gives up when the socket is gone, and `onDead` hands back whatever the
-   * caller was holding.
+   * Send once the socket is up, IN THE ORDER THE APP ASKED.
+   *
+   * The relay can REFUSE a socket outright — a device that no longer holds
+   * the account is closed at the upgrade — and a closed socket never becomes
+   * OPEN, so a bare retry would tick for the life of the page against a door
+   * that is never opening. It gives up when the socket is gone, and `onDead`
+   * hands back whatever the caller was holding.
+   *
+   * **Two messages queued on one opening socket must not overtake each
+   * other**, and they used to. Each call armed its OWN `setTimeout(…, 100)`
+   * chain, so two calls a quarter-second apart woke on different phases and
+   * whichever chain happened to tick first after the socket opened won the
+   * race — not the one that was asked first. Measured in a real browser at
+   * 3 of 8 attempts: a Quick Match tap followed by Cancel put `queue_cancel`
+   * on the wire BEFORE `queue_join`, so the relay dequeued nobody and then
+   * queued the player, answering `cancelled` and then `searching`. The row
+   * sat spinning on a search the player had already called off, and they were
+   * genuinely in the queue — one pairing away from being seated into a match
+   * they cancelled. `create_room` then `set_table_visibility`, and
+   * `join_room` then `swap_seat`, are the same shape one message apart.
+   *
+   * Listeners are the fix rather than a queue of our own, because the DOM
+   * already guarantees exactly what is needed: listeners for an event fire in
+   * the order they were added, so FIFO falls out of registering them. It also
+   * drops the up-to-100ms delay the poll added to every send on a cold
+   * socket. `connectWebSocket` assigns `onopen`/`onclose` as properties when
+   * the socket is built, so the app's own handlers still run first.
    */
   const sendWhenOpen = (socket: WebSocket | null, build: () => unknown, onDead?: () => void) => {
-    const attempt = () => {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(build()));
-        return;
-      }
-      if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
-        onDead?.();
-        return;
-      }
-      setTimeout(attempt, 100);
+    if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+      onDead?.();
+      return;
+    }
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(build()));
+      return;
+    }
+    const done = () => {
+      socket.removeEventListener('open', onOpen);
+      socket.removeEventListener('close', onGone);
+      socket.removeEventListener('error', onGone);
     };
-    attempt();
+    const onOpen = () => {
+      done();
+      socket.send(JSON.stringify(build()));
+    };
+    const onGone = () => {
+      done();
+      onDead?.();
+    };
+    socket.addEventListener('open', onOpen);
+    socket.addEventListener('close', onGone);
+    socket.addEventListener('error', onGone);
   };
 
   /**
