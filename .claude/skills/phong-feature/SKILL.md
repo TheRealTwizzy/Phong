@@ -92,6 +92,17 @@ narrow in the direction that makes the work look finished. **No map is offered h
 The durable fix is a `tests/modeParity.test.ts` on the `protocolParity` pattern — a hand-written
 list checked against the live union. It **lands with the mode**: sites cannot be pre-enumerated.
 
+**The cheaper answer is usually not to add one, and the CPU seat is the worked example.** Playing
+the AI at a relay table is a fourth state App had never had — solo physics at a seat — and adding
+`'cpu'` to `GameMode` would have paid the full 35 sites. It stayed `mode: 'solo'` instead, with
+"am I seated" carried on the axis the component already had (`roomId`/`tableState`), so the branch
+that matters most falls out RIGHT for free: the duel countdown is gated on `mode !== 'multiplayer'`
+and a machine match correctly gets none. The cost is that three sites which flip `mode` on seating
+had to be re-answered by hand and `tsc` named none of them — and getting one wrong is not cosmetic:
+the match records as an unranked duel against nobody, and `abandoningLiveSoloMatch` (which requires
+`mode === 'solo'`) never fires, so quitting a losing machine match records nothing at all. Before
+adding a mode, ask whether the new thing is a different GAME or the same game somewhere else.
+
 The same shape arrives as a **sweep** — a rename or a migration across hundreds of call sites.
 Categorise by **call site, never by the pattern you are matching**: the palette sweep found that
 hue does not partition, because cyan is both the accent and the `vanguard` tier, so replacing by

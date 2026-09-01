@@ -251,6 +251,92 @@ await g2.waitForFunction(() => document.querySelector('#seat-1')?.getAttribute('
   .catch(() => fail('the guest could not sit back down'));
 ok('and sit back down, which is what "pre-match" means');
 
+// ---- 7. Watching a MACHINE match ----------------------------------------
+//
+// The point of putting the CPU in a seat: a solo match becomes a listed,
+// watchable table, so the AI stops being a substitute for a person and
+// becomes a warm seat somebody can walk up to. The wire is pinned by
+// tests/cpuTable.test.ts against an asymmetric fixture; what only a browser
+// can say is that the watcher's screen is a WATCHER's screen — read-only,
+// headed with the player's name, and drawing a live court rather than a
+// frozen one.
+{
+  const solo = await newPlayer('CpuHost');
+  await solo.click('#building-pvp');
+  await solo.click('#room-casual');
+  await solo.waitForSelector('#btn-create-room', { timeout: 8000 });
+  await solo.click('#btn-create-room');
+  const cpuCode = await solo
+    .waitForFunction(() => {
+      const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+      return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
+    }, { timeout: 8000 })
+    .then((h) => h.jsonValue());
+
+  await solo.waitForSelector('#toggle-spectators', { timeout: 8000 });
+  await solo.click('#toggle-spectators input');
+  await solo.click('#seat-1');
+  await solo.waitForSelector('#cpu-picker', { timeout: 5000 });
+  await solo.click('#cpu-rookie');
+  await solo.waitForSelector('#cpu-picker', { state: 'detached', timeout: 5000 });
+  await solo.waitForFunction(
+    () => document.querySelector('#seat-1')?.getAttribute('data-occupant') === 'cpu',
+    { timeout: 8000 }
+  );
+  await solo.click('#btn-ready-play');
+  await solo.waitForSelector('#half-court-canvas', { timeout: 10000 });
+  ok(`a machine match is a table (${cpuCode})`);
+
+  // It is a table like any other in the browser: listed, and offering a seat.
+  const onlooker = await newPlayer('CpuFan');
+  await onlooker.click('#building-pvp');
+  await onlooker.click('#room-casual');
+  await onlooker.waitForSelector(`#table-${cpuCode}-watch`, { timeout: 10000 });
+  // Full, because the machine holds the other chair — the browser row counts
+  // it, or the row would read 1/2 and then answer ROOM_FULL on a tap.
+  if ((await onlooker.getAttribute(`#table-${cpuCode}`, 'data-full')) !== 'true') {
+    fail('a table with a machine in it is not showing as full');
+  }
+  await onlooker.click(`#table-${cpuCode}-watch`);
+  await onlooker.waitForSelector('#half-court-canvas', { timeout: 10000 });
+  if ((await onlooker.getAttribute('#half-court-container', 'data-readonly')) !== '1') {
+    fail('a watched machine match is drivable');
+  }
+  ok('a stranger can watch it, read-only, from the room browser');
+
+  // The court has to be LIVE, not a still. A real point, played by a real
+  // phone against the machine — and the score is the honest witness, because
+  // on a CPU table it can only reach the watcher through `cpu_frame`:
+  // `point_scored` is refused at a table with one human in it, so a design
+  // that forgot to forward the score leaves a live court under a scoreboard
+  // frozen at whatever `spectator_sync` handed over.
+  await solo.keyboard.down('KeyA');
+  const deadline = Date.now() + 60000;
+  let seen = 0;
+  while (Date.now() < deadline && seen < 1) {
+    await solo.keyboard.press('Space').catch(() => {});
+    await solo.waitForTimeout(800);
+    seen = await totalPoints(solo);
+  }
+  await solo.keyboard.up('KeyA');
+  if (seen < 1) fail('no point was ever scored against the machine');
+  const followed = await onlooker
+    .waitForFunction((n) => {
+      const me = parseInt(document.querySelector('#score-player')?.textContent || '', 10);
+      const opp = parseInt(document.querySelector('#score-opponent')?.textContent || '', 10);
+      return me + opp >= n;
+    }, seen, { timeout: 10000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!followed) {
+    fail(`the watcher shows ${await totalPoints(onlooker)} points, the machine match has ${seen}`);
+  }
+  ok(`and the court is live: the watcher follows the score (${seen} point(s))`);
+
+  await onlooker.context().close();
+  await solo.context().close();
+}
+
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 console.log('\nALL SPECTATE E2E CHECKS PASSED');
 await browser.close();

@@ -1,5 +1,5 @@
 import { AIDifficulty, GameMode, MatchRules, RoomMatchConfig } from './types';
-import { soloCountsForRank, soloMuCap } from './rating';
+import { AI_DIFFICULTIES, soloCountsForRank, soloMuCap } from './rating';
 import { roomCountsForRank } from './venues';
 
 // Pre-match match rules, shared by client and server like profileRules.ts and
@@ -251,6 +251,7 @@ export function unrankedRuleKeys(rules: Partial<MatchRules> | null | undefined):
 export type UnrankedReason =
   | 'mode'
   | 'venue'
+  | 'watched'
   | 'difficulty'
   | 'outgrown'
   | 'sonar'
@@ -278,6 +279,18 @@ export interface RankedMatchContext {
    * guessing, exactly as `venueRoomId` above does.
    */
   rankMu?: number;
+  /**
+   * Solo only: whether the TABLE this match is played at opens its watching
+   * seats.
+   *
+   * Not "is anybody watching right now". See the `'watched'` arm in
+   * `unrankedReasons` for why occupancy is the wrong trigger — in short, it
+   * is unset on the common path, settable by the player themselves, and
+   * cannot be shown honestly before the ball.
+   *
+   * Absent means no table, which is every menu-started solo match.
+   */
+  watched?: boolean;
 }
 
 /** Modes that never write a rating for anybody, whatever the rules say. */
@@ -297,6 +310,28 @@ export function unrankedReasons(ctx: RankedMatchContext): UnrankedReason[] {
   if (ctx.mode === 'multiplayer' && ctx.venueRoomId && !roomCountsForRank(ctx.venueRoomId)) {
     reasons.push('venue');
   }
+  // A CPU match at a table whose watching seats are OPEN does not move the
+  // visible ladder.
+  //
+  // A watcher sees the hidden half live — that is what watching IS — and can
+  // describe it over a voice call, which is the sonar rule with a second
+  // person attached. In a DUEL that is drawn by room, because both players are
+  // equally exposed and the top three brackets simply have no watching seats.
+  // Here only one side has a rating at stake, so a friend on a call is a
+  // straight gift, and the room cannot answer it.
+  //
+  // A TERM of the table rather than a fact about who is currently sitting
+  // down, and the difference is the whole design. Occupancy has four holes:
+  // the common flow is watcher-sits-then-host-starts, so a latch cleared by
+  // startMatch is never set; a watcher who closes their tab a second later
+  // still costs the host the match; a player can seat a cookieless "watcher"
+  // at their own table to unrank their own loss on demand; and the badge would
+  // say RANKED and then silently not be. `config.spectators` is host-owned,
+  // pre-match-only and broadcast, so the verdict is knowable before the first
+  // ball and cannot be changed by a stranger.
+  //
+  // Only for a CPU match: a duel's answer is the venue's, above.
+  if (ctx.mode === 'solo' && ctx.watched) reasons.push('watched');
   if (ctx.mode === 'solo' && ctx.difficulty && !soloCountsForRank(ctx.difficulty)) {
     reasons.push('difficulty');
   } else if (
@@ -335,6 +370,10 @@ export const DEFAULT_ROOM_CONFIG: RoomMatchConfig = {
   // Off by default: a table nobody asked to be watched is not watched, and
   // a create_room from an old bundle or the invite flow says nothing here.
   spectators: false,
+  // No CPU by default, which is what keeps every existing caller — the invite
+  // flow, the queue, an older bundle, the test harness — making exactly the
+  // table it made before.
+  cpu: null,
 };
 
 /**
@@ -393,6 +432,17 @@ export function normalizeRoomConfig(
     // is no. The relay narrows it further: a venue that forbids watching
     // forces this false whatever the host asked for.
     spectators: raw.spectators === true,
+    // Whitelisted against the real rungs rather than coerced, for the reason
+    // `spectate_room`'s seat argument is strict enum membership and
+    // deliberately not `clampInt`: turning junk into the first legal value
+    // would seat a Rookie for a client that sent nonsense, and a match against
+    // an opponent nobody chose is worse than a refused config.
+    //
+    // `normalizeDifficulty` is not used here on purpose — it answers 'pro' for
+    // anything it does not recognise, which is right for a stored device
+    // setting (there must always be SOME difficulty) and wrong for a table,
+    // where "no CPU" is the ordinary state and has to survive a round trip.
+    cpu: AI_DIFFICULTIES.includes(raw.cpu as AIDifficulty) ? (raw.cpu as AIDifficulty) : null,
   };
 }
 

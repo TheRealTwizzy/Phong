@@ -627,6 +627,15 @@ export default function App() {
   const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
   /** The table this page was WATCHING has gone — never an abandon notice. */
   const [toastTableEnded, setToastTableEnded] = useState<boolean>(false);
+  /**
+   * The table a CPU match was being played AT has gone, and the match has not.
+   *
+   * Its own notice because neither of the others is true here: nothing
+   * expired waiting for somebody, and nobody was ejected from anything. The
+   * court is still up and the match still counts — this is telling the player
+   * that the part they might have been sharing is over.
+   */
+  const [toastTableLost, setToastTableLost] = useState<boolean>(false);
   // An invitation link that never got its holder a seat. Silence here reads as
   // "the link is broken" — which it may well be (a dead room code), but the
   // player deserves to be told rather than left on a menu that swallowed it.
@@ -635,12 +644,23 @@ export default function App() {
   const [linkStatus, setLinkStatus] = useState<'relay' | 'connecting' | 'p2p'>('relay');
   const [p2pEnabled, setP2pEnabled] = useState<boolean>(true);
 
-  // The terms the CURRENT match is played on. A duel takes them from the room
-  // so both sides agree; every other mode takes them from the menu.
+  // The terms the CURRENT match is played on. A match at a TABLE takes them
+  // from the room so everyone at it agrees; every other match takes them from
+  // the menu.
+  //
+  // The condition is "a room config exists" rather than
+  // `mode === 'multiplayer'`, and the difference is the whole of solo-at-a-
+  // table. A CPU match keeps `mode: 'solo'` — the AI simulation, local
+  // scoring, `abandoningLiveSoloMatch` and the record payload are all gated on
+  // it, and 33 branches in this file would switch off together if it flipped —
+  // but the terms still belong to the room, because a watcher and the host
+  // have to be playing the same match. Convention §7 says never read
+  // `settings.winningScore` in match code; this extends that rule to
+  // solo-at-a-table rather than bending it.
   const activeConfig: RoomMatchConfig =
-    // `spectators: false` in the non-duel arm: a watching seat is a seat at a
-    // relay TABLE, and a solo, practice or split match has no room to sit in.
-    mode === 'multiplayer' && roomConfig
+    // `spectators: false` in the tableless arm: a watching seat is a seat at a
+    // relay TABLE, and a menu-started match has no room to sit in.
+    roomConfig
       ? spectating
         ? // A watcher sees the whole table, sonar and all — that is what
           // watching IS, and it is why the rooms where rating is on the line
@@ -650,8 +670,22 @@ export default function App() {
           // unrank a match on demand by asking a friend to sit down.
           { ...roomConfig, rules: { ...roomConfig.rules, opponentSonar: true } }
         : roomConfig
-      : { winningScore: settings.winningScore, rules: settings.rules, spectators: false };
-  const activeDifficulty: AIDifficulty = settings.difficulty;
+      : {
+          winningScore: settings.winningScore,
+          rules: settings.rules,
+          spectators: false,
+          cpu: null,
+        };
+  /**
+   * Which rung the AI on the far half is playing.
+   *
+   * From the TABLE when there is one, because the host chose it there and a
+   * watcher has to be told the same thing; from the device otherwise. Falls
+   * back to the stored setting rather than to a literal, so a table that
+   * somehow carries no CPU never silently becomes a different opponent than
+   * the pre-match sheet promised.
+   */
+  const activeDifficulty: AIDifficulty = activeConfig.cpu ?? settings.difficulty;
 
   /**
    * The two net indicators are suppressed for any match played WITH the
@@ -686,6 +720,19 @@ export default function App() {
   ballRadiusRef.current = ballRadiusFor(activeConfig.rules);
   const configRef = useRef<RoomMatchConfig>(activeConfig);
   configRef.current = activeConfig;
+  /**
+   * The rung the far half is actually playing, for the paths that read it at
+   * the whistle rather than during render.
+   *
+   * The stored device setting is NOT the same thing once a table exists: the
+   * host picks the CPU on the seat, so a match can legitimately be against a
+   * rung the menu has never been set to. Reading `settings.difficulty` at
+   * record time would file the wrong opponent — and, since the difficulty is
+   * what decides whether a solo result moves the ladder at all, sometimes the
+   * wrong ranked verdict with it.
+   */
+  const activeDifficultyRef = useRef<AIDifficulty>(activeDifficulty);
+  activeDifficultyRef.current = activeDifficulty;
   const modeRef = useRef<GameMode>(mode);
   const screenRef = useRef<'menu' | 'game'>(screen);
   const wsRef = useRef<WebSocket | null>(ws);
@@ -751,6 +798,15 @@ export default function App() {
   // channel is unordered and unreliable, so a stale sample can slip in after
   // the reliable clear that follows a net cross or a point).
   const lastBallPosSentRef = useRef<number>(0);
+  const lastCpuFrameSentRef = useRef<number>(0);
+  /**
+   * Whether anybody is watching this CPU table.
+   *
+   * Set from `table_state`, which is the only message that says who is in the
+   * watching seats. A ref rather than state because the game loop reads it
+   * sixty times a second and must not re-run for it.
+   */
+  const watchersRef = useRef<boolean>(false);
   const oppBallSeenRef = useRef<number>(0);
   const matchCountdownRef = useRef<number | null>(matchCountdown);
   const intentionalCloseRef = useRef<boolean>(false);
@@ -1177,7 +1233,7 @@ export default function App() {
           opponentName:
             modeRef.current === 'multiplayer'
               ? opponentName || 'Opponent'
-              : `AI (${settingsRef.current.difficulty})`,
+              : `AI (${activeDifficultyRef.current})`,
           playerScore: statsRef.current.score,
           opponentScore: statsRef.current.opponentScore,
           bestStreak: statsRef.current.bestStreak,
@@ -1196,7 +1252,10 @@ export default function App() {
           ...nextRunSeq(),
           aces: statsRef.current.aces,
           mode: modeRef.current,
-          difficulty: settingsRef.current.difficulty,
+          // The rung actually played, which at a table is the room's and not
+          // this device's — the host chose it on the seat, and the stored
+          // setting may say something else entirely.
+          difficulty: activeDifficultyRef.current,
           isWinner,
           // The rules the match was actually played under — the room's in a
           // duel, the menu's otherwise. The server re-derives whether they sit
@@ -1205,7 +1264,12 @@ export default function App() {
           // Lets the server cross-check this PvP result against the room
           // state it owns instead of trusting the numbers above — against the
           // right match in that room, which is what matchSeq names.
-          roomId: modeRef.current === 'multiplayer' ? roomId || undefined : undefined,
+          // A CPU match names its table too. Not for a cross-check — the
+          // relay records nothing there, so this POST is the only copy — but
+          // because the table is what says whether watching seats were open,
+          // and that is what decides whether the ladder moves. The server
+          // vouches the claim before it reads anything off the room.
+          roomId: roomId || undefined,
           // Only when the room actually told us (game_start always does). A
           // duel that somehow never learned its number says nothing rather
           // than claiming match 0, and the server falls back to the match the
@@ -1782,6 +1846,10 @@ export default function App() {
         setRoomId(msg.roomId);
         setPlayerIndex(msg.playerIndex);
         playerIndexRef.current = msg.playerIndex;
+        // Unconditional, and corrected a beat later by `room_config`, which is
+        // the only message that knows whether this table has a CPU in it.
+        // Safe because holding a seat leaves the player on the MENU — nothing
+        // renders a court until `game_start`, which decides the mode itself.
         setMode('multiplayer');
         // Deliberately NOT setScreen('game'). Holding a seat is not playing a
         // match: the court belongs to the match, and until one starts there is
@@ -1846,6 +1914,17 @@ export default function App() {
       case 'room_config':
         setRoomConfig(msg.config);
         p2pRef.current?.setConfig(msg.config);
+        // The config is what says whether this table is a duel or a solo
+        // match with an audience, so it is what decides the mode — not the
+        // seating messages, which arrive before anyone knows.
+        //
+        // `mode` stays 'solo' at a CPU table and that is load-bearing rather
+        // than cosmetic: the AI simulation, local scoring,
+        // abandoningLiveSoloMatch, the record payload and 33 other branches in
+        // this file are all gated on it, and they would switch off together.
+        // A watcher is exempt — they run no simulation and are watching a
+        // relayed match whichever kind it is.
+        if (!spectatingRef.current) setMode(msg.config.cpu ? 'solo' : 'multiplayer');
         break;
 
       case 'ready_state':
@@ -1865,7 +1944,15 @@ export default function App() {
         // not re-derive — a second record of the same seat, paid twice. The
         // P2P replica synthesizes this same message for a peer-agreed
         // rematch, so its locally counted matchSeq lands here too.
-        matchKeyRef.current = roomId ? duelMatchKey(roomId, matchSeqRef.current) : '';
+        //
+        // A CPU table mints NO duel key: the relay records nothing there
+        // (recordRoomMatch returns early without two seated players), so
+        // there is no second writer to deduplicate against and the ordinary
+        // solo key — minted by the recording path itself — is the right one.
+        // Leaving the duel key here would file a solo match under a shape the
+        // server re-derives as a duel's.
+        matchKeyRef.current =
+          roomId && !msg.config.cpu ? duelMatchKey(roomId, matchSeqRef.current) : '';
         shownMatchKeyRef.current = '';
         setRoomConfig(msg.config);
         p2pRef.current?.setConfig(msg.config);
@@ -1901,7 +1988,16 @@ export default function App() {
         // on a live court behind the lobby sheet — a ball waiting on them
         // while they picked a winning score. For a queue match the relay is
         // the host, and this is where the search ends.
-        setMode('multiplayer');
+        //
+        // And the mode comes from the config, as it does in `room_config`
+        // above. This is the site that matters, because it is the one that
+        // also walks onto the court: get it wrong here and a CPU match starts
+        // with the AI simulation switched off, scoring handed to a relay that
+        // is not keeping any, and a result that files as a duel against an
+        // opponent who does not exist. A WATCHER is exempt — they simulate
+        // nothing, and what they are watching is relayed either way.
+        if (!spectatingRef.current) setMode(msg.config.cpu ? 'solo' : 'multiplayer');
+        else setMode('multiplayer');
         setScreen('game');
         setIsMultiplayerOpen(false);
         queueSeatingRef.current = false;
@@ -2031,6 +2127,11 @@ export default function App() {
         break;
 
       case 'table_state': {
+        // Whether to publish `cpu_frame` at all. Seats 2 and 3 are the
+        // watching ones; nobody in them means the whole stream is skipped.
+        watchersRef.current = msg.seats.some(
+          (seat) => seat.seat >= 2 && seat.playerId !== null
+        );
         setTableState({
           seats: msg.seats,
           yourSeat: msg.yourSeat,
@@ -2348,6 +2449,38 @@ export default function App() {
         // truth; alone in a lobby there was never a match to be removed from;
         // and a WATCHER was never in a match at all, so an abandon notice
         // would be about something that did not happen to them.
+        // A CPU match is NOT ended by losing its table.
+        //
+        // A match started from the menu needs no network at all, and that is
+        // the whole reason the SOLO building stays: it survives a tunnel, a
+        // dropped cell, a handover. At a table it holds a socket — and this
+        // path calls handleLeaveRoom, which ends with setMode('solo'),
+        // setScreen('menu') and resetMatch(), with `abandoningLiveSoloMatch`
+        // never consulted. So a dropped connection would SILENTLY DISCARD a
+        // live solo match: no loss, no XP, no history row. That is the "quit
+        // every match you are losing" hole running backwards, fired by a cell
+        // handover.
+        //
+        // The table is a bonus, not the match. The court stays up, the AI
+        // keeps playing, the table and any watchers are simply gone, and the
+        // result records as an ordinary solo match — which is exactly what it
+        // is, since the relay records nothing for a CPU table anyway.
+        const inCpuMatch =
+          modeRef.current === 'solo' &&
+          screenRef.current === 'game' &&
+          !spectatingRef.current;
+        if (inCpuMatch) {
+          // The table's IDENTITY goes; its TERMS stay. `activeConfig` reads
+          // `roomConfig`, so clearing it would drop this match back onto the
+          // device's own winning score and rules mid-rally — a different match
+          // than the one that started, decided by a dropped packet.
+          setRoomId(null);
+          setTableState(null);
+          setIsMultiplayerOpen(false);
+          setToastTableLost(true);
+          return;
+        }
+
         const notice = spectatingRef.current
           ? setToastTableEnded
           : opponentIdRef.current
@@ -3170,6 +3303,61 @@ export default function App() {
         setOppBall(ob);
       }
 
+      // Publish the whole visible table to anyone WATCHING this CPU match.
+      //
+      // AFTER both halves and off the refs, not inside either section: section
+      // 3 runs only while the ball is on the player's half and section 4 only
+      // while it is on the AI's, so a publisher inside either would go silent
+      // for half of every rally — and the watcher would freeze mid-flight
+      // rather than see the ball cross.
+      //
+      // Only while somebody is watching. The relay has no simulation, so
+      // these frames exist purely for a spectator, and the ordinary case —
+      // nobody watching — must cost nothing. `watchersRef` comes from
+      // `table_state`, which is the only message that knows.
+      //
+      // The ball is a SIDE rather than a crossing, so the relay sees it leave
+      // a half rather than having to be told: the AI's serve materialises
+      // inside its own half and its miss ends past its baseline, and neither
+      // is a crossing anybody could report.
+      if (
+        currentMode === 'solo' &&
+        watchersRef.current &&
+        time - lastCpuFrameSentRef.current > 50
+      ) {
+        lastCpuFrameSentRef.current = time;
+        const mine = ballRef.current;
+        const theirs = oppBallRef.current;
+        sendNetRef.current({
+          type: 'cpu_frame',
+          hostPaddle: paddleXRef.current,
+          cpuPaddle: aiRef.current.paddleX,
+          ball: mine.active
+            ? { side: 0, x: mine.x, y: mine.y }
+            : theirs?.active
+              ? { side: 1, x: theirs.x, y: theirs.y }
+              : null,
+          // In SEAT order, because that is how the relay reads it
+          // (`room.scores[me]`, `room.scores[cpuIdx]`) — not because the two
+          // differ today. Only seat 0 can seat a machine, since
+          // `set_room_config` is host-only and the host is whoever holds seat
+          // 0 right now, so `cpuSeatOf` is always 1 and mine-first would give
+          // the same array. Written by seat because the cost is nothing and
+          // the failure if that ever stops being true is silent: both
+          // watchers' scoreboards inverted, and the relay reading the
+          // MACHINE's score as the one that ends the match.
+          scores:
+            (playerIndexRef.current ?? 0) === 0
+              ? [statsRef.current.score, statsRef.current.opponentScore]
+              : [statsRef.current.opponentScore, statsRef.current.score],
+          // The loop's effect lists `winner` in its deps, so this closure is
+          // rebuilt when it changes and reads the current value. `live` is
+          // what sets `room.inPlay`, which is what decides whether a joiner
+          // may take the CPU's seat.
+          live: !winner,
+        });
+      }
+
       animId = requestAnimationFrame(gameLoop);
     };
 
@@ -3664,6 +3852,13 @@ export default function App() {
               content: t('room_expired_notice', currentLanguage),
               onDismiss: () => setToastRoomExpired(false),
             },
+            toastTableLost && {
+              id: 'toast-table-lost',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: t('table_lost_notice', currentLanguage),
+              onDismiss: () => setToastTableLost(false),
+            },
             toastTableEnded && {
               id: 'toast-table-ended',
               tone: 'warn' as const,
@@ -3769,7 +3964,16 @@ export default function App() {
                 unrankedReasons({
                   rules: activeConfig.rules,
                   mode,
-                  difficulty: settings.difficulty,
+                  // The rung the far half is ACTUALLY playing, which at a
+                  // table is the host's seat pick and not the menu's stored
+                  // setting. Reading the device setting here judges the quit
+                  // against a match nobody is playing — and the difficulty is
+                  // what decides whether a solo result moves the ladder at
+                  // all, so it is the ranked verdict that comes out wrong.
+                  // Third time this call site has skipped a field the sheet
+                  // passes; `tests/matchRules.test.ts` reads the call sites
+                  // rather than the function for exactly that reason.
+                  difficulty: activeDifficulty,
                   // The table's own venue, so a Casual duel is not threatened
                   // with a rank it was never going to move.
                   venueRoomId: tableState?.venueRoomId ?? null,
@@ -3781,6 +3985,11 @@ export default function App() {
                   // asked the same way by every consumer, is the whole reason
                   // this predicate exists.
                   rankMu: profile?.rankMu,
+                  // And the table's watching seats, for a CPU match: with
+                  // them open the ladder was never on the line, so quitting
+                  // must not threaten a rank it could not have moved. Same
+                  // rule as `rankMu` above, one verdict later.
+                  watched: activeConfig.cpu ? activeConfig.spectators : undefined,
                 }).length === 0
                   ? 'quit_confirm_ranked'
                   : 'quit_confirm_unranked',
@@ -4534,6 +4743,11 @@ export default function App() {
           onSetPrivate={(isPrivate) =>
             sendWhenOpen(ws, () => ({ type: 'set_table_visibility', private: isPrivate }))
           }
+          // The VISIBLE ladder rating, for the ranked badge on a CPU table:
+          // the match there is judged as the solo match it is, so a rung this
+          // player has climbed past has to read as outgrown here exactly as
+          // it does on the menu's pre-match sheet.
+          rankMu={profile?.rankMu}
         />
 
         {/* Player Profile & Stats Modal */}

@@ -712,6 +712,34 @@ export interface RoomMatchConfig {
    * and is already locked during play by set_room_config's own guard.
    */
   spectators: boolean;
+  /**
+   * The CPU sitting in this table's other playing seat, if one is.
+   *
+   * A term of the TABLE, for the same reasons `spectators` above is one and
+   * for one more that decided it. `RoomMatchConfig` is already host-owned and
+   * pre-match-only through `set_room_config`, already normalized server-side
+   * by `roomConfigFor`, already broadcast on `room_config` AND re-sent on
+   * every `game_start`, and already carried inside `table_state.config` — so
+   * a browsing player and a watcher both learn about it with nothing new on
+   * the wire.
+   *
+   * The alternative was a parallel `Room.cpu` field plus
+   * `room.ready[cpuSeat] = true`, and it fails three ways. `canStart` is not
+   * `ready[0] && ready[1]`; it is `players[0] && players[1] && ready[1]`, so a
+   * parallel field satisfies one clause of four and Start silently does
+   * nothing — `matchSeq` never advances, so `spectator_sync` never walks a
+   * watcher onto the court and the feature cannot work at all. `ready` is
+   * indexed by SEAT, so writing a machine's "yes" into `ready[1]` puts a
+   * forged consent in the slot a PERSON uses. And `set_room_config` clears
+   * `ready` whenever `ready[1]` was set, so seating a CPU and then changing
+   * the winning score — which is what a pre-match sheet is FOR — would disarm
+   * Start with no error and no Ready control to press.
+   *
+   * Null means the seat is open for a human. Which seat the CPU occupies is
+   * not stored: it is whichever playing seat the host is not in, so a host who
+   * swaps sides takes the CPU with them rather than landing on top of it.
+   */
+  cpu: AIDifficulty | null;
 }
 
 /**
@@ -736,6 +764,19 @@ export interface TableSeatInfo {
    * which the venue can force off however the host set it.
    */
   enabled: boolean;
+  /**
+   * What is in the seat, when something is.
+   *
+   * Absent means a human (or nobody, when `playerId` is null) — so an older
+   * bundle reading this reads exactly what it read before. A CPU seat carries
+   * `'cpu'` and fills `playerId`/`playerName` with the existing
+   * pseudo-opponent spelling, `AI-<difficulty>` / `AI (<difficulty>)`, which
+   * is what Match History already writes for a solo match. That spelling is
+   * load-bearing rather than tidy: `isLinkableId` matches neither `dev_` nor
+   * `bot-`, so the name is already refused as a tap target and nothing has to
+   * learn about it to stop opening a public profile for a machine.
+   */
+  occupant?: 'human' | 'cpu';
 }
 
 /**
@@ -792,6 +833,30 @@ export type WSClientMessage =
   // tests/protocolParity.test.ts reads this union to the first line-ending
   // semicolon, and a multi-line member truncates the whole parse.
   | { type: 'match_sync'; matchSeq: number; rev: number; p1Score: number; p2Score: number; bestStreaks: [number, number]; streaks: [number, number]; earnedBests: [number, number]; servingPlayer: 0 | 1; crossingsThisPoint: number }
+  // Everything a WATCHER needs about a table where one seat is a CPU, in one
+  // frame, sent by the host and by nobody else.
+  //
+  // The relay has no simulation: `watched_paddle` and `watched_ball` exist
+  // only because a human client sends `paddle_move` and `ball_pos`, and a CPU
+  // has no client. So the host publishes both halves — its own and the one it
+  // is simulating — and the relay derives every watcher frame from this,
+  // EXCLUDING the sender, which is already drawing all of it.
+  //
+  // Sent only while somebody is actually watching (the host learns that from
+  // `table_state`), so the ordinary case — nobody watching — costs nothing.
+  //
+  // `ball.side` rather than crossing events, and that is the subtle part: the
+  // CPU's SERVE materialises inside its own half and the CPU's MISS ends past
+  // its baseline, so neither is a `ball_cross_net`. A design that emitted
+  // `watched_ball_left` only on a crossing would leave the watcher beside the
+  // CPU dead-reckoning a ghost ball off the bottom of the screen after every
+  // point. A side (or null) is a state rather than an event, so the relay can
+  // see the transition and cannot miss one.
+  //
+  // NOTE this member stays on ONE line — tests/protocolParity.test.ts reads
+  // this union to the first line-ending semicolon, and a multi-line member
+  // truncates the whole parse.
+  | { type: 'cpu_frame'; hostPaddle: number; cpuPaddle: number; ball: { side: 0 | 1; x: number; y: number } | null; scores: [number, number]; live: boolean }
   | { type: 'quick_chat'; text: string; senderName?: string }
   | { type: 'rematch_request' }
   | { type: 'rtc_signal'; payload: RTCSignalPayload }

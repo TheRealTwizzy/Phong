@@ -3,12 +3,21 @@ import { Cosmetic } from '../game/cosmetics';
 import { isLinkableId } from '../profileRules';
 import { t } from '../i18n/translations';
 import { Button, Panel, Sheet, SegmentedControl, UnlockHintSheet } from './ui';
-import { Achievement, LanguageCode, MatchRules, RoomMatchConfig, TableSeat, TableSeatInfo } from '../types';
+import {
+  Achievement,
+  AIDifficulty,
+  LanguageCode,
+  MatchRules,
+  RoomMatchConfig,
+  TableSeat,
+  TableSeatInfo,
+} from '../types';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { DEFAULT_ROOM_CONFIG, WINNING_SCORES, normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
-import { DEFAULT_VENUE_ROOM, roomAllowsSpectators } from '../venues';
+import { DEFAULT_VENUE_ROOM, roomAllowsSpectators, roomsOf } from '../venues';
 import {
+  Bot,
   Check,
   Copy,
   Share2,
@@ -21,6 +30,16 @@ import {
   RefreshCw,
   Eye,
 } from 'lucide-react';
+
+/**
+ * The localized name of an AI rung.
+ *
+ * Reads the SOLO building's own room labels rather than a second dictionary
+ * of five: the rung a host seats here is the same rung the menu's Solo
+ * building lists, and two spellings of one name is one of them going stale.
+ */
+const rungLabelKey = (d: AIDifficulty): string =>
+  roomsOf('solo').find((r) => r.difficulty === d)?.labelKey ?? 'mode_solo';
 
 interface MultiplayerLobbyProps {
   /** Position in App's open-sheet stack; forwarded to Sheet. See Sheet's `stack`. */
@@ -86,6 +105,15 @@ interface MultiplayerLobbyProps {
   joinKey?: string | null;
   /** Host-only, pre-match. Turning it ON always mints a FRESH key. */
   onSetPrivate?: (isPrivate: boolean) => void;
+  /**
+   * This player's VISIBLE ladder rating, for the ranked badge.
+   *
+   * Only ever read for a CPU table, where the match is judged as the solo
+   * match it is: a rung the host has climbed past moves no rating, and the
+   * badge has to say so here exactly as the menu's pre-match sheet does. A
+   * duel rates on its rules and its venue, so this is unread on that path.
+   */
+  rankMu?: number;
 }
 
 /** One row of the table browser, as GET /api/rooms/:venue/tables returns it. */
@@ -136,6 +164,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   isPrivate = false,
   joinKey = null,
   onSetPrivate,
+  rankMu,
   stack,
 }) => {
   const playerName = currentUsername || 'Player';
@@ -147,6 +176,12 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   // A gated match length explains itself on tap, rather than through a title
   // attribute that no touch device renders.
   const [gateHint, setGateHint] = useState<Achievement | null>(null);
+  // Which playing seat the host is filling, or null. A seat rather than a
+  // boolean because the host is not always at seat 0 any more — `join_room`
+  // takes the first free PLAYING seat, so a newcomer adopting a hostless
+  // table sits at 0 and the chair they are filling is 1, but a table adopted
+  // the other way round exists too.
+  const [cpuSeatPicker, setCpuSeatPicker] = useState<0 | 1 | null>(null);
 
   // Check URL query parameters for auto room join (?room=CODE)
   useEffect(() => {
@@ -171,11 +206,32 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   const opponentLinkable = onViewProfile && isLinkableId(opponentId);
   // The host owns the room's terms; the guest sees exactly the same panel
   // with every control disabled.
-  const isHost = playerIndex === 0;
+  /**
+   * Whether this player actually holds the HOST's playing seat.
+   *
+   * Not `playerIndex === 0`, which is overloaded: `table_state` sets
+   * `playerIndex` to the SIDE a watcher is sitting beside, so a spectator in
+   * seat 2 reports 0 and read as the host — seeing the host's controls live
+   * and editable while the relay refused every one of them (`playerIndex()`
+   * is null for a watcher), and, once the opponent chair became a tap target,
+   * opening a CPU picker where the swap-back-into-play control should be.
+   *
+   * `yourSeat` is the WIRE seat and answers the question directly. The
+   * fallback covers the beat between `room_created` and the `table_state`
+   * that follows it, where the old reading was correct.
+   */
+  const isHost = tableState ? tableState.yourSeat === 0 : playerIndex === 0;
   const config = roomConfig || DEFAULT_ROOM_CONFIG;
   const guestReady = readyStates[1];
   const myReady = playerIndex !== null ? readyStates[playerIndex] : false;
   const scoreOpen = (pts: number) => hasUnlock(earnedAchievements, 'winningScore', pts);
+  const difficultyOpen = (d: AIDifficulty) => hasUnlock(earnedAchievements, 'difficulty', d);
+  // The five rungs, named by the SOLO building's own room labels rather than
+  // by five new keys: the same rung must read the same word in both places,
+  // and a second dictionary entry for it is a second thing to drift.
+  const RUNGS = roomsOf('solo')
+    .map((r) => r.difficulty)
+    .filter((d): d is AIDifficulty => !!d);
 
   // One seat in the room. The handshake used to be two label:value rows and a
   // separate chip; making each seat a row with its own ready state is what
@@ -272,15 +328,23 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 id="btn-ready-play"
                 variant="primary"
                 block
-                disabled={!opponentName || !guestReady}
+                // A machine in the chair needs no Ready tap: seating it IS the
+                // yes, and there is nobody to ask. Without this arm the relay
+                // accepts the start and the button that would send it stays
+                // disabled forever, waiting on an `opponentName` only
+                // `room_joined`/`opponent_joined` ever set — the feature not
+                // working at all, with nothing on screen to say why.
+                disabled={config.cpu ? false : !opponentName || !guestReady}
                 icon={<Play className="h-3.5 w-3.5 fill-current" />}
                 onClick={() => onStartMatch?.()}
               >
-                {!opponentName
-                  ? t('waiting_for_opponent', language)
-                  : guestReady
-                    ? t('start_match', language)
-                    : t('waiting_for_ready', language)}
+                {config.cpu
+                  ? t('start_match', language)
+                  : !opponentName
+                    ? t('waiting_for_opponent', language)
+                    : guestReady
+                      ? t('start_match', language)
+                      : t('waiting_for_ready', language)}
               </Button>
             ) : (
               <Button
@@ -509,30 +573,57 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                     const mine = tableState.yourSeat === info.seat;
                     const free = info.playerId === null;
                     const watchSeat = info.seat >= 2;
+                    const cpuHere = info.occupant === 'cpu';
+                    // The OPPONENT chair, from the host's side: the other
+                    // playing seat, filled by a machine or by nobody. Tapping
+                    // it picks who sits there rather than swapping into it —
+                    // and a swap into it was never available anyway, since
+                    // `swap_seat` refuses any move that would leave nobody
+                    // playing, so the host tapping the only other playing
+                    // seat at their own table was a guaranteed error message.
+                    const opponentChair =
+                      isHost && !watchSeat && !mine && (free || cpuHere) && !!onUpdateRoomConfig;
+                    const tappable = opponentChair || (info.enabled && free && !mine);
                     return (
                       <button
                         key={info.seat}
                         id={`seat-${info.seat}`}
                         data-mine={mine ? 'true' : 'false'}
                         data-free={free ? 'true' : 'false'}
-                        disabled={!info.enabled || !free || mine}
-                        onClick={() => onSwapSeat(info.seat)}
+                        data-occupant={info.occupant ?? (free ? 'none' : 'human')}
+                        disabled={!tappable}
+                        onClick={() =>
+                          opponentChair
+                            ? setCpuSeatPicker(info.seat as 0 | 1)
+                            : onSwapSeat(info.seat)
+                        }
                         className={`flex min-w-0 flex-col items-start rounded-card border px-2 py-1.5 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
                           mine
                             ? 'border-accent/50 bg-accent/12'
-                            : info.enabled && free
+                            : tappable
                               ? 'border-line bg-surface-2'
                               : 'border-line bg-surface-1 opacity-60'
                         }`}
                       >
                         <span className="flex items-center gap-1 text-2xs font-normal tracking-normal text-ink-dim uppercase">
-                          {watchSeat ? <Eye className="h-3 w-3" /> : <User className="h-3 w-3" />}
+                          {watchSeat ? (
+                            <Eye className="h-3 w-3" />
+                          ) : cpuHere ? (
+                            <Bot className="h-3 w-3" />
+                          ) : (
+                            <User className="h-3 w-3" />
+                          )}
                           {watchSeat ? t('watch_table', language) : `P${info.seat + 1}`}
                         </span>
                         <span className="w-full truncate text-2xs text-ink">
                           {!info.enabled
                             ? '—'
-                            : info.playerName || t('lobby_seat_free', language)}
+                            : cpuHere && config.cpu
+                              ? t(rungLabelKey(config.cpu), language)
+                              : info.playerName ||
+                                (opponentChair
+                                  ? t('lobby_cpu_pick', language)
+                                  : t('lobby_seat_free', language))}
                         </span>
                       </button>
                     );
@@ -617,7 +708,21 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                   onUpdateRoomConfig?.({ rules: normalizeRules({ ...config.rules, ...patch }) })
                 }
                 lang={language}
-                mode="multiplayer"
+                // A table with a CPU in the other chair is playing a SOLO
+                // match — the table is only WHERE it is played and who may
+                // watch — so the badge has to judge it as one: the rung's own
+                // ceiling applies, Rookie never rates, and the watching seats
+                // decide the rest. Handing it 'multiplayer' would price a
+                // machine match as a duel on screen while the server priced it
+                // correctly, which is the disagreement `unrankedReasons`
+                // exists to make impossible.
+                mode={config.cpu ? 'solo' : 'multiplayer'}
+                difficulty={config.cpu ?? undefined}
+                rankMu={config.cpu ? rankMu : undefined}
+                // The host is choosing this in this very panel, two rows up,
+                // so the badge answers in the same breath rather than a frame
+                // later.
+                watched={config.cpu ? config.spectators : undefined}
                 readOnly={!isHost}
                 idPrefix="lobby"
                 // The TABLE's venue, not the room the player walked in from.
@@ -822,6 +927,53 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
             {t('lobby_tip', language)}
           </span>
         </Panel>
+      </Sheet>
+
+      {/* Who sits in the opponent chair.
+          `layer="over"` because it opens FROM the lobby and the lobby has to
+          stay legible behind it — the host is choosing an opponent for the
+          table they can see. `set_room_config` carries the answer, so there
+          is no new message and no ordering hazard against the winning score
+          or the watching seats being set in the same breath. */}
+      <Sheet
+        id="cpu-picker"
+        isOpen={cpuSeatPicker !== null}
+        onClose={() => setCpuSeatPicker(null)}
+        closeId="btn-close-cpu-picker"
+        layer="over"
+        size="sm"
+        icon={<Bot className="h-4 w-4" />}
+        title={t('lobby_cpu_title', language)}
+        subtitle={t('lobby_cpu_hint', language)}
+        closeLabel={t('close', language)}
+      >
+        <SegmentedControl
+          columns={3}
+          ariaLabel={t('lobby_cpu_title', language)}
+          value={config.cpu ?? 'none'}
+          onLockTap={setGateHint}
+          lockLabel={t('locked', language)}
+          onChange={(value) => {
+            onUpdateRoomConfig?.({ cpu: value === 'none' ? null : (value as AIDifficulty) });
+            setCpuSeatPicker(null);
+          }}
+          options={[
+            // Taking the machine back out, so the chair is a chair again.
+            // First rather than last: it is the state the table starts in,
+            // and the one a host reaches for when somebody is on their way.
+            { value: 'none' as const, id: 'cpu-none', label: t('lobby_cpu_none', language), lock: null },
+            ...RUNGS.map((d) => ({
+              value: d,
+              id: `cpu-${d}`,
+              label: t(rungLabelKey(d), language),
+              // The same gate the menu's Solo rooms draw and the same one
+              // /api/match/record enforces — the menu is the client, and so
+              // is this. A rung this profile has not earned is shown, and
+              // tapping its lock says which achievement opens it.
+              lock: difficultyOpen(d) ? null : unlockedBy('difficulty', d) ?? null,
+            })),
+          ]}
+        />
       </Sheet>
 
       <UnlockHintSheet

@@ -624,6 +624,49 @@ describe('every consumer asks the verdict the same way', () => {
     // The same match, asked without the rating: reads as fully ranked.
     expect(unrankedReasons(ctx)).toHaveLength(0);
   });
+
+  // And the DIFFICULTY, which at a table is the host's seat pick rather than
+  // the menu's stored setting: reading the device value judges a match nobody
+  // is playing, and the difficulty is what decides whether a solo result
+  // moves the ladder at all.
+  it.each(CONSUMERS)('%s judges the rung actually being played', (file) => {
+    for (const args of callArgs(readFileSync(resolve(__dirname, '..', file), 'utf8'))) {
+      if (!/difficulty/.test(args)) continue;
+      expect(args).not.toMatch(/difficulty:\s*settings\.difficulty/);
+    }
+  });
+
+  // `watched` is the same shape of hazard one arm along: absent means "no
+  // table", which is right for a menu-started match and a silent lie for a
+  // CPU one played at a table whose watching seats are open.
+  it.each(CONSUMERS)('%s gives it `watched`, so the watched arm is reachable', (file) => {
+    for (const args of callArgs(readFileSync(resolve(__dirname, '..', file), 'utf8'))) {
+      expect(args).toMatch(/watched/);
+    }
+  });
+
+  it('would otherwise call a watched CPU match ranked', () => {
+    const ctx = { rules: {}, mode: 'solo', difficulty: 'pro' } as const;
+    expect(unrankedReasons({ ...ctx, watched: true })).toContain('watched');
+    expect(unrankedReasons(ctx)).toHaveLength(0);
+  });
+
+  // The panel is a COMPONENT, so its own call being correct proves nothing
+  // about the two places that render it: a site that never passes the prop
+  // leaves the arm skipped just as thoroughly as one that never passes it to
+  // the function. The lobby is the site that matters — it is the only one
+  // that can be showing a CPU table at all.
+  it('the lobby hands the panel a `watched`, or the badge cannot ever say it', () => {
+    const src = readFileSync(resolve(__dirname, '..', 'src/components/MultiplayerLobby.tsx'), 'utf8');
+    const at = src.indexOf('<MatchRulesPanel');
+    expect(at).toBeGreaterThan(-1);
+    const props = src.slice(at, src.indexOf('/>', at));
+    expect(props).toMatch(/watched=/);
+    // And the difficulty and rating the solo arms are judged on, or the badge
+    // would price a machine match as a duel while the server priced it right.
+    expect(props).toMatch(/difficulty=/);
+    expect(props).toMatch(/rankMu=/);
+  });
 });
 
 describe('autoServeForced', () => {

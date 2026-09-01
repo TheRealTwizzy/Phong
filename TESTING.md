@@ -56,16 +56,24 @@ coverage number.
 | `ladderTone` | Which stop of the rank meter's fixed ramp a fill is at — the one tone in the app picked by a value rather than a meaning |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
+| `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing) |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
-| `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `p2pParity` `headers` | Ten suites that boot the real server (see §4) |
+| `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `p2pParity` `headers` | Eleven suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` | The one-shot migrations |
 
 ### Browser layer
 
 `profiles` · `cosmetics` · `venues` · `menu` · `gameplay` · `rating` · `rules` ·
 `achievements` · `elite` · `duel` · `invite` · `lobby` · `spectate` · `queue` · `split` ·
-`streak` · `history` · `delete` · `eject` · `build-id`
+`streak` · `history` · `delete` · `report` · `eject` · `load` · `build-id`
+
+`lobby` and `spectate` are where the CPU seat is driven through a real browser, because the
+cost of it is on the CLIENT and `tsc` names none of the branches: `lobby` proves the picker
+opens from the free chair, that Start is live with nobody opposite, and — the witness that
+matters — that the court comes up with the HUD's **Reset** button, which is hidden in a duel,
+so `mode` genuinely stayed `'solo'` at a relay seat. `spectate` proves a machine match is a
+listed, watchable table whose scoreboard actually follows the play.
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. That isolation is

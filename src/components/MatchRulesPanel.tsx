@@ -54,6 +54,16 @@ interface Props {
    * rating, and promising otherwise is the same lie the Rookie case fixes.
    */
   rankMu?: number;
+  /**
+   * Solo only: whether the TABLE this match will be played at opens its
+   * watching seats. A watcher sees the hidden half live, so a CPU match at
+   * such a table moves no visible ladder — and the host is choosing that
+   * here, in this panel, which is why the badge has to answer it in the same
+   * breath rather than a frame later.
+   *
+   * Absent means no table at all, which is every menu-started solo match.
+   */
+  watched?: boolean;
 }
 
 const SLIDERS: { key: PhysicsRuleKey; labelKey: string }[] = [
@@ -82,6 +92,8 @@ const UNRANKED_COPY_KEY = (reason: UnrankedReason | undefined): string => {
       return 'rules_unranked_outgrown';
     case 'venue':
       return 'rules_unranked_venue';
+    case 'watched':
+      return 'rules_unranked_watched';
     case 'sonar':
       return 'rules_unranked_sonar';
     default:
@@ -99,11 +111,12 @@ export const MatchRulesPanel: React.FC<Props> = ({
   idPrefix = 'menu',
   venueRoomId = null,
   rankMu,
+  watched,
 }) => {
   const [open, setOpen] = useState(false);
   // Everything standing between this match and the ladder, not just the
   // sliders: the mode, the difficulty and the sonar count too.
-  const blockers = unrankedReasons({ rules, mode, difficulty, venueRoomId, rankMu });
+  const blockers = unrankedReasons({ rules, mode, difficulty, venueRoomId, rankMu, watched });
   const ranked = blockers.length === 0;
   const sonarUnranks = blockers.includes('sonar');
   // A DIFFERENT question from the badge above, and one this panel must not
@@ -146,6 +159,10 @@ export const MatchRulesPanel: React.FC<Props> = ({
 
       <div
         id={`${idPrefix}-rules-status`}
+        // The verdict itself, not the prose. A suite asserting on the
+        // rendered sentence is asserting on a translation, and this row has
+        // seven of them; the reason is the thing that has to be right.
+        data-blocker={blockers[0] ?? 'none'}
         className={`px-2.5 py-1 rounded-ctl text-2xs leading-snug ${
           ranked
             ? 'border border-win/40 bg-win/10 text-win'
