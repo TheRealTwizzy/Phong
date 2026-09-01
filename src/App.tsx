@@ -1383,11 +1383,13 @@ export default function App() {
     if (roomCode) pendingRoomRef.current = roomCode.trim().toUpperCase();
   }, []);
 
-  // Handle paddle movement & velocity
+  // Handle paddle movement. The paddle's VELOCITY is not computed here: a
+  // pointermove is delivered once per animation frame, so a per-event delta
+  // reads half the true speed on a 120Hz phone and a stale saturated value
+  // forever once the finger stops moving. It is sampled per frame in the game
+  // loop instead, the same way the AI does it (`physics.ts`).
   const handlePaddleMove = useCallback((newX: number) => {
     setPaddleX(newX);
-    paddleVxRef.current = (newX - prevPaddleXRef.current) * 60;
-    prevPaddleXRef.current = newX;
 
     // Send position to multiplayer opponent
     if (modeRef.current === 'multiplayer') {
@@ -2533,6 +2535,16 @@ export default function App() {
     const gameLoop = (time: number) => {
       const dt = Math.min((time - lastTime) / 1000, 0.05);
       lastTime = time;
+
+      // The paddle's own velocity is an input to the ball (`driveCoupling`),
+      // so it has to be a speed rather than a per-event delta: measured here,
+      // once a frame, against the same position the collision below reads.
+      // Frame-rate independent by construction, and it returns to zero on its
+      // own the moment the paddle stops — a flick followed by a held finger
+      // fires no further pointermove at all, and the old per-event value
+      // stayed latched at full swing for every remaining contact.
+      paddleVxRef.current = (paddleXRef.current - prevPaddleXRef.current) / (dt || 0.016);
+      prevPaddleXRef.current = paddleXRef.current;
 
       // A streamed opponent ball that has stopped being refreshed is stale —
       // its clear was reliable but the stream is not, so one late sample can
