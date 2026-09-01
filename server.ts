@@ -64,6 +64,13 @@ import {
   roomsOf,
 } from './src/venues';
 import { validateUsername } from './src/profileRules';
+import {
+  REPORTS_PER_DAY,
+  REPORT_CATEGORIES,
+  REPORT_TEXT_MIN,
+  ReportCategory,
+} from './src/reportRules';
+import { APP_VERSION } from './src/version';
 import { Rating, newRating, winProbability } from './src/rating';
 
 
@@ -1265,7 +1272,7 @@ async function startServer() {
       console.error('[health] datastore unreachable:', e?.message);
       return res.status(503).json({ status: 'degraded', build: buildId() });
     }
-    res.json({ status: 'ok', activeRooms: rooms.size, build: buildId() });
+    res.json({ status: 'ok', activeRooms: rooms.size, build: buildId(), version: APP_VERSION });
   });
 
   // ---- Session: which one device is holding this account right now --------
@@ -2131,6 +2138,62 @@ async function startServer() {
       });
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
       res.json({ modeStats: out.modeStats });
+    } catch (e: any) {
+      serverError(res, e);
+    }
+  });
+
+  /**
+   * Tell us what went wrong.
+   *
+   * Behind `requireActiveSession` like everything else that writes
+   * (convention §8), and behind an initialized profile, because a report with
+   * no account behind it is one nobody can follow up.
+   *
+   * The allowance is counted from the TABLE rather than from memory, unlike
+   * the sign-in limiter: an in-memory counter is reset by every deploy, and a
+   * deploy is exactly when a wave of reports arrives. It is per player per UTC
+   * day, the same shape the daily mission tables already use.
+   *
+   * `context` is attached by the CLIENT and is diagnostics, not testimony:
+   * build id, locale, screen, the last match key. Nobody reports a build id by
+   * hand, and a report without one costs an afternoon. It is bounded and
+   * stringified rather than trusted — see db.fileReport.
+   *
+   * Note what this deliberately does NOT do: it does not act. An abuse report
+   * names a subject and stops there, because acting on one is a judgement a
+   * person makes with `moderate.cjs`, not something a route infers from a
+   * stranger's say-so. A route that could hide an avatar on report would be a
+   * route that lets one player hide another's.
+   */
+  app.post('/api/report', requireActiveSession, (req, res) => {
+    try {
+      const me = db.getProfile(req.deviceId!);
+      if (!me.initialized) return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+
+      const category = String(req.body?.category || '');
+      if (!REPORT_CATEGORIES.includes(category as ReportCategory)) {
+        return res.status(400).json({ error: 'BAD_CATEGORY' });
+      }
+      const text = String(req.body?.text || '').trim();
+      if (text.length < REPORT_TEXT_MIN) return res.status(400).json({ error: 'TOO_SHORT' });
+
+      if (db.reportsToday(me.id) >= REPORTS_PER_DAY) {
+        return res.status(429).json({ error: 'TOO_MANY_REPORTS' });
+      }
+
+      const id = db.fileReport({
+        playerId: me.id,
+        username: me.username,
+        category,
+        text,
+        // Only meaningful for `abuse`; stored as given and never resolved
+        // here, because resolving it would be acting on it.
+        subjectId: req.body?.subjectId ? String(req.body.subjectId) : null,
+        context: { ...(req.body?.context ?? {}), build: buildId(), version: APP_VERSION },
+      });
+      db.bumpCounter(`report:${category}`);
+      res.json({ ok: true, id });
     } catch (e: any) {
       serverError(res, e);
     }

@@ -2,6 +2,7 @@ import React from 'react';
 import { GameSettings, LanguageCode, SoundscapeType } from '../types';
 import { LANGUAGES, t } from '../i18n/translations';
 import { sound } from '../audio/soundEffects';
+import { APP_VERSION } from '../version';
 import {
   Smartphone,
   Volume2,
@@ -14,6 +15,9 @@ import {
   Crosshair,
   Waves,
   Zap,
+  ChevronRight,
+  Newspaper,
+  Flag,
 } from 'lucide-react';
 
 // Every device and presentation preference, with no chrome of its own — so the
@@ -38,6 +42,16 @@ export interface SettingsPanelProps {
    * screen. The stored preferences are untouched and come back by themselves.
    */
   indicatorsLockedBySonar?: boolean;
+  /**
+   * Absent = not offered, the same contract AccountDangerZone uses for
+   * deletion. Both of these are menu-only: this panel is also the body of the
+   * in-match settings modal, and a form to type into is not something to open
+   * over a live court with a ball on it.
+   */
+  onOpenPatchNotes?: () => void;
+  onOpenReport?: () => void;
+  /** True when the newest patch note is one this device has not opened. */
+  patchNotesUnread?: boolean;
 }
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
@@ -45,6 +59,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onUpdateSettings,
   onTriggerShake,
   indicatorsLockedBySonar = false,
+  onOpenPatchNotes,
+  onOpenReport,
+  patchNotesUnread = false,
 }) => {
   const lang = settings.language || 'en';
 
@@ -502,6 +519,53 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           );
         })}
       </div>
+
+      {/* About & feedback.
+          Rendered only where the callbacks are supplied, which is the menu:
+          see the prop docs. A row that opens a sub-sheet is new to this
+          panel — every other control here mutates `settings` in place — so it
+          is built as a plain button carrying the same card chrome the sections
+          above use, rather than a new primitive nothing else would reuse. */}
+      {(onOpenPatchNotes || onOpenReport) && (
+        <div className="flex flex-col gap-2 rounded-2xl border border-line bg-surface-2/60 p-3.5">
+          {onOpenPatchNotes && (
+            <button
+              id="btn-open-patch-notes"
+              onClick={onOpenPatchNotes}
+              className="flex items-center justify-between gap-2 rounded-ctl px-1 py-1.5 text-left transition-colors hover:bg-surface-3"
+            >
+              <span className="flex min-w-0 items-center gap-1.5 text-xs font-mono font-bold text-ink">
+                <Newspaper className="h-4 w-4 shrink-0 text-accent" />
+                <span className="truncate">{t('patch_notes_title', lang)}</span>
+                {patchNotesUnread && (
+                  <span
+                    id="patch-notes-dot"
+                    aria-label={t('patch_notes_new', lang)}
+                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+                  />
+                )}
+              </span>
+              <span className="flex shrink-0 items-center gap-1">
+                <span className="font-mono text-[10px] text-ink-muted">v{APP_VERSION}</span>
+                <ChevronRight className="h-4 w-4 text-ink-muted" />
+              </span>
+            </button>
+          )}
+          {onOpenReport && (
+            <button
+              id="btn-open-report"
+              onClick={onOpenReport}
+              className="flex items-center justify-between gap-2 rounded-ctl px-1 py-1.5 text-left transition-colors hover:bg-surface-3"
+            >
+              <span className="flex min-w-0 items-center gap-1.5 text-xs font-mono font-bold text-ink">
+                <Flag className="h-4 w-4 shrink-0 text-warn" />
+                <span className="truncate">{t('report_title', lang)}</span>
+              </span>
+              <ChevronRight className="h-4 w-4 shrink-0 text-ink-muted" />
+            </button>
+          )}
+        </div>
+      )}
     </>
   );
 };

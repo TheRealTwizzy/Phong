@@ -84,6 +84,10 @@ import { ScoreBoard } from './components/ScoreBoard';
 import { RadarPreview } from './components/RadarPreview';
 import { SettingsModal } from './components/SettingsModal';
 import { SettingsPanel } from './components/SettingsPanel';
+import { PatchNotesSheet } from './components/PatchNotesSheet';
+import { ReportSheet } from './components/ReportSheet';
+import { latestPatchNote } from './patchNotes';
+import { classifyDevice } from './device';
 import { MultiplayerLobby } from './components/MultiplayerLobby';
 import { MainMenu } from './components/MainMenu';
 import { SplitScreenMatch } from './components/SplitScreenMatch';
@@ -158,6 +162,17 @@ const MAX_INVITE_RETRIES = 2;
 // failure from a relay that cannot be reached, and it recovers on its own
 // within a round trip, so it gets its own (larger) allowance.
 const MAX_INVITE_SESSION_REJOINS = 5;
+
+/**
+ * The newest patch-note version this browser has opened.
+ *
+ * Flat and unnamespaced like the other per-browser keys here, and that is
+ * safe for exactly the reason `phong_pending_matches` is NOT: nothing is paid
+ * or rated on it. The worst a stale value can do is show, or fail to show, a
+ * dot — so unlike the pending-match queue it does not need clearing when the
+ * identity changes.
+ */
+const SEEN_PATCH_KEY = 'phong_seen_patch_version';
 
 const DEFAULT_SETTINGS: GameSettings = {
   soundEnabled: true,
@@ -301,6 +316,37 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isMultiplayerOpen, setIsMultiplayerOpen] = useState<boolean>(false);
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
+  const [isPatchNotesOpen, setIsPatchNotesOpen] = useState<boolean>(false);
+  const [isReportOpen, setIsReportOpen] = useState<boolean>(false);
+  /**
+   * The newest version this browser has actually opened the notes for.
+   *
+   * localStorage rather than the profile, deliberately: "have I read this" is
+   * a fact about a screen, not about an account, and putting it on the profile
+   * would make it a thing moveAccount and deleteAccount have to carry. The
+   * cost is that a player signing in on a second browser sees the dot again,
+   * which is the right side to be wrong on — a notice shown twice is better
+   * than one never shown.
+   */
+  const [seenPatchVersion, setSeenPatchVersion] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(SEEN_PATCH_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const patchNotesUnread = seenPatchVersion !== latestPatchNote().version;
+  const openPatchNotes = useCallback(() => {
+    setIsPatchNotesOpen(true);
+    const version = latestPatchNote().version;
+    setSeenPatchVersion(version);
+    try {
+      localStorage.setItem(SEEN_PATCH_KEY, version);
+    } catch {
+      // A private window refusing to store this costs a repeated dot, nothing
+      // more — the same posture meterMemory takes about its own writes.
+    }
+  }, []);
   const [shakeTrigger, setShakeTrigger] = useState<number>(0);
   // Any tapped username opens this player's public profile — last in
   // `sheetStack` below, so it draws above whatever spawned it. null = closed.
@@ -331,10 +377,20 @@ export default function App() {
         isMissionsOpen && 'missions',
         isMultiplayerOpen && 'lobby',
         isSettingsOpen && 'settings',
+        isPatchNotesOpen && 'patch-notes',
+        isReportOpen && 'report',
         isProfileOpen && 'profile',
         publicProfileId && 'public-profile',
       ].filter(Boolean) as string[],
-    [isMissionsOpen, isMultiplayerOpen, isSettingsOpen, isProfileOpen, publicProfileId]
+    [
+      isMissionsOpen,
+      isMultiplayerOpen,
+      isSettingsOpen,
+      isPatchNotesOpen,
+      isReportOpen,
+      isProfileOpen,
+      publicProfileId,
+    ]
   );
   const stackOf = (key: string) => {
     const index = sheetStack.indexOf(key);
@@ -396,6 +452,16 @@ export default function App() {
   // nothing played from here would be recorded.
   const [sessionStatus, setSessionStatus] = useState<ClientSessionStatus>('connecting');
   const [sessionBusy, setSessionBusy] = useState<boolean>(false);
+  /**
+   * The build the SERVER says it is serving.
+   *
+   * Read off the heartbeat, which already carries it for the stale-build
+   * reload, rather than fetching /api/health for a string that is going to be
+   * rendered on one sheet. It is shown beside the version because the two
+   * answer different questions: the version is what changed, the build is what
+   * is running.
+   */
+  const [sessionBuild, setSessionBuild] = useState<string | null>(null);
 
   // 'menu' = out-of-match navigation hub; 'game' = a match is on court.
   const [screen, setScreen] = useState<'menu' | 'game'>('menu');
@@ -3442,6 +3508,7 @@ export default function App() {
     () =>
       watchSession(({ status, build }) => {
         setSessionStatus(status);
+        if (build) setSessionBuild(build);
         if (status === 'stale_build' && build) {
           // A new deployment is live. Reload onto it — the device cookie is
           // untouched, so we come back to the same account on the new build.
@@ -3869,6 +3936,9 @@ export default function App() {
                   onUpdateSettings={(newVals) => setSettings((s) => ({ ...s, ...newVals }))}
                   onTriggerShake={() => setShakeTrigger(Date.now())}
                   indicatorsLockedBySonar={!indicatorsAllowed}
+                  onOpenPatchNotes={openPatchNotes}
+                  onOpenReport={() => setIsReportOpen(true)}
+                  patchNotesUnread={patchNotesUnread}
                 />
               ),
             }}
@@ -4372,6 +4442,33 @@ export default function App() {
           profile={profile}
           onTriggerShake={() => setShakeTrigger(Date.now())}
           indicatorsLockedBySonar={!indicatorsAllowed}
+        />
+
+        {/* What changed, and what this player is running. */}
+        <PatchNotesSheet
+          stack={stackOf('patch-notes')}
+          isOpen={isPatchNotesOpen}
+          onClose={() => setIsPatchNotesOpen(false)}
+          lang={currentLanguage}
+          build={sessionBuild}
+        />
+
+        {/* Tell us what went wrong. The diagnostics are attached here rather
+            than typed: nobody reports a build id by hand, and a report
+            without one costs an afternoon. */}
+        <ReportSheet
+          stack={stackOf('report')}
+          isOpen={isReportOpen}
+          onClose={() => setIsReportOpen(false)}
+          lang={currentLanguage}
+          context={{
+            screen,
+            mode,
+            locale: currentLanguage,
+            device: classifyDevice(),
+            roomId: roomId ?? null,
+            lastMatchKey: matchKeyRef.current || null,
+          }}
         />
 
         {/* 2-Phone Multiplayer Lobby */}

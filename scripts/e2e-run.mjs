@@ -61,6 +61,7 @@ const SUITES = [
   { name: 'streak', ownsServer: false },
   { name: 'history', ownsServer: false },
   { name: 'delete', ownsServer: false },
+  { name: 'report', ownsServer: false },
   { name: 'eject', ownsServer: true },
   { name: 'load', ownsServer: false, needsBrowser: false },
   { name: 'build-id', ownsServer: true, needsBrowser: false },
