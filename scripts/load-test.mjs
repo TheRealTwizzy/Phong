@@ -5,17 +5,29 @@
 //
 // Usage: node scripts/load-test.mjs [rooms] [seconds] [url]
 //   defaults: 10 rooms, 20 seconds, ws://localhost:3000/ws
+//
+// This script silently STOPPED WORKING when the lobby handshake landed: it
+// waited for a `game_start` that no longer follows a join, having sent neither
+// `player_ready` nor `start_match`, so it died on the first pair. Nothing
+// noticed, for however long that was, while a capacity number nobody could
+// reproduce sat in two documents — `lint:suites` covers only `e2e-*.mjs`,
+// `npm test` never touches this file, `tsc` does not check `.mjs`, and CI
+// never invoked it.
+//
+// So it is now exercised at SMOKE SCALE by `scripts/e2e-load.mjs`, which is a
+// registered suite. That is the part that matters: a repaired script with
+// nothing running it is a script that will rot again.
 
 import WebSocket from 'ws';
 
-const ROOMS = Number(process.argv[2]) || 10;
-const SECONDS = Number(process.argv[3]) || 20;
-const URL = process.argv[4] || 'ws://localhost:3000/ws';
+const isMain = import.meta.url === `file://${process.argv[1]}`;
 
 const PADDLE_HZ = 30;
 const CROSS_EVERY_MS = 900; // one net crossing per ~rally beat
 const POINT_EVERY_MS = 7000;
 
+export async function runLoadTest({ rooms: ROOMS, seconds: SECONDS, url: URL, quiet = false } = {}) {
+const log = quiet ? () => {} : console.log;
 const latencies = [];
 let paddleSent = 0;
 let paddleReceived = 0;
@@ -59,20 +71,29 @@ const waitFor = (ws, type, ms = 5000) =>
     }, 20);
   });
 
-console.log(`Starting ${ROOMS} concurrent matches for ${SECONDS}s against ${URL}`);
+log(`Starting ${ROOMS} concurrent matches for ${SECONDS}s against ${URL}`);
 
 const pairs = [];
 for (let i = 0; i < ROOMS; i++) {
   const a = await open();
-  a.sendJ({ type: 'create_room', playerId: `load_a_${i}`, playerName: `HostBot${i}` });
+  // No `playerName`: the relay resolves display names from the device cookie
+  // and stopped reading a client-sent one. Sending it was harmless and stale.
+  a.sendJ({ type: 'create_room', playerId: `load_a_${i}` });
   const { roomId } = await waitFor(a, 'room_created');
   const b = await open();
-  b.sendJ({ type: 'join_room', roomId, playerId: `load_b_${i}`, playerName: `JoinBot${i}` });
+  b.sendJ({ type: 'join_room', roomId, playerId: `load_b_${i}` });
   await waitFor(b, 'room_joined');
+  // A duel starts by HANDSHAKE: the guest readies, then the host starts, and
+  // the server-broadcast `game_start` is what closes both lobbies. Joining has
+  // not started a match since that landed, which is what broke this script.
+  b.sendJ({ type: 'player_ready', ready: true });
+  await waitFor(a, 'ready_state');
+  a.sendJ({ type: 'start_match' });
   await waitFor(a, 'game_start');
+  await waitFor(b, 'game_start');
   pairs.push({ a, b, roomId });
 }
-console.log(`All ${ROOMS} rooms running.`);
+log(`All ${ROOMS} rooms running.`);
 
 const timers = [];
 for (const { a, b } of pairs) {
@@ -110,11 +131,11 @@ const pct = (p) => latencies[Math.min(latencies.length - 1, Math.floor((p / 100)
 const paddleLoss = paddleSent ? (((paddleSent - paddleReceived) / paddleSent) * 100).toFixed(2) : '0';
 const crossLoss = crossSent ? (((crossSent - crossReceived) / crossSent) * 100).toFixed(2) : '0';
 
-console.log('--- results ---');
-console.log(`paddle msgs:  sent ${paddleSent}, delivered ${paddleReceived} (${paddleLoss}% loss)`);
-console.log(`net crossings: sent ${crossSent}, delivered ${crossReceived} (${crossLoss}% loss)`);
-console.log(`ping samples: ${latencies.length}, p50 ${pct(50)}ms, p95 ${pct(95)}ms, max ${latencies[latencies.length - 1] ?? 0}ms`);
-console.log(`server errors: ${errors}`);
+log('--- results ---');
+log(`paddle msgs:  sent ${paddleSent}, delivered ${paddleReceived} (${paddleLoss}% loss)`);
+log(`net crossings: sent ${crossSent}, delivered ${crossReceived} (${crossLoss}% loss)`);
+log(`ping samples: ${latencies.length}, p50 ${pct(50)}ms, p95 ${pct(95)}ms, max ${latencies[latencies.length - 1] ?? 0}ms`);
+log(`server errors: ${errors}`);
 
 for (const { a, b } of pairs) {
   a.close();
@@ -122,5 +143,25 @@ for (const { a, b } of pairs) {
 }
 
 const ok = Number(crossLoss) === 0 && Number(paddleLoss) < 1 && pct(95) < 100 && errors === 0;
-console.log(ok ? 'LOAD TEST PASSED' : 'LOAD TEST FAILED');
-process.exit(ok ? 0 : 1);
+log(ok ? 'LOAD TEST PASSED' : 'LOAD TEST FAILED');
+return {
+  ok,
+  rooms: ROOMS,
+  paddleSent,
+  paddleReceived,
+  crossSent,
+  crossReceived,
+  errors,
+  p50: pct(50),
+  p95: pct(95),
+};
+}
+
+if (isMain) {
+  const result = await runLoadTest({
+    rooms: Number(process.argv[2]) || 10,
+    seconds: Number(process.argv[3]) || 20,
+    url: process.argv[4] || 'ws://localhost:3000/ws',
+  });
+  process.exit(result.ok ? 0 : 1);
+}
