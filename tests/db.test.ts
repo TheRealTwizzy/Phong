@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import type { MatchEndPayload, MatchRecord, MatchRules } from '../src/types';
-import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, soloMuCap } from '../src/rating';
+import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, practiceDayXp, soloMuCap } from '../src/rating';
 import { SHUTOUT_MIN_POINTS, isShutout } from '../src/matchRules';
 
 // db.ts resolves DATA_DIR at import time, so point it at a temp dir first.
@@ -1405,6 +1405,53 @@ describe('reporting a run with no match to report it', () => {
     // ...while a genuinely newer one is taken.
     db.recordPractice(id, { bestStreak: 8, earnedStreak: 8, endStreak: 8 });
     expect(db.getModeStats(id).practice?.currentStreak).toBe(8);
+  });
+
+  it('pays identical practice work identically, however it is split', () => {
+    // The exploit the day curve exists to remove, in the shape it survived in.
+    // `earnedBest` is the longest UNBROKEN run of a visit — a miss resets the
+    // run it tracks — so a curve fed the peak counted three returns for a visit
+    // that made ninety with misses between them, while the same play split at
+    // each miss reported thirty threes and banked ninety. Same work, 30x the
+    // credit, in the fix written to stop exactly that.
+    const oneSitting = 'dev_practice00000010';
+    const split = 'dev_practice00000011';
+    init(oneSitting, 'OneSitting');
+    init(split, 'SplitUp');
+
+    // Ninety returns in one visit, in thirty runs of three broken by a miss.
+    const bulk = db.recordPractice(oneSitting, {
+      bestStreak: 3,
+      earnedStreak: 3,
+      endStreak: 0,
+      earnedReturns: 90,
+    });
+
+    // The same ninety, left and re-entered after every miss.
+    let piecemeal = 0;
+    for (let i = 0; i < 30; i++) {
+      piecemeal += db.recordPractice(split, {
+        bestStreak: 3,
+        earnedStreak: 3,
+        endStreak: 0,
+        earnedReturns: 3,
+      }).earnedXp;
+    }
+
+    expect(bulk.earnedXp).toBe(piecemeal);
+    // And it is the real value of ninety returns, not zero on both sides.
+    expect(bulk.earnedXp).toBe(practiceDayXp(90));
+    expect(bulk.earnedXp).toBeGreaterThan(0);
+  });
+
+  it('falls back to the run when an older bundle sends no count', () => {
+    // `earnedReturns` is new on the payload, so a client that predates it sends
+    // nothing — and that must behave exactly as it did before rather than
+    // paying zero.
+    const id = 'dev_practice00000012';
+    init(id, 'OldBundle');
+    const paid = db.recordPractice(id, { bestStreak: 12, earnedStreak: 12, endStreak: 12 });
+    expect(paid.earnedXp).toBe(practiceDayXp(12));
   });
 
   it('does not count a visit that returned no ball as a session played', () => {

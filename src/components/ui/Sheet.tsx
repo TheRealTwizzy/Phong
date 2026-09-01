@@ -176,7 +176,16 @@ export const Sheet: React.FC<SheetProps> = ({
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (!closeRef.current || !dismissOnBackdrop) return;
+        // Gated on there being something to close, NOT on the backdrop option.
+        // They are different questions: `dismissOnBackdrop={false}` says a tap
+        // OUTSIDE must not dismiss — an accident this sheet is too expensive to
+        // suffer — while Escape is a deliberate keypress and the keyboard's
+        // equivalent of the close button beside it. Conflated, the lobby (which
+        // supplies `onClose` and an X and disables the backdrop, because
+        // dismissing it leaves the room) gave keyboard users no way out at all,
+        // which is the opposite of what adding Escape was for. `onClose` still
+        // routes through whatever confirmation the caller put behind it.
+        if (!closeRef.current) return;
         e.stopPropagation();
         closeRef.current();
         return;
@@ -223,7 +232,7 @@ export const Sheet: React.FC<SheetProps> = ({
       // not throw on the way out.
       if (back instanceof HTMLElement && back.isConnected) back.focus({ preventScroll: true });
     };
-  }, [isOpen, covered, dismissOnBackdrop]);
+  }, [isOpen, covered]);
 
   return (
     <AnimatePresence>

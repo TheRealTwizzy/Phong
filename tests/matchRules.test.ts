@@ -674,3 +674,25 @@ describe('autoServeForced', () => {
     }
   });
 });
+
+describe('normalizeRules survives a value that is not an object', () => {
+  // The memo key is the caller's own object and `WeakMap.set` THROWS on a
+  // primitive, so memoizing turned a value this function exists to normalize
+  // into a crash. Reachable from a corrupted `half_pong_settings` at startup
+  // and from an untyped `create_room`/`set_room_config` over the wire, where
+  // the throw is swallowed by the outer logger and no response is sent at all,
+  // so the client waits forever. The reads already treat a primitive as having
+  // no keys; only the caching had to sit it out.
+  it.each([['a string', 'x'], ['a number', 5], ['a boolean', true], ['a symbol-free NaN', NaN]])(
+    'falls back to the defaults for %s',
+    (_label, bad) => {
+      expect(() => normalizeRules(bad as never)).not.toThrow();
+      expect(normalizeRules(bad as never)).toEqual(DEFAULT_MATCH_RULES);
+    }
+  );
+
+  it('still memoizes a real object, which is the point of the cache', () => {
+    const input = { paddleScale: 1.1 };
+    expect(normalizeRules(input)).toBe(normalizeRules(input));
+  });
+});

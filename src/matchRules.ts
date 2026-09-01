@@ -160,7 +160,16 @@ const DEFAULT_NORMALIZED: MatchRules = Object.freeze({ ...DEFAULT_MATCH_RULES })
 /** Normalize anything arriving from a client or from storage. */
 export function normalizeRules(input: Partial<MatchRules> | null | undefined): MatchRules {
   if (input === null || input === undefined) return DEFAULT_NORMALIZED;
-  const cached = NORMALIZED.get(input);
+  // A WeakMap key must be an object, and `set` THROWS on anything else — so a
+  // primitive here turned a value this function is supposed to normalize into
+  // a crash. Reachable from a corrupted `half_pong_settings` at startup and
+  // from an untyped `create_room`/`set_room_config` over the wire, where the
+  // throw is swallowed by the outer logger and no response is sent at all, so
+  // the client waits forever. The reads below already treat a primitive as
+  // having no keys and fall through to the defaults, which is the right
+  // answer; only the caching had to learn to sit it out.
+  const cacheable = typeof input === 'object';
+  const cached = cacheable ? NORMALIZED.get(input) : undefined;
   if (cached) return cached;
   const raw = input;
   const rules: MatchRules = { ...DEFAULT_MATCH_RULES };
@@ -177,7 +186,7 @@ export function normalizeRules(input: Partial<MatchRules> | null | undefined): M
   // A minimum above the maximum would make the speed clamp meaningless.
   if (rules.ballSpeedMin > rules.ballSpeedMax) rules.ballSpeedMin = rules.ballSpeedMax;
   Object.freeze(rules);
-  NORMALIZED.set(input, rules);
+  if (cacheable) NORMALIZED.set(input, rules);
   return rules;
 }
 

@@ -407,6 +407,7 @@ export default function App() {
     bestStreak: 0,
     earnedStreak: 0,
     earnedBest: 0,
+    earnedReturns: 0,
     oppStreak: 0,
     oppBestStreak: 0,
     aces: 0,
@@ -3144,7 +3145,7 @@ export default function App() {
   // is worth and holds a daily cap, since a guaranteed-return drill would
   // otherwise be the fastest XP in the game.
   const submitPracticeSession = useCallback(
-    async (bestStreak: number, earnedStreak: number, endStreak: number) => {
+    async (bestStreak: number, earnedStreak: number, endStreak: number, earnedReturns: number) => {
       // Where the run stood when the wall opened — read before the stamp
       // below replaces it, because it is what decides whether this session
       // has anything to say at all.
@@ -3168,7 +3169,8 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            bestStreak, earnedStreak, endStreak, endedAt, clientNow: Date.now(), chainId, runSeq,
+            bestStreak, earnedStreak, endStreak, earnedReturns,
+            endedAt, clientNow: Date.now(), chainId, runSeq,
           }),
         })
       );
@@ -3261,7 +3263,8 @@ export default function App() {
       void submitPracticeSession(
         statsRef.current.bestStreak,
         statsRef.current.earnedBest,
-        statsRef.current.streak
+        statsRef.current.streak,
+        statsRef.current.earnedReturns
       );
     } else {
       // Walking out of an UNFINISHED match still ends wherever the run ends.
@@ -3371,7 +3374,8 @@ export default function App() {
         void submitPracticeSession(
           statsRef.current.bestStreak,
           statsRef.current.earnedBest,
-          run
+          run,
+          statsRef.current.earnedReturns
         );
       } else void reportStreak(modeRef.current, run);
     }

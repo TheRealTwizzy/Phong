@@ -649,6 +649,18 @@ export const PRACTICE_XP_PER_RETURN = 2;
 
 export const PRACTICE_XP_DAILY_CAP = 300;
 
+/**
+ * A sanity rail on the return COUNT one visit may claim, not a game rule.
+ *
+ * The count is client-reported like every other practice figure, and inflating
+ * it is self-harming — the curve is marginal, so claimed returns only make the
+ * rest of the day pay LESS — which is why this is a bound against nonsense
+ * (an overflow, a corrupted payload) rather than an anti-cheat measure. 2500 is
+ * far past where the daily cap has been reached: the curve tops out at 2500
+ * returns exactly, so nothing legitimate is ever clipped.
+ */
+export const PRACTICE_RETURNS_MAX = 2500;
+
 /** XP for one Practice Wall session, from its best return streak. */
 /**
  * What a DAY of practice returns is worth in total.

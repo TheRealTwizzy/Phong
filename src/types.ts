@@ -191,6 +191,24 @@ export interface PlayerStats {
    */
   earnedStreak: number;
   earnedBest: number;
+  /**
+   * How many returns were made here IN TOTAL — a count, not a run.
+   *
+   * `earnedBest` is the longest UNBROKEN run built here, because `ownMiss`
+   * resets `earnedStreak` and this is its high-water mark. That is the right
+   * number for a reward keyed on a rally and the wrong one for counting work,
+   * and the Practice Wall's daily curve needed the second: fed the peak, three
+   * returns and a miss repeated thirty times in one visit banked three
+   * returns, while leaving after each miss banked ninety for identical play.
+   * The session-splitting exploit the day curve exists to remove, surviving in
+   * the shape of the number handed to it.
+   *
+   * A miss does not touch this. Nothing else reads it: XP per rally, the
+   * rating weight and the daily rally tasks all still key on `earnedBest`,
+   * because those are about how long a run was and this is about how much was
+   * done.
+   */
+  earnedReturns: number;
   /** The same two, for the opponent. Tracked separately, never mixed in. */
   oppStreak: number;
   oppBestStreak: number;

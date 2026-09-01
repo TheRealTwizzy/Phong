@@ -62,6 +62,7 @@ import {
   practiceDayXp,
   achievementXpCap,
   PRACTICE_XP_DAILY_CAP,
+  PRACTICE_RETURNS_MAX,
   soloAdjustedXp,
   LADDER_TOP_N,
   RANK_MOVE_EPSILON,
@@ -1811,6 +1812,8 @@ class GameDatabase {
     session: {
       bestStreak: number;
       earnedStreak?: number;
+      /** Total returns made this visit — a count, not a run. */
+      earnedReturns?: number;
       endStreak?: number;
       ageMs?: number;
       chainId?: string | null;
@@ -1834,6 +1837,16 @@ class GameDatabase {
     // Neither of these can stand higher than the run ever reached.
     const earned = Math.min(peak, whole(session.earnedStreak));
     const ended = Math.min(peak, whole(session.endStreak));
+    // What the DAY curve counts, and it is not `earned`. `earnedBest` is the
+    // longest unbroken run built this visit, because a miss resets the run it
+    // is the high-water mark of — so feeding it to the curve left the
+    // session-splitting exploit standing in a new shape: three returns and a
+    // miss repeated thirty times in ONE visit banked three returns, while
+    // leaving after each miss submitted thirty threes and banked ninety, for
+    // identical play. Floored at `earned`, since a run of N is N returns, and
+    // an older bundle that sends nothing falls back to it — which is what it
+    // did before, so nothing regresses.
+    const returns = Math.max(earned, Math.min(whole(session.earnedReturns), PRACTICE_RETURNS_MAX));
 
     // Whether anything happened here at all, asked ONCE. The history row below
     // was gated on it and `played` was not, ten lines apart, so the two records
@@ -1897,7 +1910,7 @@ class GameDatabase {
       .get(playerId, dayKey) as { xpAwarded: number; returns: number } | undefined;
     const alreadyPaid = row?.xpAwarded ?? 0;
     const returnsBefore = row?.returns ?? 0;
-    const returnsAfter = returnsBefore + earned;
+    const returnsAfter = returnsBefore + returns;
 
     // The MARGINAL value of today's returns, not a fresh session curve. Paid
     // per session, the curve restarted at its steepest point every time the

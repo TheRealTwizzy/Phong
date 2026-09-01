@@ -31,7 +31,8 @@ const bump = (current: number, best: number): [number, number] => {
 export function ownReturn(s: PlayerStats): PlayerStats {
   const [streak, bestStreak] = bump(s.streak, s.bestStreak);
   const [earnedStreak, earnedBest] = bump(s.earnedStreak, s.earnedBest);
-  return { ...s, streak, bestStreak, earnedStreak, earnedBest };
+  // A COUNT, so it survives the miss that resets the run above it.
+  return { ...s, streak, bestStreak, earnedStreak, earnedBest, earnedReturns: s.earnedReturns + 1 };
 }
 
 /**
@@ -79,6 +80,9 @@ export function startMatchStreaks(
     // in was earned here.
     earnedStreak: 0,
     earnedBest: 0,
+    // Counted from zero for the same reason, and reset by nothing else: a miss
+    // ends a run and does not un-do the returns already made.
+    earnedReturns: 0,
     // The opponent's run carries too, and in a duel the relay tells both
     // phones what each seat walks in on. Zero is the default because usually
     // nobody knows: a solo opponent is an AI that has just been constructed,

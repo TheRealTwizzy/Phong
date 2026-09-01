@@ -2031,6 +2031,13 @@ async function startServer() {
           bestStreak: streak,
           earnedStreak: Number(req.body?.earnedStreak),
           endStreak: Number(req.body?.endStreak),
+          // How many returns this visit made in total, which is a COUNT and
+          // not a run — see recordPractice for why the daily curve cannot be
+          // fed the peak. Absent from an older bundle, and recordPractice
+          // falls back to the peak there, which is exactly what it did before.
+          earnedReturns: req.body?.earnedReturns === undefined
+            ? undefined
+            : Number(req.body?.earnedReturns),
           ageMs: clientAgeMs(req.body),
           chainId: chainIdOf(req.body),
           runSeq: Number(req.body?.runSeq),

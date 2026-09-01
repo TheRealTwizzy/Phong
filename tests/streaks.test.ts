@@ -36,6 +36,7 @@ const base = (over: Partial<PlayerStats> = {}): PlayerStats => ({
   bestStreak: 0,
   earnedStreak: 0,
   earnedBest: 0,
+  earnedReturns: 0,
   oppStreak: 0,
   oppBestStreak: 0,
   aces: 0,
@@ -293,5 +294,43 @@ describe('the opponent’s run, where it is known', () => {
     const s = startMatchStreaks(base(), 7, 40);
     expect(s.earnedStreak).toBe(0);
     expect(s.earnedBest).toBe(0);
+  });
+});
+
+describe('earnedReturns counts work, where earnedBest measures a run', () => {
+  // The two answer different questions and the Practice Wall's daily curve
+  // needs the first. A miss resets `earnedStreak`, so `earnedBest` is the
+  // longest UNBROKEN run built here — fed to a curve that is counting returns,
+  // it undercounts a session with misses in it by however many times the
+  // player missed, which is what left the session-splitting exploit standing.
+  it('survives a miss, which the run does not', () => {
+    let s = base({});
+    for (let i = 0; i < 3; i++) s = ownReturn(s);
+    expect(s.earnedBest).toBe(3);
+    expect(s.earnedReturns).toBe(3);
+
+    s = ownMiss(s);
+    expect(s.earnedStreak).toBe(0);
+    expect(s.earnedReturns).toBe(3);
+
+    for (let i = 0; i < 3; i++) s = ownReturn(s);
+    // Six returns made, in two runs of three: the peak is still three.
+    expect(s.earnedBest).toBe(3);
+    expect(s.earnedReturns).toBe(6);
+  });
+
+  it('opens at zero on a new match, like the earned run beside it', () => {
+    let s = base({});
+    for (let i = 0; i < 5; i++) s = ownReturn(s);
+    expect(s.earnedReturns).toBe(5);
+    expect(startMatchStreaks(s, 12).earnedReturns).toBe(0);
+  });
+
+  it('is untouched by the opponent, exactly like every other earned figure', () => {
+    let s = base({});
+    s = ownReturn(s);
+    s = opponentReturn(s);
+    s = opponentMiss(s);
+    expect(s.earnedReturns).toBe(1);
   });
 });
