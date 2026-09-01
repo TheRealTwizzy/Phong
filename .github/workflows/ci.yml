@@ -5,9 +5,23 @@ on:
     branches: [main]
   pull_request:
 
+# One run per ref. Pushing again to a PR cancels the run for the commit that
+# has already been superseded — nobody reads its result, and the e2e job costs
+# minutes of a shared runner to produce it. `main` is deliberately NOT
+# cancelled: its runs are the record of what was merged, and a cancelled one
+# leaves a commit with no verdict against it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # `e2e` has had one since it was split out; this one did not, so a hung
+    # install or a wedged typecheck sat on a runner for the account's default
+    # (six hours) rather than failing. Generous against a job that takes about
+    # a minute.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

@@ -989,6 +989,63 @@ async function startServer() {
     'trust proxy',
     process.env.TRUST_PROXY_HOPS && Number.isFinite(trustHops) && trustHops >= 0 ? trustHops : 1
   );
+  // Express advertises itself by default; there is nothing to gain by it.
+  app.disable('x-powered-by');
+
+  /**
+   * Response headers, set HERE rather than in `deploy/Caddyfile`.
+   *
+   * The compose stack's Caddy is one of two deployment paths and not the
+   * primary one — Dokploy's Traefik is, and this repo does not configure it —
+   * so a header set at the proxy covers whichever path the person editing it
+   * happened to be thinking about. Set on the app, they hold for both, for
+   * `npm start`, and for anything anyone puts in front later.
+   *
+   * The CSP is deliberately checkable rather than ambitious. The built
+   * `index.html` carries no inline script and no inline style (verified), the
+   * bundle and stylesheet are hashed files under `/assets`, and the only
+   * inline styling in the app is the `style` ATTRIBUTE the equipped cosmetic
+   * publishes on `#app-root-container` — which is what `'unsafe-inline'` in
+   * `style-src` is for and what a policy without it would break silently, in
+   * production, on every theme. `connect-src` carries `ws:`/`wss:` because the
+   * relay shares this origin, and `img-src` carries `blob:`/`data:` for the
+   * avatar pipeline, which builds a 256x256 PNG in the browser.
+   *
+   * `PHONG_CSP=off` disables it, because a policy that breaks a deployment
+   * must be switchable off by whoever is holding the pager rather than by a
+   * redeploy.
+   */
+  const CSP = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self' ws: wss:",
+    "media-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    // `frame-ancestors` above is the modern form; this is for the browsers
+    // that only understand the old one.
+    res.setHeader('X-Frame-Options', 'DENY');
+    if (process.env.PHONG_CSP !== 'off') res.setHeader('Content-Security-Policy', CSP);
+    // Only over a connection that is already HTTPS, and only in production:
+    // Caddy does not add this by default and neither does Traefik. Deliberately
+    // WITHOUT `includeSubDomains` or `preload` — this is a leaf host, so
+    // neither buys anything here, and they are the halves that are hard to
+    // take back.
+    if (req.secure && process.env.NODE_ENV === 'production') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // The device cookie is established by the NAVIGATION, before a line of JS
