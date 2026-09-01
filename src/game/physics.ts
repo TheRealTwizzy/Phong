@@ -4,8 +4,11 @@ import { AI_RATINGS, START_MU, effectiveAiMu } from '../rating';
 
 export const PADDLE_Y = 0.92;
 export const PADDLE_HEIGHT = 0.024;
-// Fixed for every player and mode — fairness rule: paddle width and ball
-// speed are never exposed as user settings.
+// The STOCK game. A match may scale this and the ball speeds through
+// `src/matchRules.ts`, which is why every helper below takes rules; what is
+// never true is that a phone can set them for itself, because both halves of
+// one rally have to obey one set of numbers. Tuning inside the ranked band
+// still rates; past it the match pays XP and moves no rating.
 export const PADDLE_WIDTH_RATIO = 0.22;
 
 /**

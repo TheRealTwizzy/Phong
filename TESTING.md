@@ -4,7 +4,7 @@ This is the working guide to the test suite. When the tests and this file disagr
 
 ```bash
 npm run lint           # tsc --noEmit
-npm test               # vitest run — the fast layer, ~7s
+npm test               # vitest run — the fast layer, ~25s
 npm run test:coverage  # the same suites plus the coverage floors CI enforces
 npm run test:e2e       # browser suites; needs `npm run build` first
 ```
@@ -13,7 +13,7 @@ npm run test:e2e       # browser suites; needs `npm run build` first
 
 ## 1. Two layers, deliberately
 
-**`tests/*.test.ts` — vitest, seconds.** Pure logic, the SQLite store, and two suites that
+**`tests/*.test.ts` — vitest, seconds.** Pure logic, the SQLite store, and ten suites that
 spawn a real server. This is where a rule goes when it can be stated as a rule.
 
 **`scripts/e2e-*.mjs` — Playwright, minutes.** A real Chromium driving the production build
@@ -58,7 +58,7 @@ coverage number.
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
-| `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` | Five suites that boot the real server (see §4) |
+| `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `p2pParity` `headers` | Ten suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` | The one-shot migrations |
 
 ### Browser layer
@@ -81,9 +81,11 @@ Playwright download, else system Chrome.
 
 V8 coverage measures **in-process execution only**. Two consequences that will mislead you:
 
-- **`server.ts` reads 0%.** It is not untested — `duelRecord`, `deviceSession` and
-  `accountRecovery` spawn it,
-  and all twenty browser suites drive it. The instrumentation cannot see across a process
+- **`server.ts` is ABSENT from the report, not 0%.** It is a root file and matches no
+  `include` glob, so it does not appear at all — which is a stronger version of the same
+  trap, since a missing row reads as nothing to look at. It is not untested either: ten
+  vitest suites spawn it and all twenty-one browser suites drive it. The instrumentation
+  cannot see across a process
   boundary.
 - **Every `.tsx` reads 0%,** for the same reason. Playwright covers them.
 

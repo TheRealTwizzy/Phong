@@ -9,7 +9,7 @@ import { defineConfig } from 'vitest/config';
 // Coverage floors, and why they are shaped like this.
 //
 // There is deliberately NO global threshold. Most of src/components is at zero
-// because this project bets on Playwright for UI — eleven browser suites drive
+// because this project bets on Playwright for UI — twenty-one browser suites drive
 // the real thing against a real server — and a global number would either fail
 // on that bet or be set so low it measured nothing.
 //

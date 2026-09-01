@@ -50,11 +50,14 @@ makes the badge lie:
 2. **`isRankedRules()`** — the server re-derives this in `recordMatch` from the rules
    themselves. A client-set `ranked` flag is ignored, always.
 3. **`unrankedReasons()`** — the whole verdict in one ordered list: mode, then **venue**,
-   then difficulty, then sonar, then the physics keys. This is a **display** predicate; the
-   server still derives its own half from `isRankedRules`, `soloCountsForRank` and
-   `roomCountsForRank` and never trusts it.
+   then difficulty, then **outgrown** (the player is past that rung's `SOLO_MU_CAPS`
+   ceiling, where it moves no rating in either direction), then sonar, then the physics
+   keys. This is a **display** predicate; the server still derives its own half from
+   `isRankedRules`, `soloCountsForRank` and `roomCountsForRank` and never trusts it.
 4. **`normalizeRules()`** — clamp and snap it, because it arrives from a client and from
-   storage.
+   storage. Its result is MEMOIZED on the input object and FROZEN: it is called several
+   times per frame from the game loop, so a caller that writes into what it returns is
+   rewriting the rules for everyone else holding the same input. Build a copy.
 5. **`MatchRulesPanel`** so it can be set, in the pre-match sheet *and* the duel lobby (same
    component, both places).
 6. **The P2P replica**, if it changes what the ball does. `src/net/p2p.ts` runs the rules

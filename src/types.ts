@@ -111,8 +111,12 @@ export interface GameSettings {
   // Telemetry visibility is deliberately NOT a stored setting: the panel is
   // per-match, starting hidden and toggled from the court (see App.tsx).
   showTrails: boolean;
-  // Paddle width and ball speed are deliberately NOT settings — they are
-  // fixed constants in game/physics.ts and must never be player-editable.
+  // Paddle width and ball speed are not DEVICE settings: they are terms of
+  // the MATCH, chosen pre-match in `rules` below and shared with the opponent
+  // through `RoomMatchConfig`. This comment used to say they "must never be
+  // player-editable", which `PHYSICS_RULES` contradicted thirty lines away —
+  // what is actually true is that they are never a per-phone preference,
+  // because the two halves of one rally have to obey one set of numbers.
   difficulty: AIDifficulty;
   winningScore: number;
   // Pre-match only, like difficulty and winningScore: chosen on the menu and

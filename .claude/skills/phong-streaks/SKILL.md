@@ -29,7 +29,7 @@ either scored, so a player's rally number was mostly a statement about their opp
 2. **`endStreak` — where the run stands when the match ends.** This is what the next match
    starts from, and the only one of the three that legitimately goes *down*.
 3. **`earnedStreak` — how much of the peak was built here, counted from zero.** **This is the
-   only one anything is paid or rated on**: `matchXp`, `practiceXp`, `performanceWeight` and the
+   only one anything is paid or rated on**: `matchXp`, `practiceDayXp`, `performanceWeight` and the
    daily rally tasks.
 
 **Paying on the peak is a farm with no work in it.** Carry a run in, open the Practice Wall,
