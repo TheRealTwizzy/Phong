@@ -47,6 +47,11 @@ const FLOORS = {
   // coverage pass that set these floors.
   'src/net/matchRecord.ts': { statements: 90, branches: 88 },
   'src/net/session.ts': { statements: 90, branches: 75 },
+  // The relay's refusals, in the player's language. Small, and shared by two
+  // surfaces that must not disagree: the menu's bracket lock and the relay's
+  // bracket refusal render from one `lockReason`, and the verdict now crosses
+  // the WIRE, so a malformed one is a thing that reaches this file.
+  'src/net/relayErrors.ts': { statements: 95, branches: 90 },
   // p2p.ts duplicates the relay's rules by design. The untested remainder is
   // WebRTC signalling and teardown, which a fake peer connection can only say
   // so much about; the rules themselves are covered.

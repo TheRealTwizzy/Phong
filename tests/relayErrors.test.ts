@@ -57,6 +57,40 @@ describe('relayErrorText', () => {
     }
   });
 
+  it('renders both tier refusals, at both ends of a bracket', () => {
+    // Both ends, because a bracket with only a floor is one a veteran farms —
+    // so `tier_high` is a real verdict and not a defensive branch.
+    const low = { ok: false, reason: 'tier_low' as const, needTier: 'grandmaster' as const };
+    const high = { ok: false, reason: 'tier_high' as const, maxTier: 'ace' as const };
+    for (const { code: lang } of LANGUAGES) {
+      const lowText = relayErrorText(frame({ code: 'VENUE_LOCKED', verdict: low }), lang);
+      const highText = relayErrorText(frame({ code: 'VENUE_LOCKED', verdict: high }), lang);
+      expect(lowText).toBe(lockReason(low, lang));
+      expect(highText).toBe(lockReason(high, lang));
+      expect(lowText).not.toBe('');
+      expect(highText).not.toBe('');
+      expect(lowText).not.toBe(highText);
+    }
+  });
+
+  it('does not render a verdict whose own field is missing', () => {
+    // It crosses the WIRE now, so a malformed one is a thing that happens —
+    // and an undefined tier would index TIER_LABEL_KEY with `undefined`.
+    for (const bad of [
+      { ok: false, reason: 'level' as const },
+      { ok: false, reason: 'tier_low' as const },
+      { ok: false, reason: 'tier_high' as const },
+      { ok: false },
+      { ok: true },
+    ]) {
+      expect(lockReason(bad, 'en')).toBe('');
+      // The frame still says SOMETHING, because `message` is the fallback.
+      expect(relayErrorText(frame({ code: 'VENUE_LOCKED', verdict: bad }), 'en')).toBe(
+        'Room not found.'
+      );
+    }
+  });
+
   it('falls back to the server text for a code this bundle does not know', () => {
     // A relay ahead of the client. English beats a raw token, and beats blank.
     const ahead = frame({ code: 'SOMETHING_NEW' as RelayErrorCode, message: 'Nope.' });
