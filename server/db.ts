@@ -132,6 +132,23 @@ export interface RecordMatchContext {
    * a replay of that row.
    */
   venueRoomId?: string;
+  /**
+   * Move no VISIBLE ladder, but keep learning.
+   *
+   * Deliberately not `forceUnranked` above, and the difference is the whole
+   * point of having two fields: that one gates `ranked`, which also gates the
+   * hidden MMR update, so it would stop the estimator learning from a match
+   * that really was played — leaving the pre-match odds and the queue's
+   * pairing worse for it. This suppresses `ranksThisMatch` alone, which is
+   * exactly the call Casual already makes (`src/venues.ts`: hidden MMR still
+   * learns from the match, only the visible tier stands still).
+   *
+   * The one caller is `/api/match/record`, for a solo match at a table whose
+   * watching seats are open — and only once it has VOUCHED the room, since
+   * `roomId` on a solo payload is otherwise a free variable and this would be
+   * a way for a losing player to keep their rating.
+   */
+  forceUnrankedLadder?: boolean;
 }
 
 // Overridable so production can point at a persistent volume (e.g. /data on
@@ -2869,8 +2886,19 @@ class GameDatabase {
     // placed. Reachable without anything exotic: two placement wins carry a
     // player past Pro's 30.9 ceiling.
     const soloOutgrown = !isPvp && profile.rankMu > soloMuCap(difficulty);
+    // ...and a solo match played at a table whose WATCHING seats are open.
+    // A watcher sees the hidden half live and can describe it, which is the
+    // sonar rule with a second person attached — and here only one side of
+    // the match has a rating at stake. Suppressed here rather than through
+    // `forceUnranked` deliberately: see RecordMatchContext.forceUnrankedLadder.
+    // The caller has VOUCHED the room before setting it; unvouched, `roomId`
+    // on a solo payload is a free variable and this would be a losing
+    // player's way to keep their rating.
     const ranksThisMatch =
-      ranked && venueRates && (isPvp || (soloCountsForRank(difficulty) && !soloOutgrown));
+      ranked &&
+      venueRates &&
+      !context.forceUnrankedLadder &&
+      (isPvp || (soloCountsForRank(difficulty) && !soloOutgrown));
     // Sampled before the update so the overlay can say which way the ladder
     // went. Only the DIRECTION ever leaves the server — the mu itself is not
     // something the client renders (see src/components/ui/RankBadge.tsx).

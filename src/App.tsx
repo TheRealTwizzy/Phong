@@ -3964,6 +3964,11 @@ export default function App() {
                   // asked the same way by every consumer, is the whole reason
                   // this predicate exists.
                   rankMu: profile?.rankMu,
+                  // And the table's watching seats, for a CPU match: with
+                  // them open the ladder was never on the line, so quitting
+                  // must not threaten a rank it could not have moved. Same
+                  // rule as `rankMu` above, one verdict later.
+                  watched: activeConfig.cpu ? activeConfig.spectators : undefined,
                 }).length === 0
                   ? 'quit_confirm_ranked'
                   : 'quit_confirm_unranked',
@@ -4717,6 +4722,11 @@ export default function App() {
           onSetPrivate={(isPrivate) =>
             sendWhenOpen(ws, () => ({ type: 'set_table_visibility', private: isPrivate }))
           }
+          // The VISIBLE ladder rating, for the ranked badge on a CPU table:
+          // the match there is judged as the solo match it is, so a rung this
+          // player has climbed past has to read as outgrown here exactly as
+          // it does on the menu's pre-match sheet.
+          rankMu={profile?.rankMu}
         />
 
         {/* Player Profile & Stats Modal */}

@@ -251,6 +251,7 @@ export function unrankedRuleKeys(rules: Partial<MatchRules> | null | undefined):
 export type UnrankedReason =
   | 'mode'
   | 'venue'
+  | 'watched'
   | 'difficulty'
   | 'outgrown'
   | 'sonar'
@@ -278,6 +279,18 @@ export interface RankedMatchContext {
    * guessing, exactly as `venueRoomId` above does.
    */
   rankMu?: number;
+  /**
+   * Solo only: whether the TABLE this match is played at opens its watching
+   * seats.
+   *
+   * Not "is anybody watching right now". See the `'watched'` arm in
+   * `unrankedReasons` for why occupancy is the wrong trigger — in short, it
+   * is unset on the common path, settable by the player themselves, and
+   * cannot be shown honestly before the ball.
+   *
+   * Absent means no table, which is every menu-started solo match.
+   */
+  watched?: boolean;
 }
 
 /** Modes that never write a rating for anybody, whatever the rules say. */
@@ -297,6 +310,28 @@ export function unrankedReasons(ctx: RankedMatchContext): UnrankedReason[] {
   if (ctx.mode === 'multiplayer' && ctx.venueRoomId && !roomCountsForRank(ctx.venueRoomId)) {
     reasons.push('venue');
   }
+  // A CPU match at a table whose watching seats are OPEN does not move the
+  // visible ladder.
+  //
+  // A watcher sees the hidden half live — that is what watching IS — and can
+  // describe it over a voice call, which is the sonar rule with a second
+  // person attached. In a DUEL that is drawn by room, because both players are
+  // equally exposed and the top three brackets simply have no watching seats.
+  // Here only one side has a rating at stake, so a friend on a call is a
+  // straight gift, and the room cannot answer it.
+  //
+  // A TERM of the table rather than a fact about who is currently sitting
+  // down, and the difference is the whole design. Occupancy has four holes:
+  // the common flow is watcher-sits-then-host-starts, so a latch cleared by
+  // startMatch is never set; a watcher who closes their tab a second later
+  // still costs the host the match; a player can seat a cookieless "watcher"
+  // at their own table to unrank their own loss on demand; and the badge would
+  // say RANKED and then silently not be. `config.spectators` is host-owned,
+  // pre-match-only and broadcast, so the verdict is knowable before the first
+  // ball and cannot be changed by a stranger.
+  //
+  // Only for a CPU match: a duel's answer is the venue's, above.
+  if (ctx.mode === 'solo' && ctx.watched) reasons.push('watched');
   if (ctx.mode === 'solo' && ctx.difficulty && !soloCountsForRank(ctx.difficulty)) {
     reasons.push('difficulty');
   } else if (

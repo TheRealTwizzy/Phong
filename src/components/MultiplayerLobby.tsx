@@ -86,6 +86,15 @@ interface MultiplayerLobbyProps {
   joinKey?: string | null;
   /** Host-only, pre-match. Turning it ON always mints a FRESH key. */
   onSetPrivate?: (isPrivate: boolean) => void;
+  /**
+   * This player's VISIBLE ladder rating, for the ranked badge.
+   *
+   * Only ever read for a CPU table, where the match is judged as the solo
+   * match it is: a rung the host has climbed past moves no rating, and the
+   * badge has to say so here exactly as the menu's pre-match sheet does. A
+   * duel rates on its rules and its venue, so this is unread on that path.
+   */
+  rankMu?: number;
 }
 
 /** One row of the table browser, as GET /api/rooms/:venue/tables returns it. */
@@ -136,6 +145,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   isPrivate = false,
   joinKey = null,
   onSetPrivate,
+  rankMu,
   stack,
 }) => {
   const playerName = currentUsername || 'Player';
@@ -617,7 +627,21 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                   onUpdateRoomConfig?.({ rules: normalizeRules({ ...config.rules, ...patch }) })
                 }
                 lang={language}
-                mode="multiplayer"
+                // A table with a CPU in the other chair is playing a SOLO
+                // match — the table is only WHERE it is played and who may
+                // watch — so the badge has to judge it as one: the rung's own
+                // ceiling applies, Rookie never rates, and the watching seats
+                // decide the rest. Handing it 'multiplayer' would price a
+                // machine match as a duel on screen while the server priced it
+                // correctly, which is the disagreement `unrankedReasons`
+                // exists to make impossible.
+                mode={config.cpu ? 'solo' : 'multiplayer'}
+                difficulty={config.cpu ?? undefined}
+                rankMu={config.cpu ? rankMu : undefined}
+                // The host is choosing this in this very panel, two rows up,
+                // so the badge answers in the same breath rather than a frame
+                // later.
+                watched={config.cpu ? config.spectators : undefined}
                 readOnly={!isHost}
                 idPrefix="lobby"
                 // The TABLE's venue, not the room the player walked in from.

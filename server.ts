@@ -1983,19 +1983,59 @@ async function startServer() {
 
       // The achievement tree gates the ladder, so the gate is enforced here
       // too — the menu hides a locked difficulty, but the menu is the client.
+      // Gameplay is client-authoritative, so a solo payload is entirely
+      // self-reported and only ever feeds XP — except for the one term below
+      // that a vouched room can add. A PvP payload, though, can be checked
+      // against the room state the relay owns: when the room is still live we
+      // use OUR scores and rally count, not the client's, and only then do the
+      // TrueSkill-2 performance signals apply.
+      const context: RecordMatchContext = {};
+
       if (payload.mode === 'solo') {
         const difficulty = normalizeDifficulty(payload.difficulty);
         if (!hasUnlock(me.achievements, 'difficulty', difficulty)) {
           return res.status(403).json({ error: 'DIFFICULTY_LOCKED', difficulty });
         }
+
+        // A solo match played AT A TABLE does not move the visible ladder if
+        // that table opened its watching seats: a watcher sees the hidden half
+        // live, and here only one side has a rating at stake.
+        //
+        // The room has to be VOUCHED before anything is read off it, because
+        // `roomId` on a solo payload is a free variable — the relay records
+        // nothing for a CPU table, so this POST is the only copy of the match
+        // and every server-side term of it is client-chosen. Unvouched, this
+        // is a one-way ladder ratchet: win, and POST with your own table;
+        // lose, and POST with the id of any table whose seats are open — or
+        // one you created privately from the same socket a moment earlier —
+        // and take no rating hit. server/db.ts:122 names that exact failure
+        // for the duel path.
+        //
+        // Four clauses, and each covers what the others leave. The caller
+        // must hold a PLAYING seat at the room by their own device id; the
+        // table must actually have the CPU they claim to have played; the
+        // sequence must be the match the room is on; and it must be one that
+        // started AFTER they sat down, so a newcomer cannot claim the match
+        // before theirs. A room that has been reaped fails all of them and the
+        // match rates exactly as a menu-started one does — the same
+        // absence-versus-safety call `RecordMatchContext.venueRoomId`
+        // documents, decided the same way.
+        const room = payload.roomId ? rooms.get(payload.roomId.toUpperCase()) : undefined;
+        if (room) {
+          const seat = room.players.findIndex((p) => p && p.deviceId === req.deviceId);
+          const seq = payload.matchSeq;
+          const satAt = seat >= 0 ? room.seatSince?.[seat as 0 | 1] ?? null : null;
+          const vouched =
+            seat >= 0 &&
+            room.config.cpu === difficulty &&
+            seq !== undefined &&
+            seq === room.matchSeq &&
+            satAt !== null &&
+            seq > satAt;
+          if (vouched && room.config.spectators) context.forceUnrankedLadder = true;
+        }
       }
 
-      // Gameplay is client-authoritative, so a solo payload is entirely
-      // self-reported and only ever feeds XP. A PvP payload, though, can be
-      // checked against the room state the relay owns — when the room is
-      // still live we use OUR scores and rally count, not the client's, and
-      // only then do the TrueSkill-2 performance signals apply.
-      const context: RecordMatchContext = {};
       if (payload.mode === 'multiplayer') {
         const room = payload.roomId ? rooms.get(String(payload.roomId).toUpperCase()) : undefined;
         const seat = room?.players.findIndex((p) => p?.playerId === req.deviceId!) ?? -1;
