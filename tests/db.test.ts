@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -163,6 +163,43 @@ describe('rankDirection', () => {
 describe('GameDatabase', () => {
   it('creates the SQLite database file in DATA_DIR', () => {
     expect(fs.existsSync(path.join(TMP, 'phong.db'))).toBe(true);
+  });
+
+  it('proves the store is WRITABLE, not merely readable, in healthCheck', () => {
+    // The probe shipped as a bare SELECT while its own comment promised it
+    // caught "a full disk, a volume that vanished". A read succeeds on a
+    // filesystem that is full and on one remounted read-only — two of the
+    // three — so /api/health went on answering 200 while every match write
+    // failed, which is the orchestrator's whole reason for asking.
+    //
+    // Asserted as the side effect rather than by breaking a filesystem, which
+    // a unit test cannot do portably: if the write is ever dropped back to a
+    // read, this row stops appearing.
+    const probe = () =>
+      (
+        new DatabaseSync(path.join(TMP, 'phong.db'), { readOnly: true })
+          .prepare("SELECT value FROM meta WHERE key = 'health_probe'")
+          .get() as { value?: string } | undefined
+      )?.value;
+
+    db.healthCheck();
+    const first = probe();
+    expect(first).toBeTruthy();
+
+    // ...and it is rate-limited, because /api/health is unauthenticated and
+    // unmetered: one upsert per request would make the probe a write
+    // amplifier, which is the shape of the findings it shipped alongside.
+    //
+    // The clock is moved rather than the calls being made back to back: the
+    // probe writes Date.now(), so two real calls inside one millisecond write
+    // the same value and the assertion would pass with the rate limit deleted.
+    vi.setSystemTime(Date.now() + 5);
+    db.healthCheck();
+    expect(probe()).toBe(first);
+    vi.setSystemTime(Date.now() + 30_000);
+    db.healthCheck();
+    expect(probe()).not.toBe(first);
+    vi.useRealTimers();
   });
 
   it('mints an UNINITIALIZED profile with a placeholder name on first read', () => {
