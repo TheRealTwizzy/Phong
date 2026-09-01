@@ -3287,6 +3287,63 @@ class GameDatabase {
     return { deleted: true, username: row.username, devices: [...devices] };
   }
 
+  /**
+   * Delete the empty placeholder rows left behind by browsers that never
+   * became players.
+   *
+   * `getProfile` mints and PERSISTS a profile for any device id it has not
+   * seen, and the routes that reach it are unauthenticated by design — a
+   * first-time visitor has to be able to load the game. So one request with no
+   * cookie is one ~0.5KB row, forever, and a script pointed at the host grows
+   * the database without bound. That cannot be closed by requiring auth (the
+   * whole point is that a stranger can arrive) and a per-IP mint limit would
+   * refuse real first-time visitors behind a shared address, so the answer is
+   * a BOUND rather than a gate: nothing stops the rows being created, and
+   * nothing keeps them once it is clear nobody was behind them.
+   *
+   * The predicate is deliberately narrow, because this deletes player rows on
+   * a timer and a subtly wrong one destroys accounts. A row has to have no
+   * username (never onboarded, so there is no account to lose), nothing
+   * recorded against it, no browser signed in to it, and no activity for the
+   * whole window. A real visitor who loaded the game, did not onboard, and
+   * comes back later is handed a fresh empty profile — which is exactly the
+   * state they were in.
+   */
+  public pruneStaleGuests(olderThanMs: number, now: Date = new Date()): number {
+    const cutoff = new Date(now.getTime() - olderThanMs).toISOString();
+    const rows = this.sql
+      .prepare(
+        `SELECT id FROM players
+          WHERE initializedAt IS NULL
+            AND matchesPlayed = 0
+            AND xp = 0
+            AND rankedGames = 0
+            AND lastActive < ?
+            AND id NOT LIKE 'bot-%'
+            AND id NOT IN (SELECT deviceId FROM device_links)
+            AND id NOT IN (SELECT playerId FROM device_links)
+            AND id NOT IN (SELECT deviceId FROM released_devices)
+            AND id NOT IN (SELECT player1Id FROM matches)`
+      )
+      .all(cutoff) as { id: string }[];
+    if (!rows.length) return 0;
+
+    this.sql.exec('BEGIN');
+    try {
+      for (const { id } of rows) {
+        for (const table of PLAYER_KEYED_TABLES) {
+          this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(id);
+        }
+        this.stmt('DELETE FROM players WHERE id = ?').run(id);
+      }
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    return rows.length;
+  }
+
   /** Mint a new sign-in code for an account, retiring the old one. */
   public rotateRecoveryCode(playerId: string): string | null {
     const code = this.newRecoveryCode();

@@ -2007,6 +2007,31 @@ async function startServer() {
     }
   }, HEARTBEAT_MS).unref?.();
 
+  /**
+   * Sweep the empty placeholder rows away — see `db.pruneStaleGuests`.
+   *
+   * Hourly rather than on every request, and guarded like the room reaper is:
+   * a failing disk should log a line, not take a sweep (or the process) down.
+   * The window is a week by default, which is long enough that a real visitor
+   * who loaded the game and did not onboard has plainly moved on, and short
+   * enough that the table's steady state is a week of traffic rather than
+   * everything that ever reached the host.
+   */
+  const GUEST_TTL_MS =
+    Number(process.env.GUEST_PROFILE_TTL_DAYS) > 0
+      ? Number(process.env.GUEST_PROFILE_TTL_DAYS) * 24 * 60 * 60 * 1000
+      : 7 * 24 * 60 * 60 * 1000;
+  const sweepGuests = () => {
+    try {
+      const gone = db.pruneStaleGuests(GUEST_TTL_MS);
+      if (gone > 0) console.log(`[db] pruned ${gone} stale guest profile(s)`);
+    } catch (e) {
+      console.error('guest prune failed:', e);
+    }
+  };
+  sweepGuests();
+  setInterval(sweepGuests, 60 * 60 * 1000).unref?.();
+
   wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
     // Answered the last probe. A fresh socket has not been probed yet, so it
     // starts alive rather than one sweep away from being terminated.
