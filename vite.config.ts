@@ -70,6 +70,33 @@ const FLOORS = {
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    build: {
+      rollupOptions: {
+        output: {
+          /**
+           * Split the libraries out of the app chunk.
+           *
+           * Everything shipped as one 820KB file, so every deployment — and
+           * this project force-refreshes sessions on every deployment by
+           * design (see `server/build.ts`) — invalidated React, Motion and the
+           * icon set along with the twenty lines of game code that actually
+           * changed. Separated, a deploy re-downloads the app chunk and the
+           * vendor chunk stays in the browser cache it was already in, which
+           * is what the `immutable, max-age=1y` on `/assets` is for.
+           *
+           * Deliberately coarse: three buckets, matched on the dependency
+           * path, so nothing here has to be kept in step with the import graph
+           * — a library that moves between them still lands in a vendor chunk.
+           */
+          manualChunks(id: string) {
+            if (!id.includes('node_modules')) return undefined;
+            if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return 'react';
+            if (/[\\/]node_modules[\\/](motion|framer-motion|canvas-confetti)/.test(id)) return 'motion';
+            return 'vendor';
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
