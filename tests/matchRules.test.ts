@@ -18,6 +18,7 @@ import {
   duelMatchKey,
   unrankedRuleKeys,
   unrankedReasons,
+  autoServeForced,
   isRankedMatch,
   normalizeRules,
   AUTO_SERVE_OPTIONS,
@@ -622,5 +623,54 @@ describe('every consumer asks the verdict the same way', () => {
     expect(unrankedReasons({ ...ctx, rankMu: above })).toContain('outgrown');
     // The same match, asked without the rating: reads as fully ranked.
     expect(unrankedReasons(ctx)).toHaveLength(0);
+  });
+});
+
+describe('autoServeForced', () => {
+  // The control has been wrong in BOTH directions, which is why the rule lives
+  // beside `normalizeRoomConfig` rather than in the panel: too narrow (the
+  // whole ranked verdict, so a Casual table offered "Off" and the server
+  // overwrote it with 5s) and then too broad (the rules alone, so Practice,
+  // Split and unranked solo rungs lost "Off" though nothing forces it there).
+  const stock = {};
+  const tuned = { paddleScale: 1.6 };
+
+  it('forces the timer for a ranked-legal duel', () => {
+    expect(autoServeForced('multiplayer', stock)).toBe(true);
+  });
+
+  it('forces it on a CASUAL table too, where the venue unranks the match', () => {
+    // The venue is not part of this question: two humans on ranked-legal rules
+    // can still stall each other, which is what the floor exists for.
+    expect(autoServeForced('multiplayer', stock)).toBe(true);
+    expect(unrankedReasons({ rules: stock, mode: 'multiplayer', venueRoomId: 'casual' })).toContain(
+      'venue'
+    );
+  });
+
+  it('leaves a duel on non-ranked rules alone', () => {
+    expect(autoServeForced('multiplayer', tuned)).toBe(false);
+  });
+
+  it('never forces it where no room normalization runs', () => {
+    // `normalizeRoomConfig` is the only thing that forces the timer and it is
+    // reached by a ROOM alone; these three go through `normalizeRules`.
+    for (const mode of ['solo', 'practice', 'split'] as const) {
+      expect(autoServeForced(mode, stock)).toBe(false);
+      expect(autoServeForced(mode, tuned)).toBe(false);
+    }
+  });
+
+  it('agrees with what normalizeRoomConfig actually does', () => {
+    // The two must not drift: whenever the panel says Off is not a choice, the
+    // server must in fact overwrite it, and whenever it says Off is a choice,
+    // the server must leave it alone.
+    for (const rules of [stock, tuned, { ballSpeedMax: 2 }]) {
+      const config = normalizeRoomConfig({
+        rules: normalizeRules({ ...rules, autoServeSeconds: 0 }),
+      });
+      const overwritten = config.rules.autoServeSeconds !== 0;
+      expect(overwritten).toBe(autoServeForced('multiplayer', rules));
+    }
   });
 });

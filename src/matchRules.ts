@@ -334,6 +334,28 @@ export const DEFAULT_ROOM_CONFIG: RoomMatchConfig = {
  * score was two private matches that happened to share a ball, and the shorter
  * one ending first left the other player stranded mid-rally.
  */
+/**
+ * Whether the auto-serve timer is forced ON, i.e. whether "Off" is a real
+ * choice or a setting the server is about to overwrite.
+ *
+ * Two conditions, and leaving either out makes the control lie in a different
+ * direction. `normalizeRoomConfig` is the only thing that forces the timer and
+ * it runs for a ROOM and nowhere else — solo, Practice and Split Screen reach
+ * `normalizeRules` alone — so the mode is half the question. The other half is
+ * the rules ALONE and not the whole ranked verdict: on a Casual table the
+ * venue unranks the match, so the full verdict said "not ranked", so "Off" was
+ * offered and then silently overwritten with 5s. A Casual duel is still two
+ * humans on ranked-legal rules, which is exactly the stall the floor exists
+ * for.
+ *
+ * Asking `isRankedRules` alone was the swing back too far: it disabled "Off"
+ * in Practice and Split, which are unranked always and pass through no room
+ * normalization at all, and on unranked solo rungs like Rookie.
+ */
+export function autoServeForced(mode: GameMode, rules: Partial<MatchRules> | null | undefined): boolean {
+  return mode === 'multiplayer' && isRankedRules(normalizeRules(rules));
+}
+
 export function normalizeRoomConfig(
   input: Partial<RoomMatchConfig> | null | undefined
 ): RoomMatchConfig {

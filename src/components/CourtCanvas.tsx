@@ -495,7 +495,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   /**
    * Every finger is gone, and none of them served.
    *
-   * CLAUDE.md §16 reads as though this file already had the abort paths
+   * CLAUDE.md §17 reads as though this file already had the abort paths
    * `useMenuSwipe` has, and it did not: only `pointerup` and `pointercancel`
    * ever removed a pointer. A pointer that goes away without either — the
    * documented Android `intent://` hand-off to another browser, the app

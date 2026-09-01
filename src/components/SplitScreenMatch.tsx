@@ -399,13 +399,24 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     };
     const onKeyUp = (e: KeyboardEvent) => pressed.delete(e.code);
 
-    const keyLoop = () => {
+    // Per SECOND, not per frame — the same fix `CourtCanvas` took, in the file
+    // the same commit missed. A flat 0.025 per frame moves the paddle exactly
+    // twice as fast on a 120Hz display as on a 60Hz one, and here that is no
+    // longer only a speed: these positions are differentiated into `p1Vx`/
+    // `p2Vx` and fed to `driveCoupling`, so the refresh rate became paddle
+    // VELOCITY and two identical keyboard returns left with different angles,
+    // different pace and different spin depending on the monitor.
+    const KEY_PADDLE_SPEED = 0.025 * 60;
+    let keyLast = performance.now();
+    const keyLoop = (now: number) => {
+      const dt = Math.min((now - keyLast) / 1000, 0.05);
+      keyLast = now;
       let d1 = 0;
       let d2 = 0;
-      if (pressed.has('ArrowLeft')) d1 -= 0.025;
-      if (pressed.has('ArrowRight')) d1 += 0.025;
-      if (pressed.has('KeyA')) d2 -= 0.025;
-      if (pressed.has('KeyD')) d2 += 0.025;
+      if (pressed.has('ArrowLeft')) d1 -= KEY_PADDLE_SPEED * dt;
+      if (pressed.has('ArrowRight')) d1 += KEY_PADDLE_SPEED * dt;
+      if (pressed.has('KeyA')) d2 -= KEY_PADDLE_SPEED * dt;
+      if (pressed.has('KeyD')) d2 += KEY_PADDLE_SPEED * dt;
       if (d1 !== 0) p1PaddleRef.current = clampPaddle(p1PaddleRef.current + d1);
       if (d2 !== 0) p2PaddleRef.current = clampPaddle(p2PaddleRef.current + d2);
       frame = requestAnimationFrame(keyLoop);
@@ -483,7 +494,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     pointerOwnersRef.current.delete(pointerId);
   }, []);
 
-  // The abort paths, which CLAUDE.md §16 requires and this component had none
+  // The abort paths, which CLAUDE.md §17 requires and this component had none
   // of — only `pointerup` and `pointercancel` ever released a half. A pointer
   // that goes away without either (the app switcher, a tab change, capture
   // taken elsewhere) left `halfOwnerRef` holding a pointer id that will never

@@ -860,3 +860,29 @@ describe('the split-screen serve obeys the match rules', () => {
     expect(deg).toBeCloseTo(SERVE_MAX_ANGLE_DEG * SPREAD, 9);
   });
 });
+
+describe('keyboard paddles move per SECOND, in every component that has one', () => {
+  // A flat delta added on every animation frame moves the paddle exactly twice
+  // as fast on a 120Hz display as on a 60Hz one. `CourtCanvas` was fixed and
+  // `SplitScreenMatch` was missed by the same commit — and there it is not
+  // only a speed, because those positions are differentiated into the paddle
+  // velocity that feeds `driveCoupling`, so the refresh rate decided the
+  // angle, the pace and the spin of an otherwise identical return.
+  //
+  // Read from the source for the same reason the paddle call sites are: this
+  // lives inside a `useEffect` in a `.tsx`, and a frame-rate dependence
+  // compiles, runs, and looks correct on whatever display you happen to own.
+  const DRIVERS = ['src/components/CourtCanvas.tsx', 'src/components/SplitScreenMatch.tsx'];
+
+  it.each(DRIVERS)('%s scales its keyboard delta by dt', (file) => {
+    const src = readFileSync(resolve(__dirname, '..', file), 'utf8');
+    const uses = src
+      .split('\n')
+      .filter((l) => l.includes('KEY_PADDLE_SPEED') && !l.includes('const KEY_PADDLE_SPEED'));
+    // It has to be there at all, or the assertion below is vacuous.
+    expect(uses.length).toBeGreaterThan(0);
+    for (const line of uses) expect(line).toMatch(/KEY_PADDLE_SPEED \* dt/);
+    // And the per-second constant is declared, rather than a bare literal.
+    expect(src).toMatch(/const KEY_PADDLE_SPEED = [\d.]+ \* 60;/);
+  });
+});
