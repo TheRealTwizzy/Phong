@@ -193,8 +193,16 @@ describe('per-player retention', () => {
          VALUES (?, ?, 'HistBusy', 'AI-rookie', 'AI (rookie)', ?, 'HistBusy', 5, 2, 3, 'solo', 'rookie', ?, 0)`
       );
       const now = new Date().toISOString();
+      // ONE transaction. Un-batched, each `run` is its own implicit commit, so
+      // this was 510 of them — 143ms on a local disk and past vitest's 5s
+      // default on a loaded CI runner, where it timed out on `main` at c03fa42
+      // while every other test passed. A timeout is not an assertion, so it
+      // says nothing about the trim; it is the fixture being written the slow
+      // way. Batching is also simply how a bulk load is done.
+      raw.exec('BEGIN');
       for (let i = 0; i < 509; i++) insert.run(`bulk_${i}`, busy, busy, now);
       insert.run('quiet_1', quiet, quiet, now);
+      raw.exec('COMMIT');
     } finally {
       raw.close();
     }
