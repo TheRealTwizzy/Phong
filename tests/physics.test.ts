@@ -24,6 +24,7 @@ import {
   BALL_BASE_RADIUS,
   MAX_PHYSICS_SUBSTEPS,
   physicsSubsteps,
+  bounceOffWall,
 } from '../src/game/physics';
 import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
@@ -578,5 +579,54 @@ describe('physicsSubsteps keeps the ball inside the paddle it is passing', () =>
     const steps = physicsSubsteps(speed, dt, radius);
     const hits = Array.from({ length: steps }, (_, i) => sample(startY + speed * (dt / steps) * (i + 1)));
     expect(hits.some(Boolean)).toBe(true);
+  });
+});
+
+describe('the paddle obeys the match speed band', () => {
+  // CLAUDE.md §3 promises "every rebound is held inside the match's own speed
+  // band". `bounceOffWall` has taken the rules since spin shipped and
+  // `checkPaddleCollision` did not, so the wall let a rally climb to
+  // `MAX_BALL_SPEED * ballSpeedMax` while every paddle contact snapped it back
+  // to the stock 2.4 — a rule that only ever made the game slower, and only in
+  // one half of the rally.
+  const arriving = (speed: number) =>
+    ({
+      x: 0.5,
+      y: PADDLE_Y - PADDLE_HEIGHT / 2,
+      vx: 0,
+      vy: speed,
+      radius: BALL_BASE_RADIUS,
+      spin: 0,
+      active: true,
+    }) as BallState;
+
+  it('still caps at the stock ceiling when the rules are stock', () => {
+    const stock = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, {});
+    expect(stock.speed).toBeCloseTo(MAX_BALL_SPEED, 10);
+  });
+
+  it('behaves exactly as before when given no rules at all', () => {
+    const bare = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO);
+    expect(bare.speed).toBe(MAX_BALL_SPEED);
+  });
+
+  it('lets a raised ceiling actually raise it', () => {
+    const fast = checkPaddleCollision(arriving(MAX_BALL_SPEED), 0.5, PADDLE_WIDTH_RATIO, 0, {
+      ballSpeedMax: 2,
+    });
+    expect(fast.speed).toBeGreaterThan(MAX_BALL_SPEED);
+    expect(fast.speed).toBeLessThanOrEqual(MAX_BALL_SPEED * 2 + 1e-9);
+  });
+
+  it('agrees with the wall about where the ceiling is', () => {
+    // The two surfaces disagreeing is the whole bug: a ball could be sped up
+    // by a wall past a ceiling the paddle would then pull it back under.
+    for (const ballSpeedMax of [1, 1.2, 1.5, 2]) {
+      const rules = { ballSpeedMax };
+      const paddle = checkPaddleCollision(arriving(MAX_BALL_SPEED * 4), 0.5, PADDLE_WIDTH_RATIO, 0, rules);
+      expect(paddle.speed).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
+      const wall = bounceOffWall(-MAX_BALL_SPEED * 4, 0.1, 0, true, rules);
+      expect(Math.hypot(wall.vx, wall.vy)).toBeLessThanOrEqual(MAX_BALL_SPEED * ballSpeedMax + 1e-9);
+    }
   });
 });

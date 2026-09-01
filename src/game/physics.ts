@@ -340,7 +340,16 @@ export function checkPaddleCollision(
   ball: BallState,
   paddleX: number,
   paddleWidth: number,
-  paddleVx: number = 0
+  paddleVx: number = 0,
+  // The band this match is played under. `bounceOffWall` above has taken this
+  // since spin shipped, and the paddle not taking it is the asymmetry that
+  // made CLAUDE.md §3's "every rebound is held inside the match's own speed
+  // band" false: the wall let a rally climb to `MAX_BALL_SPEED * ballSpeedMax`
+  // while every paddle contact snapped it back to the stock 2.4. Measured with
+  // `ballSpeedMax: 2` — 3.37 after three bounces, 4.80 after nine, and 2.4 off
+  // the paddle in between. Optional, so the stock game and every existing
+  // caller behave exactly as before.
+  rules?: Partial<MatchRules>
 ): HitResult {
   const paddleTop = PADDLE_Y - PADDLE_HEIGHT / 2;
   const paddleBottom = PADDLE_Y + PADDLE_HEIGHT / 2;
@@ -388,7 +397,7 @@ export function checkPaddleCollision(
           (1.04 +
             Math.abs(drive) * DRIVE_SPEED_GAIN +
             spinPace(incoming, outgoingVx) * SPIN_PADDLE_SPEED_GAIN),
-        MAX_BALL_SPEED
+        rules ? maxBallSpeedFor(rules) : MAX_BALL_SPEED
       );
 
       return {

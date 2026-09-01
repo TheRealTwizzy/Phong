@@ -2900,12 +2900,18 @@ export default function App() {
           ob,
           aiRef.current.paddleX,
           paddleWidthRef.current,
-          aiRef.current.paddleVx
+          aiRef.current.paddleVx,
+          rulesRef.current
         );
 
         if (oppHit.hit && oppHit.angle !== undefined && oppHit.speed !== undefined) {
-          ob.vy = -Math.abs(oppHit.speed * Math.cos(oppHit.angle));
-          ob.vx = oppHit.speed * Math.sin(oppHit.angle);
+          // The AI's return went through no band clamp at all, where the
+          // player's has had one since the rules shipped — so with a raised
+          // `ballSpeedMin` the AI could hand back a ball slower than the match
+          // permits, and the two halves of one rally obeyed different rules.
+          const oppSpeed = clampBallSpeed(oppHit.speed, rulesRef.current);
+          ob.vy = -Math.abs(oppSpeed * Math.cos(oppHit.angle));
+          ob.vx = oppSpeed * Math.sin(oppHit.angle);
           ob.y = PADDLE_Y - PADDLE_HEIGHT / 2 - ob.radius;
 
           sound.playOpponentPaddleHit();
@@ -3730,6 +3736,7 @@ export default function App() {
             settings={settings}
             theme={currentTheme}
             winningScore={activeConfig.winningScore}
+            rules={activeConfig.rules}
             onExitSplitMode={quitToMenu}
           />
         )}

@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { GameSettings, LanguageCode } from '../types';
+import { GameSettings, LanguageCode, MatchRules } from '../types';
 import { Cosmetic } from '../game/cosmetics';
 import {
   PADDLE_Y,
   PADDLE_HEIGHT,
-  PADDLE_WIDTH_RATIO,
-  BALL_BASE_RADIUS,
   BASE_BALL_SPEED,
-  MAX_BALL_SPEED,
   checkPaddleCollision,
+  paddleWidthFor,
+  ballRadiusFor,
+  maxBallSpeedFor,
+  minBallSpeedFor,
+  physicsSubsteps,
 } from '../game/physics';
 import { sound } from '../audio/soundEffects';
 import { t } from '../i18n/translations';
@@ -28,6 +30,14 @@ interface SplitScreenMatchProps {
    * by construction — this is compliance, not a behaviour change.
    */
   winningScore: number;
+  /**
+   * The same rules every other mode plays under. This screen used to take
+   * none: it hard-coded `PADDLE_WIDTH_RATIO`, `BALL_BASE_RADIUS` and
+   * `MAX_BALL_SPEED`, so all six physics rules its OWN pre-match sheet offers
+   * — paddle size, ball size, both speed bounds, serve angle and power — were
+   * accepted from the player and then silently ignored.
+   */
+  rules: MatchRules;
   onExitSplitMode: () => void;
 }
 
@@ -38,9 +48,10 @@ const NET_Y = 0.5;
 
 // A full court is ~2.2x the travel of a blind half-court leg, so the shared
 // half-court speeds are scaled down to keep rallies at the same felt pace.
+// The RULES are applied on top of that scale rather than instead of it: the
+// scale is geometry, the rules are the match.
 const SPEED_SCALE = 0.55;
 const SERVE_SPEED = BASE_BALL_SPEED * SPEED_SCALE;
-const SPEED_CAP = MAX_BALL_SPEED * SPEED_SCALE;
 
 interface FullCourtBall {
   x: number;
@@ -60,6 +71,7 @@ interface FullCourtBall {
 export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   settings,
   winningScore,
+  rules,
   theme,
   onExitSplitMode,
 }) => {
@@ -77,15 +89,33 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   const [server, setServer] = useState<1 | 2>(1);
   const [winner, setWinner] = useState<1 | 2 | null>(null);
 
+  // The rules the match is played under, read by the loop through a ref so a
+  // re-render does not re-arm it. Fixed for the life of a match, as everywhere
+  // else — the pre-match sheet is the only place they can be set.
+  const rulesRef = useRef<MatchRules>(rules);
+  rulesRef.current = rules;
+  const paddleWidth = paddleWidthFor(rules);
+  const ballRadius = ballRadiusFor(rules);
+  // Both bounds scaled into this court's own units, so a raised ballSpeedMax
+  // makes a split match faster exactly as it makes a half-court match faster.
+  const speedCap = maxBallSpeedFor(rules) * SPEED_SCALE;
+  const speedMin = minBallSpeedFor(rules) * SPEED_SCALE;
+  const serveSpeed = Math.max(speedMin, Math.min(SERVE_SPEED, speedCap));
+  const geomRef = useRef({ paddleWidth, ballRadius, speedCap, speedMin, serveSpeed });
+  geomRef.current = { paddleWidth, ballRadius, speedCap, speedMin, serveSpeed };
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const p1PaddleRef = useRef<number>(0.5);
   const p2PaddleRef = useRef<number>(0.5);
+  // Last frame's positions, so each paddle's own speed can be measured.
+  const p1PrevRef = useRef<number>(0.5);
+  const p2PrevRef = useRef<number>(0.5);
   const ballRef = useRef<FullCourtBall>({
     x: 0.5,
     y: P1_PADDLE_Y - 0.06,
     vx: 0,
     vy: 0,
-    radius: BALL_BASE_RADIUS,
+    radius: ballRadiusFor(rules),
     active: true,
   });
   // The physics loop reads/writes these refs synchronously (a state updater
@@ -101,7 +131,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   const pointerOwnersRef = useRef<Map<number, 1 | 2>>(new Map());
 
   const clampPaddle = (x: number) => {
-    const half = PADDLE_WIDTH_RATIO / 2;
+    const half = geomRef.current.paddleWidth / 2;
     return Math.max(half, Math.min(1 - half, x));
   };
 
@@ -117,8 +147,8 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       y: from === 1 ? P1_PADDLE_Y - 0.06 : P2_PADDLE_Y + 0.06,
       vx,
       // Player 1 (bottom) serves upward; player 2 (top) serves downward.
-      vy: from === 1 ? -SERVE_SPEED : SERVE_SPEED,
-      radius: BALL_BASE_RADIUS,
+      vy: from === 1 ? -geomRef.current.serveSpeed : geomRef.current.serveSpeed,
+      radius: geomRef.current.ballRadius,
       active: true,
     };
   }, []);
@@ -133,7 +163,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       y: nextServer === 1 ? P1_PADDLE_Y - 0.06 : P2_PADDLE_Y + 0.06,
       vx: 0,
       vy: 0,
-      radius: BALL_BASE_RADIUS,
+      radius: geomRef.current.ballRadius,
       active: true,
     };
   };
@@ -171,46 +201,72 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         return;
       }
 
+      const geom = geomRef.current;
+      const activeRules = rulesRef.current;
+      // Each paddle's own speed, sampled once a frame against the position the
+      // collision below reads — the same rule App follows. Nothing passed a
+      // paddle velocity here at all, so `driveCoupling` saw a stationary
+      // paddle on every contact and there was no paddle drive and no spin in
+      // this mode whatsoever.
+      const p1Vx = (p1PaddleRef.current - p1PrevRef.current) / (dt || 0.016);
+      const p2Vx = (p2PaddleRef.current - p2PrevRef.current) / (dt || 0.016);
+      p1PrevRef.current = p1PaddleRef.current;
+      p2PrevRef.current = p2PaddleRef.current;
+
       const b = { ...ballRef.current };
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
+      // Substepped for the reason the half-court loop is: the paddle test is a
+      // POINT sample with a window about `PADDLE_HEIGHT + 2r` tall, and one
+      // jump at speed over a clamped frame steps clean over it.
+      const steps = physicsSubsteps(Math.hypot(b.vx, b.vy), dt, b.radius);
+      const sdt = dt / steps;
 
-      // Side walls
-      if (b.x - b.radius <= 0) {
-        b.x = b.radius;
-        b.vx = Math.abs(b.vx);
-        sound.playWallBounce();
-      } else if (b.x + b.radius >= 1) {
-        b.x = 1 - b.radius;
-        b.vx = -Math.abs(b.vx);
-        sound.playWallBounce();
-      }
+      for (let step = 0; step < steps; step++) {
+        b.x += b.vx * sdt;
+        b.y += b.vy * sdt;
 
-      // Player 1's paddle sits exactly where the shared half-court collision
-      // routine expects one, so it is reused as-is.
-      const p1Hit = checkPaddleCollision(b, p1PaddleRef.current, PADDLE_WIDTH_RATIO);
-      if (p1Hit.hit && p1Hit.angle !== undefined && p1Hit.speed !== undefined) {
-        const speed = Math.min(p1Hit.speed, SPEED_CAP);
-        b.vy = -Math.abs(speed * Math.cos(p1Hit.angle));
-        b.vx = speed * Math.sin(p1Hit.angle);
-        b.y = P1_PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
-        sound.playPaddleHit(speed / SERVE_SPEED);
-        rallyRef.current = [rallyRef.current[0] + 1, rallyRef.current[1]];
-        setStreaks(rallyRef.current);
-      }
+        // Side walls
+        if (b.x - b.radius <= 0) {
+          b.x = b.radius;
+          b.vx = Math.abs(b.vx);
+          sound.playWallBounce();
+        } else if (b.x + b.radius >= 1) {
+          b.x = 1 - b.radius;
+          b.vx = -Math.abs(b.vx);
+          sound.playWallBounce();
+        }
 
-      // Player 2's paddle is the same geometry flipped about the net, so the
-      // ball is mirrored into the routine's frame and the result mirrored back.
-      const mirrored = { ...b, y: 1 - b.y, vy: -b.vy };
-      const p2Hit = checkPaddleCollision(mirrored, p2PaddleRef.current, PADDLE_WIDTH_RATIO);
-      if (p2Hit.hit && p2Hit.angle !== undefined && p2Hit.speed !== undefined) {
-        const speed = Math.min(p2Hit.speed, SPEED_CAP);
-        b.vy = Math.abs(speed * Math.cos(p2Hit.angle));
-        b.vx = speed * Math.sin(p2Hit.angle);
-        b.y = P2_PADDLE_Y + PADDLE_HEIGHT / 2 + b.radius;
-        sound.playOpponentPaddleHit();
-        rallyRef.current = [rallyRef.current[0], rallyRef.current[1] + 1];
-        setStreaks(rallyRef.current);
+        // Player 1's paddle sits exactly where the shared half-court collision
+        // routine expects one, so it is reused as-is.
+        const p1Hit = checkPaddleCollision(b, p1PaddleRef.current, geom.paddleWidth, p1Vx, activeRules);
+        if (p1Hit.hit && p1Hit.angle !== undefined && p1Hit.speed !== undefined) {
+          const speed = Math.max(geom.speedMin, Math.min(p1Hit.speed, geom.speedCap));
+          b.vy = -Math.abs(speed * Math.cos(p1Hit.angle));
+          b.vx = speed * Math.sin(p1Hit.angle);
+          b.y = P1_PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
+          sound.playPaddleHit(speed / geom.serveSpeed);
+          rallyRef.current = [rallyRef.current[0] + 1, rallyRef.current[1]];
+          setStreaks(rallyRef.current);
+        }
+
+        // Player 2's paddle is the same geometry flipped about the net, so the
+        // ball is mirrored into the routine's frame and the result mirrored
+        // back — the paddle's own velocity with it, since left and right swap
+        // across the mirror too.
+        const mirrored = { ...b, y: 1 - b.y, vy: -b.vy };
+        const p2Hit = checkPaddleCollision(mirrored, p2PaddleRef.current, geom.paddleWidth, -p2Vx, activeRules);
+        if (p2Hit.hit && p2Hit.angle !== undefined && p2Hit.speed !== undefined) {
+          const speed = Math.max(geom.speedMin, Math.min(p2Hit.speed, geom.speedCap));
+          b.vy = Math.abs(speed * Math.cos(p2Hit.angle));
+          b.vx = speed * Math.sin(p2Hit.angle);
+          b.y = P2_PADDLE_Y + PADDLE_HEIGHT / 2 + b.radius;
+          sound.playOpponentPaddleHit();
+          rallyRef.current = [rallyRef.current[0], rallyRef.current[1] + 1];
+          setStreaks(rallyRef.current);
+        }
+
+        // Past either baseline is a point, and the sweep stops there rather
+        // than carrying the ball on past it.
+        if (b.y >= 1.05 || b.y <= -0.05) break;
       }
 
       // Baselines: a ball past a player's baseline is a point for the other.
@@ -352,7 +408,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       color: string,
       glow: string
     ) => {
-      const w = PADDLE_WIDTH_RATIO * width;
+      const w = geomRef.current.paddleWidth * width;
       const h = PADDLE_HEIGHT * height;
       const left = x * width - w / 2;
       const top = centerY * height - h / 2;
