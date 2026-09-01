@@ -21,6 +21,9 @@ import {
   AIM_FULL_PUSH,
   AIM_DEADZONE,
   SERVE_MAX_ANGLE_DEG,
+  SPIN_MAX,
+  MAX_REBOUND_ANGLE_DEG,
+  AI_AGGRESSION_ANGLE_DEG,
 } from '../src/game/physics';
 import { AI_DIFFICULTIES, normalizeDifficulty } from '../src/rating';
 
@@ -54,6 +57,40 @@ describe('checkPaddleCollision', () => {
     expect(edge.hit).toBe(true);
     expect(Math.abs(edge.offset!)).toBeLessThanOrEqual(1.1);
     expect(edge.offset!).toBeGreaterThan(0.9);
+  });
+
+  it('measures the spin pace against the angle the BIAS produced, not the one before it', () => {
+    // The AI's aggression used to be applied to the returned angle, in
+    // App.tsx, after this function had already decided the pace. That pace is
+    // signed: spinPace adds or scrubs up to SPIN_PADDLE_SPEED_GAIN according
+    // to the sign of the direction the ball leaves in. So a bias that pushed a
+    // shallow return ACROSS the zero-angle axis — which is precisely what
+    // aggression is for — left the speed measured against a direction the ball
+    // was no longer travelling, and a spun ball got a boost where it should
+    // have been scrubbed.
+    //
+    // A ball hit just right of centre leaves at a small positive angle; a
+    // negative bias takes it to a real negative one. With spin on the ball the
+    // pace must follow the SECOND sign.
+    // The bias is the largest the AI can actually apply, not a magic number,
+    // so this stays a statement about the real lever.
+    const bias = (AI_AGGRESSION_ANGLE_DEG * Math.PI) / 180;
+    const spun = () => ballAt(0.5 + PADDLE_W * 0.05, { spin: SPIN_MAX * 0.2 });
+    const plain = checkPaddleCollision(spun(), 0.5, PADDLE_W);
+    const pushed = checkPaddleCollision(spun(), 0.5, PADDLE_W, 0, -bias);
+
+    // The bias really did cross the axis, or this test proves nothing.
+    expect(plain.angle!).toBeGreaterThan(0);
+    expect(pushed.angle!).toBeLessThan(0);
+
+    // Positive spin leaving rightward skids on; the same spin leaving leftward
+    // is scrubbed. Both are the same contact, so the difference is the sign.
+    expect(pushed.speed!).toBeLessThan(plain.speed!);
+  });
+
+  it('bounds a biased angle by the same rebound limit as an unbiased one', () => {
+    const hard = checkPaddleCollision(ballAt(0.5 + PADDLE_W / 2), 0.5, PADDLE_W, 0, 1.5);
+    expect(Math.abs(hard.angle!)).toBeLessThanOrEqual((Math.PI / 180) * MAX_REBOUND_ANGLE_DEG + 1e-9);
   });
 
   it('never returns a hit for a ball moving upward', () => {

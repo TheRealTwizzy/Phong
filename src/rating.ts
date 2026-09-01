@@ -123,7 +123,7 @@ export const AI_ADAPT_BAND = 7;
  * so their odds went 50% -> 22% and every further loss widened the gap. The
  * ladder must never get harder because you are losing.
  */
-export const AI_ADAPT_DOWN_STRENGTH = 1;
+export const AI_ADAPT_DOWN_STRENGTH = 0.85;
 export const AI_ADAPT_DOWN_BAND = 20;
 
 /**
@@ -535,7 +535,7 @@ export function matchXp(params: {
 // inside recordMatch — a client still never sends an XP amount, and PvP XP is
 // untouched:
 //
-//   soloXp = clamp(matchXp × momentum(w) × fatigue(n), XP_FLOOR, SOLO_XP_MATCH_CAP)
+//   soloXp = max(XP_FLOOR, matchXp × min(momentum(w) × fatigue(n), SOLO_XP_MAX_MULTIPLIER))
 //
 // MOMENTUM rewards consecutive solo wins, ramping with diminishing increments
 // toward saturation. `w` is the solo win streak the player CARRIES INTO the
@@ -575,8 +575,25 @@ export const SOLO_FATIGUE_FREE_GAMES = 3;
  * fatigue is there to tax streak-LESS grinding, not to cancel momentum.
  */
 export const SOLO_FATIGUE_STEP = 0.02;
-/** No solo match ever pays more than this, however long the streak. */
-export const SOLO_XP_MATCH_CAP = 450;
+/**
+ * The most momentum and fatigue may multiply a solo match's own XP by.
+ *
+ * This bounds the MULTIPLIER, not the product, and the difference is the
+ * ladder's ordering. A flat 450 cap on the product flattened the top: on a
+ * three-win streak Cyber and Chaos both paid exactly 450, and on an eight-win
+ * streak so did Elite — so a player on a run was paid the same for the easiest
+ * of the top three as for the hardest. rating.ts's own claim that "a harder
+ * rung always pays more, with no per-difficulty XP table anywhere" is true of
+ * matchXp and was false of what actually reached the player.
+ *
+ * A multiplier cap cannot do that, because it scales a base that is already
+ * ordered by winProbability. The honest cost is that the ceiling rises with
+ * the rung rather than sitting at one number: a Chaos win on an eight-win
+ * streak goes 450 -> 560. Preserving ordering under a streak means raising the
+ * top or lowering the middle, and lowering the middle would take XP away from
+ * players who did nothing wrong.
+ */
+export const SOLO_XP_MAX_MULTIPLIER = 2.0;
 
 /** Concave, saturating: increments diminish as the streak grows. */
 export const soloMomentum = (winStreak: number): number => {
@@ -598,8 +615,11 @@ export const soloFatigue = (gamesToday: number): number => {
  * recorded this UTC day, before this one.
  */
 export function soloAdjustedXp(baseXp: number, winStreak: number, gamesToday: number): number {
-  const adjusted = Math.round(baseXp * soloMomentum(winStreak) * soloFatigue(gamesToday));
-  return Math.min(SOLO_XP_MATCH_CAP, Math.max(XP_FLOOR, adjusted));
+  const multiplier = Math.min(
+    SOLO_XP_MAX_MULTIPLIER,
+    soloMomentum(winStreak) * soloFatigue(gamesToday)
+  );
+  return Math.max(XP_FLOOR, Math.round(baseXp * multiplier));
 }
 
 // ---------------------------------------------------------------------------

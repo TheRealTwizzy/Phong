@@ -200,6 +200,18 @@ export const SPIN_PADDLE_CARRY = -0.35;
 /** No AI ever fully reads spin — it has to stay worth using at the top. */
 export const MAX_SPIN_READ = 0.85;
 
+/** The steepest a ball may leave any paddle, the AI's aggression included. */
+export const MAX_REBOUND_ANGLE_DEG = 62;
+
+/**
+ * How far aggression may bend the AI's OWN return, in degrees.
+ *
+ * Sized against the 62 degrees a paddle can produce at all: a fully aggressive
+ * rung adds up to 14, roughly a fifth of the range, which is a visibly
+ * cornered ball without turning every return into the extreme.
+ */
+export const AI_AGGRESSION_ANGLE_DEG = 14;
+
 /**
  * How strongly this contact couples the paddle's motion into the ball:
  * 0 at rest, toward 1 for a fast swing caught on the edge.
@@ -311,7 +323,22 @@ export function checkPaddleCollision(
   ball: BallState,
   paddleX: number,
   paddleWidth: number,
-  paddleVx: number = 0
+  paddleVx: number = 0,
+  /**
+   * An extra push on the outgoing angle, in radians. The AI's aggression, and
+   * nothing else — the player passes none.
+   *
+   * It belongs INSIDE the contact rather than applied to the returned angle
+   * afterwards, and the reason is two lines down from here: `outgoingVx` is
+   * derived from this angle and fed to spinPace, which adds or scrubs up to
+   * SPIN_PADDLE_SPEED_GAIN of pace ACCORDING TO ITS SIGN. Bending the angle
+   * after the fact leaves the speed measured against a direction the ball is
+   * no longer going, so a push across the zero-angle axis — a shallow return
+   * nudged to the other side, which is exactly what aggression is for — gave a
+   * spun ball a boost where it should have been scrubbed. Folded in here, the
+   * angle, the pace and the returned spin cannot disagree by construction.
+   */
+  angleBias: number = 0
 ): HitResult {
   const paddleTop = PADDLE_Y - PADDLE_HEIGHT / 2;
   const paddleBottom = PADDLE_Y + PADDLE_HEIGHT / 2;
@@ -339,11 +366,12 @@ export function checkPaddleCollision(
 
       // Calculate rebound angle (max ~60 degrees), plus what the swing and the
       // incoming spin add.
-      const maxAngle = (Math.PI / 180) * 62;
+      const maxAngle = (Math.PI / 180) * MAX_REBOUND_ANGLE_DEG;
       const angle = clamp(
         hitOffset * maxAngle +
           (drive * DRIVE_ANGLE_DEG * Math.PI) / 180 +
-          (incoming * SPIN_REBOUND_DEG * Math.PI) / 180,
+          (incoming * SPIN_REBOUND_DEG * Math.PI) / 180 +
+          angleBias,
         -maxAngle,
         maxAngle
       );
@@ -404,40 +432,113 @@ export function checkPaddleCollision(
  * The ceiling moved UP with the five-rung ladder — a deliberate reversal of
  * the 0.9 → 0.66 cut, taken knowingly: players reported the whole ladder too
  * easy, and two new top rungs need headroom above the old Cyber to be
- * distinct. 0.78 puts the hardest thing in the game (Chaos, and an adapted
- * Chaos at the clamp) near ~90% of balls returned — a genuine wall that still
- * drops roughly one ball in ten. The old lottery critique is honoured by the
- * hard rule in tests/physics.test.ts: no difficulty may ever return ≥93%.
+ * distinct. It rose again, 0.78 → 0.81, when the knots were extended past the
+ * top anchor so the top three rungs stop being the same opponent.
+ *
+ * It cannot rise much further, and the reason is worth knowing before anyone
+ * tries. This constant does FIVE jobs — the top knot, the clamp in
+ * competenceForMu, the lapse normaliser, the serve-skill normaliser, and the
+ * per-rally volatility clamp — so raising it changes every rung, not just the
+ * top. And the hard rule in tests/physics.test.ts, that no difficulty may ever
+ * return ≥93% of balls, binds: measured at the suite's own sample against a
+ * mu-40 player, the top rungs sit at 91.0-91.2%, and pushing the clamp to 0.86
+ * put them at 92.8% (93.0 on a smaller sample), which is a flaky CI job and a
+ * broken promise at the same time.
+ *
+ * One thing this bought back on the way up: at the old clamp all three top
+ * rungs had serve skill exactly 1.000 — identical serves by construction —
+ * because that is `competence / MAX_AI_COMPETENCE`. They now differ.
  */
-export const MAX_AI_COMPETENCE = 0.78;
+export const MAX_AI_COMPETENCE = 0.81;
+
+/**
+ * The other end of the same range, and it exists for the same reason the top
+ * one does: the curve has to keep the rungs apart everywhere they can land.
+ *
+ * effectiveAiMu tracks the player DOWN by AI_ADAPT_DOWN_BAND (20), so the
+ * reachable effective mu runs from Rookie's 20 - 20 = 0 to Chaos's 36 +
+ * AI_ADAPT_BAND = 43. The curve used to start at mu 12 and clamp at 0.05
+ * underneath, which put Rookie AND Pro on that floor for every player under
+ * mu ~10.9 — a state reached by ordinary losing, since rating has no floor of
+ * its own (twenty Pro losses from a standing start land at mu 8.76). Measured
+ * at 2700 balls a cell there, Rookie returned 44.6% of them and Pro 45.4%:
+ * the same opponent, while prediction and XP priced Pro as substantially
+ * stronger. At mu 0 the collapse reached Elite as well and the measured order
+ * inverted — Elite 41.6% against Rookie's 44.4%.
+ *
+ * 0.02 rather than 0 because every parameter in paramsForCompetence is a lerp
+ * in c, so a rung at 0 is the fixed bottom of all nine at once and nothing
+ * below it can ever be told apart. Note that a floor in the CURVE is not by
+ * itself enough — see MAX_CONTACT_ERROR, which was pinning the dominant
+ * parameter well above it.
+ */
+export const MIN_AI_COMPETENCE = 0.02;
 
 // The ladder as it is actually PLAYED, in competence.
 //
 // Knots at the five anchors in rating.ts (rookie 20, pro 24, elite 30, cyber
 // 33, chaos 36), each calibrated against the rally simulation in
-// tests/physics.test.ts rather than chosen: the targets are roughly 72% of
-// balls returned at Rookie, 79% at Pro, 85% at Elite, 88% at Cyber and 90% at
-// Chaos. Return rate saturates near the top, so the top rungs sit closer
-// together in balls returned than in matches won — the measure players feel.
-// Above the top anchor the curve is flat at the clamp: an adapted Chaos plays
-// the ceiling, never past it.
+// tests/physics.test.ts rather than chosen: measured at player mu 25, roughly
+// 72% of balls returned at Rookie, 79% at Pro, 86% at Elite, 89% at Cyber and
+// 89% at Chaos.
+//
+// Two knots then continue PAST the top anchor to 43, which is 36 +
+// AI_ADAPT_BAND and therefore the furthest an adapted Chaos can reach. Without
+// them the curve went flat at 36 — and because effectiveAiMu measures its
+// deviation from START_MU, every rung receives the identical offset and they
+// all arrived at that flat section together: from player mu 30 upward Elite,
+// Cyber and Chaos were byte-identical opponents.
+//
+// The separation up there is deliberately small (0.784 / 0.795 / 0.810 against
+// a mu-40 player) and cannot be widened: return rate SATURATES near the top,
+// so a bigger competence spread buys almost no measurable difficulty, while
+// the hard 93% ceiling in tests/physics.test.ts caps how far the hardest rung
+// may go. What actually separates the top three is carried elsewhere — the
+// anchor each is rated at, how hard each plays for the corners (aimBias),
+// how much spin each reads, and serve pace.
+//
+// And one knot continues DOWN, to the other end of the same reachable range.
+// The curve used to start at mu 12 with a flat clamp underneath, which is the
+// identical collapse seen from below: a player under mu ~10.9 met a Rookie and
+// a Pro pinned to the same 0.05, and at mu 0 the pin reached Elite too and
+// INVERTED the ladder — measured over 4000 rally starts, Elite committed a
+// mean aim error of 0.5610 against Rookie's 0.5522, because with competence
+// flat the only surviving difference between the rungs was their volatility,
+// and Elite's swing is the smaller one. That is reachable by ordinary losing:
+// rating carries no floor of its own and twenty Pro losses land at mu 8.76.
+// See MIN_AI_COMPETENCE, and MAX_CONTACT_ERROR for the second floor that had
+// to move with it.
 const COMPETENCE_KNOTS: readonly (readonly [number, number])[] = [
+  [0, MIN_AI_COMPETENCE],
   [12, 0.05],
   [20, 0.36],
   [24, 0.49],
   [30, 0.66],
   [33, 0.72],
-  [36, MAX_AI_COMPETENCE],
+  [36, 0.78],
+  // Above the top ANCHOR, not above the ladder. The curve used to stop at
+  // Chaos's own anchor of 36 and go flat, and effectiveAiMu measures its
+  // deviation from START_MU — so every rung receives the IDENTICAL offset and
+  // they all reached that flat section together. Measured: from player mu 30
+  // upward Elite, Cyber and Chaos were byte-identical at 0.780, and every
+  // player who can select Chaos (cyber_10 gates it on Grandmaster) was inside
+  // that region. The ladder advertised five rungs and delivered three.
+  //
+  // These two carry the adaptation band (7) past the top anchor so an adapted
+  // Cyber and an adapted Chaos still separate. Nothing above 43 is reachable:
+  // 36 + AI_ADAPT_BAND is exactly 43.
+  [40, 0.795],
+  [43, MAX_AI_COMPETENCE],
 ];
 
 export function competenceForMu(mu: number): number {
-  if (!Number.isFinite(mu)) return 0.05;
+  if (!Number.isFinite(mu)) return MIN_AI_COMPETENCE;
   for (let i = 1; i < COMPETENCE_KNOTS.length; i++) {
     const [mLo, cLo] = COMPETENCE_KNOTS[i - 1];
     const [mHi, cHi] = COMPETENCE_KNOTS[i];
     if (mu <= mHi) {
       const t = clamp((mu - mLo) / (mHi - mLo), 0, 1);
-      return clamp(cLo + (cHi - cLo) * t, 0.05, MAX_AI_COMPETENCE);
+      return clamp(cLo + (cHi - cLo) * t, MIN_AI_COMPETENCE, MAX_AI_COMPETENCE);
     }
   }
   return MAX_AI_COMPETENCE;
@@ -455,10 +556,13 @@ const AI_STYLES: Record<AIDifficulty, AIStyle> = {
   pro: { volatility: 0.08, aggression: 0.58 },
   elite: { volatility: 0.05, aggression: 0.75 },
   cyber: { volatility: 0.04, aggression: 0.9 },
-  // Chaos recovers its historical identity — strength is the anchor, STYLE is
-  // volatility. At the competence clamp its swings can only reach downward,
-  // so it sometimes plays a rally like Elite: erratic, never superhuman.
-  chaos: { volatility: 0.11, aggression: 0.95 },
+  // Chaos's identity is the anchor it is rated at and how hard it plays for the
+  // corners, NOT volatility. It carried 0.11 while sitting on the competence
+  // clamp, where a swing can only reach downward — so the rung the ladder
+  // rates hardest measured as the WEAKEST of the top three (mean per-rally
+  // competence 0.7525 against Cyber's 0.7700). A style that can only subtract
+  // is a penalty wearing a style's name.
+  chaos: { volatility: 0, aggression: 0.95 },
 };
 
 interface AIParams {
@@ -480,20 +584,55 @@ interface AIParams {
 // 0.03): even Chaos stands a rally out roughly one time in thirty-three,
 // which is part of why the ceiling is not a wall.
 function lapseForCompetence(c: number): number {
-  return lerp(0.075, 0.03, clamp(c / MAX_AI_COMPETENCE, 0, 1));
+  // The floor rose with the aggression rework. Aggression used to be paid for
+  // in accuracy — it was added to targetX, so a rung played for the corners by
+  // standing off-centre and missing more. Moving it to the ball leaving made
+  // the AI strictly better, and the ladder's hardest rungs went straight at
+  // the 93% ceiling (measured 92.8, and 93.0 on a smaller sample). The
+  // difference is given back here rather than by capping competence, because
+  // competence is what ORDERS the rungs and lapses are what make any of them
+  // beatable.
+  return lerp(0.078, 0.048, clamp(c / MAX_AI_COMPETENCE, 0, 1));
 }
 
 // Calibrated by simulating rallies through the real checkPaddleCollision above.
 // The paddle catches a ball within ~0.147 of its centre (half-width plus ball
 // radius plus the edge buffer), so `contactError` — the aim error still present
 // at the moment of contact — is what actually decides whether the AI returns.
-// Its curve is what sets the ladder: measured AI return rates come out at
-// roughly Rookie 57%, Pro 77%, Chaos 87%, Cyber 89% for an average player.
+//
+// This comment used to quote "Rookie 57%, Pro 77%, Chaos 87%, Cyber 89%" — the
+// PRE-FIX numbers, with the top two printed in the wrong order, and a Rookie
+// figure that tests/physics.test.ts asserts must be above 66% precisely
+// because 57% was the bug that was fixed. Current measured rates live in the
+// header note above competenceForMu, in one place, where the curve they
+// describe is.
+/**
+ * The most aim error the AI may carry into a contact, as a standard deviation
+ * against a catch window of ~0.147.
+ *
+ * Derived from MIN_AI_COMPETENCE rather than picked, because a flat number here
+ * is a SECOND floor under the curve and it sat well above the first one. It was
+ * 0.6, which `0.085 * c^-0.7` reaches at c = 0.061 — above the competence an
+ * adapted Rookie AND an adapted Pro play at for any player under mu ~10.9, so
+ * the ladder's dominant parameter was one value for both of them exactly where
+ * the rungs are meant to be furthest apart. Extending COMPETENCE_KNOTS down to
+ * mu 0 did not fix that on its own: the curve separated (0.035 against 0.045 at
+ * mu 8.76) and the measured return rates did not move at all, 43.7% against
+ * 44.1% over 2700 balls a cell.
+ *
+ * Anchoring it to the bottom of the competence range makes it a rail against a
+ * nonsense input instead of a pin inside the reachable one — it can no longer
+ * bind for any competence the curve can produce. Nothing at ordinary skill
+ * changes: an average player's Rookie sits at c 0.36, where the expression
+ * gives 0.174.
+ */
+const MAX_CONTACT_ERROR = 0.085 * Math.pow(MIN_AI_COMPETENCE, -0.7);
+
 function paramsForCompetence(c: number): AIParams {
   return {
     reactionTime: lerp(0.34, 0.05, c),
     maxSpeed: lerp(0.6, 1.7, c),
-    contactError: clamp(0.085 * Math.pow(c, -0.7), 0.078, 0.6),
+    contactError: clamp(0.085 * Math.pow(c, -0.7), 0.078, MAX_CONTACT_ERROR),
     // An early misread that decays as the ball closes: the AI commits to the
     // wrong spot, then scrambles. Costs it the rally when it cannot cover the
     // correction in time, which is where maxSpeed bites.
@@ -508,7 +647,14 @@ function paramsForCompetence(c: number): AIParams {
     // difficulty lever than raw aim error. Deliberately capped below 1: an AI
     // that read curve perfectly would make spin worthless against the top
     // rung, which is exactly where a player most needs another option.
-    spinRead: clamp((c - 0.08) / 0.72, 0, MAX_SPIN_READ),
+    // The divisor is set so the cap is reached only at the top of the
+    // competence range, not partway up it. At /0.72 it saturated at c = 0.692
+    // — which an adapted Cyber passes at player mu 22.7 and an adapted Elite
+    // at 27.7 — so every rung a strong player ever meets read spin
+    // identically, and a lever the design leans on for the top of the ladder
+    // was doing nothing there. /0.86 puts the cap at c = 0.821, just past
+    // Chaos at its clamp.
+    spinRead: clamp((c - 0.08) / 0.86, 0, MAX_SPIN_READ),
   };
 }
 
@@ -601,7 +747,7 @@ export class OpponentAI {
   private entryY: number = 0;
   private contactBias: number = 0;
   private readBias: number = 0;
-  private aimShift: number = 0;
+  private aggressionBias: number = 0;
   private lapsed: boolean = false;
   private readsBounce: boolean = true;
   private spinRead: number = 1;
@@ -647,7 +793,11 @@ export class OpponentAI {
   private beginRally(oppBall: BallState) {
     const style = AI_STYLES[this.difficulty];
     const base = competenceForMu(this.effectiveMu());
-    const c = clamp(base + (Math.random() - 0.5) * 2 * style.volatility, 0.05, MAX_AI_COMPETENCE);
+    const c = clamp(
+      base + (Math.random() - 0.5) * 2 * style.volatility,
+      MIN_AI_COMPETENCE,
+      MAX_AI_COMPETENCE
+    );
     const p = paramsForCompetence(c);
     this.params = p;
 
@@ -660,10 +810,35 @@ export class OpponentAI {
     // this ball. Re-deciding every tick would average out to a perfect read.
     this.spinRead = clamp(p.spinRead * (0.75 + Math.random() * 0.5), 0, 1);
     this.lapsed = Math.random() < p.lapseChance;
-    // Deliberate off-centre contact to return at a sharper angle. Bounded to
-    // the paddle's own half-width so ambition never becomes a guaranteed whiff.
-    this.aimShift = (Math.random() - 0.5) * 2 * style.aggression * 0.6;
+    // Which corner this rally is played for, committed once like every other
+    // read. Applied to the ball LEAVING (see aimBias), never to where the
+    // paddle stands.
+    this.aggressionBias = (Math.random() - 0.5) * 2 * style.aggression;
     this.reactionDelayTimer = p.reactionTime; // plan immediately on arrival
+  }
+
+  /**
+   * Aggression, applied to the ball LEAVING rather than to where the paddle
+   * stands.
+   *
+   * It used to be added to `targetX`, so a rung played for the corners by
+   * deliberately standing off-centre from where the ball was going: it bought
+   * a sharper rebound with a higher chance of missing outright. That reads as
+   * a risk/reward style and measured as a self-handicap — the harder rungs
+   * carry MORE aggression, so the lever fought the competence curve that is
+   * supposed to order them, and Cyber returned fewer balls than Elite despite
+   * strictly better parameters.
+   *
+   * Here it costs the AI nothing and costs the PLAYER the width of the court:
+   * the return leaves at a steeper angle, so it has further to travel to reach
+   * it. That gives the top rungs the second separating axis they need, because
+   * return rate saturates near the top and cannot carry them on its own.
+   *
+   * Bounded by the same limit checkPaddleCollision applies, so the AI can
+   * never produce a ball the physics would not.
+   */
+  public aimBias(): number {
+    return (this.aggressionBias * AI_AGGRESSION_ANGLE_DEG * Math.PI) / 180;
   }
 
   /**
@@ -720,8 +895,7 @@ export class OpponentAI {
           predicted +
           this.contactBias +
           this.readBias * (1 - travelled) +
-          gaussian() * p.jitter +
-          this.aimShift * (paddleWidth / 2);
+          gaussian() * p.jitter;
       } else {
         this.targetX = oppBall.x;
       }

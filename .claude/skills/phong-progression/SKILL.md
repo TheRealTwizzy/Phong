@@ -62,11 +62,22 @@ farming the hardest thing in the game. The values now sit 0.1 under a tier floor
 `START_MU`, pro 30.9, elite 33.9, cyber and chaos 36.9. **Legend is the solo ceiling; Cyber
 Overlord (37) is only ever reached through PvP.**
 
-**Adaptation is asymmetric on purpose** (`AI_ADAPT_STRENGTH` 0.6 up, `AI_ADAPT_DOWN_STRENGTH` 1
-down, `:114`/`:126`). Partial tracking leaves a residual gap that is fine above average and
-compounds below it — a player losing every match to Pro fell to μ13 while Pro stalled at 18, so
-their odds went 50% to 22% and every further loss widened it. **The ladder must never get harder
-because you are losing.**
+**Adaptation is asymmetric on purpose** (`AI_ADAPT_STRENGTH` 0.6 up, `AI_ADAPT_DOWN_STRENGTH`
+0.85 down, `:114`/`:126`), and it has been wrong in BOTH directions, so read the numbers before
+touching it. At 0.6 the residual gap compounded below average — a player losing every match to
+Pro fell to μ13 while Pro stalled at 18, odds 50% → 22%, each loss widening it. At a flat 1 the
+gap closed to exactly zero at every depth, which pinned `P(win)` at 56.4% forever: the pre-match
+odds, the XP surprise multiplier and `recommendedDifficulty` all key off that number, so a μ6
+player was shown the same 56% as a μ25 player while the AI they faced fell to the competence
+floor. It also flattened the BOTTOM of the ladder, putting Rookie and Pro on that same floor.
+
+0.85 leaves a residual that **converges** — 2.0 μ at the deepest point, inside one 3 μ tier band
+— rather than diverging, which is the distinction from the 0.6 spiral. **A falling player must
+always have a winnable rung, and that rung is Rookie**; a harder rung staying harder is not the
+bug. What this does NOT fix is recovery: climbing back from a collapsed μ takes 254 wins at 1.0
+and 211 at 0.85, because the binding constraint is σ, not the adaptation — at σ2.54 a win moves
+μ by 0.33 where at σ8.33 it moves 2.11. The player is confidently rated as bad and TrueSkill is
+behaving correctly. Fixing that means σ inflation or an asymmetric `k`, and is its own design.
 
 **The two placement conditions must agree.** `PLACEMENT_GAMES` is the promise the Profile modal
 makes; `PLACEMENT_SIGMA` is what actually releases a tier. At the ordinary PvP shrink, σ does not
@@ -115,3 +126,32 @@ well the opponent plays, not what the ladder is worth, and the bounds are measur
 chosen — `phong-ship-check` owns reading those failures, including why a bound on a sampled
 value is read off its own suite's distribution and never copied from a neighbouring one. Change
 an anchor here; change competence there.
+
+**But the two meet, and the seam is where the ladder collapsed — at BOTH ends.**
+`effectiveAiMu` takes its deviation from `START_MU`, so every anchor receives the IDENTICAL
+offset — which means the anchors here decide only where each rung SITS on the competence curve
+there, never how far apart they land. When that curve went flat above μ36 (Chaos's own anchor),
+all five rungs slid into the flat section together and the top three became byte-identical
+opponents from player μ30 upward. It went flat *below* μ12 in exactly the same way, so a player
+under μ ~10.9 met a Rookie and a Pro pinned to one value — reachable by ordinary losing, since
+rating has no floor of its own. So: **an anchor change is not a difficulty change unless the
+curve has room at the place it lands**, and it has to have that room across the whole range
+`effectiveAiMu` can produce, which is `20 - AI_ADAPT_DOWN_BAND` (0) to `36 + AI_ADAPT_BAND`
+(43). Upward the room is capped by the 93% rule, which binds hard — the top rungs measure
+91.0-91.2% at the suite's own sample and a clamp of 0.86 put them at 92.8%.
+
+**A floor in the curve is not by itself a floor in the ladder.** `contactError` carried a
+second one — a flat `0.6` output clamp that `0.085 × c^-0.7` reaches at c = 0.061, above where
+both bottom rungs sat for those players — so extending the knots alone left the measured return
+rates unmoved (43.7% against 44.1% at μ8.76, 2700 balls a cell). `MAX_CONTACT_ERROR` is now
+derived from `MIN_AI_COMPETENCE`. **When you widen the competence range, grep the parameter
+clamps in `paramsForCompetence` for one that binds inside the new range**; `bounceSkill` (0
+below c 0.1) and `spinRead` (0 below c 0.08) are the other two, both deliberate.
+
+The guard for this is in `tests/rating.test.ts`, asserting
+`competenceForMu(effectiveAiMu(d, mu))` strictly increasing at eleven player ratings, four of
+them below μ12 because that is where the second collapse lived and the loop originally stopped
+one rating short of it.
+**Never assert ladder ordering on return rate**: it saturates near the top and across seven
+measured configurations never once ordered the top three, because the rally harness sees a
+rung's aggression as missed balls and never as the sharper return the player has to chase.
