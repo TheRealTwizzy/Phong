@@ -175,9 +175,44 @@ export const Sheet: React.FC<SheetProps> = ({
     cardRef.current?.focus({ preventScroll: true });
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || !closeRef.current || !dismissOnBackdrop) return;
-      e.stopPropagation();
-      closeRef.current();
+      if (e.key === 'Escape') {
+        if (!closeRef.current || !dismissOnBackdrop) return;
+        e.stopPropagation();
+        closeRef.current();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      // `aria-modal="true"` promises the rest of the page is not there, and
+      // moving focus onto the card does not deliver that on its own: the page
+      // behind the backdrop stays focusable, so Tab walked straight out of the
+      // sheet into controls the player cannot see and could then activate. The
+      // covered sheets below are already `inert`; what was missing was the
+      // application behind ALL of them, which this sheet cannot mark without
+      // reaching outside itself — so the focus is kept in instead.
+      const card = cardRef.current;
+      if (!card) return;
+      const focusable = Array.from(
+        card.querySelectorAll<HTMLElement>(
+          'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+      // Nothing to land on: hold focus on the card rather than letting Tab
+      // escape a sheet that is only text.
+      if (focusable.length === 0) {
+        e.preventDefault();
+        card.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (!e.shiftKey && (active === last || !card.contains(active))) {
+        e.preventDefault();
+        first.focus({ preventScroll: true });
+      } else if (e.shiftKey && (active === first || active === card || !card.contains(active))) {
+        e.preventDefault();
+        last.focus({ preventScroll: true });
+      }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => {

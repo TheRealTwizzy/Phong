@@ -1,8 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import os from 'os';
 import path from 'path';
 import type { MatchEndPayload, MatchRules } from '../src/types';
+import { soloMuCap } from '../src/rating';
 import {
   DEFAULT_MATCH_RULES,
   PHYSICS_RULES,
@@ -574,5 +577,50 @@ describe('normalizeRules is cheap enough to call from the game loop', () => {
       );
       expect(clampRule('ballScale', v)).toBeCloseTo(viaString, 10);
     }
+  });
+});
+
+describe('every consumer asks the verdict the same way', () => {
+  // `unrankedReasons` exists so the pre-match sheet, the lobby badge and the
+  // quit confirmation cannot each answer differently. The 'outgrown' arm is
+  // skipped when `rankMu` is absent, which is right for a caller that has no
+  // rating to give — and made the quit dialog silently disagree with the sheet
+  // that had just been shown: told the match could not move rank, then warned
+  // about the ranked loss it was never going to file. The source is what can
+  // be checked, the same way the paddle call sites are.
+  const CONSUMERS = ['src/App.tsx', 'src/components/MatchRulesPanel.tsx'];
+
+  function callArgs(src: string): string[] {
+    const calls: string[] = [];
+    const needle = 'unrankedReasons(';
+    for (let at = src.indexOf(needle); at !== -1; at = src.indexOf(needle, at + 1)) {
+      let depth = 0;
+      let i = at + needle.length - 1;
+      for (; i < src.length; i++) {
+        if (src[i] === '(') depth++;
+        else if (src[i] === ')' && --depth === 0) break;
+      }
+      calls.push(src.slice(at + needle.length, i));
+    }
+    return calls;
+  }
+
+  it('finds the calls, so a rename cannot make this vacuous', () => {
+    const found = CONSUMERS.flatMap((f) => callArgs(readFileSync(resolve(__dirname, '..', f), 'utf8')));
+    expect(found.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it.each(CONSUMERS)('%s gives it a rankMu, so the outgrown arm is reachable', (file) => {
+    for (const args of callArgs(readFileSync(resolve(__dirname, '..', file), 'utf8'))) {
+      expect(args).toMatch(/rankMu/);
+    }
+  });
+
+  it('would otherwise call a match ranked that the sheet calls outgrown', () => {
+    const ctx = { rules: {}, mode: 'solo', difficulty: 'pro' } as const;
+    const above = soloMuCap('pro') + 1;
+    expect(unrankedReasons({ ...ctx, rankMu: above })).toContain('outgrown');
+    // The same match, asked without the rating: reads as fully ranked.
+    expect(unrankedReasons(ctx)).toHaveLength(0);
   });
 });

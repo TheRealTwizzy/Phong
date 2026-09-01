@@ -2762,7 +2762,19 @@ class GameDatabase {
     // from the match and the pre-match odds stay honest, while the visible
     // tier, rankedGames and the history row's `ranked` column stand still.
     const venueRates = roomCountsForRank(context.venueRoomId);
-    const ranksThisMatch = ranked && venueRates && (isPvp || soloCountsForRank(difficulty));
+    // A rung this player has OUTGROWN moves no rating in either direction, so
+    // it does not rate — the same answer `unrankedReasons` gives the pre-match
+    // badge, given here so the two cannot disagree. Gating only the arithmetic
+    // and not this flag was the half-fix: `updateRating` returned the rating
+    // untouched while `rankedGames` still incremented and the history row still
+    // recorded as ranked. For an UNPLACED player that is the placement trap the
+    // comment below exists for, reached by another door — sigma never shrinks
+    // and the count still climbs, so they reach "5/5" no closer to being
+    // placed. Reachable without anything exotic: two placement wins carry a
+    // player past Pro's 30.9 ceiling.
+    const soloOutgrown = !isPvp && profile.rankMu > soloMuCap(difficulty);
+    const ranksThisMatch =
+      ranked && venueRates && (isPvp || (soloCountsForRank(difficulty) && !soloOutgrown));
     // Sampled before the update so the overlay can say which way the ladder
     // went. Only the DIRECTION ever leaves the server — the mu itself is not
     // something the client renders (see src/components/ui/RankBadge.tsx).

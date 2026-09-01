@@ -100,6 +100,25 @@ win was worth 0.53 mu where it should be 1.21, better than a fifth of a tier ban
 the same direction. **A fixture that sets both pairs equal cannot tell which one was used**;
 `seedSplit` in `tests/duelRecord.test.ts` exists to pull them apart.
 
+**A rung the player has OUTGROWN is a third member of that family, and it is the one that
+bites twice.** Above `SOLO_MU_CAPS[difficulty]` a solo match moves no rating in either
+direction, so it must be excluded from `ranksThisMatch` and not merely from the arithmetic.
+Gating `updateRating` alone leaves the rating untouched while `rankedGames` still increments
+and the history row still files as ranked — and while UNPLACED that is the placement trap by
+another door, because the count climbs and sigma never shrinks, so the player reaches "5/5" no
+closer to placed. Reachable without anything exotic: two placement wins clear Pro's 30.9.
+Note how the state is reached, because it is NOT by farming — farming converges TO a cap and
+stops there, and AT the cap is not outgrown, since the rung can still take rating away on a
+loss. Strictly above needs rating from elsewhere, which is what a duel is; a test that farms
+one rung and expects to pass its ceiling will sit at it forever.
+
+And the display half is `unrankedReasons`'s `'outgrown'` arm, which is **skipped whenever
+`rankMu` is absent** — so every consumer has to pass it. Missing it in one place is not a
+missing feature but a CONTRADICTION: the pre-match sheet said the match could not move rank
+and the quit confirmation then warned about the ranked loss it was never going to file, which
+is the disagreement the one-predicate rule exists to prevent. `tests/matchRules.test.ts` reads
+the call sites for it, because a caller that omits an optional argument compiles.
+
 `rankMoveSize` (`src/rating.ts`) buckets the delta into the 1/2/3 arrows the winner overlay
 draws. Bucketed SERVER-side and never sent as a number: `rankMu` reaching the client is the
 one thing `RankBadge.tsx` forbids outright. The bands are measured, and 0.8 is chosen to clear

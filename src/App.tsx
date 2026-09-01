@@ -3663,6 +3663,14 @@ export default function App() {
                   // The table's own venue, so a Casual duel is not threatened
                   // with a rank it was never going to move.
                   venueRoomId: tableState?.venueRoomId ?? null,
+                  // And this player's own rating, or the 'outgrown' verdict is
+                  // skipped here and nowhere else: the pre-match sheet passes
+                  // it, so a player above the rung's ceiling was told the match
+                  // could not move rank and then warned, on quitting it, about
+                  // the ranked loss it was never going to file. One verdict,
+                  // asked the same way by every consumer, is the whole reason
+                  // this predicate exists.
+                  rankMu: profile?.rankMu,
                 }).length === 0
                   ? 'quit_confirm_ranked'
                   : 'quit_confirm_unranked',

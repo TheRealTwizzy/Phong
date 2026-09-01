@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
-import type { MatchEndPayload, MatchRules } from '../src/types';
+import type { MatchEndPayload, MatchRecord, MatchRules } from '../src/types';
 import { levelFromXp, PLACEMENT_GAMES, PLACEMENT_SIGMA, soloMuCap } from '../src/rating';
 import { SHUTOUT_MIN_POINTS, isShutout } from '../src/matchRules';
 
@@ -315,6 +315,69 @@ describe('GameDatabase', () => {
     const farmed = db.getProfile('p_farm_rank');
     expect(farmed.rankMu).toBeLessThanOrEqual(soloMuCap('pro') + 1e-9);
     expect(farmed.tier).not.toBe('cyber-overlord');
+  });
+
+  it('stops COUNTING an outgrown rung, not just rating it', () => {
+    // Gating the arithmetic alone was the half-fix: `updateRating` returned the
+    // rating untouched while `ranksThisMatch` still came out true, so
+    // `rankedGames` climbed and the history row recorded as ranked for a match
+    // that moved nothing. The server's predicate has to agree with the badge's.
+    //
+    // Note how the state is reached, because it is not by farming: farming a
+    // rung converges TO its cap and stops there, and AT the cap is not
+    // outgrown — the rung can still take rating away on a loss, which
+    // `tests/rating.test.ts` asserts directly. Getting strictly above it takes
+    // rating from somewhere else, which is what duels are.
+    init('p_outgrown', 'Outgrown');
+    for (let i = 0; i < 40; i++) {
+      db.recordMatch(
+        match('p_outgrown', { mode: 'multiplayer', matchKey: `og:duel:${i}` })
+      );
+    }
+    const strong = db.getProfile('p_outgrown');
+    expect(strong.rankMu).toBeGreaterThan(soloMuCap('pro'));
+
+    const gamesBefore = strong.rankedGames;
+    const muBefore = strong.rankMu;
+    const sigmaBefore = strong.rankSigma;
+    db.recordMatch(match('p_outgrown', { mode: 'solo', difficulty: 'pro', matchKey: 'og:after' }));
+    const after = db.getProfile('p_outgrown');
+
+    expect(after.rankMu).toBeCloseTo(muBefore, 9);
+    // The two that were wrong: a match that moves no rating is not a ranked
+    // game, and does not file itself as one.
+    expect(after.rankedGames).toBe(gamesBefore);
+    expect(after.rankSigma).toBeCloseTo(sigmaBefore, 9);
+    const rows: MatchRecord[] = db.getMatchHistory('p_outgrown', 5);
+    expect(rows[0].mode).toBe('solo');
+    expect(rows[0].ranked).toBeFalsy();
+  });
+
+  it('never lets an outgrown rung burn a PLACEMENT game', () => {
+    // The sharper half, and the trap placement was fixed for reached by another
+    // door: while unplaced, `rankedGames` climbing without sigma shrinking
+    // walks a player to "5/5" no closer to being placed than when they started.
+    // Two placement wins carry a player past Pro's 30.9 ceiling, so this needs
+    // nothing exotic.
+    init('p_place_og', 'PlaceOutgrown');
+    db.recordMatch(match('p_place_og', { mode: 'solo', difficulty: 'pro', matchKey: 'po:seed' }));
+    const seeded = db.getProfile('p_place_og');
+    expect(seeded.rankedGames).toBe(1);
+
+    // Push the visible rating above the rung's ceiling the way a duel would.
+    for (let i = 0; i < 40; i++) {
+      db.recordMatch(
+        match('p_place_og', { mode: 'multiplayer', matchKey: `po:duel:${i}` })
+      );
+    }
+    const strong = db.getProfile('p_place_og');
+    expect(strong.rankMu).toBeGreaterThan(soloMuCap('pro'));
+
+    const before = db.getProfile('p_place_og');
+    db.recordMatch(match('p_place_og', { mode: 'solo', difficulty: 'pro', matchKey: 'po:after' }));
+    const after = db.getProfile('p_place_og');
+    expect(after.rankedGames).toBe(before.rankedGames);
+    expect(after.rankSigma).toBeCloseTo(before.rankSigma, 9);
   });
 
   it('awards more XP for beating a hard AI than an easy one', () => {

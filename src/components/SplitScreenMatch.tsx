@@ -476,6 +476,41 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     } catch {}
   };
 
+  /** Forget a pointer that went away without lifting. */
+  const dropPointer = useCallback((pointerId: number) => {
+    const which = pointerOwnersRef.current.get(pointerId);
+    if (which && halfOwnerRef.current[which] === pointerId) halfOwnerRef.current[which] = null;
+    pointerOwnersRef.current.delete(pointerId);
+  }, []);
+
+  // The abort paths, which CLAUDE.md §16 requires and this component had none
+  // of — only `pointerup` and `pointercancel` ever released a half. A pointer
+  // that goes away without either (the app switcher, a tab change, capture
+  // taken elsewhere) left `halfOwnerRef` holding a pointer id that will never
+  // come back, and because claiming a half is an early return on exactly that
+  // check, every later touch in that half is REFUSED: that player's paddle is
+  // dead for the rest of the match with no way back but a remount. Worse than
+  // the half-court version of this bug, where the stuck pointer at least still
+  // drove something.
+  useEffect(() => {
+    const onLost = (e: PointerEvent) => dropPointer(e.pointerId);
+    const onGone = () => {
+      halfOwnerRef.current = { 1: null, 2: null };
+      pointerOwnersRef.current.clear();
+    };
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') onGone();
+    };
+    window.addEventListener('lostpointercapture', onLost);
+    document.addEventListener('visibilitychange', onHidden);
+    window.addEventListener('pagehide', onGone);
+    return () => {
+      window.removeEventListener('lostpointercapture', onLost);
+      document.removeEventListener('visibilitychange', onHidden);
+      window.removeEventListener('pagehide', onGone);
+    };
+  }, [dropPointer]);
+
   // Canvas render loop
   useEffect(() => {
     const canvas = canvasRef.current;
