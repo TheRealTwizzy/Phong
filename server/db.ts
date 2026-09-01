@@ -257,6 +257,21 @@ function isUniqueViolation(e: unknown): boolean {
   return typeof err?.message === 'string' && /UNIQUE constraint failed/i.test(err.message);
 }
 
+/** The longest report body accepted. Long enough for a repro, short enough to read. */
+export const REPORT_TEXT_MAX = 2000;
+
+export interface ReportRow {
+  id: string;
+  playerId: string;
+  username: string;
+  category: string;
+  text: string;
+  subjectId: string | null;
+  context: string;
+  createdAt: string;
+  readAt: string | null;
+}
+
 export const PLAYER_KEYED_TABLES = [
   'avatars',
   'player_mode_stats',
@@ -724,6 +739,56 @@ class GameDatabase {
       -- is the game's hot write; it was not going to pay for this.
       CREATE INDEX IF NOT EXISTS idx_recorded_matches_at
         ON recorded_matches (recordedAt);
+
+      -- How many of a thing happened today, and nothing about WHO.
+      --
+      -- There is no analytics anywhere in this repo, which is fine while the
+      -- only players are invited and useless the moment the question is "why
+      -- is nobody playing". This is the cheapest thing that can answer it: a
+      -- counter per (day, name), bumped server-side, read by the support CLI.
+      --
+      -- Deliberately not player-keyed and deliberately not a row per event.
+      -- A per-event log would be a second, worse copy of 'matches' plus a
+      -- retention problem, and a playerId here would make an aggregate into
+      -- personal data — which would then have to be carried by moveAccount,
+      -- erased by deleteAccount, and reasoned about in a privacy policy, all
+      -- to answer a question that only needs a number.
+      CREATE TABLE IF NOT EXISTS daily_counters (
+        dayKey TEXT NOT NULL,
+        name TEXT NOT NULL,
+        n INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (dayKey, name)
+      );
+
+      -- What a player told us went wrong.
+      --
+      -- 'playerId' is the REPORTER, and it is spelled that way on purpose:
+      -- tests/identity.test.ts reads the live schema and fails on any table
+      -- carrying a playerId that neither PLAYER_KEYED_TABLES nor its
+      -- HANDLED_APART list names, so calling the column anything else would
+      -- have hidden this table from the one check that guards the account
+      -- lifecycle. It is handled apart rather than in the loop because a
+      -- report outlives its reporter, exactly as a 'matches' row outlives one
+      -- of its two players: an abuse report is about somebody ELSE, and
+      -- deleting the reporter's account must not delete the evidence. The
+      -- pointer is scrubbed instead, the same way match rows are.
+      --
+      -- 'subjectId' is who the report is ABOUT, for the abuse category. Null
+      -- for a bug or an exploit, which are about the game.
+      CREATE TABLE IF NOT EXISTS reports (
+        id TEXT PRIMARY KEY,
+        playerId TEXT NOT NULL,
+        username TEXT NOT NULL,
+        category TEXT NOT NULL,
+        text TEXT NOT NULL,
+        subjectId TEXT,
+        context TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        readAt TEXT
+      );
+      -- The support CLI reads newest-first and filters on unread; both are
+      -- this index.
+      CREATE INDEX IF NOT EXISTS idx_reports_created ON reports (createdAt DESC);
     `);
   }
 
@@ -764,6 +829,13 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS device_links');
       this.sql.exec('DROP TABLE IF EXISTS recent_missions');
       this.sql.exec('DROP TABLE IF EXISTS player_mode_stats');
+      // Counters are about the deployment rather than the players, but a wipe
+      // resets the population to zero and a funnel that straddles that reads
+      // as a cliff nobody caused.
+      this.sql.exec('DROP TABLE IF EXISTS daily_counters');
+      // And reports, for the reason device_links is here: a surviving row
+      // points at a playerId that no longer exists.
+      this.sql.exec('DROP TABLE IF EXISTS reports');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -3407,6 +3479,13 @@ class GameDatabase {
       // Everything already pointed at the account follows it, and both ends of
       // the move are members from here on.
       this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
+      // Reports follow the account, both ends of the pointer. Not in the loop
+      // above because a report is not deleted with its reporter (see
+      // deleteAccount), so it must not be deleted off the claiming browser
+      // either — the loop's DELETE exists to clear a placeholder profile's
+      // colliding rows, and a report has no composite key to collide on.
+      this.stmt('UPDATE reports SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
+      this.stmt('UPDATE reports SET subjectId = ? WHERE subjectId = ?').run(newDeviceId, fromId);
       for (const id of [fromId, newDeviceId]) {
         this.stmt('INSERT OR REPLACE INTO device_links (deviceId, playerId, linkedAt) VALUES (?, ?, ?)')
           .run(id, newDeviceId, now);
@@ -3488,6 +3567,17 @@ class GameDatabase {
         .run(DELETED_PLAYER_ID, DELETED_PLAYER_NAME, playerId);
       this.stmt('UPDATE matches SET winnerId = ?, winnerName = ? WHERE winnerId = ?')
         .run(DELETED_PLAYER_ID, DELETED_PLAYER_NAME, playerId);
+      // Reports are scrubbed rather than deleted, the same call `matches`
+      // gets and for the same reason one level up: a report is not only
+      // about its author. An abuse report names somebody ELSE, and letting
+      // the reported player's own deletion — or the reporter's — take the
+      // evidence with it would make deletion a way to clear the record. The
+      // username goes too, because a deleted name returns to the pool and
+      // would otherwise sit in a report naming whoever claims it next.
+      this.stmt('UPDATE reports SET playerId = ?, username = ? WHERE playerId = ?')
+        .run(DELETED_PLAYER_ID, DELETED_PLAYER_NAME, playerId);
+      this.stmt('UPDATE reports SET subjectId = ? WHERE subjectId = ?')
+        .run(DELETED_PLAYER_ID, playerId);
       this.sql.exec('COMMIT');
     } catch (e) {
       this.sql.exec('ROLLBACK');
@@ -3912,6 +4002,100 @@ class GameDatabase {
     } finally {
       this.lastWriteProbeAt = now;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Counters and reports
+  // -------------------------------------------------------------------------
+
+  /**
+   * Add one to today's count of `name`.
+   *
+   * Never throws. A counter is the least important write in the process and it
+   * sits on paths that matter — the document route, the session mint, the
+   * match record — so a failure here must not be the thing that takes one of
+   * those down. That is the same call `seedBotRoster` makes per bot, and the
+   * opposite of the one `healthCheck` makes, which exists precisely to fail.
+   */
+  bumpCounter(name: string, now: Date = new Date()): void {
+    try {
+      this.stmt(
+        'INSERT INTO daily_counters (dayKey, name, n) VALUES (?, ?, 1) ' +
+          'ON CONFLICT(dayKey, name) DO UPDATE SET n = n + 1'
+      ).run(missionDayKey(now), name);
+    } catch {
+      // Deliberately silent: see above.
+    }
+  }
+
+  /** Every counter for the last `days` days, newest day first. */
+  readCounters(days: number): Array<{ dayKey: string; name: string; n: number }> {
+    return this.stmt(
+      'SELECT dayKey, name, n FROM daily_counters ORDER BY dayKey DESC, name ASC LIMIT ?'
+    ).all(Math.max(1, Math.min(10_000, Math.floor(days) * 50))) as unknown as Array<{
+      dayKey: string;
+      name: string;
+      n: number;
+    }>;
+  }
+
+  /**
+   * File a report. Returns its id.
+   *
+   * `text` and `context` are bounded HERE as well as at the route, on the same
+   * reasoning `bound()` in recordMatch already carries: this is the last thing
+   * between an untrusted string and the disk, and a caller that forgets is a
+   * caller that writes whatever it was handed.
+   */
+  fileReport(input: {
+    playerId: string;
+    username: string;
+    category: string;
+    text: string;
+    subjectId?: string | null;
+    context?: unknown;
+  }): string {
+    // randomUUID rather than the alphabet used for recovery codes: a report
+    // id is a primary key an operator quotes back, not a credential, so the
+    // only property it needs is that two reports filed in the same
+    // millisecond cannot collide.
+    const id = crypto.randomUUID();
+    this.stmt(
+      'INSERT INTO reports (id, playerId, username, category, text, subjectId, context, createdAt) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      id,
+      input.playerId,
+      String(input.username).slice(0, 64),
+      String(input.category).slice(0, 32),
+      String(input.text).slice(0, REPORT_TEXT_MAX),
+      input.subjectId ? String(input.subjectId).slice(0, 64) : null,
+      JSON.stringify(input.context ?? {}).slice(0, 4000),
+      new Date().toISOString()
+    );
+    return id;
+  }
+
+  /** How many reports this player has filed today — the per-day allowance. */
+  reportsToday(playerId: string, now: Date = new Date()): number {
+    const row = this.stmt(
+      "SELECT COUNT(*) AS n FROM reports WHERE playerId = ? AND substr(createdAt, 1, 10) = ?"
+    ).get(playerId, missionDayKey(now)) as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
+  /** Newest first, for the support CLI. */
+  listReports(limit: number, unreadOnly: boolean): ReportRow[] {
+    const where = unreadOnly ? 'WHERE readAt IS NULL' : '';
+    return this.stmt(
+      `SELECT id, playerId, username, category, text, subjectId, context, createdAt, readAt ` +
+        `FROM reports ${where} ORDER BY createdAt DESC LIMIT ?`
+    ).all(Math.max(1, Math.min(500, Math.floor(limit)))) as unknown as ReportRow[];
+  }
+
+  /** Mark one report read, so `--unread` means something on the next pass. */
+  markReportRead(id: string): void {
+    this.stmt('UPDATE reports SET readAt = ? WHERE id = ?').run(new Date().toISOString(), id);
   }
 }
 

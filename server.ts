@@ -455,6 +455,9 @@ function queueCandidate(entry: QueueEntry): Candidate | null {
  * `game_start` and runs when each player actually reaches the court.
  */
 function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
+  // A pairing, not a join. The gap between `queue:join` and this one is the
+  // question the queue is always asked: is anybody there to play?
+  db.bumpCounter('queue:paired');
   const code = mintRoomCode();
   if (!code) return; // absurd, but never overwrite a live table or a live key
 
@@ -1148,6 +1151,9 @@ async function startServer() {
     if (req.path.startsWith('/api')) return next(); // its own mount, below
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (!String(req.headers.accept || '').includes('text/html')) return next();
+    // The top of the funnel: somebody opened the game. Everything below is a
+    // fraction of this number, which is what makes the rest legible.
+    db.bumpCounter('visit');
     return deviceIdentity(req, res, next);
   });
 
@@ -1517,6 +1523,11 @@ async function startServer() {
     try {
       const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
       const result = db.initializeProfile(req.deviceId!, username);
+      // Counted on SUCCESS only. A refused name is a player still trying, and
+      // folding those in would make the drop-off between visiting and
+      // onboarding look smaller than it is — which is the one number this
+      // whole table exists to show honestly.
+      if (result.ok) db.bumpCounter('onboarded');
       if (!result.ok) {
         const status = result.code === 'USERNAME_INVALID' ? 400 : 409;
         return res.status(status).json({ error: result.code });
@@ -2054,6 +2065,16 @@ async function startServer() {
       }
 
       const result = db.recordMatch(payload, context);
+      // Counted once per match rather than once per REPORT: the same match
+      // legitimately arrives up to three times (relay, client POST, on-device
+      // replay), and the ledger is what tells them apart. Without this guard
+      // the funnel would report roughly double the duels actually played.
+      if (!result.alreadyRecorded) {
+        db.bumpCounter(`match:${payload.mode}`);
+        if (payload.mode === 'solo' && payload.difficulty) {
+          db.bumpCounter(`match:solo:${normalizeDifficulty(payload.difficulty)}`);
+        }
+      }
       res.json(result);
     } catch (e: any) {
       serverError(res, e);
@@ -2937,6 +2958,7 @@ async function startServer() {
           }
           broadcastTableState(room);
         } else if (msg.type === 'queue_join') {
+          db.bumpCounter('queue:join');
           // A seat and a queue place are the same commitment, so nobody holds
           // both: the relay would otherwise seat somebody who is already
           // mid-duel, and the abandon would be charged to them for a match
