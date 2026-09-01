@@ -49,6 +49,14 @@ export const PHYSICS_RULE_KEYS = Object.keys(PHYSICS_RULES) as PhysicsRuleKey[];
 export const AUTO_SERVE_OPTIONS = [0, 1, 3, 5] as const;
 export type AutoServeSeconds = (typeof AUTO_SERVE_OPTIONS)[number];
 
+/**
+ * The auto-serve timer a match falls back to: the shipped default, and what a
+ * ranked duel is forced to when the host left it off. Declared here beside the
+ * options rather than beside `normalizeRoomConfig`, because `DEFAULT_MATCH_RULES`
+ * is now one of its callers.
+ */
+export const RANKED_AUTO_SERVE_SECONDS: AutoServeSeconds = 5;
+
 /** The match lengths the menu and the lobby offer, gated by achievements. */
 export const WINNING_SCORES = [3, 5, 10, 15] as const;
 export const DEFAULT_WINNING_SCORE = 5;
@@ -99,7 +107,17 @@ export const DEFAULT_MATCH_RULES: MatchRules = {
   opponentSonar: false,
   trackTelemetry: true,
   quickChat: true,
-  autoServeSeconds: 0,
+  // On by default, because "off" is a match that can DEADLOCK. A serve needs
+  // a second finger (the first one is the paddle — see the pointer-ranking
+  // rule in `CourtCanvas`), the space bar, or this timer. A phone has no
+  // space bar, so for a first-time player alone with one thumb this timer was
+  // the only remaining way to start a rally, and it shipped switched off:
+  // every solo and practice match opened on a ball that could not be put into
+  // play, and everything downstream — XP, achievements, the ladder — is gated
+  // behind a serve. A duel already forced this on whenever the rules were
+  // ranked; this makes the same guarantee for the modes a player meets first.
+  // Still a choice, just no longer a choice made silently on their behalf.
+  autoServeSeconds: RANKED_AUTO_SERVE_SECONDS,
 };
 
 const near = (a: number, b: number) => Math.abs(a - b) < 1e-6;
@@ -244,9 +262,6 @@ export function normalizeWinningScore(value: unknown): number {
   const n = Number(value);
   return (WINNING_SCORES as readonly number[]).includes(n) ? n : DEFAULT_WINNING_SCORE;
 }
-
-/** The timer a ranked duel falls back to when the host left auto-serve off. */
-export const RANKED_AUTO_SERVE_SECONDS: AutoServeSeconds = 5;
 
 /** How long both phones count down before a duel's first serve can happen. */
 export const MATCH_START_COUNTDOWN_SECONDS = 3;
