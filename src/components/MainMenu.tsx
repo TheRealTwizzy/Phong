@@ -1074,6 +1074,10 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 // does that on every achievement change), so the badge judges
                 // the difficulty the match will actually be played on.
                 difficulty={settings.difficulty}
+                // The VISIBLE ladder rating, not the hidden one: the badge is
+                // about whether this match moves the tier, and a rung the
+                // player has climbed past moves nothing either way.
+                rankMu={profile?.rankMu}
               />
             </div>
           </>

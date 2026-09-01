@@ -1,5 +1,5 @@
 import { AIDifficulty, GameMode, MatchRules, RoomMatchConfig } from './types';
-import { soloCountsForRank } from './rating';
+import { soloCountsForRank, soloMuCap } from './rating';
 import { roomCountsForRank } from './venues';
 
 // Pre-match match rules, shared by client and server like profileRules.ts and
@@ -209,7 +209,13 @@ export function unrankedRuleKeys(rules: Partial<MatchRules> | null | undefined):
  * replace that and is never trusted by it. It is the same rule stated once
  * for display.
  */
-export type UnrankedReason = 'mode' | 'venue' | 'difficulty' | 'sonar' | PhysicsRuleKey;
+export type UnrankedReason =
+  | 'mode'
+  | 'venue'
+  | 'difficulty'
+  | 'outgrown'
+  | 'sonar'
+  | PhysicsRuleKey;
 
 export interface RankedMatchContext {
   rules: Partial<MatchRules> | null | undefined;
@@ -226,6 +232,13 @@ export interface RankedMatchContext {
    * the live room either way.
    */
   venueRoomId?: string | null;
+  /**
+   * Solo only, and only when this phone knows it: the player's VISIBLE ladder
+   * rating. Above a rung's own ceiling that rung moves no rating at all, so
+   * the badge has to stop promising one. Absent reports nothing rather than
+   * guessing, exactly as `venueRoomId` above does.
+   */
+  rankMu?: number;
 }
 
 /** Modes that never write a rating for anybody, whatever the rules say. */
@@ -247,6 +260,17 @@ export function unrankedReasons(ctx: RankedMatchContext): UnrankedReason[] {
   }
   if (ctx.mode === 'solo' && ctx.difficulty && !soloCountsForRank(ctx.difficulty)) {
     reasons.push('difficulty');
+  } else if (
+    ctx.mode === 'solo' &&
+    ctx.difficulty &&
+    ctx.rankMu !== undefined &&
+    ctx.rankMu > soloMuCap(ctx.difficulty)
+  ) {
+    // Every solo rung has a ceiling it converges on, and above that ceiling
+    // the match moves no rating at all. Said out loud here, because the badge
+    // otherwise promises a ladder move for a match that cannot make one — the
+    // same lie the Rookie case above exists to prevent, one rung up.
+    reasons.push('outgrown');
   }
   const r = normalizeRules(ctx.rules);
   if (r.opponentSonar) reasons.push('sonar');

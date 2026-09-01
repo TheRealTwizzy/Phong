@@ -330,6 +330,19 @@ export function updateRating(
   const perf = clamp(opts.performance ?? 1, 0.5, 1.5);
   const delta = opts.k * perf * ((sigma * sigma) / c) * vWin(t);
 
+  // A rung the player has already outgrown says NOTHING about them, in either
+  // direction. The cap used to be applied on the win branch only, so above it
+  // a win moved 0.0000 and a loss moved the full step down — a solo match at
+  // an earned difficulty was then strictly rating-NEGATIVE while the pre-match
+  // sheet promised it counted for rank. It is not a small effect: a Legend
+  // beats Pro about 95% of the time, so the expected drift is about -0.018 per
+  // match, and two hundred matches of a rung they win nearly all of costs them
+  // a tier. The rung converges and then stops, which is what "farming one rung
+  // converges on it and stops" has always meant.
+  if (opts.cap !== undefined && me.mu > opts.cap) {
+    return { mu: me.mu, sigma: me.sigma };
+  }
+
   let mu = won ? me.mu + delta : me.mu - delta;
   if (opts.cap !== undefined && won && mu > opts.cap) {
     // Never drag a player DOWN to the cap — only stop the climb at it.
