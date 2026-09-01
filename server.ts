@@ -50,6 +50,7 @@ import {
   roomAllowsSpectators,
   roomById,
   roomEntryVerdict,
+  type EntryVerdict,
   roomsOf,
 } from './src/venues';
 import { validateUsername } from './src/profileRules';
@@ -2112,23 +2113,36 @@ async function startServer() {
      * for. A cookieless socket (the load test's path) is not judged either —
      * it has no profile to judge.
      */
-    const venueRefusal = (venueRoomId: string): string | null => {
+    /**
+     * The bracket verdict, when it refuses — never a formatted sentence.
+     *
+     * The English prose that used to be built here went straight into the
+     * client's `alert()`, so this was one of the places the product spoke
+     * English in seven locales. The client already renders a verdict as a
+     * localized sentence for the room list (`lockReason`), so handing it the
+     * verdict keeps ONE copy of that wording rather than a second one here
+     * that would drift. `message` below is the English fallback for a bundle
+     * that does not understand the code.
+     */
+    const venueRefusal = (venueRoomId: string): EntryVerdict | null => {
       if (!cookieDeviceId) return null;
       const room = roomById(venueRoomId);
       if (!room?.gate) return null;
       const profile = db.getProfile(cookieDeviceId);
       const verdict = roomEntryVerdict(room, profile);
-      if (verdict.ok) return null;
+      return verdict.ok ? null : verdict;
+    };
+
+    /** English fallback for a verdict, for `error.message`. */
+    const venueRefusalText = (verdict: EntryVerdict): string => {
       if (verdict.reason === 'level') return `This room needs level ${verdict.needLevel}.`;
       if (verdict.reason === 'tier_low') return `This room needs ${verdict.needTier} or above.`;
       return `This room is for ${verdict.maxTier} and below.`;
     };
 
-    const seatRefusal = (): string | null => {
-      if (!cookieDeviceId) return null;
-      return db.getProfile(cookieDeviceId).initialized
-        ? null
-        : 'Pick a username before joining a match.';
+    const seatRefusal = (): boolean => {
+      if (!cookieDeviceId) return false;
+      return !db.getProfile(cookieDeviceId).initialized;
     };
 
     ws.on('message', (raw) => {
@@ -2146,9 +2160,14 @@ async function startServer() {
           // Queueing IS asking for a seat, just not yet at a named table.
           msg.type === 'queue_join'
         ) {
-          const refusal = seatRefusal();
-          if (refusal) {
-            ws.send(JSON.stringify({ type: 'error', message: refusal }));
+          if (seatRefusal()) {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'NEEDS_USERNAME',
+                message: 'Pick a username before joining a match.',
+              })
+            );
             return;
           }
         }
@@ -2160,7 +2179,14 @@ async function startServer() {
           // hold, still less charge them an abandon for a match they are in.
           const venueRefused = venueRefusal(venueRoomId);
           if (venueRefused) {
-            ws.send(JSON.stringify({ type: 'error', message: venueRefused }));
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'VENUE_LOCKED',
+                verdict: venueRefused,
+                message: venueRefusalText(venueRefused),
+              })
+            );
             return;
           }
           let code = generateRoomCode();
@@ -2265,7 +2291,7 @@ async function startServer() {
           const room = roomForCode(code);
 
           if (!room) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Room not found. Check the 4-letter code.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found. Check the 4-letter code.' }));
             return;
           }
 
@@ -2278,7 +2304,7 @@ async function startServer() {
             // it has guards of its own (the match lock above all) that a
             // vacate-then-seat would walk straight past.
             ws.send(
-              JSON.stringify({ type: 'error', message: 'You are already at this table — use a seat.' })
+              JSON.stringify({ type: 'error', code: 'ALREADY_AT_TABLE', message: 'You are already at this table — use a seat.' })
             );
             return;
           }
@@ -2300,7 +2326,7 @@ async function startServer() {
           const joinIdx: 0 | 1 | null =
             room.players[0] === null ? 0 : room.players[1] === null ? 1 : null;
           if (joinIdx === null) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Room is already full (2 players).' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'ROOM_FULL', message: 'Room is already full (2 players).' }));
             return;
           }
           const otherIdx: 0 | 1 = joinIdx === 0 ? 1 : 0;
@@ -2318,7 +2344,14 @@ async function startServer() {
           if (room.visibility === 'public') {
             const joinRefused = venueRefusal(room.venueRoomId);
             if (joinRefused) {
-              ws.send(JSON.stringify({ type: 'error', message: joinRefused }));
+              ws.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 'VENUE_LOCKED',
+                  verdict: joinRefused,
+                  message: venueRefusalText(joinRefused),
+                })
+              );
               return;
             }
           }
@@ -2403,11 +2436,11 @@ async function startServer() {
           // either, or the key would be a door with a window beside it.
           const room = roomForCode(code);
           if (!room) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Room not found.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found.' }));
             return;
           }
           if (!room.config.spectators) {
-            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NO_WATCH_SEATS', message: 'This table has no seats to watch from.' }));
             return;
           }
 
@@ -2426,14 +2459,14 @@ async function startServer() {
           if (msg.seat === undefined || msg.seat === null) {
             const free = room.spectators[0] === null ? 0 : room.spectators[1] === null ? 1 : null;
             if (free === null) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Both seats are taken.' }));
+              ws.send(JSON.stringify({ type: 'error', code: 'WATCH_SEATS_FULL', message: 'Both seats are taken.' }));
               return;
             }
             slot = free;
           } else if (msg.seat === 2 || msg.seat === 3) {
             slot = msg.seat === 2 ? 0 : 1;
           } else {
-            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat you can watch from.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NOT_A_SEAT', message: 'That is not a seat you can watch from.' }));
             return;
           }
 
@@ -2441,14 +2474,14 @@ async function startServer() {
             // Already at this table. Refused rather than treated as a move for
             // the same reason join_room refuses it: the vacate below would run
             // against the very room being taken a seat in.
-            ws.send(JSON.stringify({ type: 'error', message: 'You are already at this table.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'ALREADY_AT_TABLE', message: 'You are already at this table.' }));
             return;
           }
           // Non-null, not non-live: a seat holding a socket that has died is
           // occupied until its close handler clears it, and treating it as
           // free orphans the session sitting in it.
           if (room.spectators[slot] !== null) {
-            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'SEAT_TAKEN', message: 'That seat is taken.' }));
             return;
           }
           // One account, one seat at a table. Without this an account
@@ -2459,7 +2492,7 @@ async function startServer() {
               room.players.some((p) => p?.deviceId === cookieDeviceId) ||
               room.spectators.some((w) => w?.deviceId === cookieDeviceId);
             if (already) {
-              ws.send(JSON.stringify({ type: 'error', message: 'You already have a seat at this table.' }));
+              ws.send(JSON.stringify({ type: 'error', code: 'ALREADY_AT_TABLE', message: 'You already have a seat at this table.' }));
               return;
             }
           }
@@ -2534,14 +2567,14 @@ async function startServer() {
           // mid-duel, and the abandon would be charged to them for a match
           // they never asked to leave.
           if (currentRoomId && seat) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Leave your table before queueing.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'LEAVE_TABLE_FIRST', message: 'Leave your table before queueing.' }));
             return;
           }
           if (!cookieDeviceId) {
             // No profile means no rating to pair on and nothing to record
             // onto. A cookieless socket can still play a private duel — that
             // is the load test's path — but it cannot be matchmade.
-            ws.send(JSON.stringify({ type: 'error', message: 'Pick a username before queueing.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NEEDS_USERNAME', message: 'Pick a username before queueing.' }));
             return;
           }
           // Re-joining is not a reset: keeping the original joinedAt is what
@@ -2586,7 +2619,7 @@ async function startServer() {
           // seat 0, the host's.
           const target = msg.seat;
           if (target !== 0 && target !== 1 && target !== 2 && target !== 3) {
-            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NOT_A_SEAT', message: 'That is not a seat.' }));
             return;
           }
           const here: TableSeat = seat.role === 'player' ? seat.index : spectatorSeat(seat.slot);
@@ -2602,13 +2635,13 @@ async function startServer() {
           // free would orphan the session sitting in it.
           const occupied = toPlayer ? room.players[targetIdx] : room.spectators[targetIdx];
           if (occupied !== null) {
-            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'SEAT_TAKEN', message: 'That seat is taken.' }));
             return;
           }
           if (!toPlayer && !room.config.spectators) {
             // Re-checked at claim time: the browser is polled, so a table
             // listed as offering seats can be tapped after the host shut them.
-            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NO_WATCH_SEATS', message: 'This table has no seats to watch from.' }));
             return;
           }
 
@@ -2626,7 +2659,7 @@ async function startServer() {
           const touchesPlayer = toPlayer || seat.role === 'player';
           const midMatch = room.matchSeq > 0 && !room.matchOver;
           if (touchesPlayer && midMatch) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Seats are locked until the match ends.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'SEATS_LOCKED', message: 'Seats are locked until the match ends.' }));
             return;
           }
 
@@ -2635,7 +2668,7 @@ async function startServer() {
           if (seat.role === 'player' && !toPlayer) {
             const other = room.players[seat.index === 0 ? 1 : 0];
             if (!other) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Somebody has to be playing.' }));
+              ws.send(JSON.stringify({ type: 'error', code: 'NEEDS_A_PLAYER', message: 'Somebody has to be playing.' }));
               return;
             }
           }

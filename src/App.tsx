@@ -27,6 +27,7 @@ import { P2PGameLink, P2PStatus } from './net/p2p';
 import { QuickMatch, useQuickMatch } from './net/useQuickMatch';
 import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
 import { nextRunSeq } from './net/runChain';
+import { relayErrorText } from './net/relayErrors';
 import {
   COSMETICS,
   COSMETIC_IDS,
@@ -476,6 +477,7 @@ export default function App() {
   // them. Leaving a room is now a decision, and taking it actually leaves.
   const [leaveLobbyConfirmOpen, setLeaveLobbyConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
+  const [toastRelayError, setToastRelayError] = useState<string | null>(null);
   const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
   /** The table this page was WATCHING has gone — never an abandon notice. */
   const [toastTableEnded, setToastTableEnded] = useState<boolean>(false);
@@ -2077,7 +2079,14 @@ export default function App() {
         pendingRoomRef.current = null;
         joinInFlightRef.current = false;
         roomRequestRef.current = false;
-        alert(msg.message);
+        // A toast, in the player's own language, rather than `alert()`. The
+        // dialog was blocking — it halts the animation loop until it is
+        // dismissed, over a full-screen game — and it carried the relay's own
+        // English literal, so six of seven locales read English on what is the
+        // most common error path in the product: mistyping a join key. Notices
+        // that arrive and leave by themselves go through ToastHost, which owns
+        // the timer and the tap target (CLAUDE.md §14).
+        setToastRelayError(relayErrorText(msg, settingsRef.current.language || 'en'));
         break;
     }
   };
@@ -3312,6 +3321,13 @@ export default function App() {
               ttlMs: TOAST_TTL.reward,
               content: t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp }),
               onDismiss: () => setToastPracticeXp(null),
+            },
+            toastRelayError && {
+              id: 'toast-relay-error',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: toastRelayError,
+              onDismiss: () => setToastRelayError(null),
             },
             toastEjected && {
               id: 'toast-ejected',

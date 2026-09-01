@@ -9,6 +9,7 @@ import {
 } from '../types';
 import { Cosmetic } from '../game/cosmetics';
 import { t } from '../i18n/translations';
+import { lockReason as sharedLockReason } from '../net/relayErrors';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
 import {
@@ -278,18 +279,13 @@ export const MainMenu: React.FC<MainMenuProps> = ({
     if (room.mode) setPrematchMode(room.mode);
   };
 
-  /** Why a bracketed room is shut, in words the player can act on. */
-  const lockReason = (verdict: EntryVerdict): string => {
-    if (verdict.ok) return '';
-    if (verdict.reason === 'level') return t('room_locked_level', lang, { level: verdict.needLevel });
-    if (verdict.reason === 'tier_low') {
-      return t('room_locked_tier_low', lang, { tier: t(TIER_LABEL_KEY[verdict.needTier], lang) });
-    }
-    if (verdict.reason === 'tier_high') {
-      return t('room_locked_tier_high', lang, { tier: t(TIER_LABEL_KEY[verdict.maxTier], lang) });
-    }
-    return '';
-  };
+  /**
+   * Why a bracketed room is shut, in words the player can act on. The wording
+   * lives in `net/relayErrors` because the RELAY refuses the same bracket this
+   * menu draws, and now says so in the player's language too — one copy, so
+   * the lock and the refusal cannot drift apart.
+   */
+  const lockReason = (verdict: EntryVerdict): string => sharedLockReason(verdict, lang);
 
   // The sheet closes on the way to the court, exactly as `game_start` closes
   // both lobbies: nobody is left holding a setup form over a live match.
