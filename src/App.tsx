@@ -220,6 +220,15 @@ const rankMoveKey = (direction: RankDirection, size: RankMagnitude): string =>
 const newSoloMatchKey = (): string =>
   `solo:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
 
+/**
+ * How long a multiplayer court may sit with no ball, nobody serving and no
+ * countdown before it is treated as stalled rather than as a transient. Long
+ * enough that an ordinary crossing (one relay hop, or one DataChannel hop) is
+ * nowhere near it, short enough that a player is not left staring at a dead
+ * court wondering.
+ */
+const BALL_STALL_MS = 6000;
+
 export default function App() {
   const [settings, setSettings] = useState<GameSettings>(() => {
     const saved = localStorage.getItem('half_pong_settings');
@@ -483,6 +492,7 @@ export default function App() {
   // request left the button doing nothing at all, with no way to tell that
   // from a mission that was not finished.
   const [toastActionFailed, setToastActionFailed] = useState<boolean>(false);
+  const [toastRallyStalled, setToastRallyStalled] = useState<boolean>(false);
   const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
   /** The table this page was WATCHING has gone — never an abandon notice. */
   const [toastTableEnded, setToastTableEnded] = useState<boolean>(false);
@@ -530,6 +540,10 @@ export default function App() {
   const paddleXRef = useRef<number>(paddleX);
   const prevPaddleXRef = useRef<number>(paddleX);
   const paddleVxRef = useRef<number>(0);
+  // When this court last had a rally on it, and whether the stall it is in has
+  // already been reported. See the watchdog in the game loop.
+  const rallyAliveRef = useRef<number>(0);
+  const stallHandledRef = useRef<boolean>(false);
   const aiRef = useRef<OpponentAI>(new OpponentAI(settings.difficulty));
   // Match rules are locked in on the menu; these refs give the game loop the
   // live values without re-creating it every render.
@@ -2138,6 +2152,14 @@ export default function App() {
 
     socket.onclose = () => {
       setIsConnected(false);
+      // A queue place is held by the socket, so a socket that dies has given
+      // it up — the relay's own close handler calls `leaveQueue`. Without
+      // this the search UI kept counting against a queue this player was no
+      // longer in.
+      if (quickMatchRef.current?.state.status === 'searching') {
+        quickMatchRef.current.reset();
+        setToastActionFailed(true);
+      }
       // A dead socket answers nothing, so any join waiting on one is over —
       // released here rather than in handleJoinRoom, which stops watching the
       // moment it sends. A socket that dies after `join_room` goes out but
@@ -2392,7 +2414,21 @@ export default function App() {
     (msg: WSClientMessage) => {
       let socket = wsRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) socket = connectWebSocket();
-      sendWhenOpen(socket, () => msg);
+      sendWhenOpen(
+        socket,
+        () => msg,
+        () => {
+          // The socket reached CLOSED without ever opening, so nothing was
+          // sent. `join()` is optimistic — the spinner starts on the tap
+          // rather than a round trip later — and with no `onDead` the state
+          // was never reset, so the player watched the elapsed counter climb
+          // indefinitely for a `queue_join` that never left the device.
+          if (msg.type === 'queue_join') {
+            quickMatchRef.current?.reset();
+            setToastActionFailed(true);
+          }
+        }
+      );
     },
     [connectWebSocket]
   );
@@ -2600,9 +2636,54 @@ export default function App() {
         return;
       }
 
+      // A rally is ALIVE if a ball exists anywhere, if somebody is about to
+      // serve one, if the countdown is still running, or if the match is over.
+      // Anything else is a court with nothing on it, which is only ever a
+      // transient in a healthy match.
+      if (
+        isServingRef.current ||
+        winner ||
+        ballRef.current.active ||
+        oppBallRef.current?.active ||
+        countdownArmedRef.current ||
+        (matchCountdownRef.current ?? 0) > 0
+      ) {
+        rallyAliveRef.current = time;
+        stallHandledRef.current = false;
+      }
+
       if (isServingRef.current || winner) {
         animId = requestAnimationFrame(gameLoop);
         return;
+      }
+
+      // A DataChannel that dies without CLOSING takes the crossing with it.
+      // `sendGame` reports success, `ball_cross_net` is never delivered, and
+      // the ball has already left this half — so neither phone has a ball and
+      // neither has `isServing`. Auto-serve cannot arm (it is gated on
+      // serving), `p2p_fallback` cannot fire (the relay saw nothing), and the
+      // reaper will not touch a room whose `lastActive` the survivor's own
+      // paddle keeps fresh. The point never ends, and the only way out is
+      // quitting — which is recorded as an abandon, a real ranked loss for a
+      // player who did nothing.
+      //
+      // This does not resurrect the lost ball: doing that safely needs an
+      // acknowledged crossing, which is a protocol change and not this. What
+      // it does is stop the silence. The DataChannel is dropped, so every
+      // later message goes back over the relay where it is at least reliable
+      // and where the relay can judge it, and the player is TOLD, so leaving
+      // is an informed decision rather than the only thing left to try.
+      if (
+        modeRef.current === 'multiplayer' &&
+        !stallHandledRef.current &&
+        time - rallyAliveRef.current > BALL_STALL_MS
+      ) {
+        stallHandledRef.current = true;
+        // `close()` reports through `onStatus`, which is what puts the HUD
+        // badge back to RELAY and clears the ref — so this does not set
+        // either itself.
+        p2pRef.current?.close();
+        setToastRallyStalled(true);
       }
 
       const currentMode = modeRef.current;
@@ -3329,6 +3410,13 @@ export default function App() {
               ttlMs: TOAST_TTL.reward,
               content: t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp }),
               onDismiss: () => setToastPracticeXp(null),
+            },
+            toastRallyStalled && {
+              id: 'toast-rally-stalled',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: t('rally_stalled_notice', currentLanguage),
+              onDismiss: () => setToastRallyStalled(false),
             },
             toastActionFailed && {
               id: 'toast-action-failed',
