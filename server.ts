@@ -3715,23 +3715,58 @@ async function startServer() {
     // favicon and the og image are hashed by nothing, so they are cached for a
     // day rather than a year: a wrong icon that cannot be corrected for twelve
     // months is the failure mode on the other side.
-    const ROOT_FILES: Record<string, string> = {
+    //
+    // Read ONCE, at boot, and served from memory — no file system access per
+    // request at all. The first version did `fs.existsSync` and then
+    // `sendFile` on every hit, and CodeQL was right to flag it: an
+    // unauthenticated, unmetered handler doing file I/O is an amplifier. The
+    // fix is not a rate limit, because rate-limiting a favicon breaks the
+    // browsers and link previews it exists for. It is to stop touching the
+    // disk: `existsSync` in particular is SYNCHRONOUS, on the one event loop
+    // that is also relaying `paddle_move` for every live match, so this is a
+    // real improvement rather than an alert quieted.
+    //
+    // Four small files, so holding them costs a few KB. Express computes an
+    // ETag for a buffer body, so conditional requests still get their 304.
+    const ROOT_FILE_TYPES: Record<string, string> = {
       '/favicon.svg': 'image/svg+xml',
       '/og.svg': 'image/svg+xml',
       '/manifest.webmanifest': 'application/manifest+json',
       '/robots.txt': 'text/plain; charset=utf-8',
     };
-    app.get(Object.keys(ROOT_FILES), (req, res) => {
-      const file = path.join(distPath, path.basename(req.path));
-      if (!fs.existsSync(file)) return res.status(404).end();
-      res.setHeader('Content-Type', ROOT_FILES[req.path]);
+    const rootFiles = new Map<string, Buffer>();
+    for (const route of Object.keys(ROOT_FILE_TYPES)) {
+      try {
+        rootFiles.set(route, fs.readFileSync(path.join(distPath, path.basename(route))));
+      } catch {
+        // A build without one of these is a 404 rather than a boot failure:
+        // the game does not need a favicon to be playable, and falling through
+        // to the SPA handler would answer /robots.txt with HTML.
+        console.warn(`[static] ${route} is missing from the build`);
+      }
+    }
+    app.get(Object.keys(ROOT_FILE_TYPES), (req, res) => {
+      const body = rootFiles.get(req.path);
+      if (!body) return res.status(404).end();
+      res.setHeader('Content-Type', ROOT_FILE_TYPES[req.path]);
       res.setHeader('Cache-Control', 'public, max-age=86400');
-      return res.sendFile(file);
+      return res.send(body);
     });
 
+    // The SPA handler, and the same treatment for the same reason: it answers
+    // every unmatched GET — every deep link, every 404, every crawler — and
+    // read the file off disk each time.
+    //
+    // Reading it once is safe precisely BECAUSE of the no-cache header's
+    // reason: index.html is served no-cache so a client told its session is
+    // stale reloads onto the new build rather than back onto the old one. A
+    // new build is a new PROCESS (server/build.ts hashes the artifacts to
+    // decide exactly that), so the file cannot change under a running one.
+    const indexHtml = fs.readFileSync(path.join(distPath, 'index.html'));
     app.get('*', (req, res) => {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(path.join(distPath, 'index.html'));
+      res.send(indexHtml);
     });
   }
 
