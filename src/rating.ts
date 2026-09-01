@@ -613,17 +613,34 @@ export function soloAdjustedXp(baseXp: number, winStreak: number, gamesToday: nu
 // wide margin precisely because it cannot be lost.
 
 export const PRACTICE_XP_PER_RETURN = 2;
-export const PRACTICE_XP_SESSION_CAP = 90;
+
 export const PRACTICE_XP_DAILY_CAP = 300;
 
 /** XP for one Practice Wall session, from its best return streak. */
-export function practiceXp(bestStreak: number): number {
-  const streak = Math.max(0, Math.floor(bestStreak || 0));
-  if (streak < 3) return 0; // a couple of taps is not a session
-  // Square-root shaped: early returns are worth the most, so a long grind
-  // cannot out-earn simply playing real matches.
-  const raw = PRACTICE_XP_PER_RETURN * Math.sqrt(streak) * 3;
-  return Math.min(PRACTICE_XP_SESSION_CAP, Math.round(raw));
+/**
+ * What a DAY of practice returns is worth in total.
+ *
+ * Square-root shaped: early returns are worth the most, so a long grind cannot
+ * out-earn simply playing real matches. What matters is that the curve is
+ * measured over the DAY and not over a session, because a session is whatever
+ * the player says it is — leaving and re-entering the Practice Wall used to
+ * restart the curve at its steepest point. Measured against the shipped
+ * constants, when it was per-session: **90 returns in one sitting paid 57 XP,
+ * and the same 90 returns split into thirty sittings of three paid the full
+ * daily 300.** A 5.3x difference for identical work, in favour of the version
+ * that is less effort per return, which is exactly backwards.
+ *
+ * The payout is therefore the MARGINAL value of the day's returns: the Nth
+ * return of a day is worth the same whichever session it happened in, and
+ * splitting buys nothing. There is no per-session cap any more — a session was
+ * the wrong unit, and a second ceiling measured in it could only ever
+ * UNDER-pay an honest day against this curve.
+ */
+export function practiceDayXp(dayReturns: number): number {
+  const n = Math.max(0, Math.floor(dayReturns || 0));
+  if (n < 3) return 0;
+  const raw = PRACTICE_XP_PER_RETURN * Math.sqrt(n) * 3;
+  return Math.min(PRACTICE_XP_DAILY_CAP, Math.round(raw));
 }
 
 // Level curve: each level costs a bit more than the last, growing linearly

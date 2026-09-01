@@ -19,7 +19,7 @@ import {
   missionDayKey,
   msUntilMissionReset,
 } from '../src/game/missions';
-import { practiceXp, PRACTICE_XP_DAILY_CAP, PRACTICE_XP_SESSION_CAP } from '../src/rating';
+import { practiceDayXp, PRACTICE_XP_DAILY_CAP } from '../src/rating';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-missions-test-'));
 process.env.DATA_DIR = TMP;
@@ -258,18 +258,18 @@ describe('server-owned mission state', () => {
 
 describe('Practice Wall XP', () => {
   it('pays nothing for a couple of taps', () => {
-    expect(practiceXp(0)).toBe(0);
-    expect(practiceXp(2)).toBe(0);
-    expect(practiceXp(3)).toBeGreaterThan(0);
+    expect(practiceDayXp(0)).toBe(0);
+    expect(practiceDayXp(2)).toBe(0);
+    expect(practiceDayXp(3)).toBeGreaterThan(0);
   });
 
   it('rises with the streak but flattens, so grinding cannot beat real matches', () => {
-    const short = practiceXp(5);
-    const long = practiceXp(50);
+    const short = practiceDayXp(5);
+    const long = practiceDayXp(50);
     expect(long).toBeGreaterThan(short);
     // A 10x longer streak must not pay 10x — the curve is deliberately concave.
     expect(long).toBeLessThan(short * 10);
-    expect(practiceXp(100000)).toBeLessThanOrEqual(PRACTICE_XP_SESSION_CAP);
+    expect(practiceDayXp(100000)).toBeLessThanOrEqual(PRACTICE_XP_DAILY_CAP);
   });
 
   it('caps what a day of drilling can pay, and survives a restart', () => {
@@ -1094,5 +1094,103 @@ describe('mission progress is part of the match record, not a side effect of it'
     const after = db.getMissions('m_retry').map((m) => m.current);
     db.recordMatch(match('m_retry', { matchKey: key, playerScore: 5, bestStreak: 30 }));
     expect(db.getMissions('m_retry').map((m) => m.current)).toEqual(after);
+  });
+});
+
+describe('a task finished before midnight', () => {
+  // Everything about missions is day-keyed, so a task completed at 23:59 and
+  // claimed at 00:01 looked up an empty row for the NEW day and was refused as
+  // MISSION_INCOMPLETE — the reward the player watched themselves earn simply
+  // evaporated, with an error saying they had not finished it.
+  const at = (iso: string) => new Date(iso);
+  const finish = (id: string, when: Date) => {
+    init(id, `Mid${id.slice(-4)}`);
+    const held = db.getMissions(id, when);
+    // Drive one held task all the way to its target.
+    for (let i = 0; i < 40; i++) {
+      db.recordMatch(
+        match(id, {
+          matchKey: `solo:${id}:${i}`,
+          mode: 'multiplayer',
+          playerScore: 5,
+          bestStreak: 45,
+          endStreak: 0,
+          earnedStreak: 45,
+          aces: 9,
+        }),
+        {},
+        when
+      );
+    }
+    return db.getMissions(id, when).find((m) => m.current >= m.target && !m.claimed) ?? held[0];
+  };
+
+  it('is still claimable just after the day rolls', () => {
+    const before = at('2026-05-04T23:59:00Z');
+    const done = finish('m_midnight', before);
+    expect(done.current).toBeGreaterThanOrEqual(done.target);
+
+    const after = at('2026-05-05T00:01:00Z');
+    const res = db.claimMission('m_midnight', done.id, after);
+    expect(res.code).toBeUndefined();
+    expect(res.ok).toBe(true);
+    expect(res.earnedXp).toBeGreaterThan(0);
+  });
+
+  it('cannot be claimed twice across the boundary', () => {
+    const before = at('2026-05-06T23:59:00Z');
+    const done = finish('m_midnight2', before);
+    const after = at('2026-05-07T00:05:00Z');
+    expect(db.claimMission('m_midnight2', done.id, after).ok).toBe(true);
+    expect(db.claimMission('m_midnight2', done.id, after).code).toBe('MISSION_CLAIMED');
+  });
+
+  it('is a grace, not a backlog', () => {
+    const before = at('2026-05-08T20:00:00Z');
+    const done = finish('m_midnight3', before);
+    // Well past the window: the day it belonged to is long over.
+    const muchLater = at('2026-05-10T09:00:00Z');
+    expect(db.claimMission('m_midnight3', done.id, muchLater).code).toBe('MISSION_INCOMPLETE');
+  });
+});
+
+describe('practice XP cannot be split into being worth more', () => {
+  // The curve was applied per SESSION, and a session is whatever the player
+  // says it is. Measured against the shipped constants before this: 90 returns
+  // in one sitting paid 57 XP, and the same 90 split into thirty sittings of
+  // three paid the full daily 300.
+  it('pays the same for the same work however it is divided', () => {
+    init('p_split', 'Splitter');
+    let split = 0;
+    for (let i = 0; i < 30; i++) {
+      split += db.recordPractice('p_split', { bestStreak: 3, earnedStreak: 3 }).earnedXp;
+    }
+
+    init('p_grind', 'Grinder');
+    const grind = db.recordPractice('p_grind', { bestStreak: 90, earnedStreak: 90 }).earnedXp;
+
+    expect(split).toBe(grind);
+  });
+
+  it('still rewards the first returns of a day the most', () => {
+    init('p_marginal', 'Marginal');
+    const first = db.recordPractice('p_marginal', { bestStreak: 10, earnedStreak: 10 }).earnedXp;
+    const second = db.recordPractice('p_marginal', { bestStreak: 10, earnedStreak: 10 }).earnedXp;
+    const third = db.recordPractice('p_marginal', { bestStreak: 10, earnedStreak: 10 }).earnedXp;
+    expect(first).toBeGreaterThan(0);
+    expect(second).toBeLessThan(first);
+    expect(third).toBeLessThanOrEqual(second);
+  });
+
+  it('banks the returns even when the session paid nothing', () => {
+    // Otherwise a session whose marginal value rounded to zero would leave the
+    // day's total where it was, and the next one would be paid as though those
+    // returns had never happened — the split exploit by another route.
+    init('p_zero', 'ZeroPay');
+    for (let i = 0; i < 60; i++) {
+      db.recordPractice('p_zero', { bestStreak: 500, earnedStreak: 500 });
+    }
+    const spent = db.recordPractice('p_zero', { bestStreak: 500, earnedStreak: 500 }).earnedXp;
+    expect(spent).toBe(0);
   });
 });

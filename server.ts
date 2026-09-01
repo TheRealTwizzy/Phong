@@ -218,18 +218,40 @@ function sendAll(sockets: WebSocket[], payload: unknown): void {
  * both: a key that collided with a room id would open a table its holder was
  * never given.
  */
+function codeIsFree(code: string): boolean {
+  if (rooms.has(code)) return false;
+  for (const room of rooms.values()) {
+    if (room.joinKey === code) return false;
+  }
+  return true;
+}
+
 function mintJoinKey(): string {
   for (let i = 0; i < 200; i++) {
     const key = generateRoomCode();
-    if (rooms.has(key)) continue;
-    let taken = false;
-    for (const room of rooms.values()) {
-      if (room.joinKey === key) { taken = true; break; }
-    }
-    if (!taken) return key;
+    if (codeIsFree(key)) return key;
   }
   // 32^4 codes against a single-instance room map: unreachable in practice,
   // and a null key is refused rather than silently opening the table.
+  return '';
+}
+
+/**
+ * A fresh ROOM ID, unique against the same two namespaces a join key is.
+ *
+ * `mintJoinKey` above has always checked both, and minting an id checked only
+ * `rooms` — which is the same collision from the other side. `roomForCode`
+ * resolves a typed code against ids and keys together, so a new table given an
+ * id equal to a live table's join key would answer to that key: the four
+ * characters somebody was privately handed would start opening a stranger's
+ * table, and the table they were invited to would become unreachable by the
+ * only code that opens it.
+ */
+function mintRoomCode(): string {
+  for (let i = 0; i < 200; i++) {
+    const code = generateRoomCode();
+    if (codeIsFree(code)) return code;
+  }
   return '';
 }
 
@@ -411,10 +433,8 @@ function queueCandidate(entry: QueueEntry): Candidate | null {
  * `game_start` and runs when each player actually reaches the court.
  */
 function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
-  let code = generateRoomCode();
-  let guard = 0;
-  while (rooms.has(code) && guard++ < 50) code = generateRoomCode();
-  if (rooms.has(code)) return; // absurd, but never overwrite a live table
+  const code = mintRoomCode();
+  if (!code) return; // absurd, but never overwrite a live table or a live key
 
   const session = (entry: QueueEntry, index: 0 | 1): PlayerSession => ({
     ws: entry.ws,
@@ -2246,9 +2266,16 @@ async function startServer() {
             );
             return;
           }
-          let code = generateRoomCode();
-          while (rooms.has(code)) {
-            code = generateRoomCode();
+          const code = mintRoomCode();
+          if (!code) {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'ROOM_NOT_FOUND',
+                message: 'Could not open a table right now. Try again.',
+              })
+            );
+            return;
           }
           // Taking a seat means giving up the one this socket already holds.
           // The handlers below just overwrite currentRoomId and the seat, so

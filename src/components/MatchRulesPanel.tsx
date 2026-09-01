@@ -10,6 +10,7 @@ import {
   isRuleRanked,
   clampRule,
   unrankedReasons,
+  isRankedRules,
 } from '../matchRules';
 import { t } from '../i18n/translations';
 import { SegmentedControl } from './ui';
@@ -96,6 +97,15 @@ export const MatchRulesPanel: React.FC<Props> = ({
   const blockers = unrankedReasons({ rules, mode, difficulty, venueRoomId });
   const ranked = blockers.length === 0;
   const sonarUnranks = blockers.includes('sonar');
+  // The auto-serve floor asks a NARROWER question than the badge does, and
+  // conflating them made the control lie. `normalizeRoomConfig` forces the
+  // timer on when `isRankedRules(rules)` — the rules alone — while `ranked`
+  // above is the whole verdict, including the venue. On a Casual table the
+  // venue unranks the match, so `ranked` was false, so "Off" was offered as a
+  // real choice — and the server then overwrote it with 5s, silently. A Casual
+  // duel is still a duel between two humans on ranked-legal rules, which is
+  // exactly the stall the floor exists for.
+  const autoServeForced = isRankedRules(rules);
 
   const toggles: { key: 'opponentSonar' | 'trackTelemetry' | 'quickChat'; labelKey: string; shown: boolean }[] = [
     { key: 'opponentSonar', labelKey: 'rule_sonar', shown: mode === 'solo' || mode === 'multiplayer' },
@@ -237,10 +247,10 @@ export const MatchRulesPanel: React.FC<Props> = ({
                   label: secs === 0 ? t('rule_off', lang) : `${secs}s`,
                   // Ranked play always carries a timer — "off" is only on the
                   // table once the rules have left the ranked bands.
-                  disabled: secs === 0 && ranked,
+                  disabled: secs === 0 && autoServeForced,
                 }))}
               />
-              {ranked && (
+              {autoServeForced && (
                 <span id={`${idPrefix}-autoserve-ranked-note`} className="text-2xs font-normal tracking-normal text-ink-dim">
                   {t('rule_autoserve_ranked', lang)}
                 </span>
