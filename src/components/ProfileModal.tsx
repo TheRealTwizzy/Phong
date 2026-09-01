@@ -126,10 +126,13 @@ const CosmeticPicker: React.FC<{
 
 // Solo before duel before practice: the order a player meets them in.
 const MODE_ORDER = ['solo', 'multiplayer', 'practice'] as const;
-const MODE_LABEL: Record<string, string> = {
-  solo: 'Solo AI',
-  multiplayer: 'Duel',
-  practice: 'Practice',
+// The mode names the rest of the app already uses, rather than a third
+// spelling of them: `mode_solo`/`mode_multiplayer`/`mode_practice` have been in
+// all seven locales since the modes shipped.
+const MODE_LABEL_KEY: Record<string, string> = {
+  solo: 'mode_solo',
+  multiplayer: 'mode_multiplayer',
+  practice: 'mode_practice',
 };
 
 export const ProfileModal: React.FC<Props> = ({
@@ -207,9 +210,7 @@ export const ProfileModal: React.FC<Props> = ({
     if (
       profile &&
       profile.matchesPlayed > 0 &&
-      !window.confirm(
-        'Restoring another profile will replace the profile currently on this device (its stats will be lost). Continue?'
-      )
+      !window.confirm(t('restore_replaces_confirm', language))
     ) {
       return;
     }
@@ -223,13 +224,15 @@ export const ProfileModal: React.FC<Props> = ({
       });
       const data = await res.json();
       if (!res.ok) {
-        setClaimError(data.error || 'Could not restore profile');
+        // The server's `error` is a CODE, not prose — showing it raw put
+        // things like `BROWSER_HAS_ACCOUNT` in front of the player.
+        setClaimError(t('restore_failed', language));
         return;
       }
       // Identity swapped server-side; reload so every view reflects it
       window.location.reload();
     } catch {
-      setClaimError('Network error — try again');
+      setClaimError(t('network_error_retry', language));
     } finally {
       setClaimBusy(false);
     }
@@ -420,13 +423,20 @@ export const ProfileModal: React.FC<Props> = ({
                             : 'bg-ink-dim'
                         }`}
                       />
-                      {playerStatus === 'online' ? 'ACTIVE' : playerStatus === 'idle' ? 'IDLE' : 'OFFLINE'}
+                      {t(
+                      playerStatus === 'online'
+                        ? 'status_active'
+                        : playerStatus === 'idle'
+                          ? 'status_idle'
+                          : 'status_offline',
+                      language
+                    )}
                     </span>
                     <button
                       id="edit-username-btn"
                       onClick={() => setIsEditingName(true)}
                       className="text-ink-muted hover:text-accent transition-colors p-1"
-                      title="Edit Callsign"
+                      title={t('edit_callsign', language)}
                     >
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
@@ -476,7 +486,7 @@ export const ProfileModal: React.FC<Props> = ({
                   {xpCurrentLevelProgress.toLocaleString()} / {xpNeededForLevel.toLocaleString()} XP
                 </span>
               </div>
-              <ProgressBar value={xpPercent / 100} tone="xp" ariaLabel="Experience" />
+              <ProgressBar value={xpPercent / 100} tone="xp" ariaLabel={t('xp', language)} />
             </div>
           </div>
 
@@ -583,13 +593,11 @@ export const ProfileModal: React.FC<Props> = ({
                   <div className="flex items-center gap-2 text-accent">
                     <KeyRound className="w-4 h-4" />
                     <span className="text-xs font-mono font-bold uppercase tracking-wider">
-                      Profile Recovery Code
+                      {t('recovery_code_title', language)}
                     </span>
                   </div>
                   <p className="text-[11px] text-ink-muted leading-relaxed">
-                    Your profile lives on this device. Save this code somewhere safe — it moves your
-                    profile to a new phone or restores it after clearing browser data. Using it
-                    generates a fresh code.
+                    {t('recovery_code_body', language)}
                   </p>
                   <div className="flex items-center gap-2">
                     <code
@@ -601,7 +609,7 @@ export const ProfileModal: React.FC<Props> = ({
                     <button
                       id="btn-copy-recovery"
                       onClick={copyRecoveryCode}
-                      title="Copy code"
+                      title={t('copy_code', language)}
                       className="p-2.5 rounded-xl bg-surface-3 hover:bg-surface-4 text-ink border border-line-strong transition active:scale-95"
                     >
                       {codeCopied ? <Check className="w-4 h-4 text-win" /> : <Copy className="w-4 h-4" />}
@@ -609,7 +617,7 @@ export const ProfileModal: React.FC<Props> = ({
                   </div>
                   <div className="pt-1 border-t border-line/80 space-y-2">
                     <p className="text-[11px] text-ink-muted">
-                      Have a code from another device? Restore that profile here:
+                      {t('have_recovery_code', language)}
                     </p>
                     <div className="flex items-center gap-2">
                       <input
@@ -626,7 +634,7 @@ export const ProfileModal: React.FC<Props> = ({
                         disabled={claimBusy || !claimCode.trim()}
                         className="px-4 py-2 rounded-xl font-mono text-xs font-bold bg-accent hover:bg-accent disabled:bg-surface-3 disabled:text-ink-muted text-ink transition active:scale-95"
                       >
-                        {claimBusy ? '…' : 'Restore'}
+                        {claimBusy ? '…' : t('restore_profile', language)}
                       </button>
                     </div>
                     {claimError && <p className="text-[11px] text-loss">{claimError}</p>}
@@ -637,7 +645,7 @@ export const ProfileModal: React.FC<Props> = ({
                   <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
                     <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
                       <Trophy className="w-4 h-4 text-xp" />
-                      <span>Win Rate</span>
+                      <span>{t('win_rate', language)}</span>
                     </div>
                     <div className="text-2xl font-black text-ink">{winRate}%</div>
                     <div className="text-[11px] text-ink-muted mt-1">
@@ -648,28 +656,28 @@ export const ProfileModal: React.FC<Props> = ({
                   <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
                     <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
                       <Flame className="w-4 h-4 text-warn" />
-                      <span>Highest Rally</span>
+                      <span>{t('longest_rally', language)}</span>
                     </div>
                     <div className="text-2xl font-black text-ink">{profile.highestRally}</div>
-                    <div className="text-[11px] text-ink-muted mt-1">Best return streak</div>
+                    <div className="text-[11px] text-ink-muted mt-1">{t('best_return_streak', language)}</div>
                   </div>
 
                   <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
                     <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
                       <Zap className="w-4 h-4 text-accent" />
-                      <span>Total Points</span>
+                      <span>{t('total_points', language)}</span>
                     </div>
                     <div className="text-2xl font-black text-ink">{profile.totalPointsScored}</div>
-                    <div className="text-[11px] text-ink-muted mt-1">Volleys past opponent</div>
+                    <div className="text-[11px] text-ink-muted mt-1">{t('volleys_past_opponent', language)}</div>
                   </div>
 
                   <div className="bg-surface-3/60 border border-line-strong/60 rounded-2xl p-3.5 flex flex-col">
                     <div className="flex items-center gap-2 text-ink-muted text-xs font-medium mb-1">
                       <Award className="w-4 h-4 text-rank-steady" />
-                      <span>Achievements</span>
+                      <span>{t('achievements', language)}</span>
                     </div>
                     <div className="text-2xl font-black text-ink">{profile.achievements.length}</div>
-                    <div className="text-[11px] text-ink-muted mt-1">Badges Unlocked</div>
+                    <div className="text-[11px] text-ink-muted mt-1">{t('badges_unlocked', language)}</div>
                   </div>
                 </div>
 
@@ -687,12 +695,12 @@ export const ProfileModal: React.FC<Props> = ({
                       <table className="w-full text-[11px] text-ink">
                         <thead>
                           <tr className="text-ink-muted text-left whitespace-nowrap">
-                            <th className="py-1 pr-2 font-medium">Mode</th>
-                            <th className="py-1 px-1.5 font-medium text-right">Played</th>
-                            <th className="py-1 px-1.5 font-medium text-right">W–L</th>
-                            <th className="py-1 px-1.5 font-medium text-right">Pts</th>
-                            <th className="py-1 px-1.5 font-medium text-right">Streak</th>
-                            <th className="py-1 pl-1.5 font-medium text-right">Win run</th>
+                            <th className="py-1 pr-2 font-medium">{t('stats_mode', language)}</th>
+                            <th className="py-1 px-1.5 font-medium text-right">{t('stats_played', language)}</th>
+                            <th className="py-1 px-1.5 font-medium text-right">{t('stats_wl', language)}</th>
+                            <th className="py-1 px-1.5 font-medium text-right">{t('stats_pts', language)}</th>
+                            <th className="py-1 px-1.5 font-medium text-right">{t('stats_streak', language)}</th>
+                            <th className="py-1 pl-1.5 font-medium text-right">{t('stats_win_run', language)}</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -703,7 +711,7 @@ export const ProfileModal: React.FC<Props> = ({
                               className="border-t border-line/80 whitespace-nowrap"
                             >
                               <td className="py-1.5 pr-2 text-ink">
-                                {MODE_LABEL[mode] || mode}
+                                {MODE_LABEL_KEY[mode] ? t(MODE_LABEL_KEY[mode], language) : mode}
                               </td>
                               <td className="py-1.5 px-1.5 text-right tabular-nums">{st.matchesPlayed}</td>
                               <td className="py-1.5 px-1.5 text-right tabular-nums">
