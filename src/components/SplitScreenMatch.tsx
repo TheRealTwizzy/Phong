@@ -5,12 +5,17 @@ import {
   PADDLE_Y,
   PADDLE_HEIGHT,
   BASE_BALL_SPEED,
+  SERVE_MIN_POWER,
+  SERVE_MAX_POWER,
   checkPaddleCollision,
   paddleWidthFor,
   ballRadiusFor,
   maxBallSpeedFor,
   minBallSpeedFor,
   physicsSubsteps,
+  bounceOffWall,
+  serveVelocity,
+  clampBallSpeed,
 } from '../game/physics';
 import { sound } from '../audio/soundEffects';
 import { t } from '../i18n/translations';
@@ -61,6 +66,15 @@ const NET_Y = 0.5;
 // scale is geometry, the rules are the match.
 const SPEED_SCALE = 0.55;
 const SERVE_SPEED = BASE_BALL_SPEED * SPEED_SCALE;
+// Half the match's permitted serve angle, either way. Nobody aims in this
+// mode, so the serve is a random aim rather than a fixed one — and half is
+// what reproduces the +/-25.7 degrees the hardcoded `vx` spread produced at
+// stock rules, to within two degrees, while now scaling with `serveAngleMax`.
+const SPLIT_SERVE_ANGLE_SPREAD = 0.5;
+// The power fraction whose `lerp(SERVE_MIN_POWER, SERVE_MAX_POWER, f)` is
+// exactly 1, so at stock rules the serve leaves at precisely the
+// `BASE_BALL_SPEED` it always did and only `servePowerMax` moves it.
+const SPLIT_SERVE_POWER_FRAC = (1 - SERVE_MIN_POWER) / (SERVE_MAX_POWER - SERVE_MIN_POWER);
 
 interface FullCourtBall {
   x: number;
@@ -68,6 +82,13 @@ interface FullCourtBall {
   vx: number;
   vy: number;
   radius: number;
+  /**
+   * Carried, so a driven contact actually means something afterwards.
+   * `checkPaddleCollision` has always returned a spin and this mode dropped it
+   * on the floor, so the paddle velocity restored above bought the angle and
+   * the pace and nothing that outlives the contact.
+   */
+  spin: number;
   /**
    * Always true here, and present so this really is a BallState — which is
    * what checkPaddleCollision takes, and this passes it one. On a half court
@@ -125,6 +146,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     vx: 0,
     vy: 0,
     radius: ballRadiusFor(rules),
+    spin: 0,
     active: true,
   });
   // The physics loop reads/writes these refs synchronously (a state updater
@@ -153,14 +175,34 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     setIsServing(false);
     isServingRef.current = false;
 
-    const vx = (Math.random() - 0.5) * 0.45;
+    // Nobody aims a serve in this mode, so it is a random aim inside the
+    // match's OWN limits rather than a hardcoded angle and a fixed speed.
+    // `serveAngleMax` and `servePowerMax` are two of the six physics rules
+    // this mode's pre-match sheet offers, and the launch ignored both: a
+    // `serveAngleMax: 0` still produced angled serves and `servePowerMax`
+    // did nothing at all.
+    const launch = serveVelocity(
+      {
+        angle: (Math.random() * 2 - 1) * SPLIT_SERVE_ANGLE_SPREAD,
+        power: SPLIT_SERVE_POWER_FRAC,
+      },
+      rulesRef.current
+    );
+    // A full court is ~2.2x the travel of a half-court leg, so this mode
+    // scales every speed; the rules are the match and the scale is geometry.
+    const speed = Math.max(
+      geomRef.current.speedMin,
+      Math.min(Math.hypot(launch.vx, launch.vy) * SPEED_SCALE, geomRef.current.speedCap)
+    );
+    const heading = Math.atan2(launch.vx, -launch.vy);
     ballRef.current = {
       x: from === 1 ? p1PaddleRef.current : p2PaddleRef.current,
       y: from === 1 ? P1_PADDLE_Y - 0.06 : P2_PADDLE_Y + 0.06,
-      vx,
+      vx: speed * Math.sin(heading),
       // Player 1 (bottom) serves upward; player 2 (top) serves downward.
-      vy: from === 1 ? -geomRef.current.serveSpeed : geomRef.current.serveSpeed,
+      vy: (from === 1 ? -1 : 1) * Math.abs(speed * Math.cos(heading)),
       radius: geomRef.current.ballRadius,
+      spin: 0,
       active: true,
     };
   }, []);
@@ -176,6 +218,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       vx: 0,
       vy: 0,
       radius: geomRef.current.ballRadius,
+      spin: 0,
       active: true,
     };
   };
@@ -236,14 +279,23 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
         b.x += b.vx * sdt;
         b.y += b.vy * sdt;
 
-        // Side walls
-        if (b.x - b.radius <= 0) {
-          b.x = b.radius;
-          b.vx = Math.abs(b.vx);
-          sound.playWallBounce();
-        } else if (b.x + b.radius >= 1) {
-          b.x = 1 - b.radius;
-          b.vx = -Math.abs(b.vx);
+        // Side walls. Routed through the shared rebound rather than a bare
+        // `vx` reversal, so spin spends itself on a wall here exactly as it
+        // does on a half court — and so the rebound is held inside this
+        // match's own speed band.
+        const atLeftWall = b.x - b.radius <= 0;
+        if (atLeftWall || b.x + b.radius >= 1) {
+          b.x = atLeftWall ? b.radius : 1 - b.radius;
+          // Into the half-court frame and back: `bounceOffWall` holds its
+          // result inside `[minBallSpeedFor, maxBallSpeedFor]`, which is the
+          // band UNSCALED, and this mode's whole speed range sits below that
+          // floor — handed the raw values it would speed every wall bounce up
+          // to the half-court minimum. The scale is geometry and the rules are
+          // the match, so the rules are applied where they were written.
+          const off = bounceOffWall(b.vx / SPEED_SCALE, b.vy / SPEED_SCALE, b.spin, atLeftWall, activeRules);
+          b.vx = off.vx * SPEED_SCALE;
+          b.vy = off.vy * SPEED_SCALE;
+          b.spin = off.spin;
           sound.playWallBounce();
         }
 
@@ -254,6 +306,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
           const speed = Math.max(geom.speedMin, Math.min(p1Hit.speed, geom.speedCap));
           b.vy = -Math.abs(speed * Math.cos(p1Hit.angle));
           b.vx = speed * Math.sin(p1Hit.angle);
+          b.spin = p1Hit.spin ?? 0;
           b.y = P1_PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
           sound.playPaddleHit(speed / geom.serveSpeed);
           rallyRef.current = [rallyRef.current[0] + 1, rallyRef.current[1]];
@@ -262,14 +315,20 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
 
         // Player 2's paddle is the same geometry flipped about the net, so the
         // ball is mirrored into the routine's frame and the result mirrored
-        // back — the paddle's own velocity with it, since left and right swap
-        // across the mirror too.
-        const mirrored = { ...b, y: 1 - b.y, vy: -b.vy };
-        const p2Hit = checkPaddleCollision(mirrored, p2PaddleRef.current, geom.paddleWidth, -p2Vx, 0, activeRules);
+        // back. The mirror is in Y ALONE — this is one screen, not two phones
+        // head to head, so there is no `1 - x` here and world x is shared.
+        // Everything along x therefore passes through untouched: the paddle's
+        // own velocity, and the `sin(angle)` the contact hands back. What DOES
+        // flip is spin, because a reflection reverses the sense of a rotation
+        // — which is the same reason `bounceOffWall` signs its tilt off which
+        // wall was struck.
+        const mirrored = { ...b, y: 1 - b.y, vy: -b.vy, spin: -b.spin };
+        const p2Hit = checkPaddleCollision(mirrored, p2PaddleRef.current, geom.paddleWidth, p2Vx, 0, activeRules);
         if (p2Hit.hit && p2Hit.angle !== undefined && p2Hit.speed !== undefined) {
           const speed = Math.max(geom.speedMin, Math.min(p2Hit.speed, geom.speedCap));
           b.vy = Math.abs(speed * Math.cos(p2Hit.angle));
           b.vx = speed * Math.sin(p2Hit.angle);
+          b.spin = -(p2Hit.spin ?? 0);
           b.y = P2_PADDLE_Y + PADDLE_HEIGHT / 2 + b.radius;
           sound.playOpponentPaddleHit();
           rallyRef.current = [rallyRef.current[0], rallyRef.current[1] + 1];

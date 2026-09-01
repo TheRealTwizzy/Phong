@@ -449,6 +449,35 @@ export default function App() {
   // connection that has stopped answering went on showing its last good ping,
   // unchanged and reassuring, for as long as the stall lasted.
   const [pingAt, setPingAt] = useState<number>(0);
+  /**
+   * Whether that reading has gone stale, as STATE rather than as a
+   * `Date.now()` read during render. A render-time comparison never schedules
+   * the render that would show the transition, so the badge only went stale if
+   * something unrelated happened to re-render App — and the case it exists for
+   * is precisely the quiet one: a relay that stops answering while the court
+   * is idle on a held serve, which an unranked duel can sit on indefinitely
+   * because `autoServeSeconds` is only forced on inside the ranked bands. The
+   * last good latency sat there reading healthy.
+   *
+   * Keyed on `pingAt` alone, per the timer rule in CLAUDE.md §14: an effect
+   * that depended on anything App rebuilds each render would tear this timeout
+   * down and re-arm it once a frame and never fire.
+   */
+  const [pingStale, setPingStale] = useState<boolean>(false);
+  useEffect(() => {
+    if (!pingAt) {
+      setPingStale(false);
+      return;
+    }
+    const due = pingAt + PING_STALE_MS - Date.now();
+    if (due <= 0) {
+      setPingStale(true);
+      return;
+    }
+    setPingStale(false);
+    const id = window.setTimeout(() => setPingStale(true), due);
+    return () => window.clearTimeout(id);
+  }, [pingAt]);
   const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
   /**
    * Which side of a table this page is WATCHING, or null when it is playing.
@@ -3916,14 +3945,12 @@ export default function App() {
         {inCourtMatch && mode === 'multiplayer' && pingMs > 0 && linkStatus !== 'p2p' && (
           <div
             id="link-ping"
-            data-stale={Date.now() - pingAt > PING_STALE_MS ? '1' : '0'}
+            data-stale={pingStale ? '1' : '0'}
             className={`rounded-chip border bg-surface-0/80 px-1.5 py-0.5 text-2xs tnum select-none ${
-              Date.now() - pingAt > PING_STALE_MS
-                ? 'border-warn/50 text-warn'
-                : 'border-line text-ink-dim'
+              pingStale ? 'border-warn/50 text-warn' : 'border-line text-ink-dim'
             }`}
           >
-            {Date.now() - pingAt > PING_STALE_MS ? '···' : `${pingMs}ms`}
+            {pingStale ? '···' : `${pingMs}ms`}
           </div>
         )}
         </div>
