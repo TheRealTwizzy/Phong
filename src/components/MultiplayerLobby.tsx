@@ -653,7 +653,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                       aria-label={t('lobby_tables_refresh', language)}
                       className="rounded-ctl border border-line bg-surface-2 p-1.5 text-ink-muted transition-colors active:scale-95 motion-reduce:active:scale-100"
                     >
-                      <RefreshCw className={`h-3.5 w-3.5 ${tablesLoading ? 'animate-spin' : ''}`} />
+                      <RefreshCw className={`h-3.5 w-3.5 ${tablesLoading ? 'animate-spin' : ''}`} data-motion-essential />
                     </button>
                   )}
                 </div>

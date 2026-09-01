@@ -3307,7 +3307,20 @@ export default function App() {
       // wins are ever recorded. The run still carries (a restart is not a
       // miss); it is the MATCH that ends here, as a loss.
       if (abandoningLiveSoloMatch()) void recordMatchCompletion(false);
-      else void reportStreak(modeRef.current, run);
+      // The Practice Wall banks through its own report, and Reset had it
+      // reporting the STREAK alone — so the session's XP and its history row
+      // were simply discarded, for work the player had already done. Restart
+      // is the same ending as walking out as far as the wall is concerned: the
+      // run carries either way (a restart is not a miss), and `resetMatch`
+      // below opens the next session's earned counters at zero, so nothing is
+      // banked twice.
+      else if (modeRef.current === 'practice') {
+        void submitPracticeSession(
+          statsRef.current.bestStreak,
+          statsRef.current.earnedBest,
+          run
+        );
+      } else void reportStreak(modeRef.current, run);
     }
     resetMatch(modeRef.current, run);
   };

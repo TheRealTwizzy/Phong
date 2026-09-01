@@ -12,7 +12,7 @@ import {
   roomEntryVerdict,
   roomsOf,
 } from '../src/venues';
-import { AI_DIFFICULTIES } from '../src/rating';
+import { AI_DIFFICULTIES, TIER_ORDER } from '../src/rating';
 import type { Tier } from '../src/rating';
 
 // Buildings, rooms and who may enter them. This is the one predicate the menu
@@ -147,17 +147,53 @@ describe('who may play in a room', () => {
 
   it('names the level a room needs, and checks it before the tier', () => {
     // Level first because it is the one a player can always act on: "play
-    // more" is advice, "be a better player" is not.
-    expect(roomEntryVerdict(roomById('intermediate'), who(2, 'ace'))).toEqual({
+    // more" is advice, "be a better player" is not. Judged on somebody who
+    // clears NEITHER gate, which is the case the ordering is for.
+    expect(roomEntryVerdict(roomById('intermediate'), who(2, 'unranked'))).toEqual({
       ok: false,
       reason: 'level',
       needLevel: 5,
     });
-    expect(roomEntryVerdict(roomById('pro'), who(1, 'legend'))).toEqual({
+    expect(roomEntryVerdict(roomById('pro'), who(1, 'ace'))).toEqual({
       ok: false,
       reason: 'level',
       needLevel: 30,
     });
+  });
+
+  it('lets a met tier floor stand in for the level', () => {
+    // The level is a PROXY for experience and the tier floor is a measurement
+    // of it, so a player who clears the floor has already done the thing the
+    // level was standing in for.
+    expect(canEnterRoom(roomById('intermediate'), who(2, 'ace'))).toBe(true);
+    expect(canEnterRoom(roomById('pro'), who(1, 'legend'))).toBe(true);
+    // And it does not open a room whose CEILING excludes them.
+    expect(canEnterRoom(roomById('beginner'), who(40, 'ace'))).toBe(false);
+  });
+
+  it('never locks a player out of every ranked bracket', () => {
+    // The case this exists for: placement is five ranked games, five games is
+    // roughly level 3-4, and winning most of them lands Ace. Ace is above
+    // BEGINNER's ceiling and below INTERMEDIATE's level 5, so before the rule
+    // above both refused — and so did every room over them. Casual was the
+    // only room in the game such a player could enter, which is the opposite
+    // of what being rated Ace should mean.
+    // RANKED brackets only. Casual gates nobody, so including it makes this
+    // invariant trivially true and says nothing — which is exactly the state
+    // the bug left players in: one room, and not one that moves the ladder.
+    const ranked = ROOMS.filter(
+      (r) => r.building === 'pvp' && r.listable !== false && r.ranked !== false
+    );
+    expect(ranked.length).toBeGreaterThan(0);
+    for (const tier of ['unranked', ...TIER_ORDER] as const) {
+      for (const level of [1, 2, 3, 4, 5, 8, 12, 20, 30, 60]) {
+        const open = ranked.filter((r) => canEnterRoom(r, who(level, tier)));
+        expect(
+          open.length,
+          `level ${level} / ${tier} can enter no ranked bracket`
+        ).toBeGreaterThan(0);
+      }
+    }
   });
 
   it('names the tier a room needs when the level is already there', () => {

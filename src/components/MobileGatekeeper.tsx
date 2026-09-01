@@ -100,7 +100,7 @@ export const MobileGatekeeper: React.FC<MobileGatekeeperProps> = ({ children, la
     return (
       <Panel>
         <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-accent/10">
-          <RotateCcw className="w-8 h-8 animate-spin" style={{ animationDuration: '6s' }} />
+          <RotateCcw className="w-8 h-8 animate-spin" style={{ animationDuration: '6s' }} data-motion-essential />
         </div>
         <h1 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase mb-2">
           {t('rotate_prompt', language)}

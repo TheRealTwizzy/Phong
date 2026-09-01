@@ -88,7 +88,7 @@ const RestoreForm: React.FC<{ language: LanguageCode }> = ({ language }) => {
           disabled={busy || !code.trim()}
           className="px-4 py-2.5 rounded-xl bg-cyan-500 text-ink-on-accent font-bold uppercase tracking-wider text-[11px] disabled:opacity-40 active:scale-[0.98] transition shrink-0"
         >
-          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t('restore_profile', language)}
+          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" data-motion-essential /> : t('restore_profile', language)}
         </button>
       </div>
       {error && <p className="text-[10px] font-mono text-rose-400 text-center">{error}</p>}
@@ -126,7 +126,7 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
       onAction: onAdopt,
     },
     stale_build: {
-      icon: <RefreshCw className="w-8 h-8 animate-spin" style={{ animationDuration: '2s' }} />,
+      icon: <RefreshCw className="w-8 h-8 animate-spin" style={{ animationDuration: '2s' }} data-motion-essential />,
       title: t('session_update_title', language),
       body: t('session_update_body', language),
       // Nothing to press: the reload is already under way.
@@ -186,7 +186,7 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
                   disabled={busy}
                   className="flex-1 px-3 py-3 rounded-xl bg-rose-500 text-ink-on-accent font-bold uppercase tracking-wider text-[11px] disabled:opacity-50 active:scale-[0.98] transition"
                 >
-                  {busy ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : t('session_moved_confirm_action', language)}
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin mx-auto" data-motion-essential /> : t('session_moved_confirm_action', language)}
                 </button>
               </div>
             </div>
@@ -201,11 +201,11 @@ export const SessionGuard: React.FC<SessionGuardProps> = ({
                   : 'w-full px-5 py-3 rounded-xl bg-cyan-500 text-ink-on-accent font-bold uppercase tracking-wider text-xs shadow-lg shadow-accent/20 disabled:opacity-50 active:scale-[0.98] transition'
               }
             >
-              {busy && !isReleased ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : copy.action}
+              {busy && !isReleased ? <Loader2 className="w-4 h-4 animate-spin mx-auto" data-motion-essential /> : copy.action}
             </button>
           )
         ) : (
-          <Loader2 className="w-5 h-5 animate-spin text-cyan-400/70" />
+          <Loader2 className="w-5 h-5 animate-spin text-cyan-400/70" data-motion-essential />
         )}
       </motion.div>
     </div>

@@ -138,6 +138,9 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   const rallyRef = useRef<[number, number]>([0, 0]);
   // Which paddle each active pointer drives, so two thumbs can play at once.
   const pointerOwnersRef = useRef<Map<number, 1 | 2>>(new Map());
+  // Which pointer currently drives each half, so a second thumb in one half is
+  // ignored rather than fighting the first for the paddle.
+  const halfOwnerRef = useRef<{ 1: number | null; 2: number | null }>({ 1: null, 2: null });
 
   const clampPaddle = (x: number) => {
     const half = geomRef.current.paddleWidth / 2;
@@ -381,6 +384,14 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const which = paddleForEvent(e);
     if (!which) return;
+    // ONE pointer per half, first one down. Any number could own a half
+    // before, so two thumbs in the same half both drove that paddle and it
+    // jittered between them — with two people at one phone that is not an
+    // exotic input, it is a hand resting on the glass. Same rule as
+    // `CourtCanvas`, where the oldest pointer is the paddle; here the halves
+    // just keep their own oldest.
+    if (halfOwnerRef.current[which] !== null) return;
+    halfOwnerRef.current[which] = e.pointerId;
     pointerOwnersRef.current.set(e.pointerId, which);
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     moveFromEvent(e, which);
@@ -394,6 +405,12 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const which = pointerOwnersRef.current.get(e.pointerId);
+    // Released only by the pointer that CLAIMED it, so a stray one lifting
+    // cannot hand the half to somebody else's resting thumb.
+    if (which && halfOwnerRef.current[which] === e.pointerId) {
+      halfOwnerRef.current[which] = null;
+    }
     pointerOwnersRef.current.delete(e.pointerId);
     try {
       (e.target as HTMLElement).releasePointerCapture(e.pointerId);
@@ -545,17 +562,17 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       style={{ backgroundColor: theme.background }}
     >
       {/* Player 2 (top) HUD — rotated so it reads from the far side */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-800 bg-zinc-950/80 z-20 rotate-180">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-line bg-surface-0/80 z-20 rotate-180">
         <button
           id="btn-split-exit"
           onClick={onExitSplitMode}
           title={t('exit_to_menu', lang)}
-          className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-cyan-400 border border-zinc-700 transition active:scale-95"
+          className="p-1.5 rounded-lg bg-surface-2/80 hover:bg-surface-3 text-accent border border-line-strong transition active:scale-95"
         >
           <Home className="w-4 h-4" />
         </button>
         <div className="flex items-center gap-2 font-mono text-sm">
-          <span className="text-[9px] uppercase text-zinc-400">P2</span>
+          <span className="text-[9px] uppercase text-ink-muted">P2</span>
           <span className="text-xl font-black text-pink-400 leading-none">{p2Score}</span>
         </div>
         <div className="w-8" />
@@ -585,32 +602,32 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
 
         {/* Unranked reminder, parked on the net line */}
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-          <span className="px-2 py-0.5 rounded-full bg-black/50 border border-zinc-700 text-[8px] font-mono text-zinc-400 uppercase tracking-widest">
+          <span className="px-2 py-0.5 rounded-full bg-black/50 border border-line-strong text-[8px] font-mono text-ink-muted uppercase tracking-widest">
             {t('mode_split', lang)} · {t('rally', lang)} {streaks[0]} — {streaks[1]}
           </span>
         </div>
       </div>
 
       {/* Player 1 (bottom) HUD */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-t border-zinc-800 bg-zinc-950/80 z-20">
+      <div className="flex items-center justify-between px-3 py-1.5 border-t border-line bg-surface-0/80 z-20">
         <button
           id="btn-split-exit-p1"
           onClick={onExitSplitMode}
           title={t('exit_to_menu', lang)}
-          className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-cyan-400 border border-zinc-700 transition active:scale-95"
+          className="p-1.5 rounded-lg bg-surface-2/80 hover:bg-surface-3 text-accent border border-line-strong transition active:scale-95"
         >
           <Home className="w-4 h-4" />
         </button>
         <div className="flex items-center gap-2 font-mono text-sm">
-          <span className="text-[9px] uppercase text-zinc-400">P1</span>
-          <span className="text-xl font-black text-cyan-400 leading-none">{p1Score}</span>
-          <span className="text-[8px] text-zinc-500">to {winningScore}</span>
+          <span className="text-[9px] uppercase text-ink-muted">P1</span>
+          <span className="text-xl font-black text-accent leading-none">{p1Score}</span>
+          <span className="text-[8px] text-ink-dim">to {winningScore}</span>
         </div>
         <button
           id="btn-split-reset"
           onClick={resetAll}
           title={t('reset_match', lang)}
-          className="p-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition active:scale-95"
+          className="p-1.5 rounded-lg bg-surface-2/80 hover:bg-surface-3 text-ink border border-line-strong transition active:scale-95"
         >
           <RefreshCw className="w-4 h-4" />
         </button>
@@ -620,31 +637,31 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
       {winner && (
         <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-black/80 backdrop-blur-md p-4">
           <div className="rotate-180">
-            <h3 className={`text-xl font-mono font-black uppercase ${winner === 2 ? 'text-pink-400' : 'text-cyan-400'}`}>
+            <h3 className={`text-xl font-mono font-black uppercase ${winner === 2 ? 'text-pink-400' : 'text-accent'}`}>
               {t('player_wins', lang, { n: winner })}
             </h3>
           </div>
 
-          <p className="text-xs font-mono text-zinc-400">
+          <p className="text-xs font-mono text-ink-muted">
             {t('final_score', lang)}: {p1Score} - {p2Score}
           </p>
 
           <div className="flex items-center gap-2">
             <button
               onClick={resetAll}
-              className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-ink-on-accent font-mono font-bold text-xs active:scale-95 transition"
+              className="px-5 py-2.5 rounded-xl bg-accent hover:bg-accent text-ink-on-accent font-mono font-bold text-xs active:scale-95 transition"
             >
               {t('play_again', lang)}
             </button>
             <button
               onClick={onExitSplitMode}
-              className="px-5 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 font-mono font-bold text-xs active:scale-95 transition"
+              className="px-5 py-2.5 rounded-xl bg-surface-2 hover:bg-surface-3 text-white border border-line-strong font-mono font-bold text-xs active:scale-95 transition"
             >
               {t('exit_to_menu', lang)}
             </button>
           </div>
 
-          <h3 className={`text-xl font-mono font-black uppercase ${winner === 2 ? 'text-pink-400' : 'text-cyan-400'}`}>
+          <h3 className={`text-xl font-mono font-black uppercase ${winner === 2 ? 'text-pink-400' : 'text-accent'}`}>
             {t('player_wins', lang, { n: winner })}
           </h3>
         </div>
