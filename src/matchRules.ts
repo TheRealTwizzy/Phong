@@ -1,5 +1,5 @@
 import { AIDifficulty, GameMode, MatchRules, RoomMatchConfig } from './types';
-import { soloCountsForRank, soloMuCap } from './rating';
+import { AI_DIFFICULTIES, soloCountsForRank, soloMuCap } from './rating';
 import { roomCountsForRank } from './venues';
 
 // Pre-match match rules, shared by client and server like profileRules.ts and
@@ -335,6 +335,10 @@ export const DEFAULT_ROOM_CONFIG: RoomMatchConfig = {
   // Off by default: a table nobody asked to be watched is not watched, and
   // a create_room from an old bundle or the invite flow says nothing here.
   spectators: false,
+  // No CPU by default, which is what keeps every existing caller — the invite
+  // flow, the queue, an older bundle, the test harness — making exactly the
+  // table it made before.
+  cpu: null,
 };
 
 /**
@@ -393,6 +397,17 @@ export function normalizeRoomConfig(
     // is no. The relay narrows it further: a venue that forbids watching
     // forces this false whatever the host asked for.
     spectators: raw.spectators === true,
+    // Whitelisted against the real rungs rather than coerced, for the reason
+    // `spectate_room`'s seat argument is strict enum membership and
+    // deliberately not `clampInt`: turning junk into the first legal value
+    // would seat a Rookie for a client that sent nonsense, and a match against
+    // an opponent nobody chose is worse than a refused config.
+    //
+    // `normalizeDifficulty` is not used here on purpose — it answers 'pro' for
+    // anything it does not recognise, which is right for a stored device
+    // setting (there must always be SOME difficulty) and wrong for a table,
+    // where "no CPU" is the ordinary state and has to survive a round trip.
+    cpu: AI_DIFFICULTIES.includes(raw.cpu as AIDifficulty) ? (raw.cpu as AIDifficulty) : null,
   };
 }
 

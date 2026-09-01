@@ -71,7 +71,7 @@ import {
   ReportCategory,
 } from './src/reportRules';
 import { APP_VERSION } from './src/version';
-import { Rating, newRating, winProbability } from './src/rating';
+import { Rating, aiRating, newRating, winProbability } from './src/rating';
 
 
 /**
@@ -216,6 +216,26 @@ function watcherBeside(room: Room, side: 0 | 1): WebSocket | null {
  */
 function sendMatchPrediction(room: Room): void {
   const [a, b] = room.players;
+  // A CPU table has odds too, and they are the ones the pre-match sheet has
+  // always shown for a solo match: the rung's anchor, adapted to this player.
+  // Sent so a WATCHER gets the same panel a duel's watcher gets — without it
+  // the one surface that says what the match is worth goes blank exactly when
+  // somebody sits down to watch it.
+  if (room.config.cpu) {
+    const human = a ?? b;
+    if (!human) return;
+    const mine = db.matchmakingRating(human.playerId) ?? newRating();
+    const p = winProbability(mine, aiRating(room.config.cpu, mine.mu));
+    const seat = a ? 0 : 1;
+    sendAll(viewersOf(room, seat), { type: 'match_prediction', winProbability: p });
+    // And the watcher on the CPU's side sees it from that side, which is what
+    // every other frame at this table already does for them.
+    sendAll(viewersOf(room, seat === 0 ? 1 : 0), {
+      type: 'match_prediction',
+      winProbability: 1 - p,
+    });
+    return;
+  }
   if (!a || !b) return;
   // Two ratings, not two profiles. `getProfile` is four queries and, for
   // anyone on the top rung, a full table scan for a ladder position nothing
@@ -308,6 +328,29 @@ function roomForCode(code: string): Room | null {
 const spectatorSeat = (slot: 0 | 1): TableSeat => (slot === 0 ? 2 : 3);
 
 /**
+ * Which playing seat the CPU is in, when the table has one.
+ *
+ * Derived rather than stored: it is whichever playing seat holds no human, so
+ * a host who swaps sides takes the CPU with them rather than landing on top of
+ * it, and there is no second field that can disagree with `players`.
+ *
+ * Seat 1 is the answer for an empty table too — a table with a CPU and nobody
+ * at all is on its way to being reaped, and the host seat is the one a
+ * newcomer takes.
+ */
+const cpuSeatOf = (room: Room): 0 | 1 => (room.players[0] ? 1 : 0);
+
+/**
+ * A stand-in for "something is in this seat" where the something is a machine.
+ *
+ * `swap_seat` asks whether a target seat is occupied and compares against
+ * null; a CPU is not a `PlayerSession` and never will be (see
+ * RoomMatchConfig.cpu), so it needs a non-null value to answer with that is
+ * obviously not a session.
+ */
+const CPU_HOLDS_SEAT = Object.freeze({ cpu: true });
+
+/**
  * Who is sitting where, told to each socket separately.
  *
  * Per-socket rather than broadcast because `yourSeat` differs by recipient —
@@ -317,9 +360,30 @@ const spectatorSeat = (slot: 0 | 1): TableSeat => (slot === 0 ? 2 : 3);
  * them which room they are in.
  */
 function broadcastTableState(room: Room): void {
+  // The CPU's chair, described the way Match History already describes a solo
+  // opponent — `AI-<difficulty>` / `AI (<difficulty>)`. `isLinkableId` matches
+  // neither `dev_` nor `bot-`, so that id is already refused as a tap target
+  // and nothing has to learn about it to stop opening a profile for a machine.
+  const cpuIdx = room.config.cpu ? cpuSeatOf(room) : null;
+  const playing = (i: 0 | 1): TableSeatInfo =>
+    cpuIdx === i && room.config.cpu
+      ? {
+          seat: i,
+          playerId: `AI-${room.config.cpu}`,
+          playerName: `AI (${room.config.cpu})`,
+          enabled: true,
+          occupant: 'cpu',
+        }
+      : {
+          seat: i,
+          playerId: room.players[i]?.playerId ?? null,
+          playerName: room.players[i]?.playerName ?? null,
+          enabled: true,
+          ...(room.players[i] ? { occupant: 'human' as const } : {}),
+        };
   const seats: TableSeatInfo[] = [
-    { seat: 0, playerId: room.players[0]?.playerId ?? null, playerName: room.players[0]?.playerName ?? null, enabled: true },
-    { seat: 1, playerId: room.players[1]?.playerId ?? null, playerName: room.players[1]?.playerName ?? null, enabled: true },
+    playing(0),
+    playing(1),
     { seat: 2, playerId: room.spectators[0]?.playerId ?? null, playerName: room.spectators[0]?.playerName ?? null, enabled: room.config.spectators },
     { seat: 3, playerId: room.spectators[1]?.playerId ?? null, playerName: room.spectators[1]?.playerName ?? null, enabled: room.config.spectators },
   ];
@@ -1464,8 +1528,13 @@ async function startServer() {
         id: room.id,
         hostName: room.players[0]?.playerName ?? null,
         hostId: room.players[0]?.playerId ?? null,
-        playerCount: room.players.filter(Boolean).length,
-        isFull: room.players.filter(Boolean).length >= 2,
+        // The CPU counts as an occupant, so a browsing player is not offered
+        // a table as "1/2, waiting" and then answered ROOM_FULL when they tap
+        // it. `cpu` rides along in `config` below, so a row can say WHAT it is
+        // full of — "Alice vs Cyber" is a table worth walking up to, and
+        // "Alice, 2/2" is one you skip.
+        playerCount: room.players.filter(Boolean).length + (room.config.cpu ? 1 : 0),
+        isFull: room.players.filter(Boolean).length + (room.config.cpu ? 1 : 0) >= 2,
         inPlay: room.inPlay,
         config: room.config,
         waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
@@ -2783,6 +2852,32 @@ async function startServer() {
           }
           const otherIdx: 0 | 1 = joinIdx === 0 ? 1 : 0;
 
+          // Taking a CPU's chair, which is the whole point of a listed CPU
+          // table: you play the machine until somebody takes its seat.
+          //
+          // Only BETWEEN matches. Mid-match the arrival is refused as full and
+          // the browser offers Watch instead — a human appearing on the far
+          // half of a rally in progress is a different match than the one
+          // either side agreed to, and the host's result is already being
+          // rated against a CPU.
+          //
+          // The eviction has to clear the pair state itself, because a CPU
+          // seat never passes through `vacateSeat` — nothing clears `scores`,
+          // `inPlay`, `matchOver`, `startRatings` or the departing seat's
+          // streaks. Leave it and the pair sit at a table stuck `matchOver` at
+          // the CPU match's final score, with a Start button that does nothing
+          // and no error to explain it.
+          if (room.config.cpu) {
+            if (room.inPlay && !room.matchOver) {
+              ws.send(
+                JSON.stringify({ type: 'error', code: 'ROOM_FULL', message: 'That table is mid-match — watch, or try again when it ends.' })
+              );
+              return;
+            }
+            room.config = { ...room.config, cpu: null };
+            resetTableForNextPair(room, joinIdx);
+          }
+
           // A PUBLIC table is one this player browsed to, so the bracket that
           // listed it applies to them as well as to its host. A PRIVATE table
           // is an invitation, and an invitation is not bracketed: two friends
@@ -3098,7 +3193,17 @@ async function startServer() {
           // Non-null, not non-live: a seat holding a socket that has died is
           // occupied until its close handler clears it, and treating it as
           // free would orphan the session sitting in it.
-          const occupied = toPlayer ? room.players[targetIdx] : room.spectators[targetIdx];
+          //
+          // A CPU seat counts as occupied even though it is not in `players`.
+          // Without this the host swapping onto it finds `players[1]` null,
+          // is not refused, and ends up sharing the chair: `playerIndex()`
+          // becomes 1, so every host-only guard — set_room_config,
+          // start_match, set_table_visibility — then refuses the only person
+          // at the table, the CPU cannot be removed, and the table is wedged.
+          const cpuSeat = room.config.cpu ? cpuSeatOf(room) : null;
+          const occupied = toPlayer
+            ? room.players[targetIdx] ?? (cpuSeat === targetIdx ? CPU_HOLDS_SEAT : null)
+            : room.spectators[targetIdx];
           if (occupied !== null) {
             ws.send(JSON.stringify({ type: 'error', code: 'SEAT_TAKEN', message: 'That seat is taken.' }));
             return;
@@ -3251,6 +3356,93 @@ async function startServer() {
           // would spend the players' bandwidth on somebody else's view.
           const mine = watcherBeside(room, me);
           if (mine) mine.send(JSON.stringify({ type: 'watched_ball', x, y }));
+        } else if (msg.type === 'cpu_frame' && currentRoomId) {
+          // Everything a WATCHER needs about a CPU table, in one frame from
+          // the host.
+          //
+          // Guarded on the TABLE having a CPU and on the sender being the
+          // human playing at it — deliberately not on the usual
+          // `playerIndex() !== null`, which is the natural thing to copy and
+          // is exploitable: in a real two-human duel, seat 0 could send this
+          // and inject a `ball_incoming` onto seat 1's live court, clearing
+          // their serve and replacing the ball so the point can never end.
+          // Guarded this way, the worst a forged frame can do is lie to a
+          // spectator about a match with no second player's rating in it.
+          const room = rooms.get(currentRoomId);
+          if (!room || !room.config.cpu) return;
+          const me = playerIndex();
+          if (me === null || room.players[me] === null) return;
+          const cpuIdx: 0 | 1 = me === 0 ? 1 : 0;
+          room.lastActive = Date.now();
+
+          // Bounded like every other gameplay stream. The stakes are lower
+          // here — nothing on the far side has a rating — but a NaN
+          // serializes as null and lands as 1 on a watcher's court, and
+          // `bound` is the habit rather than the exception.
+          const unit = (v: unknown): number => Math.max(0, Math.min(1, Number(v) || 0));
+          const hostPaddle = unit(msg.hostPaddle);
+          const cpuPaddle = unit(msg.cpuPaddle);
+          const rawBall = msg.ball;
+          const ball =
+            rawBall && (rawBall.side === 0 || rawBall.side === 1)
+              ? { side: rawBall.side as 0 | 1, x: unit(rawBall.x), y: unit(rawBall.y) }
+              : null;
+
+          // The relay's own copy of the score, for `spectator_sync` alone —
+          // somebody sitting down at 3-2 has to see 3-2. Held inside the
+          // room's winning score for the same reason applyMatchSync holds a
+          // synced one, and never echoed back: the host is authoritative for
+          // its own solo match and a `score_update` returning to it would
+          // fight the local scoring.
+          const cap = room.config.winningScore;
+          const rawScores = Array.isArray(msg.scores) ? msg.scores : [0, 0];
+          room.scores = [
+            clampInt(rawScores[0], 0, cap),
+            clampInt(rawScores[1], 0, cap),
+          ];
+          room.inPlay = msg.live === true;
+          room.matchOver = room.scores[me] >= cap || room.scores[cpuIdx] >= cap;
+
+          // Now the six frames, and the ONE rule that decides them: `watched_*`
+          // is RAW (a watcher draws that player's court in that player's own
+          // coordinates) and `opponent_*` is PRE-MIRRORED (it crosses the net).
+          // A stray `1 - x` either way is invisible against a centred fixture,
+          // which is why the suite that pins this uses an asymmetric one.
+          const watchHost = watcherBeside(room, me);
+          const watchCpu = watcherBeside(room, cpuIdx);
+          if (watchHost) {
+            watchHost.send(JSON.stringify({ type: 'watched_paddle', x: hostPaddle }));
+            watchHost.send(JSON.stringify({ type: 'opponent_paddle', x: 1 - cpuPaddle }));
+          }
+          if (watchCpu) {
+            watchCpu.send(JSON.stringify({ type: 'watched_paddle', x: cpuPaddle }));
+            watchCpu.send(JSON.stringify({ type: 'opponent_paddle', x: 1 - hostPaddle }));
+          }
+
+          // The ball is a STATE — which half it is on, or nowhere — rather
+          // than a crossing event, and that is what makes it correct by
+          // construction. The CPU's serve materialises inside its own half and
+          // the CPU's miss ends past its baseline: neither is a crossing, so a
+          // design that emitted `watched_ball_left` only on one would leave
+          // the watcher beside the CPU dead-reckoning a ghost ball off the
+          // bottom of the screen after every point.
+          const side = ball ? ball.side : null;
+          const tellWatcher = (
+            sock: WebSocket | null | undefined,
+            seat: 0 | 1
+          ): void => {
+            if (!sock) return;
+            if (side === seat && ball) {
+              sock.send(JSON.stringify({ type: 'watched_ball', x: ball.x, y: ball.y }));
+            } else {
+              sock.send(JSON.stringify({ type: 'watched_ball_left' }));
+              // The far half, in the SENDER's frame — the radar applies the
+              // head-to-head mirror itself, exactly as it does in a duel.
+              if (ball) sock.send(JSON.stringify({ type: 'opponent_ball', x: ball.x, y: ball.y }));
+            }
+          };
+          tellWatcher(watchHost, me);
+          tellWatcher(watchCpu, cpuIdx);
         } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
@@ -3428,6 +3620,11 @@ async function startServer() {
           // get past. Silent: the offer simply never arrives, which is the
           // case p2p.ts already falls back from.
           if (room.config.spectators) return;
+          // And a CPU table has no peer at all: the far half is simulated by
+          // the host's own client, so there is nothing on the other end of a
+          // DataChannel. The client does not offer one, but a client is a
+          // hint and the relay is the only signalling path.
+          if (room.config.cpu) return;
 
           const me = playerIndex() as 0 | 1;
           // Validates the payload and records what it advances of the
@@ -3457,11 +3654,21 @@ async function startServer() {
           room.lastActive = Date.now();
           // Host-only, both seated, the guest has readied, and nothing has
           // been played yet — rematches go through the two-vote handshake.
+          // The other playing seat is either a person who has said yes, or a
+          // CPU the host put there — and seating the CPU IS the yes, in the
+          // same way `seatQueuePair` treats queueing as one. That is why the
+          // CPU lives in `config` rather than in `ready`: a machine's consent
+          // written into the slot a person uses would be a forged token, and
+          // `set_room_config` clears that slot every time the host edits the
+          // terms, which would disarm Start with no error and nothing to press.
+          const oppIdx = 1;
+          const opponentReady = room.config.cpu
+            ? !room.players[oppIdx]
+            : !!room.players[oppIdx] && room.ready[oppIdx];
           const canStart =
             playerIndex() === 0 &&
             !!room.players[0] &&
-            !!room.players[1] &&
-            room.ready[1] &&
+            opponentReady &&
             !room.inPlay &&
             !room.matchOver;
           if (!canStart) return;
@@ -3512,8 +3719,16 @@ async function startServer() {
           if (voteSeat === null) return;
           room.rematchVotes[voteSeat] = true;
 
-          if (room.rematchVotes[0] && room.rematchVotes[1] && room.players[0] && room.players[1]) {
-            // Both agreed: fresh match, the other side opens this time.
+          // A CPU table has one voter, and without this the SECOND match at
+          // one can never start: the room stays matchOver at its final score
+          // forever, `point_scored` is refused, and every watcher sees a
+          // frozen scoreboard. Play Again is the most common thing a solo
+          // player does, so this is not an edge case.
+          const bothAgreed = room.config.cpu
+            ? !!room.players[0] && !room.players[1]
+            : room.rematchVotes[0] && room.rematchVotes[1] && !!room.players[0] && !!room.players[1];
+          if (bothAgreed) {
+            // Agreed: fresh match, the other side opens this time.
             startMatch(room, room.servingPlayer === 0 ? 1 : 0);
           } else {
             broadcast(room, { type: 'rematch_state', votes: room.rematchVotes });

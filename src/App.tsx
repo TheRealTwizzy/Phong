@@ -635,12 +635,23 @@ export default function App() {
   const [linkStatus, setLinkStatus] = useState<'relay' | 'connecting' | 'p2p'>('relay');
   const [p2pEnabled, setP2pEnabled] = useState<boolean>(true);
 
-  // The terms the CURRENT match is played on. A duel takes them from the room
-  // so both sides agree; every other mode takes them from the menu.
+  // The terms the CURRENT match is played on. A match at a TABLE takes them
+  // from the room so everyone at it agrees; every other match takes them from
+  // the menu.
+  //
+  // The condition is "a room config exists" rather than
+  // `mode === 'multiplayer'`, and the difference is the whole of solo-at-a-
+  // table. A CPU match keeps `mode: 'solo'` — the AI simulation, local
+  // scoring, `abandoningLiveSoloMatch` and the record payload are all gated on
+  // it, and 33 branches in this file would switch off together if it flipped —
+  // but the terms still belong to the room, because a watcher and the host
+  // have to be playing the same match. Convention §7 says never read
+  // `settings.winningScore` in match code; this extends that rule to
+  // solo-at-a-table rather than bending it.
   const activeConfig: RoomMatchConfig =
-    // `spectators: false` in the non-duel arm: a watching seat is a seat at a
-    // relay TABLE, and a solo, practice or split match has no room to sit in.
-    mode === 'multiplayer' && roomConfig
+    // `spectators: false` in the tableless arm: a watching seat is a seat at a
+    // relay TABLE, and a menu-started match has no room to sit in.
+    roomConfig
       ? spectating
         ? // A watcher sees the whole table, sonar and all — that is what
           // watching IS, and it is why the rooms where rating is on the line
@@ -650,8 +661,22 @@ export default function App() {
           // unrank a match on demand by asking a friend to sit down.
           { ...roomConfig, rules: { ...roomConfig.rules, opponentSonar: true } }
         : roomConfig
-      : { winningScore: settings.winningScore, rules: settings.rules, spectators: false };
-  const activeDifficulty: AIDifficulty = settings.difficulty;
+      : {
+          winningScore: settings.winningScore,
+          rules: settings.rules,
+          spectators: false,
+          cpu: null,
+        };
+  /**
+   * Which rung the AI on the far half is playing.
+   *
+   * From the TABLE when there is one, because the host chose it there and a
+   * watcher has to be told the same thing; from the device otherwise. Falls
+   * back to the stored setting rather than to a literal, so a table that
+   * somehow carries no CPU never silently becomes a different opponent than
+   * the pre-match sheet promised.
+   */
+  const activeDifficulty: AIDifficulty = activeConfig.cpu ?? settings.difficulty;
 
   /**
    * The two net indicators are suppressed for any match played WITH the
