@@ -34,19 +34,6 @@ export const PatchNotesSheet: React.FC<PatchNotesSheetProps> = ({
   build,
   stack,
 }) => {
-  const header = (
-    <div className="shrink-0 flex items-center gap-2.5 border-b border-line bg-surface-1 p-4">
-      <Newspaper className="h-5 w-5 text-accent" />
-      <div className="flex min-w-0 flex-col">
-        <h2 className="text-title truncate">{t('patch_notes_title', lang)}</h2>
-        <span id="patch-notes-build" className="font-mono text-[10px] text-ink-muted">
-          v{APP_VERSION}
-          {build ? ` · ${build}` : ''}
-        </span>
-      </div>
-    </div>
-  );
-
   return (
     <Sheet
       stack={stack}
@@ -56,7 +43,14 @@ export const PatchNotesSheet: React.FC<PatchNotesSheetProps> = ({
       onClose={onClose}
       size="lg"
       accent="accent"
-      header={header}
+      icon={<Newspaper className="h-5 w-5" />}
+      title={t('patch_notes_title', lang)}
+      subtitle={
+        <span id="patch-notes-build" className="font-mono">
+          v{APP_VERSION}
+          {build ? ` · ${build}` : ''}
+        </span>
+      }
       closeId="btn-close-patch-notes"
       closeLabel={t('close', lang)}
       bodyClassName="scroll-y p-4 flex flex-col gap-4"

@@ -18,6 +18,7 @@ import {
   ChevronRight,
   Newspaper,
   Flag,
+  ShieldCheck,
 } from 'lucide-react';
 
 // Every device and presentation preference, with no chrome of its own — so the
@@ -50,6 +51,7 @@ export interface SettingsPanelProps {
    */
   onOpenPatchNotes?: () => void;
   onOpenReport?: () => void;
+  onOpenLegal?: () => void;
   /** True when the newest patch note is one this device has not opened. */
   patchNotesUnread?: boolean;
 }
@@ -61,6 +63,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   indicatorsLockedBySonar = false,
   onOpenPatchNotes,
   onOpenReport,
+  onOpenLegal,
   patchNotesUnread = false,
 }) => {
   const lang = settings.language || 'en';
@@ -526,7 +529,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           panel — every other control here mutates `settings` in place — so it
           is built as a plain button carrying the same card chrome the sections
           above use, rather than a new primitive nothing else would reuse. */}
-      {(onOpenPatchNotes || onOpenReport) && (
+      {(onOpenPatchNotes || onOpenReport || onOpenLegal) && (
         <div className="flex flex-col gap-2 rounded-2xl border border-line bg-surface-2/60 p-3.5">
           {onOpenPatchNotes && (
             <button
@@ -549,6 +552,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 <span className="font-mono text-[10px] text-ink-muted">v{APP_VERSION}</span>
                 <ChevronRight className="h-4 w-4 text-ink-muted" />
               </span>
+            </button>
+          )}
+          {onOpenLegal && (
+            <button
+              id="btn-open-legal"
+              onClick={onOpenLegal}
+              className="flex items-center justify-between gap-2 rounded-ctl px-1 py-1.5 text-left transition-colors hover:bg-surface-3"
+            >
+              <span className="flex min-w-0 items-center gap-1.5 text-xs font-mono font-bold text-ink">
+                <ShieldCheck className="h-4 w-4 shrink-0 text-accent" />
+                <span className="truncate">{t('legal_title', lang)}</span>
+              </span>
+              <ChevronRight className="h-4 w-4 shrink-0 text-ink-muted" />
             </button>
           )}
           {onOpenReport && (

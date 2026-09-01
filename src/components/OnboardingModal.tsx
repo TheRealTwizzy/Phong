@@ -447,6 +447,19 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           {t('lock_in_start', language)}
         </button>
 
+        {/* Disclosure, not consent — and the distinction is the reason this is
+            a line of text rather than a banner with a button.
+
+            The device cookie is already set by the time this modal is on
+            screen: it is established by the document NAVIGATION, before a line
+            of JS runs, because anything later races itself and mints three
+            identities on a slow connection (CLAUDE.md §5). So there is nothing
+            here to agree to — the honest thing is to say what happened and
+            where the detail is, which is one tap away in Settings. */}
+        <p id="onboarding-privacy-note" className="text-[10px] font-mono text-ink-muted text-center leading-relaxed">
+          {t('onboarding_privacy_note', language)}
+        </p>
+
         {/* Restore an existing profile instead (recovery code bypass) */}
         <div className="border-t border-line/80 pt-3 flex flex-col gap-2">
           <button

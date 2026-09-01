@@ -80,7 +80,8 @@ await page.click('#menu-nav-settings');
 await page.waitForSelector('#btn-open-patch-notes', { timeout: 8000 })
   .catch(() => fail('the Settings page has no patch-notes row'));
 if (!(await page.$('#btn-open-report'))) fail('the Settings page has no report row');
-ok('both rows are on the Settings page');
+if (!(await page.$('#btn-open-legal'))) fail('the Settings page has no privacy/terms row');
+ok('all three rows are on the Settings page');
 
 // ---- 1b. THE GATE: neither row is reachable from a live court ------------
 // SettingsPanel is the body of the menu's Settings PAGE *and* of the in-match
@@ -107,7 +108,8 @@ await gated.waitForSelector('#toggle-master-sound', { timeout: 5000 })
   .catch(() => fail('the in-match settings sheet never rendered its panel'));
 if (await gated.$('#btn-open-patch-notes')) fail('patch notes were offered from a live court');
 if (await gated.$('#btn-open-report')) fail('the report form was offered from a live court');
-ok('neither row is reachable from a live court');
+if (await gated.$('#btn-open-legal')) fail('privacy/terms were offered from a live court');
+ok('none of the three rows is reachable from a live court');
 await gated.context().close();
 
 // ---- 3a. The dot is there before the notes have been opened --------------
@@ -198,6 +200,36 @@ const bad = await page.evaluate(() =>
 );
 if (bad !== 400) fail(`an unknown category answered ${bad} rather than 400`);
 ok('an unknown category is refused');
+
+// ---- 7. Privacy and terms exist, and reach a person ---------------------
+// A privacy notice is relied on, so what a browser has to answer is that it
+// is REACHABLE and that its contact section leads somewhere. Whether its
+// claims are true of the code is not a thing a browser can check — that is
+// tests/legal.test.ts, which reads the server source.
+await page.click('#btn-close-report');
+await page.waitForSelector('#report-sheet-card', { state: 'detached', timeout: 5000 });
+await page.click('#btn-open-legal');
+await page.waitForSelector('#legal-sheet-card', { timeout: 5000 });
+for (const id of ['#legal-legal_privacy', '#legal-legal_terms', '#legal-contact']) {
+  if (!(await page.$(id))) fail(`${id} is missing from the privacy sheet`);
+}
+await assertReachable(page, '#btn-legal-done', 'the privacy/terms CTA');
+ok('privacy, terms and a contact section are all present and reachable');
+
+// The contact section must lead SOMEWHERE. With no address configured it
+// offers the report form, which is a real channel; with one it is a mailto.
+// A section that names neither would be the failure worth catching.
+const hasEmail = await page.$('#legal-contact-email');
+const hasForm = await page.$('#btn-legal-open-report');
+if (!hasEmail && !hasForm) fail('the contact section offers no way to reach anybody');
+if (hasForm) {
+  await page.click('#btn-legal-open-report');
+  await page.waitForSelector('#report-sheet-card', { timeout: 5000 })
+    .catch(() => fail('the contact section did not open the report form'));
+  ok('with no address configured, contact opens the report form');
+} else {
+  ok('contact offers a mail address');
+}
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 console.log('\nALL REPORT / PATCH-NOTES E2E CHECKS PASSED');

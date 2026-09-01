@@ -95,13 +95,6 @@ export const ReportSheet: React.FC<ReportSheetProps> = ({
     }
   };
 
-  const header = (
-    <div className="shrink-0 flex items-center gap-2.5 border-b border-line bg-surface-1 p-4">
-      <Flag className="h-5 w-5 text-accent" />
-      <h2 className="text-title truncate">{t('report_title', lang)}</h2>
-    </div>
-  );
-
   return (
     <Sheet
       stack={stack}
@@ -111,7 +104,8 @@ export const ReportSheet: React.FC<ReportSheetProps> = ({
       onClose={onClose}
       size="lg"
       accent="accent"
-      header={header}
+      icon={<Flag className="h-5 w-5" />}
+      title={t('report_title', lang)}
       closeId="btn-close-report"
       closeLabel={t('close', lang)}
       bodyClassName="scroll-y p-4 flex flex-col gap-3.5"

@@ -86,6 +86,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { SettingsPanel } from './components/SettingsPanel';
 import { PatchNotesSheet } from './components/PatchNotesSheet';
 import { ReportSheet } from './components/ReportSheet';
+import { LegalSheet } from './components/LegalSheet';
 import { latestPatchNote } from './patchNotes';
 import { classifyDevice } from './device';
 import { MultiplayerLobby } from './components/MultiplayerLobby';
@@ -318,6 +319,7 @@ export default function App() {
   const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
   const [isPatchNotesOpen, setIsPatchNotesOpen] = useState<boolean>(false);
   const [isReportOpen, setIsReportOpen] = useState<boolean>(false);
+  const [isLegalOpen, setIsLegalOpen] = useState<boolean>(false);
   /**
    * The newest version this browser has actually opened the notes for.
    *
@@ -378,6 +380,9 @@ export default function App() {
         isMultiplayerOpen && 'lobby',
         isSettingsOpen && 'settings',
         isPatchNotesOpen && 'patch-notes',
+        isLegalOpen && 'legal',
+        // Report sits ABOVE legal deliberately: the contact section opens it,
+        // so that pair is the one that actually stacks here.
         isReportOpen && 'report',
         isProfileOpen && 'profile',
         publicProfileId && 'public-profile',
@@ -387,6 +392,7 @@ export default function App() {
       isMultiplayerOpen,
       isSettingsOpen,
       isPatchNotesOpen,
+      isLegalOpen,
       isReportOpen,
       isProfileOpen,
       publicProfileId,
@@ -3938,6 +3944,7 @@ export default function App() {
                   indicatorsLockedBySonar={!indicatorsAllowed}
                   onOpenPatchNotes={openPatchNotes}
                   onOpenReport={() => setIsReportOpen(true)}
+                  onOpenLegal={() => setIsLegalOpen(true)}
                   patchNotesUnread={patchNotesUnread}
                 />
               ),
@@ -4469,6 +4476,15 @@ export default function App() {
             roomId: roomId ?? null,
             lastMatchKey: matchKeyRef.current || null,
           }}
+        />
+
+        {/* What is stored, what is expected, and how to reach a person. */}
+        <LegalSheet
+          stack={stackOf('legal')}
+          isOpen={isLegalOpen}
+          onClose={() => setIsLegalOpen(false)}
+          lang={currentLanguage}
+          onOpenReport={() => setIsReportOpen(true)}
         />
 
         {/* 2-Phone Multiplayer Lobby */}
