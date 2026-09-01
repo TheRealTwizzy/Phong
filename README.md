@@ -1,16 +1,36 @@
 # Phong
 
-A blind half-court Pong for the web. Each player sees only their own half of the court — the glowing top edge of the screen is the net, and when the ball crosses it, it leaves your screen and appears on your opponent's. Place two phones top-to-top on a table, connect them with a 4-letter room code, and the ball physically travels across both screens.
+A blind half-court Pong for the web. You only see your own half — the glowing top edge of your screen is the net, and when the ball crosses it, it leaves your screen and appears on your opponent's. Put two phones top-to-top on a table, connect them with a 4-character code, and the ball physically travels across both screens.
 
-The main menu offers four modes: **Solo AI** (adaptive Rookie / Pro / Cyber opponent on the hidden half), **Practice Wall** (fully solo — the net becomes a return line that bounces every ball back, ball never leaves your screen), **Split Screen** (2 players on one device, classic full court with the net across the middle — offline and unranked), and the **2-Phone Duel**. Match settings are locked in before each match starts: difficulty, points to win, and a **match-rules panel** — paddle size, ball size, min/max ball speed, serve angle and power, opponent sonar, telemetry, quick chat, and a PvP auto-serve timer. Changing the *physics* still earns XP but plays the match **unranked**, so the tier ladder always means one ruleset. Serving is aimed: push up from your paddle to set direction and power, or just tap. **The paddle is an instrument, not a wall** — swing through the ball and its motion couples into the return, hardest when you catch the ball off the edge of the paddle and softest dead-centre, adding angle, pace and **spin**. Spin doesn't bend the flight — it rides the ball and spends itself on impacts, kicking the ball off the side walls and off paddles at angles the mirror wouldn't give you, and it survives the trip across the net.
+**Smartphones only.** Two phones laid top-to-top is the game; a desktop cannot play it meaningfully and a tablet is the wrong shape, so the gate reads the platform the browser reports and turns everything else away with a QR code to carry the link to a phone.
 
-Private matches connect the two phones **directly over WebRTC** (peer-to-peer DataChannels) with the server relay as automatic fallback — the in-game badge shows `P2P` or `RELAY`. Profiles, ELO, and match history persist in SQLite on the server, keyed to a **server-issued device identity** (signed cookie — one profile per device, no login) with a recovery code to move your profile to a new phone.
+## Where you play
 
-The AI ladder is **rating-based and adaptive**: each difficulty is an anchor rating that slides part-way (60%) toward your own hidden skill, so Pro stays a genuine coin flip whatever your level and Cyber stays a stretch that becomes reachable as you improve — while Rookie always stays a warm-up. Skill is tracked with a **TrueSkill-style rating** (skill μ + uncertainty σ): the game predicts your odds before every match, scales XP by how surprising the result was, and shows a **tier badge** rather than a raw number. Solo play levels your profile and moves your hidden rating, but only 2-phone matches move your rank.
+The menu is a **place**, not a list of modes. You walk into a building, then pick a room inside it:
 
-Progression is server-owned: daily missions live in the database on a UTC day key and are claimed by id, and achievements that mean "you beat something" pay out scaled by the same prediction the match XP uses. Daily missions are a **dealt hand** — five regular plus one punishing **elite**, with 5 regular and 1 elite reroll a day, all of it resetting at UTC midnight. Finish an elite once and it banks a **permanent theme unlock** that outlives the day. Achievements form a **branching tree** across five lines of play, and the tree is the progression gate: Pro unlocks by beating Rookie, Cyber by beating Pro, longer matches by building a career. Deep rungs stay hidden until you reach them. Every player locks in a **unique username** on first arrival (case-insensitive, held for 365 days per change) and can upload an **avatar** (auto-cropped to 256×256). Tap any username — leaderboard, match history, lobby, or mid-match — to view that player's public profile.
+- **SOLO AI** — five rungs (Rookie, Pro, Elite, Cyber, Chaos), each one a rating anchor rather than a parameter set. Each slides part-way toward your own hidden skill, so Pro stays a genuine coin flip whatever your level while Rookie stays a warm-up. The ladder is walked, not jumped: Pro opens by beating Rookie, and Chaos by ten Cyber wins at Grandmaster.
+- **PVP** — skill brackets, gated at **both** ends (a Legend may not drop into BEGINNER; a bracket with only a floor is one a veteran farms). Inside a room you sit at a **table**: four seats, two playing and two watching. Casual is ungated and deliberately does **not** move the visible ladder — play for the game, not the rank.
+- **TRAINING** — the **Practice Wall** (the net becomes a return line and the ball never leaves your screen) and **Split Screen** (two players, one device, a full court with the net across the middle).
 
-> **Note:** the next deploy of this version performs a **one-time player wipe** (`wipe_v2`) — the game relaunches with 0 players; bots return later. `npm run db:reset -- --yes` (server stopped) is the manual equivalent.
+There is also a **ranked queue**: it holds a 45–55% win-chance target for the first thirty seconds and widens to 20–80 by three minutes, because "never match outside a fair band" and "always find somebody" cannot both be true on a small server.
+
+## How a match works
+
+Everything is computed in normalized `[0, 1]` court coordinates, so any two screens agree regardless of pixels. When the ball exits across the net the **server** applies one transform — mirror `x`, negate `vx`, send `vy` downward, flip spin — and delivers it to the other phone as `ball_incoming`, so the two clients can never disagree about it.
+
+**The paddle is an instrument, not a wall.** Swing through the ball and its motion couples into the return — hardest off the edge, softest dead-centre — adding angle, pace and **spin**. Spin does not bend the flight: it rides the ball and spends itself on impacts, kicking off side walls and paddles at angles the mirror would not give you, and it survives the trip across the net. Serving is aimed: your first finger is the paddle, a second one is a joystick, and a pull is a slingshot — the ball goes where you aimed either way.
+
+Private matches connect the two phones **directly over WebRTC**, with the relay as automatic fallback; the in-game badge shows `P2P` or `RELAY`.
+
+## Progression
+
+Two separate currencies that never substitute for each other. **XP and levels** come from every match — solo included — and never go down. **Skill tier** is a TrueSkill-style rating (μ with an uncertainty σ) shown as a badge rather than a number, moved by PvP and by solo at a difficulty you had to earn, and capped per rung so farming one converges and stops. The game predicts your odds before every match and scales XP by how surprising the result was.
+
+Beyond that: daily tasks dealt as a hand of four, a branching tree of 56 achievements across eight lines of play (three of them concealed until you stumble into them), and twenty cosmetics that retheme the **whole app** rather than the court.
+
+## Accounts
+
+There is no login. The server issues each browser a signed cookie on first page load and mints a profile behind it; you pick a unique username once, and onboarding ends by showing you a **recovery code** — the only thing that reunites you with your account from a browser this one cannot reach. One account has one live device at a time. You can delete your account, completely, from the Profile modal.
 
 ## Quick start
 
@@ -19,23 +39,29 @@ npm install
 npm run dev        # http://localhost:3000 — one process serves the app and the WebSocket relay
 ```
 
-Open two browser windows, create a room in one (2-Phone mode), join with the code in the other.
+Open two browser windows, create a table in one, join with the code in the other.
 
 | Command | What it does |
 |---|---|
 | `npm run dev` | Dev server with hot reload (Express + Vite middleware + `ws`, one port) |
-| `npm run build` | Client bundle via Vite + server bundle via esbuild, both into `dist/` |
+| `npm run build` | Client bundle via Vite + server, admin and moderation bundles via esbuild, into `dist/` |
 | `npm start` | Run the production build (`node dist/server.cjs`) |
 | `npm run lint` | TypeScript typecheck (`tsc --noEmit`) |
-| `npm test` | Vitest unit tests (physics, net transform, database) |
-| `node scripts/load-test.mjs` | Load test: N concurrent matches against the relay |
+| `npm test` | Vitest — physics, rating, the relay's room rules, the database, the protocol |
+| `npm run test:e2e` | 22 browser suites against a production build (run `npm run build` first) |
+| `npm run db:backup` | Consistent snapshot via `VACUUM INTO`, verified and pruned |
+| `npm run admin` | Read-only support CLI (recovery codes) |
+| `npm run moderate` | The one that writes: clear an avatar, rename an account, read reports |
+| `node scripts/load-test.mjs 150 20 ws://127.0.0.1:3000/ws` | Load test: N concurrent matches against the relay |
 
-Environment variables (see `.env.example`): `PORT` (default 3000), `DATA_DIR` (default `./data` — the SQLite database lives there), and optional `TURN_URL`/`TURN_STATIC_SECRET` for the P2P TURN relay.
+Environment variables (see `.env.example`): `PORT` (default 3000), `DATA_DIR` (default `./data` — the SQLite database lives there), optional `BUILD_ID`, and optional `TURN_URL`/`TURN_STATIC_SECRET` for the P2P TURN relay.
 
 ## Deploying
 
-Primary path: **your own VPS/KVM** via `docker-compose.yml` — the app, Caddy with automatic HTTPS for your domain, and an optional TURN relay, in three commands. A `render.yaml` blueprint for [Render](https://render.com) is included as an alternative. See [DEPLOYMENT.md](DEPLOYMENT.md) for the runbook (DNS, firewall, backups) and [DEVELOPMENT.md](DEVELOPMENT.md) for testing on real phones (HTTPS matters).
+One Node service, one port, WebSockets on the same listener, and **single-instance by design** — rooms and the matchmaking queue live in process memory. Primary path: a VPS/KVM via `docker-compose.yml` (the app, Caddy with automatic HTTPS, an optional TURN relay), or Dokploy building the `Dockerfile`. A `render.yaml` blueprint is included as an alternative.
 
-## How it works
+Player data is one SQLite file, so **mounting a volume at `DATA_DIR` is mandatory** and backups are part of deploying. See [DEPLOYMENT.md](DEPLOYMENT.md) for the runbook and the current capacity measurement, and [DEVELOPMENT.md](DEVELOPMENT.md) for testing on real phones (HTTPS matters).
 
-Everything is computed in normalized `[0, 1]` court coordinates so any two screens agree. When the ball exits across the net, the server applies one transform — mirror `x`, negate `vx`, send `vy` downward, flip spin — and delivers it to the opponent as `ball_incoming`. Full architecture notes live in [CLAUDE.md](CLAUDE.md).
+## Reading further
+
+[CLAUDE.md](CLAUDE.md) is the working architecture guide — what the code does and, more usefully, why, including the bugs that shaped each decision. [TESTING.md](TESTING.md) covers the two test layers and the invariants they hold.

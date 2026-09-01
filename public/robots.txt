@@ -1,0 +1,6 @@
+# The game itself is a single page and there is nothing under it to crawl.
+# The API is not content: /api/leaderboard and /api/profile/:id are public
+# reads, and a crawler walking them is load with no reader on the other end.
+User-agent: *
+Allow: /$
+Disallow: /api/

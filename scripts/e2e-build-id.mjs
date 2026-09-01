@@ -59,7 +59,14 @@ function stageDeployment(label, mutate) {
 }
 
 /** Boot that copy and ask it who it is. */
-async function buildIdOf(dir, env = {}) {
+/**
+ * Run a staged deployment and ask it something, then shut it down.
+ *
+ * `buildIdOf` is the thin wrapper the id cases use; `probe` exists because
+ * what a deployment SERVES is the same question as what it reports, and both
+ * need a live server on a staged copy.
+ */
+async function probe(dir, env, ask) {
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-build-data-'));
   temps.push(dataDir);
@@ -80,8 +87,8 @@ async function buildIdOf(dir, env = {}) {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       if (srv.exitCode !== null) throw new Error(`server exited early (code ${srv.exitCode})`);
-      const body = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()).catch(() => null);
-      if (body?.build) return body.build;
+      const ready = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()).catch(() => null);
+      if (ready?.build) return await ask(`http://127.0.0.1:${port}`, ready);
       await new Promise((r) => setTimeout(r, 150));
     }
     throw new Error('server never reported a build id');
@@ -91,6 +98,8 @@ async function buildIdOf(dir, env = {}) {
     await Promise.race([gone, new Promise((r) => setTimeout(r, 5000))]);
   }
 }
+
+const buildIdOf = (dir, env = {}) => probe(dir, env, (_base, health) => health.build);
 
 console.log('Build identity: what changes it, and what must not');
 
@@ -130,6 +139,43 @@ const hashed = await buildIdOf(pristine, { BUILD_ID: 'v1.2.3-some-image-tag' });
 if (!/^[0-9a-f]{12}$/.test(hashed)) fail(`a free-form BUILD_ID was not hashed into shape: ${hashed}`);
 if (hashed === first) fail('a free-form BUILD_ID was ignored');
 ok('BUILD_ID overrides the artifacts, verbatim when well-formed and hashed when not');
+
+// 5. What a deployment SERVES, which is the other half of what it reports.
+//
+// dist/ is not all client files: `server.cjs.map` sits in it carrying
+// `sourcesContent`, so mounting the directory published all 3,000 lines of
+// server.ts plus server/auth.ts and server/db.ts — the cookie HMAC
+// construction, the exact placement of every session gate — as a plain GET,
+// on every deployment path. The fix was to serve only /assets.
+//
+// That fix became easy to undo the moment a public/ dir existed: four root
+// files a browser asks for by name now have to be served, and the obvious way
+// to do it is to mount the directory. This is what makes that obvious way go
+// red. It runs against a STAGED copy, so it is about the built artifact rather
+// than about a dev server's middleware.
+await probe(pristine, {}, async (base) => {
+  for (const file of ['favicon.svg', 'og.svg', 'manifest.webmanifest', 'robots.txt']) {
+    const res = await fetch(`${base}/${file}`);
+    const body = await res.text();
+    if (!res.ok) fail(`/${file} answered ${res.status}`);
+    if (body.startsWith('<!doctype html')) fail(`/${file} fell through to the SPA handler`);
+  }
+  ok('the four named root files are served as themselves');
+
+  // The build outputs must NOT be. They fall through to index.html rather
+  // than 404ing, which is the SPA handler doing its job — what matters is
+  // that the file's own bytes never come back.
+  for (const secret of ['server.cjs.map', 'server.cjs', 'admin.cjs', 'moderate.cjs']) {
+    const body = await fetch(`${base}/${secret}`).then((r) => r.text());
+    if (!body.startsWith('<!doctype html')) {
+      fail(`/${secret} served ${body.length} bytes of the build output itself`);
+    }
+    if (body.includes('sourcesContent') || body.includes('requireActiveSession')) {
+      fail(`/${secret} leaked server source`);
+    }
+  }
+  ok('no build output is reachable — source map, server, admin or moderate');
+});
 
 for (const dir of temps) fs.rmSync(dir, { recursive: true, force: true });
 console.log('\nBUILD IDENTITY CHECKS PASSED');

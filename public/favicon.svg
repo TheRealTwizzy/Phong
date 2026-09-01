@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Phong">
+  <rect width="64" height="64" rx="14" fill="#090d16"/>
+  <!-- The net: the top edge of your own screen, which is the whole game. -->
+  <rect x="8" y="21" width="48" height="2.5" rx="1.25" fill="#22d3ee" opacity="0.85"/>
+  <circle cx="38" cy="34" r="4.5" fill="#f8fafc"/>
+  <!-- Your paddle, on your half. The other half is not drawn, deliberately. -->
+  <rect x="18" y="47" width="28" height="5" rx="2.5" fill="#22d3ee"/>
+</svg>

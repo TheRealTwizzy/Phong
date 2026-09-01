@@ -43,6 +43,13 @@ import {
   countReturn,
 } from './server/room';
 import { validateAvatarPng } from './server/image';
+import {
+  createRateLimit,
+  limitSpent,
+  noteAttempt,
+  sweepExpired,
+  RateLimitState,
+} from './server/rateLimit';
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
@@ -57,6 +64,13 @@ import {
   roomsOf,
 } from './src/venues';
 import { validateUsername } from './src/profileRules';
+import {
+  REPORTS_PER_DAY,
+  REPORT_CATEGORIES,
+  REPORT_TEXT_MIN,
+  ReportCategory,
+} from './src/reportRules';
+import { APP_VERSION } from './src/version';
 import { Rating, newRating, winProbability } from './src/rating';
 
 
@@ -448,6 +462,9 @@ function queueCandidate(entry: QueueEntry): Candidate | null {
  * `game_start` and runs when each player actually reaches the court.
  */
 function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
+  // A pairing, not a join. The gap between `queue:join` and this one is the
+  // question the queue is always asked: is anybody there to play?
+  db.bumpCounter('queue:paired');
   const code = mintRoomCode();
   if (!code) return; // absurd, but never overwrite a live table or a live key
 
@@ -1141,10 +1158,106 @@ async function startServer() {
     if (req.path.startsWith('/api')) return next(); // its own mount, below
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (!String(req.headers.accept || '').includes('text/html')) return next();
+    // The top of the funnel: somebody opened the game. Everything below is a
+    // fraction of this number, which is what makes the rest legible.
+    db.bumpCounter('visit');
     return deviceIdentity(req, res, next);
   });
 
   app.use('/api', deviceIdentity, sessionIdentity);
+
+  // -------------------------------------------------------------------------
+  // Rate limits. The rules live in server/rateLimit.ts, which is pure and
+  // unit-tested; this is the express wiring and the calibration.
+  //
+  // Keyed on the DEVICE and the IP together, and the IP is what actually binds
+  // here — a caller with no cookie is handed a NEW device id by
+  // `deviceIdentity` on every request, so the device key cannot see a burst
+  // from one. It is kept anyway because it is the half that survives a shared
+  // NAT, where one IP is a building. See the `trust proxy` note above for why
+  // req.ip is a hop count and not `true`: with `true` it is the client's own
+  // X-Forwarded-For entry, which is an unlimited allowance.
+  const limitKeysFor = (req: express.Request): string[] => [`d:${req.deviceId}`, `i:${req.ip}`];
+
+  /**
+   * Requests that originate ON THIS HOST are not counted.
+   *
+   * Not a convenience: it is what keeps the ceilings meaningful. Every test in
+   * this repo drives a real server from 127.0.0.1 — `tests/duelRecord.test.ts`
+   * alone onboards 87 accounts in about twenty seconds — and that is the exact
+   * shape of the attack. No single number can permit it and refuse an
+   * attacker, so a ceiling loose enough for the harness would be decoration.
+   *
+   * Exempting loopback is sound because a caller that can reach this process
+   * from the same host already has the host, and every deployment path here
+   * puts a proxy in front (DEPLOYMENT.md): behind Traefik or Caddy the socket
+   * peer is the proxy's container address and `req.ip` resolves to the real
+   * client through the one trusted hop, so a remote player is never loopback.
+   *
+   * It does mean the browser suites never exercise the 429, so the coverage
+   * has to be deliberate rather than incidental: the rules are unit-tested in
+   * `server/rateLimit.ts`, and `tests/rateLimit.test.ts` drives a real route
+   * past its ceiling with an `X-Forwarded-For`, which the single trusted hop
+   * turns into a non-loopback `req.ip`.
+   */
+  const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+  const isLocalCaller = (req: express.Request): boolean => LOOPBACK.has(String(req.ip || ''));
+
+  /**
+   * Count every REQUEST, not every failure.
+   *
+   * The sign-in limiter below counts failures, because a correct code is not
+   * an attack however often it is presented. These routes are the opposite: a
+   * SUCCESSFUL call is the one that costs a row or a username, so counting
+   * failures alone would leave the thing being defended undefended.
+   */
+  const limited =
+    (state: RateLimitState) =>
+    (req: express.Request, res: express.Response, next: express.NextFunction): void => {
+      if (isLocalCaller(req)) {
+        next();
+        return;
+      }
+      const now = Date.now();
+      const keys = limitKeysFor(req);
+      if (limitSpent(state, keys, now)) {
+        res.status(429).json({ error: 'TOO_MANY_REQUESTS' });
+        return;
+      }
+      noteAttempt(state, keys, now);
+      next();
+    };
+
+  const MINUTE = 60 * 1000;
+  /**
+   * Each ceiling is set against what ONE PLAYER does, with room for a bad
+   * connection retrying, and nothing else. The harness is not a consideration
+   * here — it is exempt as loopback — which is what lets these be tight
+   * enough to matter rather than loose enough to be decoration.
+   */
+  // A page load mints one session and a reload mints another. Ten a minute is
+  // a player mashing refresh; a hundred is a script making a players row per
+  // call.
+  const sessionLimit = createRateLimit(MINUTE, 20);
+  // Onboarding happens once per account, ever. This allowance is for somebody
+  // retrying a name that was taken, not for a script walking a dictionary —
+  // and an initialized row is never pruned, so every call it permits is
+  // permanent.
+  const onboardLimit = createRateLimit(10 * MINUTE, 10);
+  // The picker checks as the player types, debounced, so this has to tolerate
+  // real typing while refusing enumeration of the account namespace.
+  const usernameCheckLimit = createRateLimit(MINUTE, 40);
+  // 512KB of BLOB per call, and a player changes their avatar approximately
+  // never.
+  const avatarLimit = createRateLimit(10 * MINUTE, 10);
+
+  // Bounded, for the reason sweepExpired documents.
+  setInterval(() => {
+    const now = Date.now();
+    for (const state of [sessionLimit, onboardLimit, usernameCheckLimit, avatarLimit]) {
+      sweepExpired(state, now);
+    }
+  }, 10 * MINUTE).unref?.();
 
   // Health check
   app.get('/api/health', (req, res) => {
@@ -1159,7 +1272,7 @@ async function startServer() {
       console.error('[health] datastore unreachable:', e?.message);
       return res.status(503).json({ status: 'degraded', build: buildId() });
     }
-    res.json({ status: 'ok', activeRooms: rooms.size, build: buildId() });
+    res.json({ status: 'ok', activeRooms: rooms.size, build: buildId(), version: APP_VERSION });
   });
 
   // ---- Session: which one device is holding this account right now --------
@@ -1190,7 +1303,7 @@ async function startServer() {
   // Take the account for this browser. Called on every load, and after any
   // status the client cannot play under. A device that was transferred away
   // cannot start a session at all — it has no account to start one on.
-  app.post('/api/session', (req, res) => {
+  app.post('/api/session', limited(sessionLimit), (req, res) => {
     try {
       if (req.session!.status === 'released') {
         return res.status(409).json({ error: 'DEVICE_RELEASED', sessionStatus: 'released', build: buildId() });
@@ -1413,10 +1526,15 @@ async function startServer() {
 
   // First-arrival onboarding: claim a unique username (starts the 365-day
   // rename lock). One-shot per profile.
-  app.post('/api/profile/initialize', requireActiveSession, (req, res) => {
+  app.post('/api/profile/initialize', requireActiveSession, limited(onboardLimit), (req, res) => {
     try {
       const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
       const result = db.initializeProfile(req.deviceId!, username);
+      // Counted on SUCCESS only. A refused name is a player still trying, and
+      // folding those in would make the drop-off between visiting and
+      // onboarding look smaller than it is — which is the one number this
+      // whole table exists to show honestly.
+      if (result.ok) db.bumpCounter('onboarded');
       if (!result.ok) {
         const status = result.code === 'USERNAME_INVALID' ? 400 : 409;
         return res.status(status).json({ error: result.code });
@@ -1428,7 +1546,7 @@ async function startServer() {
   });
 
   // Live availability probe for the onboarding / rename forms.
-  app.get('/api/username-check', (req, res) => {
+  app.get('/api/username-check', limited(usernameCheckLimit), (req, res) => {
     try {
       const u = typeof req.query.u === 'string' ? req.query.u.trim() : '';
       const check = validateUsername(u);
@@ -1494,6 +1612,7 @@ async function startServer() {
   app.post(
     '/api/profile/me/avatar',
     requireActiveSession,
+    limited(avatarLimit),
     express.raw({ type: 'image/png', limit: '600kb' }),
     (req, res) => {
       try {
@@ -1953,6 +2072,16 @@ async function startServer() {
       }
 
       const result = db.recordMatch(payload, context);
+      // Counted once per match rather than once per REPORT: the same match
+      // legitimately arrives up to three times (relay, client POST, on-device
+      // replay), and the ledger is what tells them apart. Without this guard
+      // the funnel would report roughly double the duels actually played.
+      if (!result.alreadyRecorded) {
+        db.bumpCounter(`match:${payload.mode}`);
+        if (payload.mode === 'solo' && payload.difficulty) {
+          db.bumpCounter(`match:solo:${normalizeDifficulty(payload.difficulty)}`);
+        }
+      }
       res.json(result);
     } catch (e: any) {
       serverError(res, e);
@@ -2009,6 +2138,62 @@ async function startServer() {
       });
       if (!out.ok) return res.status(400).json({ error: 'BAD_REQUEST' });
       res.json({ modeStats: out.modeStats });
+    } catch (e: any) {
+      serverError(res, e);
+    }
+  });
+
+  /**
+   * Tell us what went wrong.
+   *
+   * Behind `requireActiveSession` like everything else that writes
+   * (convention §8), and behind an initialized profile, because a report with
+   * no account behind it is one nobody can follow up.
+   *
+   * The allowance is counted from the TABLE rather than from memory, unlike
+   * the sign-in limiter: an in-memory counter is reset by every deploy, and a
+   * deploy is exactly when a wave of reports arrives. It is per player per UTC
+   * day, the same shape the daily mission tables already use.
+   *
+   * `context` is attached by the CLIENT and is diagnostics, not testimony:
+   * build id, locale, screen, the last match key. Nobody reports a build id by
+   * hand, and a report without one costs an afternoon. It is bounded and
+   * stringified rather than trusted — see db.fileReport.
+   *
+   * Note what this deliberately does NOT do: it does not act. An abuse report
+   * names a subject and stops there, because acting on one is a judgement a
+   * person makes with `moderate.cjs`, not something a route infers from a
+   * stranger's say-so. A route that could hide an avatar on report would be a
+   * route that lets one player hide another's.
+   */
+  app.post('/api/report', requireActiveSession, (req, res) => {
+    try {
+      const me = db.getProfile(req.deviceId!);
+      if (!me.initialized) return res.status(403).json({ error: 'PROFILE_NOT_INITIALIZED' });
+
+      const category = String(req.body?.category || '');
+      if (!REPORT_CATEGORIES.includes(category as ReportCategory)) {
+        return res.status(400).json({ error: 'BAD_CATEGORY' });
+      }
+      const text = String(req.body?.text || '').trim();
+      if (text.length < REPORT_TEXT_MIN) return res.status(400).json({ error: 'TOO_SHORT' });
+
+      if (db.reportsToday(me.id) >= REPORTS_PER_DAY) {
+        return res.status(429).json({ error: 'TOO_MANY_REPORTS' });
+      }
+
+      const id = db.fileReport({
+        playerId: me.id,
+        username: me.username,
+        category,
+        text,
+        // Only meaningful for `abuse`; stored as given and never resolved
+        // here, because resolving it would be acting on it.
+        subjectId: req.body?.subjectId ? String(req.body.subjectId) : null,
+        context: { ...(req.body?.context ?? {}), build: buildId(), version: APP_VERSION },
+      });
+      db.bumpCounter(`report:${category}`);
+      res.json({ ok: true, id });
     } catch (e: any) {
       serverError(res, e);
     }
@@ -2836,6 +3021,7 @@ async function startServer() {
           }
           broadcastTableState(room);
         } else if (msg.type === 'queue_join') {
+          db.bumpCounter('queue:join');
           // A seat and a queue place are the same commitment, so nobody holds
           // both: the relay would otherwise seat somebody who is already
           // mid-duel, and the abandon would be charged to them for a match
@@ -3500,13 +3686,18 @@ async function startServer() {
     const distPath = fs.existsSync(path.join(bundleDir, 'index.html'))
       ? bundleDir
       : path.join(process.cwd(), 'dist');
-    // ONLY /assets is served. Mounting the whole of dist/ published
-    // `server.cjs.map` — a 667KB source map carrying `sourcesContent`, so every
-    // line of server.ts, server/auth.ts and server/db.ts was a public GET, cookie
-    // HMAC construction and session gates included — plus server.cjs and
-    // admin.cjs beside it. dist/ holds exactly index.html, assets/ and those
-    // three build outputs (there is no public/ dir), so naming the one directory
-    // the client needs is both the fix and the complete list.
+    // ONLY /assets and a NAMED LIST of root files are served. Mounting the
+    // whole of dist/ published `server.cjs.map` — a 667KB source map carrying
+    // `sourcesContent`, so every line of server.ts, server/auth.ts and
+    // server/db.ts was a public GET, cookie HMAC construction and session
+    // gates included — plus server.cjs, admin.cjs and moderate.cjs beside it.
+    //
+    // There IS a public/ dir now (Vite copies it into dist/), which is exactly
+    // the change that would tempt someone to mount the directory and undo
+    // that. It does not: the four files a browser asks for at the root are
+    // listed by name below, and everything else at the root still falls
+    // through to the SPA handler. An allowlist rather than a denylist, because
+    // the next build output added to dist/ must not become public by default.
     //
     // The hashed assets under /assets are immutable and may be cached hard;
     // index.html must NOT be, or a client told its session is stale would
@@ -3520,9 +3711,62 @@ async function startServer() {
         maxAge: '1y',
       })
     );
+    // The root files a browser and a link preview ask for by name. The
+    // favicon and the og image are hashed by nothing, so they are cached for a
+    // day rather than a year: a wrong icon that cannot be corrected for twelve
+    // months is the failure mode on the other side.
+    //
+    // Read ONCE, at boot, and served from memory — no file system access per
+    // request at all. The first version did `fs.existsSync` and then
+    // `sendFile` on every hit, and CodeQL was right to flag it: an
+    // unauthenticated, unmetered handler doing file I/O is an amplifier. The
+    // fix is not a rate limit, because rate-limiting a favicon breaks the
+    // browsers and link previews it exists for. It is to stop touching the
+    // disk: `existsSync` in particular is SYNCHRONOUS, on the one event loop
+    // that is also relaying `paddle_move` for every live match, so this is a
+    // real improvement rather than an alert quieted.
+    //
+    // Four small files, so holding them costs a few KB. Express computes an
+    // ETag for a buffer body, so conditional requests still get their 304.
+    const ROOT_FILE_TYPES: Record<string, string> = {
+      '/favicon.svg': 'image/svg+xml',
+      '/og.svg': 'image/svg+xml',
+      '/manifest.webmanifest': 'application/manifest+json',
+      '/robots.txt': 'text/plain; charset=utf-8',
+    };
+    const rootFiles = new Map<string, Buffer>();
+    for (const route of Object.keys(ROOT_FILE_TYPES)) {
+      try {
+        rootFiles.set(route, fs.readFileSync(path.join(distPath, path.basename(route))));
+      } catch {
+        // A build without one of these is a 404 rather than a boot failure:
+        // the game does not need a favicon to be playable, and falling through
+        // to the SPA handler would answer /robots.txt with HTML.
+        console.warn(`[static] ${route} is missing from the build`);
+      }
+    }
+    app.get(Object.keys(ROOT_FILE_TYPES), (req, res) => {
+      const body = rootFiles.get(req.path);
+      if (!body) return res.status(404).end();
+      res.setHeader('Content-Type', ROOT_FILE_TYPES[req.path]);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(body);
+    });
+
+    // The SPA handler, and the same treatment for the same reason: it answers
+    // every unmatched GET — every deep link, every 404, every crawler — and
+    // read the file off disk each time.
+    //
+    // Reading it once is safe precisely BECAUSE of the no-cache header's
+    // reason: index.html is served no-cache so a client told its session is
+    // stale reloads onto the new build rather than back onto the old one. A
+    // new build is a new PROCESS (server/build.ts hashes the artifacts to
+    // decide exactly that), so the file cannot change under a running one.
+    const indexHtml = fs.readFileSync(path.join(distPath, 'index.html'));
     app.get('*', (req, res) => {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(path.join(distPath, 'index.html'));
+      res.send(indexHtml);
     });
   }
 

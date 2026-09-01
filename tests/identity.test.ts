@@ -393,7 +393,16 @@ describe('deleting an account', () => {
     // BOTH columns (every browser of the account, not only the id the account
     // lives under), so deleteAccount handles it by hand rather than in the
     // loop. Named here so the exception is a decision and not a gap.
-    const HANDLED_APART = ['device_links'];
+    //
+    // `reports` is the second, and for the opposite reason: its rows must
+    // SURVIVE the account, the way `matches` rows do. A report is not only
+    // about its author — an abuse report names somebody else — so deleting
+    // either party must not take the evidence with it, which is what the
+    // loop's unconditional DELETE would do. deleteAccount scrubs the pointer
+    // instead. It carries a `playerId` rather than a `reporterId` precisely
+    // so it shows up here: named differently, it would have been invisible to
+    // the one check that guards the account lifecycle.
+    const HANDLED_APART = ['device_links', 'reports'];
     expect(playerKeyedTablesInSchema()).toEqual(
       [...PLAYER_KEYED_TABLES, ...HANDLED_APART].sort()
     );

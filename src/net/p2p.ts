@@ -354,10 +354,20 @@ export class P2PGameLink {
         break;
 
       case 'quick_chat':
+        // The name comes from the LINK's own record of who is on the other
+        // end, never from the payload. `WSClientMessage` carries an optional
+        // `senderName` and App populates it on every send, so preferring it
+        // here let a modified peer render 100 arbitrary characters attributed
+        // to an arbitrary username inside its opponent's court — the one
+        // thing the relay's own handler is explicit about refusing ("a client
+        // message can't impersonate another username", server.ts). The relay
+        // and this replica are two implementations of one protocol, and this
+        // is exactly the kind of drift tests/protocolParity.test.ts exists
+        // for; the field stays on the wire for older bundles and is ignored.
         this.opts.onMessage({
           type: 'quick_chat',
           text: String(msg.text || '').slice(0, 100),
-          senderName: msg.senderName || this.opts.playerNames[oppIdx] || 'Opponent',
+          senderName: this.opts.playerNames[oppIdx] || `Player ${oppIdx + 1}`,
           senderIdx: oppIdx,
         });
         break;
