@@ -118,11 +118,17 @@ await c.click('#menu-mode-quickmatch');
 await c.click('#btn-quickmatch-join');
 await c.waitForSelector('#btn-quickmatch-cancel', { timeout: 8000 });
 await c.click('#btn-quickmatch-cancel');
-// 20s, not 8: this wait is a full click → WS → relay → WS → React commit
-// round-trip, and the runner's pool schedules this suite beside its heaviest
-// siblings — measured 3.2× slower beside duel+history, where the 8s ceiling
-// was the one assertion in all twenty suites to lose. The ceiling is a bet
-// about the MACHINE; the assertion is about the app, and it is unchanged.
+// This assertion caught a real bug and spent a while being read as a slow
+// machine. The ceiling went 8s → 20s on the reasoning that the runner's pool
+// schedules this suite beside its heaviest siblings (measured 3.2× slower
+// beside duel+history) — and it went on failing about half the time in SOLO
+// single-worker runs, where that explanation buys nothing. The cause was
+// `sendWhenOpen` arming one polling chain PER CALL, so `queue_cancel` could
+// overtake `queue_join` on a socket that was still opening: the relay
+// dequeued nobody, then queued the player, and the row span on a search they
+// had called off while they sat in the queue for real (CLAUDE.md §10).
+// The ceiling stays at 20s because the load measurement above is still true
+// of the TIMING; it is simply not what was failing.
 await c
   .waitForFunction(() => document.querySelector('#menu-mode-quickmatch')?.getAttribute('data-searching') === 'false', { timeout: 20000 })
   .catch(() => fail('cancelling left the row searching'));
