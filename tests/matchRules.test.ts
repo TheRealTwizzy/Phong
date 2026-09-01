@@ -625,6 +625,17 @@ describe('every consumer asks the verdict the same way', () => {
     expect(unrankedReasons(ctx)).toHaveLength(0);
   });
 
+  // And the DIFFICULTY, which at a table is the host's seat pick rather than
+  // the menu's stored setting: reading the device value judges a match nobody
+  // is playing, and the difficulty is what decides whether a solo result
+  // moves the ladder at all.
+  it.each(CONSUMERS)('%s judges the rung actually being played', (file) => {
+    for (const args of callArgs(readFileSync(resolve(__dirname, '..', file), 'utf8'))) {
+      if (!/difficulty/.test(args)) continue;
+      expect(args).not.toMatch(/difficulty:\s*settings\.difficulty/);
+    }
+  });
+
   // `watched` is the same shape of hazard one arm along: absent means "no
   // table", which is right for a menu-started match and a silent lie for a
   // CPU one played at a table whose watching seats are open.

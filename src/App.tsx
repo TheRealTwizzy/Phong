@@ -3952,7 +3952,16 @@ export default function App() {
                 unrankedReasons({
                   rules: activeConfig.rules,
                   mode,
-                  difficulty: settings.difficulty,
+                  // The rung the far half is ACTUALLY playing, which at a
+                  // table is the host's seat pick and not the menu's stored
+                  // setting. Reading the device setting here judges the quit
+                  // against a match nobody is playing — and the difficulty is
+                  // what decides whether a solo result moves the ladder at
+                  // all, so it is the ranked verdict that comes out wrong.
+                  // Third time this call site has skipped a field the sheet
+                  // passes; `tests/matchRules.test.ts` reads the call sites
+                  // rather than the function for exactly that reason.
+                  difficulty: activeDifficulty,
                   // The table's own venue, so a Casual duel is not threatened
                   // with a rank it was never going to move.
                   venueRoomId: tableState?.venueRoomId ?? null,
