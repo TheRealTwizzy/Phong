@@ -21,7 +21,7 @@ import {
   sessionIdentity,
 } from './server/auth';
 import { buildId } from './server/build';
-import { hasUnlock } from './src/achievements';
+import { hasUnlock, playableDifficulty } from './src/achievements';
 import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import {
@@ -796,9 +796,28 @@ function persistDuelStreaks(room: Room): void {
  * One function for both the create and the edit path, so a host cannot open
  * seats a bracket forbids by asking twice.
  */
-function roomConfigFor(venueRoomId: string, raw: Partial<RoomMatchConfig> | null | undefined): RoomMatchConfig {
+function roomConfigFor(
+  venueRoomId: string,
+  raw: Partial<RoomMatchConfig> | null | undefined,
+  deviceId?: string | null
+): RoomMatchConfig {
   const config = normalizeRoomConfig(raw);
   if (!roomAllowsSpectators(venueRoomId)) config.spectators = false;
+  // The AI rung has to be one this player earned. The menu draws the lock and
+  // the menu is the client — the same reason DIFFICULTY_LOCKED sits behind
+  // /api/match/record rather than trusting the picker. It belongs HERE, in the
+  // function both the create and the edit path already share, for the reason
+  // stated above about the watching seats: a rule enforced at one of the two
+  // doors is a rule you get past by asking twice.
+  //
+  // Clamped down to the best earned rung rather than refused, which is what
+  // `playableDifficulty` is for: a refusal leaves the host tapping a row that
+  // does nothing, and this is the same clamp the client applies to a stored
+  // setting after a wipe. A cookieless socket keeps whatever it named, since
+  // it has no profile to judge against and no way to record the match either.
+  if (config.cpu && deviceId) {
+    config.cpu = playableDifficulty(db.getProfile(deviceId).achievements, config.cpu);
+  }
   return config;
 }
 
@@ -2801,7 +2820,7 @@ async function startServer() {
             syncRev: 0,
             servingPlayer: 0,
             rematchVotes: [false, false],
-            config: roomConfigFor(venueRoomId, msg.config || DEFAULT_ROOM_CONFIG),
+            config: roomConfigFor(venueRoomId, msg.config || DEFAULT_ROOM_CONFIG, cookieDeviceId),
             matchOver: false,
             inPlay: false,
             ready: [false, false],
@@ -3731,7 +3750,20 @@ async function startServer() {
             return;
           }
           const watchedBefore = room.config.spectators;
-          room.config = roomConfigFor(room.venueRoomId, msg.config);
+          const next = roomConfigFor(room.venueRoomId, msg.config, cookieDeviceId);
+          // The seat holds ONE of them. Left alone, a host who seats a machine
+          // while a guest is already sitting there wedges the table: once a
+          // CPU is named `canStart` asks for an EMPTY opposite seat, so Start
+          // would refuse with no error and no control to press — the same
+          // silent-nothing failure the parallel-`Room.cpu` design was rejected
+          // for. The chair's actual occupant wins; a host who wants the
+          // machine has to watch the person leave first.
+          //
+          // Not in roomConfigFor, deliberately: that function is about the
+          // TABLE'S terms and knows nothing about who is currently sitting at
+          // it, and create_room has no second seat to check.
+          if (next.cpu && room.players[playerIndex() === 0 ? 1 : 0]) next.cpu = null;
+          room.config = next;
           broadcast(room, { type: 'room_config', config: room.config });
           // Closing the seats closes them on whoever is in them. The host owns
           // the terms, and "no spectators" is not a term that can be true while

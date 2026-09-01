@@ -104,12 +104,14 @@ describe('a table with a CPU in it', () => {
     // satisfy one clause of four and Start would silently do nothing, with
     // matchSeq never advancing and no watcher ever reaching the court.
     const host = await newDevice('CpuHost1');
-    const { phone } = await seatCpu(host);
+    // Rookie because this account has earned nothing else — roomConfigFor
+    // clamps to the best earned rung, which the test below pins directly.
+    const { phone } = await seatCpu(host, { cpu: 'rookie' });
     phone.clear();
     phone.send({ type: 'start_match' });
     const start = await phone.await('game_start');
     expect(start.matchSeq).toBe(1);
-    expect((start.config as any).cpu).toBe('pro');
+    expect((start.config as any).cpu).toBe('rookie');
     phone.close();
   }, 20_000);
 
@@ -139,6 +141,57 @@ describe('a table with a CPU in it', () => {
     expect(again.matchSeq).toBe(2);
     phone.close();
   }, 20_000);
+
+  it('clamps a rung the host has not earned, at both doors', async () => {
+    // The picker hides a locked rung and the picker is the CLIENT. Both the
+    // create and the edit path go through roomConfigFor for exactly this
+    // reason — a rule enforced at one of two doors is a rule you get past by
+    // asking twice.
+    const host = await newDevice('CpuLocked1');
+    // Fresh account: rookie is open, everything above it is not.
+    const { phone } = await seatCpu(host, { cpu: 'chaos' });
+    const created = await phone.await('room_config');
+    expect((created.config as any).cpu).toBe('rookie');
+
+    phone.clear();
+    phone.send({
+      type: 'set_room_config',
+      config: { winningScore: 3, rules: {}, spectators: false, cpu: 'cyber' },
+    });
+    const edited = await phone.await('room_config');
+    expect((edited.config as any).cpu).toBe('rookie');
+    phone.close();
+  }, 20_000);
+
+  it('will not seat a machine on top of a person', async () => {
+    // canStart asks for an EMPTY opposite seat once a CPU is named, so a
+    // config holding both wedges the table: Start refuses with no error and
+    // no control to press.
+    const host = await newDevice('CpuOnTop1');
+    const guest = await newDevice('CpuOnTop2');
+    const p1 = await relay.openPhone(host);
+    p1.send({ type: 'create_room', playerId: host.id, config: { winningScore: 3, rules: {} } });
+    const created = await p1.await('room_created');
+    const p2 = await relay.openPhone(guest);
+    p2.send({ type: 'join_room', roomId: created.roomId, playerId: guest.id });
+    await p2.await('room_joined');
+
+    p1.clear();
+    p1.send({
+      type: 'set_room_config',
+      config: { winningScore: 3, rules: {}, spectators: false, cpu: 'rookie' },
+    });
+    const config = await p1.await('room_config');
+    expect((config.config as any).cpu).toBeNull();
+
+    // And the table still starts as the duel it is.
+    p2.send({ type: 'player_ready', ready: true });
+    await p1.await('ready_state');
+    p1.send({ type: 'start_match' });
+    await p1.await('game_start');
+    p1.close();
+    p2.close();
+  }, 25_000);
 
   it('refuses a host trying to sit in the CPU’s chair', async () => {
     // swap_seat reads room.players[target], and the CPU is not in `players`.
@@ -178,6 +231,133 @@ describe('a table with a CPU in it', () => {
     phone.close();
     guest.close();
   }, 25_000);
+});
+
+describe('what a watcher sees of a CPU match', () => {
+  // The asymmetric fixture is the whole point. `watched_*` is RAW — a watcher
+  // draws that player's court in that player's own coordinates — and
+  // `opponent_*` is PRE-MIRRORED, because it crosses the net. Against a
+  // centred fixture a paddle at 0.5 looks identical either way, so a stray
+  // `1 - x` would pass silently; every number below is picked so its mirror
+  // is a different number.
+  const HOST_PADDLE = 0.2;
+  const CPU_PADDLE = 0.7;
+  const BALL_X = 0.35;
+  const BALL_Y = 0.6;
+
+  it('draws each half raw and mirrors only what crosses the net', async () => {
+    const host = await newDevice('CpuWatch1');
+    const nearHost = await newDevice('CpuWatch2');
+    const nearCpu = await newDevice('CpuWatch3');
+    const { phone, roomId } = await seatCpu(host, { spectators: true, cpu: 'rookie' });
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+
+    // Seat 2 sits beside the host (playing seat 0); seat 3 beside the CPU.
+    const w0 = await relay.openPhone(nearHost);
+    w0.send({ type: 'spectate_room', roomId, seat: 2 });
+    await w0.await('table_state');
+    const w1 = await relay.openPhone(nearCpu);
+    w1.send({ type: 'spectate_room', roomId, seat: 3 });
+    await w1.await('table_state');
+    w0.clear();
+    w1.clear();
+
+    // The ball on the HOST's half.
+    phone.send({
+      type: 'cpu_frame',
+      hostPaddle: HOST_PADDLE,
+      cpuPaddle: CPU_PADDLE,
+      ball: { side: 0, x: BALL_X, y: BALL_Y },
+      scores: [1, 0],
+      live: true,
+    });
+
+    // Beside the host: their own court raw, the CPU's paddle mirrored in.
+    expect((await w0.await('watched_paddle')).x).toBeCloseTo(HOST_PADDLE, 6);
+    expect((await w0.await('opponent_paddle')).x).toBeCloseTo(1 - CPU_PADDLE, 6);
+    const ballHere = await w0.await('watched_ball');
+    expect(ballHere.x).toBeCloseTo(BALL_X, 6);
+    expect(ballHere.y).toBeCloseTo(BALL_Y, 6);
+
+    // Beside the CPU: the CPU's court raw, the host's paddle mirrored in —
+    // and the ball is NOT on this half, so it leaves and comes back as a
+    // radar sample in the SENDER's frame, which the radar mirrors itself.
+    expect((await w1.await('watched_paddle')).x).toBeCloseTo(CPU_PADDLE, 6);
+    expect((await w1.await('opponent_paddle')).x).toBeCloseTo(1 - HOST_PADDLE, 6);
+    expect(w1.all('watched_ball_left').length).toBe(1);
+    expect(w1.last('watched_ball')).toBeUndefined();
+    expect((await w1.await('opponent_ball')).x).toBeCloseTo(BALL_X, 6);
+
+    phone.close();
+    w0.close();
+    w1.close();
+  }, 30_000);
+
+  it('clears the watcher’s ball whenever it is not on that half', async () => {
+    // The CPU's SERVE materialises inside its own half and the CPU's MISS
+    // ends past its baseline — neither is a crossing. A design that emitted
+    // `watched_ball_left` only on a crossing would leave this watcher
+    // dead-reckoning a ghost ball off the bottom of the screen after every
+    // point, which is why the frame carries the ball's SIDE as a state.
+    const host = await newDevice('CpuWatch4');
+    const viewer = await newDevice('CpuWatch5');
+    const { phone, roomId } = await seatCpu(host, { spectators: true, cpu: 'rookie' });
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+    const w = await relay.openPhone(viewer);
+    w.send({ type: 'spectate_room', roomId, seat: 2 });
+    await w.await('table_state');
+    w.clear();
+
+    const frame = (ball: unknown) =>
+      phone.send({
+        type: 'cpu_frame',
+        hostPaddle: HOST_PADDLE,
+        cpuPaddle: CPU_PADDLE,
+        ball,
+        scores: [0, 0],
+        live: true,
+      });
+
+    frame({ side: 0, x: BALL_X, y: BALL_Y });
+    await w.await('watched_ball');
+    // Gone entirely — the point ended and nothing is in play.
+    frame(null);
+    await w.await('watched_ball_left');
+    // And with no ball there is no far-half sample either, or the radar would
+    // go on drawing the last one it was sent.
+    expect(w.all('opponent_ball').length).toBe(0);
+
+    phone.close();
+    w.close();
+  }, 30_000);
+
+  it('refuses the frame at a table with no CPU in it', async () => {
+    // The guard is on the TABLE having a CPU, not on `playerIndex() !== null`
+    // — copying the usual pattern is the natural mistake and it is
+    // exploitable: at a real two-human duel seat 0 could otherwise inject a
+    // ball onto seat 1's live court, clearing their serve and replacing the
+    // ball so the point can never end.
+    const host = await newDevice('CpuNoFrame1');
+    const guest = await newDevice('CpuNoFrame2');
+    const seated = await relay.seatDuel(host, guest);
+    seated.p2.clear();
+    seated.p1.send({
+      type: 'cpu_frame',
+      hostPaddle: HOST_PADDLE,
+      cpuPaddle: CPU_PADDLE,
+      ball: { side: 1, x: BALL_X, y: BALL_Y },
+      scores: [2, 0],
+      live: true,
+    });
+    await sleep(150);
+    expect(seated.p2.all('ball_incoming').length).toBe(0);
+    expect(seated.p2.all('opponent_paddle').length).toBe(0);
+    expect(seated.p2.all('score_update').length).toBe(0);
+    seated.p1.close();
+    seated.p2.close();
+  }, 30_000);
 });
 
 describe('what a CPU match is worth', () => {
@@ -253,6 +433,10 @@ describe('what a CPU match is worth', () => {
     const host = await newDevice('CpuRatchet1');
     const bystander = await newDevice('CpuRatchet2');
     await unlockPro(host);
+    // The stranger's table must be a genuine Pro table, or the difficulty
+    // clause refuses this POST and the seat clause — the one under test —
+    // never gets asked.
+    await unlockPro(bystander);
 
     // A watched table belonging to SOMEBODY ELSE.
     const other = await seatCpu(bystander, { spectators: true });
