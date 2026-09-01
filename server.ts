@@ -537,17 +537,24 @@ function sweepQueue(now: number): void {
   for (let i = queue.length - 1; i >= 0; i--) {
     if (queue[i].ws.readyState !== WebSocket.OPEN) queue.splice(i, 1);
   }
+  // Built ONCE, then drained. It used to be rebuilt inside the loop, so a
+  // sweep that made K pairs asked the database for every queued entry K+1
+  // times — every two seconds, synchronously, on the loop that also relays
+  // `paddle_move` for every live match. Nothing in a rating changes between
+  // two pairings of one sweep, so the rebuild could only ever produce the list
+  // it already had, minus the two just seated.
+  const byId = new Map<string, QueueEntry>();
+  let candidates: Candidate[] = [];
+  for (const entry of queue) {
+    const candidate = queueCandidate(entry);
+    // A cookieless socket has no rating to pair on and no profile to record
+    // onto. It can play a private duel; it cannot be matchmade.
+    if (!candidate || byId.has(candidate.deviceId)) continue;
+    byId.set(candidate.deviceId, entry);
+    candidates.push(candidate);
+  }
+
   for (;;) {
-    const byId = new Map<string, QueueEntry>();
-    const candidates: Candidate[] = [];
-    for (const entry of queue) {
-      const candidate = queueCandidate(entry);
-      // A cookieless socket has no rating to pair on and no profile to record
-      // onto. It can play a private duel; it cannot be matchmade.
-      if (!candidate || byId.has(candidate.deviceId)) continue;
-      byId.set(candidate.deviceId, entry);
-      candidates.push(candidate);
-    }
     const pair = findPair(candidates, now);
     if (!pair) return;
     const a = byId.get(pair[0].deviceId)!;
@@ -555,6 +562,10 @@ function sweepQueue(now: number): void {
     leaveQueue(a.ws);
     leaveQueue(b.ws);
     seatQueuePair(a, b);
+    // The two seated leave the list rather than the list being rebuilt around
+    // them. `findPair` is pure over this array, so this is the same answer.
+    const seated = new Set([pair[0].deviceId, pair[1].deviceId]);
+    candidates = candidates.filter((c) => !seated.has(c.deviceId));
   }
 }
 
@@ -2690,8 +2701,13 @@ async function startServer() {
           }
           ws.send(JSON.stringify({ type: 'queue_state', status: 'searching' }));
           // Answer immediately when there is already somebody waiting, rather
-          // than making the newcomer sit out a tick of the sweep.
-          sweepQueue(Date.now());
+          // than making the NEWCOMER sit out a tick of the sweep — which is
+          // why a re-join does not force one. Re-joining changes nothing the
+          // sweep reads except an `rttMs` tiebreak, so sweeping for it is work
+          // with no possible new answer, and it is work an unmetered message
+          // could ask for in a loop: the sweep is O(N) reads and O(N^2) erf
+          // over the queue.
+          if (!already) sweepQueue(Date.now());
         } else if (msg.type === 'queue_cancel') {
           leaveQueue(ws);
           ws.send(JSON.stringify({ type: 'queue_state', status: 'cancelled' }));
