@@ -966,8 +966,28 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies)
-  app.set('trust proxy', true);
+  // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies).
+  //
+  // The HOP COUNT is load-bearing, and `true` was wrong for more than cookies.
+  // `true` trusts the WHOLE X-Forwarded-For chain, so `req.ip` becomes its
+  // leftmost entry — which is a header the client writes. The recovery-code
+  // sign-in limiter keys on `req.ip`, so an attacker sending a different
+  // forwarded address per request had an unlimited allowance against every
+  // account at once, and the per-device key beside it does not save that: a
+  // request arriving with no cookie is minted a fresh device id, so that key
+  // is attacker-chosen too. The code is a credential the player KEEPS now
+  // rather than a one-shot token, which is exactly what made it worth guessing.
+  //
+  // One hop is what both documented deployments have — Dokploy's Traefik, and
+  // the compose stack's Caddy — and it makes `req.ip` the address the proxy
+  // actually observed. Overridable because the right answer is a property of
+  // the deployment and not of this file: two proxies is 2, and no proxy at all
+  // is 0, which is also the safe value for running the server directly.
+  const trustHops = Number(process.env.TRUST_PROXY_HOPS);
+  app.set(
+    'trust proxy',
+    process.env.TRUST_PROXY_HOPS && Number.isFinite(trustHops) && trustHops >= 0 ? trustHops : 1
+  );
   app.use(express.json());
 
   // The device cookie is established by the NAVIGATION, before a line of JS
@@ -1136,7 +1156,13 @@ async function startServer() {
   // most networks; when TURN_URL + TURN_STATIC_SECRET are set (coturn with
   // use-auth-secret), time-limited credentials are minted per request so the
   // shared secret never reaches clients.
-  app.get('/api/rtc-config', (req, res) => {
+  // Behind a live session: these are TURN credentials, valid for six hours,
+  // and the route was open to anyone who could reach the host. A relay for
+  // arbitrary traffic is what a TURN server is, so handing them out
+  // unauthenticated is offering the deployment's bandwidth to the internet.
+  // Every legitimate caller is a player about to negotiate a duel, and holds
+  // one already.
+  app.get('/api/rtc-config', requireActiveSession, (req, res) => {
     const iceServers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
       { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
     ];
@@ -1145,7 +1171,12 @@ async function startServer() {
     const turnSecret = process.env.TURN_STATIC_SECRET;
     if (turnUrl && turnSecret) {
       const ttlSeconds = 6 * 60 * 60;
-      const username = `${Math.floor(Date.now() / 1000) + ttlSeconds}:phong`;
+      // coturn's REST scheme is `expiry:name`, and the name was the constant
+      // "phong" — so every credential the deployment ever issued was
+      // identical apart from its timestamp, which makes an abusive one neither
+      // attributable to a device nor revocable without rotating the secret for
+      // everybody. The device id is what this server knows the caller by.
+      const username = `${Math.floor(Date.now() / 1000) + ttlSeconds}:${req.deviceId || 'phong'}`;
       const credential = crypto.createHmac('sha1', turnSecret).update(username).digest('base64');
       iceServers.push({ urls: turnUrl.split(',').map((u) => u.trim()), username, credential });
     }
