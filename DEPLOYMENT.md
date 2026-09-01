@@ -2,9 +2,17 @@
 
 Phong is a single Node service: Express serves the built client, the `ws` relay shares the same port, and player data lives in a SQLite file. Any host that can run a **long-lived Node process with WebSockets** works. The primary target is a **self-managed VPS/KVM** (e.g. Hostinger) behind Caddy with automatic HTTPS; a Render blueprint is kept as an alternative.
 
-Capacity note: **there is no current measurement.** This line used to cite `node scripts/load-test.mjs` for "10 simultaneous matches, 0% loss, ~1ms p95". That script stopped working when the lobby handshake landed — it waits for a `game_start` that no longer follows a join, having never sent `player_ready` or `start_match` — so it dies on the first pair, and nothing in CI or the test suites covers it. The figure is removed rather than left standing; repair the script before quoting a number from it.
+Capacity note: **150 concurrent matches — 300 players — at 0% message loss, p50 2ms / p95 9ms relay round trip, 0 server errors.**
 
-> **One-time player wipe (`wipe_v1`)**: the first deploy of this version clears ALL existing player data on the volume — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). This runs exactly once, flagged in the DB `meta` table; later deploys never wipe. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.
+```
+node scripts/load-test.mjs 150 20 ws://127.0.0.1:PORT/ws
+```
+
+Measured on a 4-core / 16GB Linux box against `NODE_ENV=production node dist/server.cjs`. Read it as a floor with two honest caveats, both of which make the real number lower rather than higher: the load generator runs on the SAME box and competes for the same four cores, and its sockets are **cookieless**, so they exercise the relay and never the profile writes a real match ends with. It is a relay throughput figure, not a "300 players will be happy" figure.
+
+The script was broken for a while and this note used to say so. It is repaired, exports `runLoadTest()`, and is now covered by a registered smoke suite (`scripts/e2e-load.mjs`, two rooms and three seconds) so the next protocol change that breaks it breaks a build instead of a claim in a document.
+
+> **One-time player wipes (`wipe_v1` … `wipe_v4`)**: each clears ALL existing player data on the volume once — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). Each runs exactly once, flagged in the DB `meta` table; later deploys never wipe. A database that has already been stamped with all four — which is every deployment past the rally-streak rework — sees none of them. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.
 
 **Pick your path by what already runs on the box:**
 

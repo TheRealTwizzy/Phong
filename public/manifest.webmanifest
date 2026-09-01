@@ -1,0 +1,13 @@
+{
+  "name": "Phong",
+  "short_name": "Phong",
+  "description": "A blind half-court Pong for two phones. You only see your own half — the top of your screen is the net.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

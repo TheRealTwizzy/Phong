@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="Phong — a blind half-court Pong for two phones">
+  <rect width="1200" height="630" fill="#090d16"/>
+  <rect x="80" y="120" width="1040" height="390" rx="18" fill="none" stroke="#1e293b" stroke-width="2"/>
+  <!-- The net across the middle, and a ball on ONE side of it: the top half
+       is deliberately empty, because that is what the player cannot see. -->
+  <rect x="80" y="314" width="1040" height="3" fill="#22d3ee" opacity="0.9"/>
+  <circle cx="742" cy="392" r="14" fill="#f8fafc"/>
+  <rect x="620" y="470" width="150" height="12" rx="6" fill="#22d3ee"/>
+  <text x="100" y="212" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="104" font-weight="700" fill="#f8fafc">PHONG</text>
+  <text x="104" y="262" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="26" fill="#94a3b8">You only see your own half.</text>
+</svg>

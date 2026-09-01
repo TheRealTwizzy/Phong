@@ -3686,13 +3686,18 @@ async function startServer() {
     const distPath = fs.existsSync(path.join(bundleDir, 'index.html'))
       ? bundleDir
       : path.join(process.cwd(), 'dist');
-    // ONLY /assets is served. Mounting the whole of dist/ published
-    // `server.cjs.map` — a 667KB source map carrying `sourcesContent`, so every
-    // line of server.ts, server/auth.ts and server/db.ts was a public GET, cookie
-    // HMAC construction and session gates included — plus server.cjs and
-    // admin.cjs beside it. dist/ holds exactly index.html, assets/ and those
-    // three build outputs (there is no public/ dir), so naming the one directory
-    // the client needs is both the fix and the complete list.
+    // ONLY /assets and a NAMED LIST of root files are served. Mounting the
+    // whole of dist/ published `server.cjs.map` — a 667KB source map carrying
+    // `sourcesContent`, so every line of server.ts, server/auth.ts and
+    // server/db.ts was a public GET, cookie HMAC construction and session
+    // gates included — plus server.cjs, admin.cjs and moderate.cjs beside it.
+    //
+    // There IS a public/ dir now (Vite copies it into dist/), which is exactly
+    // the change that would tempt someone to mount the directory and undo
+    // that. It does not: the four files a browser asks for at the root are
+    // listed by name below, and everything else at the root still falls
+    // through to the SPA handler. An allowlist rather than a denylist, because
+    // the next build output added to dist/ must not become public by default.
     //
     // The hashed assets under /assets are immutable and may be cached hard;
     // index.html must NOT be, or a client told its session is stale would
@@ -3706,6 +3711,24 @@ async function startServer() {
         maxAge: '1y',
       })
     );
+    // The root files a browser and a link preview ask for by name. The
+    // favicon and the og image are hashed by nothing, so they are cached for a
+    // day rather than a year: a wrong icon that cannot be corrected for twelve
+    // months is the failure mode on the other side.
+    const ROOT_FILES: Record<string, string> = {
+      '/favicon.svg': 'image/svg+xml',
+      '/og.svg': 'image/svg+xml',
+      '/manifest.webmanifest': 'application/manifest+json',
+      '/robots.txt': 'text/plain; charset=utf-8',
+    };
+    app.get(Object.keys(ROOT_FILES), (req, res) => {
+      const file = path.join(distPath, path.basename(req.path));
+      if (!fs.existsSync(file)) return res.status(404).end();
+      res.setHeader('Content-Type', ROOT_FILES[req.path]);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.sendFile(file);
+    });
+
     app.get('*', (req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));

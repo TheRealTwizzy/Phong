@@ -141,12 +141,17 @@ seated duel whose room sits at 0-0, so it fails if the vouching guard is ever wi
 "can this room vouch" to "has this room decided".
 
 **A number in these files names the command that produces it.** `scripts/load-test.mjs`
-stopped running when the lobby handshake landed — it awaits a `game_start` that no longer
+stopped running when the lobby handshake landed — it awaited a `game_start` that no longer
 follows a join — and nothing noticed, because `lint:suites` covers only `e2e-*.mjs`, `npm test`
-never touches it, `tsc` does not check `.mjs`, and CI never invokes it. Its "10 concurrent
-matches, 0% loss" went on being quoted in `CLAUDE.md` §10 and `DEPLOYMENT.md` the whole time.
-The claim is removed rather than restated; **an unrunnable script is worse than no script,
-because its last output keeps being cited.**
+never touches it, `tsc` does not check `.mjs`, and CI never invoked it. Its "10 concurrent
+matches, 0% loss" went on being quoted in `CLAUDE.md` §10 and `DEPLOYMENT.md` the whole time:
+**an unrunnable script is worse than no script, because its last output keeps being cited.**
+
+It is repaired now, and the repair that mattered was not the handshake. It exports
+`runLoadTest()` and `scripts/e2e-load.mjs` drives it at smoke scale (two rooms, three seconds)
+as a REGISTERED suite, so the next protocol change that breaks it breaks a build. Real numbers
+still come from running it directly at a scale worth quoting — `DEPLOYMENT.md` carries the
+current one and names the box it was measured on.
 
 **A presentation flag is free, except the one that is not.** Telemetry, quick chat and
 auto-serve never touch the ball and never touch the rating. The **opponent sonar** draws the
