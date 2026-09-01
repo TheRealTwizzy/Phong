@@ -102,10 +102,12 @@ async function attempt(payload: MatchEndPayload): Promise<MatchEndResult | null>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Deliberately a flat interface rather than a discriminated union: this repo
- * compiles with strictNullChecks off, under which TypeScript cannot narrow a
- * union by its tag, so `outcome.reason` would not type-check after `if
- * (!outcome.ok)`.
+ * A flat interface rather than a discriminated union. That began as a
+ * CONSTRAINT — the repo compiled with `strictNullChecks` off, where narrowing
+ * a union by its tag does not apply, so `outcome.reason` would not have
+ * type-checked after `if (!outcome.ok)`. Strict mode is on now, so it is a
+ * convention instead: the shape is read across enough call sites that
+ * converting it is its own change, not a side effect of turning a flag on.
  */
 export interface RecordOutcome {
   ok: boolean;

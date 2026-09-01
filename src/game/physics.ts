@@ -21,6 +21,35 @@ export const SERVE_BALL_Y = PADDLE_Y - PADDLE_HEIGHT / 2 - 0.012;
 export const BALL_BASE_RADIUS = 0.022;
 export const BASE_BALL_SPEED = 0.85; // units per second
 export const MAX_BALL_SPEED = 2.4;
+/**
+ * Upper bound on how finely one frame's flight is integrated. The step size is
+ * chosen from the paddle's own catch window, so this only ever binds for a ball
+ * that is both very fast and a long frame — where the remaining step is still
+ * well inside the window and the alternative is an unbounded loop on a stall.
+ */
+export const MAX_PHYSICS_SUBSTEPS = 16;
+
+/**
+ * How many pieces one frame's flight must be integrated in for the paddle test
+ * to be reliable.
+ *
+ * `checkPaddleCollision` is a POINT sample: it asks where the ball is now, not
+ * where it has been. It catches a ball only inside a window
+ * `PADDLE_HEIGHT + 2r` tall — 0.068 at stock — so a ball that moves further
+ * than that in one integration passes straight through. At the 2.4 speed cap
+ * and the 0.05s frame clamp a single jump is 0.12, and with a legal
+ * `ballSpeedMax: 2` a wall rebound reaches 4.8 and tunnels even at a perfect
+ * 60fps.
+ *
+ * Half the window per step, so a contact is sampled at least twice inside it
+ * rather than exactly once at the boundary.
+ */
+export function physicsSubsteps(speed: number, dt: number, radius: number): number {
+  const window = PADDLE_HEIGHT + 2 * Math.max(radius, 0);
+  const travel = Math.abs(speed) * Math.max(dt, 0);
+  if (!Number.isFinite(travel) || !Number.isFinite(window) || window <= 0) return 1;
+  return Math.max(1, Math.min(MAX_PHYSICS_SUBSTEPS, Math.ceil(travel / (window / 2))));
+}
 
 // Serve aiming. The player sets direction and power on every serve; these
 // bound what the aim can ask for, and the pre-match rules scale them.

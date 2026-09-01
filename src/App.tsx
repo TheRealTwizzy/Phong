@@ -27,6 +27,7 @@ import { P2PGameLink, P2PStatus } from './net/p2p';
 import { QuickMatch, useQuickMatch } from './net/useQuickMatch';
 import { postMatchRecord, flushPendingMatches, clearPendingMatches } from './net/matchRecord';
 import { nextRunSeq } from './net/runChain';
+import { relayErrorText } from './net/relayErrors';
 import {
   COSMETICS,
   COSMETIC_IDS,
@@ -43,6 +44,7 @@ import {
   PADDLE_WIDTH_RATIO,
   BALL_BASE_RADIUS,
   BASE_BALL_SPEED,
+  physicsSubsteps,
   checkPaddleCollision,
   OpponentAI,
   ServeAim,
@@ -217,6 +219,15 @@ const rankMoveKey = (direction: RankDirection, size: RankMagnitude): string =>
 
 const newSoloMatchKey = (): string =>
   `solo:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * How long a multiplayer court may sit with no ball, nobody serving and no
+ * countdown before it is treated as stalled rather than as a transient. Long
+ * enough that an ordinary crossing (one relay hop, or one DataChannel hop) is
+ * nowhere near it, short enough that a player is not left staring at a dead
+ * court wondering.
+ */
+const BALL_STALL_MS = 6000;
 
 export default function App() {
   const [settings, setSettings] = useState<GameSettings>(() => {
@@ -475,6 +486,13 @@ export default function App() {
   // them. Leaving a room is now a decision, and taking it actually leaves.
   const [leaveLobbyConfirmOpen, setLeaveLobbyConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
+  const [toastRelayError, setToastRelayError] = useState<string | null>(null);
+  // A mission claim or reroll that never reached the server. The non-network
+  // failures already resync the list, which is its own answer; a dropped
+  // request left the button doing nothing at all, with no way to tell that
+  // from a mission that was not finished.
+  const [toastActionFailed, setToastActionFailed] = useState<boolean>(false);
+  const [toastRallyStalled, setToastRallyStalled] = useState<boolean>(false);
   const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
   /** The table this page was WATCHING has gone — never an abandon notice. */
   const [toastTableEnded, setToastTableEnded] = useState<boolean>(false);
@@ -522,6 +540,10 @@ export default function App() {
   const paddleXRef = useRef<number>(paddleX);
   const prevPaddleXRef = useRef<number>(paddleX);
   const paddleVxRef = useRef<number>(0);
+  // When this court last had a rally on it, and whether the stall it is in has
+  // already been reported. See the watchdog in the game loop.
+  const rallyAliveRef = useRef<number>(0);
+  const stallHandledRef = useRef<boolean>(false);
   const aiRef = useRef<OpponentAI>(new OpponentAI(settings.difficulty));
   // Match rules are locked in on the menu; these refs give the game loop the
   // live values without re-creating it every render.
@@ -1177,6 +1199,7 @@ export default function App() {
       if (data.unlocked) setToastUnlocks((prev) => [...prev, normalizeCosmeticId(data.unlocked)]);
     } catch (e) {
       console.error('Failed to claim mission reward', e);
+      setToastActionFailed(true);
     }
   };
 
@@ -1199,6 +1222,7 @@ export default function App() {
       if (data.rerolls) setRerolls(data.rerolls);
     } catch (e) {
       console.error('Failed to reroll mission', e);
+      setToastActionFailed(true);
     }
   };
 
@@ -1383,11 +1407,13 @@ export default function App() {
     if (roomCode) pendingRoomRef.current = roomCode.trim().toUpperCase();
   }, []);
 
-  // Handle paddle movement & velocity
+  // Handle paddle movement. The paddle's VELOCITY is not computed here: a
+  // pointermove is delivered once per animation frame, so a per-event delta
+  // reads half the true speed on a 120Hz phone and a stale saturated value
+  // forever once the finger stops moving. It is sampled per frame in the game
+  // loop instead, the same way the AI does it (`physics.ts`).
   const handlePaddleMove = useCallback((newX: number) => {
     setPaddleX(newX);
-    paddleVxRef.current = (newX - prevPaddleXRef.current) * 60;
-    prevPaddleXRef.current = newX;
 
     // Send position to multiplayer opponent
     if (modeRef.current === 'multiplayer') {
@@ -1718,7 +1744,8 @@ export default function App() {
             // The relay's number, not the profile's: it seeded the seat from
             // the store and it is what this match will be recorded on, so a
             // phone that disagrees is a phone showing something else.
-            msg.streaks?.[playerIndexRef.current] ?? carriedStreak('multiplayer'),
+            (playerIndexRef.current !== null ? msg.streaks?.[playerIndexRef.current] : undefined) ??
+              carriedStreak('multiplayer'),
             // The other seat's, for the telemetry overlay. Shown, never
             // counted: what the opponent is paid and rated on is their own
             // phone's business and the relay's.
@@ -2074,7 +2101,14 @@ export default function App() {
         pendingRoomRef.current = null;
         joinInFlightRef.current = false;
         roomRequestRef.current = false;
-        alert(msg.message);
+        // A toast, in the player's own language, rather than `alert()`. The
+        // dialog was blocking — it halts the animation loop until it is
+        // dismissed, over a full-screen game — and it carried the relay's own
+        // English literal, so six of seven locales read English on what is the
+        // most common error path in the product: mistyping a join key. Notices
+        // that arrive and leave by themselves go through ToastHost, which owns
+        // the timer and the tap target (CLAUDE.md §14).
+        setToastRelayError(relayErrorText(msg, settingsRef.current.language || 'en'));
         break;
     }
   };
@@ -2118,6 +2152,14 @@ export default function App() {
 
     socket.onclose = () => {
       setIsConnected(false);
+      // A queue place is held by the socket, so a socket that dies has given
+      // it up — the relay's own close handler calls `leaveQueue`. Without
+      // this the search UI kept counting against a queue this player was no
+      // longer in.
+      if (quickMatchRef.current?.state.status === 'searching') {
+        quickMatchRef.current.reset();
+        setToastActionFailed(true);
+      }
       // A dead socket answers nothing, so any join waiting on one is over —
       // released here rather than in handleJoinRoom, which stops watching the
       // moment it sends. A socket that dies after `join_room` goes out but
@@ -2372,7 +2414,21 @@ export default function App() {
     (msg: WSClientMessage) => {
       let socket = wsRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) socket = connectWebSocket();
-      sendWhenOpen(socket, () => msg);
+      sendWhenOpen(
+        socket,
+        () => msg,
+        () => {
+          // The socket reached CLOSED without ever opening, so nothing was
+          // sent. `join()` is optimistic — the spinner starts on the tap
+          // rather than a round trip later — and with no `onDead` the state
+          // was never reset, so the player watched the elapsed counter climb
+          // indefinitely for a `queue_join` that never left the device.
+          if (msg.type === 'queue_join') {
+            quickMatchRef.current?.reset();
+            setToastActionFailed(true);
+          }
+        }
+      );
     },
     [connectWebSocket]
   );
@@ -2534,6 +2590,16 @@ export default function App() {
       const dt = Math.min((time - lastTime) / 1000, 0.05);
       lastTime = time;
 
+      // The paddle's own velocity is an input to the ball (`driveCoupling`),
+      // so it has to be a speed rather than a per-event delta: measured here,
+      // once a frame, against the same position the collision below reads.
+      // Frame-rate independent by construction, and it returns to zero on its
+      // own the moment the paddle stops — a flick followed by a held finger
+      // fires no further pointermove at all, and the old per-event value
+      // stayed latched at full swing for every remaining contact.
+      paddleVxRef.current = (paddleXRef.current - prevPaddleXRef.current) / (dt || 0.016);
+      prevPaddleXRef.current = paddleXRef.current;
+
       // A streamed opponent ball that has stopped being refreshed is stale —
       // its clear was reliable but the stream is not, so one late sample can
       // re-plant a dot after a net cross or a point. Swept here, BEFORE the
@@ -2570,9 +2636,54 @@ export default function App() {
         return;
       }
 
+      // A rally is ALIVE if a ball exists anywhere, if somebody is about to
+      // serve one, if the countdown is still running, or if the match is over.
+      // Anything else is a court with nothing on it, which is only ever a
+      // transient in a healthy match.
+      if (
+        isServingRef.current ||
+        winner ||
+        ballRef.current.active ||
+        oppBallRef.current?.active ||
+        countdownArmedRef.current ||
+        (matchCountdownRef.current ?? 0) > 0
+      ) {
+        rallyAliveRef.current = time;
+        stallHandledRef.current = false;
+      }
+
       if (isServingRef.current || winner) {
         animId = requestAnimationFrame(gameLoop);
         return;
+      }
+
+      // A DataChannel that dies without CLOSING takes the crossing with it.
+      // `sendGame` reports success, `ball_cross_net` is never delivered, and
+      // the ball has already left this half — so neither phone has a ball and
+      // neither has `isServing`. Auto-serve cannot arm (it is gated on
+      // serving), `p2p_fallback` cannot fire (the relay saw nothing), and the
+      // reaper will not touch a room whose `lastActive` the survivor's own
+      // paddle keeps fresh. The point never ends, and the only way out is
+      // quitting — which is recorded as an abandon, a real ranked loss for a
+      // player who did nothing.
+      //
+      // This does not resurrect the lost ball: doing that safely needs an
+      // acknowledged crossing, which is a protocol change and not this. What
+      // it does is stop the silence. The DataChannel is dropped, so every
+      // later message goes back over the relay where it is at least reliable
+      // and where the relay can judge it, and the player is TOLD, so leaving
+      // is an informed decision rather than the only thing left to try.
+      if (
+        modeRef.current === 'multiplayer' &&
+        !stallHandledRef.current &&
+        time - rallyAliveRef.current > BALL_STALL_MS
+      ) {
+        stallHandledRef.current = true;
+        // `close()` reports through `onStatus`, which is what puts the HUD
+        // badge back to RELAY and clears the ref — so this does not set
+        // either itself.
+        p2pRef.current?.close();
+        setToastRallyStalled(true);
       }
 
       const currentMode = modeRef.current;
@@ -2583,40 +2694,76 @@ export default function App() {
       // ==============================================================
       if (ballRef.current.active) {
         let b = { ...ballRef.current };
-        b.x += b.vx * dt;
-        b.y += b.vy * dt;
 
-        // Sidewall bounces. Spin never bends the flight — it spends itself
-        // here, tilting the angle the ball leaves the wall at.
-        if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
-          const atLeft = b.x - b.radius <= 0;
-          b.x = atLeft ? b.radius : 1 - b.radius;
-          const bounced = bounceOffWall(b.vx, b.vy, b.spin, atLeft, rulesRef.current);
-          b.vx = bounced.vx;
-          b.vy = bounced.vy;
-          b.spin = bounced.spin;
-          sound.playWallBounce();
+        // The flight is integrated in SUBSTEPS, not one jump. The paddle only
+        // catches a ball inside a window `PADDLE_HEIGHT + 2r` tall — about
+        // 0.068 at stock — while a ball at the 2.4 cap covers 0.12 in the
+        // 0.05s the frame clamp allows, so a point-sampled test misses 43% of
+        // sub-frame phases and the ball passes THROUGH the paddle. With a
+        // legal `ballSpeedMax: 2` a wall rebound reaches 4.8 and tunnels 15%
+        // of the time at a perfect 60fps. Stepping to the collision's own
+        // scale is what makes the test reliable, and it holds the sidewalls
+        // and the Practice Wall's return line to the same standard.
+        const steps = physicsSubsteps(Math.hypot(b.vx, b.vy), dt, b.radius);
+        const sdt = dt / steps;
+        let contacted = false;
+
+        for (let step = 0; step < steps; step++) {
+          b.x += b.vx * sdt;
+          b.y += b.vy * sdt;
+
+          // Sidewall bounces. Spin never bends the flight — it spends itself
+          // here, tilting the angle the ball leaves the wall at.
+          if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
+            const atLeft = b.x - b.radius <= 0;
+            b.x = atLeft ? b.radius : 1 - b.radius;
+            const bounced = bounceOffWall(b.vx, b.vy, b.spin, atLeft, rulesRef.current);
+            b.vx = bounced.vx;
+            b.vy = bounced.vy;
+            b.spin = bounced.spin;
+            sound.playWallBounce();
+          }
+
+          // Paddle Collision at bottom (y ~ 0.92)
+          const hitResult = checkPaddleCollision(
+            b,
+            paddleXRef.current,
+            paddleWidthRef.current,
+            paddleVxRef.current
+          );
+
+          if (hitResult.hit && hitResult.angle !== undefined && hitResult.speed !== undefined) {
+            // Hold the rally inside the speed band this match is played under.
+            const hitSpeed = clampBallSpeed(hitResult.speed, rulesRef.current);
+            b.vy = -Math.abs(hitSpeed * Math.cos(hitResult.angle));
+            b.vx = hitSpeed * Math.sin(hitResult.angle);
+            // A fresh contact defines the spin: how fast the paddle was moving,
+            // weighted by how far from centre the ball caught it.
+            b.spin = hitResult.spin ?? 0;
+            b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
+
+            sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
+            contacted = true;
+          }
+
+          // The Practice Wall's return line is a surface like any other, so it
+          // is swept here rather than tested once at the end of the frame.
+          if (currentMode === 'practice') {
+            if (b.y - b.radius <= 0) {
+              b.y = b.radius;
+              b.vy = Math.abs(b.vy);
+              sound.playWallBounce();
+            }
+          } else if (b.y <= 0) {
+            // Left this half. Stop the sweep HERE so the crossing is reported
+            // from the point it actually happened at, rather than from
+            // wherever the rest of the frame would have carried it.
+            break;
+          }
+          if (b.y >= 1.05) break;
         }
 
-        // Paddle Collision at bottom (y ~ 0.92)
-        const hitResult = checkPaddleCollision(
-          b,
-          paddleXRef.current,
-          paddleWidthRef.current,
-          paddleVxRef.current
-        );
-
-        if (hitResult.hit && hitResult.angle !== undefined && hitResult.speed !== undefined) {
-          // Hold the rally inside the speed band this match is played under.
-          const hitSpeed = clampBallSpeed(hitResult.speed, rulesRef.current);
-          b.vy = -Math.abs(hitSpeed * Math.cos(hitResult.angle));
-          b.vx = hitSpeed * Math.sin(hitResult.angle);
-          // A fresh contact defines the spin: how fast the paddle was moving,
-          // weighted by how far from centre the ball caught it.
-          b.spin = hitResult.spin ?? 0;
-          b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
-
-          sound.playPaddleHit(hitResult.speed / BASE_BALL_SPEED);
+        if (contacted) {
           setTotalTouches((t) => t + 1);
           // My own return, and my own streak. The serve never reaches here —
           // handleServe sets the ball's velocity directly and seeds it clear
@@ -2624,19 +2771,22 @@ export default function App() {
           setStats(ownReturn);
         }
 
+        // How fast the rally is actually going, in units of the base serve.
+        // It used to be read off THIS FRAME's paddle hit, which cannot be
+        // truthy on the frame the ball crosses the net — a contact leaves the
+        // ball at y≈0.9 and the net is a whole court away — so it was the
+        // constant 1 on the wire and never set at all on the local ball. The
+        // canvas's high-speed spark trail and its impact shake both key off
+        // it, so neither had ever rendered.
+        b.speedMultiplier = Math.hypot(b.vx, b.vy) / BASE_BALL_SPEED;
+
         // ==============================================================
         // 2. BALL REACHES TOP NET (Y <= 0)
-        //    - Practice Wall: the net is a RETURN LINE — the ball bounces
-        //      straight back; it never leaves the player's screen.
+        //    - Practice Wall: handled in the sweep above — the net is a
+        //      RETURN LINE and the ball never leaves the player's screen.
         //    - Everything else: it disappears across the divide!
         // ==============================================================
-        if (currentMode === 'practice') {
-          if (b.y - b.radius <= 0) {
-            b.y = b.radius;
-            b.vy = Math.abs(b.vy);
-            sound.playWallBounce();
-          }
-        } else if (b.y <= 0) {
+        if (currentMode !== 'practice' && b.y <= 0) {
           // Ball disappears from player's screen!
           b.active = false;
 
@@ -2649,7 +2799,7 @@ export default function App() {
                 vx: b.vx,
                 vy: b.vy,
                 spin: b.spin || 0,
-                speedMultiplier: hitResult.speed ? hitResult.speed / BASE_BALL_SPEED : 1,
+                speedMultiplier: b.speedMultiplier,
               },
             });
           } else if (currentMode === 'solo') {
@@ -3280,6 +3430,27 @@ export default function App() {
               ttlMs: TOAST_TTL.reward,
               content: t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp }),
               onDismiss: () => setToastPracticeXp(null),
+            },
+            toastRallyStalled && {
+              id: 'toast-rally-stalled',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: t('rally_stalled_notice', currentLanguage),
+              onDismiss: () => setToastRallyStalled(false),
+            },
+            toastActionFailed && {
+              id: 'toast-action-failed',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: t('load_failed', currentLanguage),
+              onDismiss: () => setToastActionFailed(false),
+            },
+            toastRelayError && {
+              id: 'toast-relay-error',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: toastRelayError,
+              onDismiss: () => setToastRelayError(null),
             },
             toastEjected && {
               id: 'toast-ejected',

@@ -281,9 +281,12 @@ export function roomCountsForRank(venueRoomId: string | null | undefined): boole
  * Why a room is shut, if it is.
  *
  * Optional fields rather than a discriminated union, following the same
- * convention (and for the same reason) as UsernameResult in profileRules.ts:
- * `strictNullChecks` is off in this repo, so union narrowing does not apply
- * at the call sites and a union would simply fail to compile where it is read.
+ * convention as UsernameResult in profileRules.ts. The original reason was
+ * that `strictNullChecks` was off and a union would not have narrowed at the
+ * call sites; strict mode is on now, so it is a shape kept for consistency
+ * rather than one the compiler forces. Note it crosses the WIRE as well —
+ * `error.verdict` — so a reader must treat every field as absent until
+ * checked, which `lockReason` does.
  */
 export interface EntryVerdict {
   ok: boolean;

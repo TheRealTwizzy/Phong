@@ -3,7 +3,7 @@ import { LeaderboardEntry, LanguageCode } from '../types';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
-import { Panel } from './ui';
+import { Button, Panel } from './ui';
 import { Crown, Medal, RefreshCw } from 'lucide-react';
 
 // The leaderboard itself — the category strip, the bots toggle and the rows —
@@ -65,17 +65,35 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
   // default meant a new player met an empty board — the ladder they were
   // being invited to climb had nothing on it. The toggle still hides them.
   const [showBots, setShowBots] = useState(true);
+  // A failed fetch used to be `.catch(console.error)` and nothing else, so the
+  // render fell through to the empty state and told the player "No ranking
+  // entries found. Be the first to claim the top spot!" — a confident,
+  // specific, and wrong claim about the ladder, on a dropped connection.
+  const [error, setError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
     setIsLoading(true);
     fetch(`/api/leaderboard?sort=${category}&limit=50${showBots ? '&bots=1' : ''}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (!cancelled) setEntries(data.leaderboard || []);
+      .then((res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        return res.json();
       })
-      .catch(console.error)
+      .then((data) => {
+        if (!cancelled) {
+          setEntries(data.leaderboard || []);
+          setError(null);
+        }
+      })
+      .catch((e) => {
+        console.error(e);
+        // The rows already on screen are kept, exactly as they are across a
+        // category switch: an error is a reason to say so, not to blank what
+        // the player was reading.
+        if (!cancelled) setError(t('load_failed', language));
+      })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
       });
@@ -84,7 +102,7 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [active, category, showBots, reloadKey]);
+  }, [active, category, showBots, reloadKey, retryKey, language]);
 
   // Gold, silver and bronze are the content here, not chrome — a medal that
   // took the shell's accent would stop reading as a medal.
@@ -180,6 +198,13 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
           <RefreshCw className="w-4 h-4 animate-spin text-warn" data-motion-essential />
           <span>{t('board_loading', language)}</span>
         </div>
+      ) : error && entries.length === 0 ? (
+        <Panel accent="loss" className="shrink-0 space-y-2 bg-loss/10 text-center text-ink">
+          <p className="text-2xs font-normal tracking-normal">{error}</p>
+          <Button size="sm" variant="danger" onClick={() => setRetryKey((n) => n + 1)}>
+            {t('retry', language)}
+          </Button>
+        </Panel>
       ) : entries.length === 0 ? (
         <div className="shrink-0 py-12 text-center text-2xs font-normal tracking-normal text-ink-dim">
           {t('board_empty', language)}

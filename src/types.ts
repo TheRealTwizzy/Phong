@@ -1,4 +1,7 @@
 import type { Tier } from './rating';
+// Type-only, so the cycle with venues.ts (which imports shapes from here) is
+// erased at compile time and never exists at runtime.
+import type { EntryVerdict } from './venues';
 
 export type GameMode = 'solo' | 'multiplayer' | 'split' | 'practice';
 
@@ -773,6 +776,29 @@ export type WSClientMessage =
   | { type: 'ping'; timestamp: number }
   | { type: 'leave_room' };
 
+/**
+ * Why the relay refused something, as a stable token rather than English prose.
+ *
+ * The `error` frame used to carry a server-authored English literal and the
+ * client put it straight into `alert()` — so six of seven locales read English,
+ * and the most common refusal in the product (mistyping a 4-character join key)
+ * was a blocking OS dialog over a live court. These are the client's key into
+ * its own dictionary; the literal rides along as the fallback.
+ */
+export type RelayErrorCode =
+  | 'ROOM_NOT_FOUND'
+  | 'ROOM_FULL'
+  | 'ALREADY_AT_TABLE'
+  | 'SEAT_TAKEN'
+  | 'SEATS_LOCKED'
+  | 'NEEDS_A_PLAYER'
+  | 'NO_WATCH_SEATS'
+  | 'WATCH_SEATS_FULL'
+  | 'NOT_A_SEAT'
+  | 'NEEDS_USERNAME'
+  | 'LEAVE_TABLE_FIRST'
+  | 'VENUE_LOCKED';
+
 export type WSServerMessage =
   | { type: 'room_created'; roomId: string; playerIndex: 0 | 1 }
   | { type: 'room_joined'; roomId: string; playerIndex: 0 | 1; opponentName: string; opponentId: string }
@@ -826,7 +852,27 @@ export type WSServerMessage =
   // has already overtaken. One transport, one authority.
   | { type: 'p2p_fallback' }
   | { type: 'pong'; timestamp: number }
-  | { type: 'error'; message: string };
+  | {
+      type: 'error';
+      /**
+       * English, and the fallback. Kept so an older bundle — and anything
+       * reading the wire directly — still shows something sensible.
+       */
+      message: string;
+      /**
+       * What went wrong, for a client that wants to say it in the player's own
+       * language. Optional: a relay that has not been taught a code for some
+       * refusal still sends `message`, and the client falls back to it.
+       */
+      code?: RelayErrorCode;
+      /**
+       * For `VENUE_LOCKED` only: the bracket verdict itself, so the client can
+       * render it with the same localized sentence the room list already
+       * shows. Sending the verdict rather than a formatted string is what
+       * keeps one copy of that wording instead of two.
+       */
+      verdict?: EntryVerdict;
+    };
 
 /**
  * Which device is holding an account right now. One account has exactly one

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -1053,5 +1053,46 @@ describe('a dealt task is one the player can actually play', () => {
       raw.close();
     }
     expect(db.getMissions('m_stuck', day).some((m) => m.id === 'elite_cyber_3')).toBe(false);
+  });
+});
+
+describe('mission progress is part of the match record, not a side effect of it', () => {
+  // `advanceMissions` used to run BEFORE `recordMatch` opened its transaction,
+  // so a rollback — a full disk, a constraint, anything the catch is there for
+  // — left the progress banked while the `recorded_matches` stamp did not
+  // exist. The client then retries the very same match, because as far as the
+  // server is concerned it was never recorded, and the same match advances the
+  // same missions again. Progress has no ceiling of its own beyond each
+  // mission's own target, so this is a genuine over-count, not a no-op.
+  it('does not bank progress from a match whose write rolled back', () => {
+    init('m_rollback', 'MissionRollback');
+    const before = db.getMissions('m_rollback').map((m) => m.current);
+    expect(before.every((c) => c === 0)).toBe(true);
+
+    // Fail the LAST write inside the transaction, so everything this match
+    // wrote has to come back out with it.
+    const stamp = vi
+      .spyOn(db as unknown as { stampRecordedMatch: (...a: unknown[]) => void }, 'stampRecordedMatch')
+      .mockImplementationOnce(() => {
+        throw new Error('disk full');
+      });
+
+    expect(() =>
+      db.recordMatch(match('m_rollback', { matchKey: 'duel:ROLL:1', playerScore: 5, bestStreak: 30 }))
+    ).toThrow(/disk full/);
+    stamp.mockRestore();
+
+    expect(db.getMissions('m_rollback').map((m) => m.current)).toEqual(before);
+    // And the match really did not land, so the retry below is the honest case.
+    expect(db.getProfile('m_rollback').matchesPlayed).toBe(0);
+  });
+
+  it('counts the retry of that match exactly once', () => {
+    init('m_retry', 'MissionRetry');
+    const key = 'duel:RETRY:1';
+    db.recordMatch(match('m_retry', { matchKey: key, playerScore: 5, bestStreak: 30 }));
+    const after = db.getMissions('m_retry').map((m) => m.current);
+    db.recordMatch(match('m_retry', { matchKey: key, playerScore: 5, bestStreak: 30 }));
+    expect(db.getMissions('m_retry').map((m) => m.current)).toEqual(after);
   });
 });

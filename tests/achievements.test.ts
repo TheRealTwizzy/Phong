@@ -743,3 +743,54 @@ describe('a playable setting is never a locked one', () => {
     expect(playableWinningScore([], 3)).toBe(3);
   });
 });
+
+describe('a permanent unlock is not bought with the match rules', () => {
+  // `ranked` gated the two rating updates and nothing else, so a match on
+  // party rules — correctly refused a rating, correctly paid XP — still moved
+  // every counter a permanent unlock reads. See the note in recordMatch.
+  const PARTY = { paddleScale: 1.6, ballScale: 1.8, ballSpeedMax: 1 };
+
+  const playOne = (id: string, name: string, rules: object | undefined, streak: number) => {
+    db.getProfile(id);
+    db.initializeProfile(id, name);
+    return db.recordMatch({
+      playerId: id,
+      username: name,
+      // A clean sheet, long enough to clear the shutout floor.
+      playerScore: SHUTOUT_MIN_POINTS,
+      opponentScore: 0,
+      bestStreak: streak,
+      endStreak: streak,
+      earnedStreak: streak,
+      mode: 'solo',
+      difficulty: 'pro',
+      isWinner: true,
+      ...(rules ? { rules } : {}),
+    } as Parameters<typeof db.recordMatch>[0]);
+  };
+
+  it('does not bank a rally, a shutout or a ladder win from party rules', () => {
+    const res = playOne('unranked_counters', 'PartyRules', PARTY, 150);
+    expect(res.profile.highestRally).toBe(0);
+    expect(res.profile.shutoutsWon).toBe(0);
+    expect(res.profile.proWins).toBe(0);
+    // The ladder rung those counters gate stays shut.
+    expect(res.profile.achievements).not.toContain('ai_pro_10');
+    expect(res.profile.achievements).not.toContain('rally_150');
+  });
+
+  it('still pays XP for the match, which is the documented trade', () => {
+    const res = playOne('unranked_xp', 'PartyRulesXp', PARTY, 40);
+    expect(res.earnedXp).toBeGreaterThan(0);
+    expect(res.ranked).toBe(false);
+    expect(res.profile.matchesPlayed).toBe(1);
+    expect(res.profile.matchesWon).toBe(1);
+  });
+
+  it('banks all three on stock rules', () => {
+    const res = playOne('ranked_counters', 'StockRules', undefined, 150);
+    expect(res.profile.highestRally).toBe(150);
+    expect(res.profile.shutoutsWon).toBe(1);
+    expect(res.profile.proWins).toBe(1);
+  });
+});

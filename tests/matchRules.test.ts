@@ -17,6 +17,7 @@ import {
   unrankedReasons,
   isRankedMatch,
   normalizeRules,
+  AUTO_SERVE_OPTIONS,
   DEFAULT_ROOM_CONFIG,
   normalizeRoomConfig,
   RANKED_AUTO_SERVE_SECONDS,
@@ -493,5 +494,34 @@ describe('isStockPhysics', () => {
     const nudged = { paddleScale: 1.1 };
     expect(isStockPhysics(nudged)).toBe(false);
     expect(isRankedRules(normalizeRules(nudged))).toBe(true);
+  });
+});
+
+describe('a match can always be started', () => {
+  // A serve needs a second finger, the space bar, or the auto-serve timer.
+  // A phone has no space bar, so with the timer off a player who has not yet
+  // found the two-finger gesture has no way at all to put the ball in play —
+  // and XP, achievements and the ladder all sit behind a serve. The default
+  // must therefore not be "off"; which non-zero option it is, is taste.
+  it('ships with the auto-serve timer on', () => {
+    expect(DEFAULT_MATCH_RULES.autoServeSeconds).toBeGreaterThan(0);
+    expect(AUTO_SERVE_OPTIONS as readonly number[]).toContain(
+      DEFAULT_MATCH_RULES.autoServeSeconds
+    );
+  });
+
+  it('survives the normalizer, so a stored default is not snapped back to off', () => {
+    expect(normalizeRules({ ...DEFAULT_MATCH_RULES }).autoServeSeconds).toBe(
+      DEFAULT_MATCH_RULES.autoServeSeconds
+    );
+    expect(normalizeRules({}).autoServeSeconds).toBe(DEFAULT_MATCH_RULES.autoServeSeconds);
+  });
+
+  it('still lets a host turn it off where the rules do not require it', () => {
+    const party = normalizeRoomConfig({
+      winningScore: 5,
+      rules: { ...DEFAULT_MATCH_RULES, paddleScale: 1.6, autoServeSeconds: 0 },
+    });
+    expect(party.rules.autoServeSeconds).toBe(0);
   });
 });

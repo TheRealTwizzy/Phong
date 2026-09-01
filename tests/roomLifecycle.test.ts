@@ -198,4 +198,55 @@ describe('a socket that takes a second seat', () => {
     await sleep(300);
     expect(await activeRooms()).toBe(0);
   }, 30000);
+
+  it('lets somebody take the seat the HOST vacated', async () => {
+    // `vacateSeat` empties whichever seat left and keeps the room alive, so a
+    // host tapping Main Menu after a match leaves seat 0 empty and seat 1
+    // held. The room stays in the map and stays listed — it has a live
+    // player — while `join_room` tested `players[1]` and wrote `players[1]`,
+    // so every arrival was told "Room is already full (2 players)" about a
+    // table with one person at it, until the 30-minute unpaired TTL.
+    const host = await relay.newDevice('SeatZeroHost');
+    const guest = await relay.newDevice('SeatZeroGuest');
+    const late = await relay.newDevice('SeatZeroLate');
+    const ph = await relay.openPhone(host);
+    const pg = await relay.openPhone(guest);
+    const pl = await relay.openPhone(late);
+
+    ph.send({ type: 'create_room', playerId: host.id });
+    const code = (await ph.await('room_created')).roomId;
+    pg.send({ type: 'join_room', roomId: code, playerId: guest.id });
+    expect((await pg.await('room_joined')).playerIndex).toBe(1);
+
+    // The host leaves. Nobody is playing anybody, but the table survives.
+    ph.close();
+    await sleep(300);
+    expect(await roomStatus(code)).toBe(200);
+    const listed = await (await fetch(`${base}/api/room/${code}`)).json();
+    expect(listed.playerCount).toBe(1);
+    expect(listed.isFull).toBe(false);
+
+    // A newcomer takes the free seat — which is seat 0, so they are the host.
+    pg.clear();
+    pl.send({ type: 'join_room', roomId: code, playerId: late.id });
+    const joined = await pl.await('room_joined');
+    expect(joined.playerIndex).toBe(0);
+    expect(pl.last('error')).toBeUndefined();
+    expect(joined.opponentName).toBe(guest.username);
+
+    // And the player already sitting there is told, even though they are not
+    // the host and the arrival is not "the guest".
+    const told = await pg.await('opponent_joined');
+    expect(told.opponentName).toBe(late.username);
+
+    // Seat 0 is the host seat, so the newcomer can now actually run the table.
+    pg.send({ type: 'player_ready', ready: true });
+    await sleep(150);
+    pl.send({ type: 'start_match' });
+    await pl.await('game_start');
+
+    pl.close();
+    pg.close();
+    await sleep(300);
+  }, 40000);
 });

@@ -73,7 +73,7 @@ Caddy obtains the certificate on first request — DNS must already point at the
 cd Phong && git pull && docker compose up -d --build
 ```
 
-The app restarts in a few seconds. In-flight matches drop and clients auto-reconnect; player data is untouched (it lives on the `phong-data` volume, not in the container).
+The app restarts in a few seconds. In-flight matches drop and the players in them are returned to the menu with a notice — they do NOT auto-reconnect, and nothing in the client ever did; player data is untouched (it lives on the `phong-data` volume, not in the container).
 
 ### Enabling the TURN relay (optional)
 

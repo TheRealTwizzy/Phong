@@ -19,8 +19,9 @@ export const AVATAR_MAX_BYTES = 512 * 1024;
 
 export type UsernameProblem = 'too_short' | 'too_long' | 'invalid_chars' | 'reserved';
 
-// Plain optional-field result (not a discriminated union): this repo's
-// tsconfig has strictNullChecks off, where union narrowing doesn't apply.
+// Plain optional-field result rather than a discriminated union. That was
+// forced when `strictNullChecks` was off; with strict mode on it is a
+// convention this file shares with EntryVerdict and UsernameResult.
 export function validateUsername(name: string): { ok: boolean; reason?: UsernameProblem } {
   if (typeof name !== 'string' || name.length < USERNAME_MIN) {
     return { ok: false, reason: 'too_short' };

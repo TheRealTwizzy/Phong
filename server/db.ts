@@ -246,12 +246,14 @@ export const PLAYER_KEYED_TABLES = [
 ] as const;
 
 // Result of any operation that (re)names a profile. Optional fields rather
-// than a discriminated union — strictNullChecks is off in this repo, so
-// union narrowing wouldn't apply at the call sites.
+// than a discriminated union — originally because strictNullChecks was off and
+// union narrowing would not have applied at the call sites; now a convention
+// shared with EntryVerdict and UsernameResult.
 /**
- * Matches UsernameResult's shape rather than being a discriminated union: this
- * project does not compile with `strict`, so narrowing on a literal `ok: true`
- * does not hold and the caller cannot reach `.code`.
+ * Matches UsernameResult's shape rather than being a discriminated union. The
+ * project compiles with `strict` now, so this is consistency rather than
+ * necessity — the shape is read widely enough that changing it is its own
+ * change.
  */
 export interface CosmeticResult {
   ok: boolean;
@@ -1157,7 +1159,9 @@ class GameDatabase {
         p.chaosWins || 0,
         p.abandons || 0,
         p.dailyStreak,
-        p.lastDailyDate,
+        // Optional on the shape, and the column is nullable — bound explicitly
+        // rather than letting `undefined` reach the driver, which rejects it.
+        p.lastDailyDate ?? null,
         JSON.stringify(p.achievements),
         p.createdAt,
         p.lastActive,
@@ -2761,18 +2765,43 @@ class GameDatabase {
       playerScore: payload.playerScore,
       opponentScore: payload.opponentScore,
     });
-    if (shutOut) profile.shutoutsWon += 1;
-    if (isWin && payload.mode === 'solo') {
-      if (difficulty === 'rookie') profile.rookieWins += 1;
-      else if (difficulty === 'pro') profile.proWins += 1;
-      else if (difficulty === 'elite') profile.eliteWins += 1;
-      else if (difficulty === 'cyber') profile.cyberWins += 1;
-      else if (difficulty === 'chaos') profile.chaosWins += 1;
-    }
-    // The career best rally STREAK — this player's own consecutive returns,
-    // never the opponent's, and never a whole point's worth of both.
-    if (payload.bestStreak > profile.highestRally) {
-      profile.highestRally = payload.bestStreak;
+    // ------------------------------------------------------------------
+    // Counters that gate a PERMANENT unlock only advance on ranked-legal
+    // rules.
+    //
+    // `ranked` gated the two rating updates and nothing else, so a match on
+    // `paddleScale: 1.6` + `ballScale: 1.8` + `ballSpeedMax: 1.0` — correctly
+    // refused a rating, and correctly paid XP, which is the documented trade —
+    // still moved every one of these. That bought `rally_150` (900 XP),
+    // `perpetual-blue` and `quantum-gold` off a 160% paddle; the whole shutout
+    // chain and `flawless-white` off a clean sheet nobody had to earn; and,
+    // worst of the three because it is the game's own pacing, the Elite and
+    // Cyber unlocks — `ai_pro_10` then `ai_elite_10` — so the ladder CLAUDE.md
+    // §7 calls "walked, not jumped" could be walked on a 160% paddle.
+    //
+    // XP is not on this list and must not join it: paying for unranked play is
+    // the deliberate trade, and levels never regress. What a permanent unlock
+    // is, though, is the reward ITSELF, and handing one over for a feat the
+    // rules performed is the same mistake as rating the match would have been.
+    //
+    // The line is drawn at counters a permanent unlock reads, not at every
+    // career stat: `aces` and `totalPointsScored` keep counting on any rules,
+    // because they answer "how much have you played" and freezing them would
+    // make a profile under-report matches the player really did play.
+    if (ranked) {
+      if (shutOut) profile.shutoutsWon += 1;
+      if (isWin && payload.mode === 'solo') {
+        if (difficulty === 'rookie') profile.rookieWins += 1;
+        else if (difficulty === 'pro') profile.proWins += 1;
+        else if (difficulty === 'elite') profile.eliteWins += 1;
+        else if (difficulty === 'cyber') profile.cyberWins += 1;
+        else if (difficulty === 'chaos') profile.chaosWins += 1;
+      }
+      // The career best rally STREAK — this player's own consecutive returns,
+      // never the opponent's, and never a whole point's worth of both.
+      if (payload.bestStreak > profile.highestRally) {
+        profile.highestRally = payload.bestStreak;
+      }
     }
     profile.lastActive = new Date().toISOString();
 
@@ -2915,8 +2944,8 @@ class GameDatabase {
     if (profile.dailyStreak >= 30) unlock('daily_30');
 
     // Daily mission progress rides the same server-verified match record, so
-    // it can never be reported independently of an actual game.
-    this.advanceMissions(payload.playerId, payload, now);
+    // it can never be reported independently of an actual game — and it is
+    // advanced INSIDE the transaction below, not here. See the note there.
 
     // Achievement XP can push the profile over a level threshold too
     const finalLevel = calculateLevelFromXp(profile.xp);
@@ -2957,12 +2986,24 @@ class GameDatabase {
       rankDirection,
       rankMagnitude,
       newAchievements,
-      missions: this.getMissions(payload.playerId, now),
+      // Filled from inside the transaction below, after the progress it
+      // reports has actually been written.
+      missions: [],
     };
 
     this.sql.exec('BEGIN');
     try {
       this.bumpModeStats(profile.id, payload.mode, modeDelta);
+      // Mission progress is a WRITE with no ceiling of its own — a target
+      // clamps a mission at its own goal, but nothing stops the same match
+      // advancing it twice — and it used to run before this transaction
+      // opened. So a rollback here (a full disk, a constraint, anything the
+      // catch below is for) left the progress banked while the
+      // `recorded_matches` stamp did not exist, and the client's retry of the
+      // very same match advanced it a second time. Same transaction as the
+      // payout and the stamp: a match is either paid, counted and marked, or
+      // none of the three.
+      this.advanceMissions(payload.playerId, payload, now);
       // The fatigue tally rides the same transaction and the same idempotency
       // as everything else here: this line is only reached when the matchKey
       // is unstamped, so a replayed match no more double-counts a day's games
@@ -2976,6 +3017,12 @@ class GameDatabase {
       // behind for the rest of the page session. `result` holds this same
       // object, so the stamp below records the fresh rows too.
       profile.modeStats = this.getModeStats(profile.id);
+      // Read back inside the transaction that advanced it, for the same reason
+      // `modeStats` is: `result` is handed to the client whole, and the stamp
+      // below persists this object for the replay path, so a pre-advance read
+      // would report — and then keep reporting — a match's worth of stale
+      // mission progress.
+      result.missions = this.getMissions(payload.playerId, now);
       this.upsertProfile(profile);
       this.insertMatch(matchRecord); // carries its own per-player retention trim
       // Same transaction as the payout: a match is either paid and marked, or
@@ -3295,6 +3342,63 @@ class GameDatabase {
       throw e;
     }
     return { deleted: true, username: row.username, devices: [...devices] };
+  }
+
+  /**
+   * Delete the empty placeholder rows left behind by browsers that never
+   * became players.
+   *
+   * `getProfile` mints and PERSISTS a profile for any device id it has not
+   * seen, and the routes that reach it are unauthenticated by design — a
+   * first-time visitor has to be able to load the game. So one request with no
+   * cookie is one ~0.5KB row, forever, and a script pointed at the host grows
+   * the database without bound. That cannot be closed by requiring auth (the
+   * whole point is that a stranger can arrive) and a per-IP mint limit would
+   * refuse real first-time visitors behind a shared address, so the answer is
+   * a BOUND rather than a gate: nothing stops the rows being created, and
+   * nothing keeps them once it is clear nobody was behind them.
+   *
+   * The predicate is deliberately narrow, because this deletes player rows on
+   * a timer and a subtly wrong one destroys accounts. A row has to have no
+   * username (never onboarded, so there is no account to lose), nothing
+   * recorded against it, no browser signed in to it, and no activity for the
+   * whole window. A real visitor who loaded the game, did not onboard, and
+   * comes back later is handed a fresh empty profile — which is exactly the
+   * state they were in.
+   */
+  public pruneStaleGuests(olderThanMs: number, now: Date = new Date()): number {
+    const cutoff = new Date(now.getTime() - olderThanMs).toISOString();
+    const rows = this.sql
+      .prepare(
+        `SELECT id FROM players
+          WHERE initializedAt IS NULL
+            AND matchesPlayed = 0
+            AND xp = 0
+            AND rankedGames = 0
+            AND lastActive < ?
+            AND id NOT LIKE 'bot-%'
+            AND id NOT IN (SELECT deviceId FROM device_links)
+            AND id NOT IN (SELECT playerId FROM device_links)
+            AND id NOT IN (SELECT deviceId FROM released_devices)
+            AND id NOT IN (SELECT player1Id FROM matches)`
+      )
+      .all(cutoff) as { id: string }[];
+    if (!rows.length) return 0;
+
+    this.sql.exec('BEGIN');
+    try {
+      for (const { id } of rows) {
+        for (const table of PLAYER_KEYED_TABLES) {
+          this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(id);
+        }
+        this.stmt('DELETE FROM players WHERE id = ?').run(id);
+      }
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    return rows.length;
   }
 
   /** Mint a new sign-in code for an account, retiring the old one. */

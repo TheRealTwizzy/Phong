@@ -53,6 +53,7 @@ import {
   roomAllowsSpectators,
   roomById,
   roomEntryVerdict,
+  type EntryVerdict,
   roomsOf,
 } from './src/venues';
 import { validateUsername } from './src/profileRules';
@@ -983,8 +984,85 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies)
-  app.set('trust proxy', true);
+  // Behind Traefik/Caddy in production; needed for req.secure (Secure cookies).
+  //
+  // The HOP COUNT is load-bearing, and `true` was wrong for more than cookies.
+  // `true` trusts the WHOLE X-Forwarded-For chain, so `req.ip` becomes its
+  // leftmost entry — which is a header the client writes. The recovery-code
+  // sign-in limiter keys on `req.ip`, so an attacker sending a different
+  // forwarded address per request had an unlimited allowance against every
+  // account at once, and the per-device key beside it does not save that: a
+  // request arriving with no cookie is minted a fresh device id, so that key
+  // is attacker-chosen too. The code is a credential the player KEEPS now
+  // rather than a one-shot token, which is exactly what made it worth guessing.
+  //
+  // One hop is what both documented deployments have — Dokploy's Traefik, and
+  // the compose stack's Caddy — and it makes `req.ip` the address the proxy
+  // actually observed. Overridable because the right answer is a property of
+  // the deployment and not of this file: two proxies is 2, and no proxy at all
+  // is 0, which is also the safe value for running the server directly.
+  const trustHops = Number(process.env.TRUST_PROXY_HOPS);
+  app.set(
+    'trust proxy',
+    process.env.TRUST_PROXY_HOPS && Number.isFinite(trustHops) && trustHops >= 0 ? trustHops : 1
+  );
+  // Express advertises itself by default; there is nothing to gain by it.
+  app.disable('x-powered-by');
+
+  /**
+   * Response headers, set HERE rather than in `deploy/Caddyfile`.
+   *
+   * The compose stack's Caddy is one of two deployment paths and not the
+   * primary one — Dokploy's Traefik is, and this repo does not configure it —
+   * so a header set at the proxy covers whichever path the person editing it
+   * happened to be thinking about. Set on the app, they hold for both, for
+   * `npm start`, and for anything anyone puts in front later.
+   *
+   * The CSP is deliberately checkable rather than ambitious. The built
+   * `index.html` carries no inline script and no inline style (verified), the
+   * bundle and stylesheet are hashed files under `/assets`, and the only
+   * inline styling in the app is the `style` ATTRIBUTE the equipped cosmetic
+   * publishes on `#app-root-container` — which is what `'unsafe-inline'` in
+   * `style-src` is for and what a policy without it would break silently, in
+   * production, on every theme. `connect-src` carries `ws:`/`wss:` because the
+   * relay shares this origin, and `img-src` carries `blob:`/`data:` for the
+   * avatar pipeline, which builds a 256x256 PNG in the browser.
+   *
+   * `PHONG_CSP=off` disables it, because a policy that breaks a deployment
+   * must be switchable off by whoever is holding the pager rather than by a
+   * redeploy.
+   */
+  const CSP = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self' ws: wss:",
+    "media-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    // `frame-ancestors` above is the modern form; this is for the browsers
+    // that only understand the old one.
+    res.setHeader('X-Frame-Options', 'DENY');
+    if (process.env.PHONG_CSP !== 'off') res.setHeader('Content-Security-Policy', CSP);
+    // Only over a connection that is already HTTPS, and only in production:
+    // Caddy does not add this by default and neither does Traefik. Deliberately
+    // WITHOUT `includeSubDomains` or `preload` — this is a leaf host, so
+    // neither buys anything here, and they are the halves that are hard to
+    // take back.
+    if (req.secure && process.env.NODE_ENV === 'production') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // The device cookie is established by the NAVIGATION, before a line of JS
@@ -1164,7 +1242,13 @@ async function startServer() {
   // most networks; when TURN_URL + TURN_STATIC_SECRET are set (coturn with
   // use-auth-secret), time-limited credentials are minted per request so the
   // shared secret never reaches clients.
-  app.get('/api/rtc-config', (req, res) => {
+  // Behind a live session: these are TURN credentials, valid for six hours,
+  // and the route was open to anyone who could reach the host. A relay for
+  // arbitrary traffic is what a TURN server is, so handing them out
+  // unauthenticated is offering the deployment's bandwidth to the internet.
+  // Every legitimate caller is a player about to negotiate a duel, and holds
+  // one already.
+  app.get('/api/rtc-config', requireActiveSession, (req, res) => {
     const iceServers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
       { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
     ];
@@ -1173,7 +1257,12 @@ async function startServer() {
     const turnSecret = process.env.TURN_STATIC_SECRET;
     if (turnUrl && turnSecret) {
       const ttlSeconds = 6 * 60 * 60;
-      const username = `${Math.floor(Date.now() / 1000) + ttlSeconds}:phong`;
+      // coturn's REST scheme is `expiry:name`, and the name was the constant
+      // "phong" — so every credential the deployment ever issued was
+      // identical apart from its timestamp, which makes an abusive one neither
+      // attributable to a device nor revocable without rotating the secret for
+      // everybody. The device id is what this server knows the caller by.
+      const username = `${Math.floor(Date.now() / 1000) + ttlSeconds}:${req.deviceId || 'phong'}`;
       const credential = crypto.createHmac('sha1', turnSecret).update(username).digest('base64');
       iceServers.push({ urls: turnUrl.split(',').map((u) => u.trim()), username, credential });
     }
@@ -2114,6 +2203,31 @@ async function startServer() {
     }
   }, HEARTBEAT_MS).unref?.();
 
+  /**
+   * Sweep the empty placeholder rows away — see `db.pruneStaleGuests`.
+   *
+   * Hourly rather than on every request, and guarded like the room reaper is:
+   * a failing disk should log a line, not take a sweep (or the process) down.
+   * The window is a week by default, which is long enough that a real visitor
+   * who loaded the game and did not onboard has plainly moved on, and short
+   * enough that the table's steady state is a week of traffic rather than
+   * everything that ever reached the host.
+   */
+  const GUEST_TTL_MS =
+    Number(process.env.GUEST_PROFILE_TTL_DAYS) > 0
+      ? Number(process.env.GUEST_PROFILE_TTL_DAYS) * 24 * 60 * 60 * 1000
+      : 7 * 24 * 60 * 60 * 1000;
+  const sweepGuests = () => {
+    try {
+      const gone = db.pruneStaleGuests(GUEST_TTL_MS);
+      if (gone > 0) console.log(`[db] pruned ${gone} stale guest profile(s)`);
+    } catch (e) {
+      console.error('guest prune failed:', e);
+    }
+  };
+  sweepGuests();
+  setInterval(sweepGuests, 60 * 60 * 1000).unref?.();
+
   wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
     // Answered the last probe. A fresh socket has not been probed yet, so it
     // starts alive rather than one sweep away from being terminated.
@@ -2204,23 +2318,36 @@ async function startServer() {
      * for. A cookieless socket (the load test's path) is not judged either —
      * it has no profile to judge.
      */
-    const venueRefusal = (venueRoomId: string): string | null => {
+    /**
+     * The bracket verdict, when it refuses — never a formatted sentence.
+     *
+     * The English prose that used to be built here went straight into the
+     * client's `alert()`, so this was one of the places the product spoke
+     * English in seven locales. The client already renders a verdict as a
+     * localized sentence for the room list (`lockReason`), so handing it the
+     * verdict keeps ONE copy of that wording rather than a second one here
+     * that would drift. `message` below is the English fallback for a bundle
+     * that does not understand the code.
+     */
+    const venueRefusal = (venueRoomId: string): EntryVerdict | null => {
       if (!cookieDeviceId) return null;
       const room = roomById(venueRoomId);
       if (!room?.gate) return null;
       const profile = db.getProfile(cookieDeviceId);
       const verdict = roomEntryVerdict(room, profile);
-      if (verdict.ok) return null;
+      return verdict.ok ? null : verdict;
+    };
+
+    /** English fallback for a verdict, for `error.message`. */
+    const venueRefusalText = (verdict: EntryVerdict): string => {
       if (verdict.reason === 'level') return `This room needs level ${verdict.needLevel}.`;
       if (verdict.reason === 'tier_low') return `This room needs ${verdict.needTier} or above.`;
       return `This room is for ${verdict.maxTier} and below.`;
     };
 
-    const seatRefusal = (): string | null => {
-      if (!cookieDeviceId) return null;
-      return db.getProfile(cookieDeviceId).initialized
-        ? null
-        : 'Pick a username before joining a match.';
+    const seatRefusal = (): boolean => {
+      if (!cookieDeviceId) return false;
+      return !db.getProfile(cookieDeviceId).initialized;
     };
 
     ws.on('message', (raw) => {
@@ -2238,9 +2365,14 @@ async function startServer() {
           // Queueing IS asking for a seat, just not yet at a named table.
           msg.type === 'queue_join'
         ) {
-          const refusal = seatRefusal();
-          if (refusal) {
-            ws.send(JSON.stringify({ type: 'error', message: refusal }));
+          if (seatRefusal()) {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'NEEDS_USERNAME',
+                message: 'Pick a username before joining a match.',
+              })
+            );
             return;
           }
         }
@@ -2252,7 +2384,14 @@ async function startServer() {
           // hold, still less charge them an abandon for a match they are in.
           const venueRefused = venueRefusal(venueRoomId);
           if (venueRefused) {
-            ws.send(JSON.stringify({ type: 'error', message: venueRefused }));
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'VENUE_LOCKED',
+                verdict: venueRefused,
+                message: venueRefusalText(venueRefused),
+              })
+            );
             return;
           }
           let code = generateRoomCode();
@@ -2359,7 +2498,7 @@ async function startServer() {
           const room = roomForCode(code);
 
           if (!room) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Room not found. Check the 4-letter code.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found. Check the 4-letter code.' }));
             return;
           }
 
@@ -2372,15 +2511,32 @@ async function startServer() {
             // it has guards of its own (the match lock above all) that a
             // vacate-then-seat would walk straight past.
             ws.send(
-              JSON.stringify({ type: 'error', message: 'You are already at this table — use a seat.' })
+              JSON.stringify({ type: 'error', code: 'ALREADY_AT_TABLE', message: 'You are already at this table — use a seat.' })
             );
             return;
           }
 
-          if (room.players[1] !== null) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Room is already full (2 players).' }));
+          // The FIRST free playing seat, not seat 1. `vacateSeat` empties
+          // whichever seat left and keeps the room alive, so a host who taps
+          // Main Menu after a match leaves a table with seat 0 empty and seat
+          // 1 held — still in the map, still listed by
+          // `/api/rooms/:venueRoomId/tables` (it has a live player), and
+          // refusing every arrival as "already full (2 players)" for up to the
+          // 30-minute unpaired TTL, because this test asked about seat 1 and
+          // the write below always went to seat 1.
+          //
+          // Seat 0 is the host seat, so whoever takes it is the host — which
+          // is already the rule `swap_seat` established when it made a
+          // pre-match move into seat 0 legal. Readiness and rematch votes are
+          // cleared below, so a table adopted this way starts its handshake
+          // from scratch rather than inheriting the departed pair's.
+          const joinIdx: 0 | 1 | null =
+            room.players[0] === null ? 0 : room.players[1] === null ? 1 : null;
+          if (joinIdx === null) {
+            ws.send(JSON.stringify({ type: 'error', code: 'ROOM_FULL', message: 'Room is already full (2 players).' }));
             return;
           }
+          const otherIdx: 0 | 1 = joinIdx === 0 ? 1 : 0;
 
           // A PUBLIC table is one this player browsed to, so the bracket that
           // listed it applies to them as well as to its host. A PRIVATE table
@@ -2395,7 +2551,14 @@ async function startServer() {
           if (room.visibility === 'public') {
             const joinRefused = venueRefusal(room.venueRoomId);
             if (joinRefused) {
-              ws.send(JSON.stringify({ type: 'error', message: joinRefused }));
+              ws.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 'VENUE_LOCKED',
+                  verdict: joinRefused,
+                  message: venueRefusalText(joinRefused),
+                })
+              );
               return;
             }
           }
@@ -2408,36 +2571,44 @@ async function startServer() {
           vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
-          const guestName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 2';
+          const guestName = cookieDeviceId
+            ? db.getProfile(cookieDeviceId).username
+            : joinIdx === 0
+              ? 'Player 1'
+              : 'Player 2';
           // Where this occupant came in, so the vouch in /api/match/record can
           // tell a match they played from one the room merely remembers.
-          (room.seatSince ??= [null, null])[1] = room.matchSeq;
-          room.players[1] = {
+          // Indexed on the seat ACTUALLY taken: an arrival can now adopt a
+          // hostless table by taking seat 0, and pinning this to seat 1 would
+          // leave `seatSince[0]` null — which fails closed, so that player's
+          // duel would record un-ranked for a match they really played.
+          (room.seatSince ??= [null, null])[joinIdx] = room.matchSeq;
+          room.players[joinIdx] = {
             ws,
             playerId: currentPlayerId,
             playerName: guestName,
-            playerIndex: 1,
+            playerIndex: joinIdx,
             deviceId: cookieDeviceId || null,
             sessionId: cookieSessionId,
           };
-          room.streaks[1] = carriedStreak(cookieDeviceId);
-          room.bestStreaks[1] = Math.max(room.bestStreaks[1], room.streaks[1]);
+          room.streaks[joinIdx] = carriedStreak(cookieDeviceId);
+          room.bestStreaks[joinIdx] = Math.max(room.bestStreaks[joinIdx], room.streaks[joinIdx]);
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
           // Two players: the solo clock stops. It restarts if either of them
           // leaves, which is what a room going back to one player IS.
           room.soloSince = null;
           currentRoomId = room.id;
-          seat = { role: 'player', index: 1 };
+          seat = { role: 'player', index: joinIdx };
 
           // Notify joining player
           ws.send(
             JSON.stringify({
               type: 'room_joined',
               roomId: room.id,
-              playerIndex: 1,
-              opponentName: room.players[0]?.playerName || 'Player 1',
-              opponentId: room.players[0]?.playerId || 'p1',
+              playerIndex: joinIdx,
+              opponentName: room.players[otherIdx]?.playerName || 'Player 1',
+              opponentId: room.players[otherIdx]?.playerId || 'p1',
             })
           );
 
@@ -2445,13 +2616,15 @@ async function startServer() {
           // the first serve — and can read them in the lobby.
           ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
 
-          // Notify host
-          if (room.players[0]?.ws && room.players[0].ws.readyState === WebSocket.OPEN) {
-            room.players[0].ws.send(
+          // Notify whoever was already sitting here — which is not always the
+          // host, now that an arrival can be the one taking seat 0.
+          const sitting = room.players[otherIdx];
+          if (sitting?.ws && sitting.ws.readyState === WebSocket.OPEN) {
+            sitting.ws.send(
               JSON.stringify({
                 type: 'opponent_joined',
-                opponentName: room.players[1]?.playerName || 'Player 2',
-                opponentId: room.players[1]?.playerId || 'p2',
+                opponentName: room.players[joinIdx]?.playerName || 'Player 2',
+                opponentId: room.players[joinIdx]?.playerId || 'p2',
               })
             );
           }
@@ -2477,11 +2650,11 @@ async function startServer() {
           // either, or the key would be a door with a window beside it.
           const room = roomForCode(code);
           if (!room) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Room not found.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found.' }));
             return;
           }
           if (!room.config.spectators) {
-            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NO_WATCH_SEATS', message: 'This table has no seats to watch from.' }));
             return;
           }
 
@@ -2500,14 +2673,14 @@ async function startServer() {
           if (msg.seat === undefined || msg.seat === null) {
             const free = room.spectators[0] === null ? 0 : room.spectators[1] === null ? 1 : null;
             if (free === null) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Both seats are taken.' }));
+              ws.send(JSON.stringify({ type: 'error', code: 'WATCH_SEATS_FULL', message: 'Both seats are taken.' }));
               return;
             }
             slot = free;
           } else if (msg.seat === 2 || msg.seat === 3) {
             slot = msg.seat === 2 ? 0 : 1;
           } else {
-            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat you can watch from.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NOT_A_SEAT', message: 'That is not a seat you can watch from.' }));
             return;
           }
 
@@ -2515,14 +2688,14 @@ async function startServer() {
             // Already at this table. Refused rather than treated as a move for
             // the same reason join_room refuses it: the vacate below would run
             // against the very room being taken a seat in.
-            ws.send(JSON.stringify({ type: 'error', message: 'You are already at this table.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'ALREADY_AT_TABLE', message: 'You are already at this table.' }));
             return;
           }
           // Non-null, not non-live: a seat holding a socket that has died is
           // occupied until its close handler clears it, and treating it as
           // free orphans the session sitting in it.
           if (room.spectators[slot] !== null) {
-            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'SEAT_TAKEN', message: 'That seat is taken.' }));
             return;
           }
           // One account, one seat at a table. Without this an account
@@ -2533,7 +2706,7 @@ async function startServer() {
               room.players.some((p) => p?.deviceId === cookieDeviceId) ||
               room.spectators.some((w) => w?.deviceId === cookieDeviceId);
             if (already) {
-              ws.send(JSON.stringify({ type: 'error', message: 'You already have a seat at this table.' }));
+              ws.send(JSON.stringify({ type: 'error', code: 'ALREADY_AT_TABLE', message: 'You already have a seat at this table.' }));
               return;
             }
           }
@@ -2608,14 +2781,14 @@ async function startServer() {
           // mid-duel, and the abandon would be charged to them for a match
           // they never asked to leave.
           if (currentRoomId && seat) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Leave your table before queueing.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'LEAVE_TABLE_FIRST', message: 'Leave your table before queueing.' }));
             return;
           }
           if (!cookieDeviceId) {
             // No profile means no rating to pair on and nothing to record
             // onto. A cookieless socket can still play a private duel — that
             // is the load test's path — but it cannot be matchmade.
-            ws.send(JSON.stringify({ type: 'error', message: 'Pick a username before queueing.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NEEDS_USERNAME', message: 'Pick a username before queueing.' }));
             return;
           }
           // Re-joining is not a reset: keeping the original joinedAt is what
@@ -2660,7 +2833,7 @@ async function startServer() {
           // seat 0, the host's.
           const target = msg.seat;
           if (target !== 0 && target !== 1 && target !== 2 && target !== 3) {
-            ws.send(JSON.stringify({ type: 'error', message: 'That is not a seat.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NOT_A_SEAT', message: 'That is not a seat.' }));
             return;
           }
           const here: TableSeat = seat.role === 'player' ? seat.index : spectatorSeat(seat.slot);
@@ -2676,13 +2849,13 @@ async function startServer() {
           // free would orphan the session sitting in it.
           const occupied = toPlayer ? room.players[targetIdx] : room.spectators[targetIdx];
           if (occupied !== null) {
-            ws.send(JSON.stringify({ type: 'error', message: 'That seat is taken.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'SEAT_TAKEN', message: 'That seat is taken.' }));
             return;
           }
           if (!toPlayer && !room.config.spectators) {
             // Re-checked at claim time: the browser is polled, so a table
             // listed as offering seats can be tapped after the host shut them.
-            ws.send(JSON.stringify({ type: 'error', message: 'This table has no seats to watch from.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'NO_WATCH_SEATS', message: 'This table has no seats to watch from.' }));
             return;
           }
 
@@ -2700,7 +2873,7 @@ async function startServer() {
           const touchesPlayer = toPlayer || seat.role === 'player';
           const midMatch = room.matchSeq > 0 && !room.matchOver;
           if (touchesPlayer && midMatch) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Seats are locked until the match ends.' }));
+            ws.send(JSON.stringify({ type: 'error', code: 'SEATS_LOCKED', message: 'Seats are locked until the match ends.' }));
             return;
           }
 
@@ -2709,7 +2882,7 @@ async function startServer() {
           if (seat.role === 'player' && !toPlayer) {
             const other = room.players[seat.index === 0 ? 1 : 0];
             if (!other) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Somebody has to be playing.' }));
+              ws.send(JSON.stringify({ type: 'error', code: 'NEEDS_A_PLAYER', message: 'Somebody has to be playing.' }));
               return;
             }
           }
@@ -2848,7 +3021,11 @@ async function startServer() {
           // A ball over the net from this seat is that player's return — and
           // it belongs to their streak alone. The serve is not one, which is
           // the only thing crossingsThisPoint is consulted for.
-          countReturn(room, playerIndex());
+          // Read once into a local: the branch above already established this
+          // is not null, but that is a call the compiler cannot narrow across.
+          const crossingSeat = playerIndex();
+          if (crossingSeat === null) return;
+          countReturn(room, crossingSeat);
           // The relay is counting this match now, so it owns where the run and
           // the point are — and both phones are told to come off P2P, because
           // this crossing reaches the other one as a ball_incoming that its
@@ -3019,7 +3196,9 @@ async function startServer() {
           const room = rooms.get(currentRoomId);
           if (!room) return;
           room.lastActive = Date.now();
-          room.ready[playerIndex()] = !!msg.ready;
+          const readySeat = playerIndex();
+          if (readySeat === null) return;
+          room.ready[readySeat] = !!msg.ready;
           broadcast(room, { type: 'ready_state', ready: room.ready });
         } else if (msg.type === 'start_match' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
@@ -3078,7 +3257,9 @@ async function startServer() {
           room.lastActive = Date.now();
           // A vote only means anything once the room agrees the match is done.
           if (!room.matchOver) return;
-          room.rematchVotes[playerIndex()] = true;
+          const voteSeat = playerIndex();
+          if (voteSeat === null) return;
+          room.rematchVotes[voteSeat] = true;
 
           if (room.rematchVotes[0] && room.rematchVotes[1] && room.players[0] && room.players[1]) {
             // Both agreed: fresh match, the other side opens this time.

@@ -33,7 +33,16 @@ const ok = (m) => console.log('  ✓', m);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const browser = await chromium.launch({ executablePath: EXEC, args: ['--no-sandbox'] });
+// The relay's refusals are TOASTS now, not `alert()`. Both are collected: the
+// dialog list keeps its old meaning (nothing should ever open one), and the
+// toast check is what actually carries this assertion since the alert went.
+// Left as dialogs alone, "no unexpected error" would have been vacuously true
+// for every refusal the relay can send.
 const dialogs = [];
+const relayErrorToast = async (page) => {
+  const el = await page.$('#toast-relay-error');
+  return el ? (await el.textContent())?.trim() : null;
+};
 
 async function newPage(label) {
   const ctx = await browser.newContext({ ...devices['iPhone 13'] });
@@ -134,7 +143,9 @@ await readyBtn.click();
 await sleep(1200);
 const canStart = await host.evaluate(() => {
   const b = document.querySelector('#btn-ready-play');
-  return b ? !b.disabled : false;
+  // Strictly `=== false`: `b.disabled` is `undefined` on a non-control, and
+  // `!undefined` would report a moved id as "enabled and ready to click".
+  return b ? b.disabled === false : false;
 });
 if (!canStart) fail('host cannot start after the guest readied');
 await host.click('#btn-ready-play');
@@ -147,6 +158,10 @@ if (!onCourt[0] || !onCourt[1]) fail(`both phones did not reach the court (host=
 ok('both phones reached the court');
 
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
+for (const [label, pg] of [['host', host], ['guest', guest]]) {
+  const toast = await relayErrorToast(pg);
+  if (toast) fail(`unexpected relay error on ${label}: ${toast}`);
+}
 
 // ---------------------------------------------------------------------------
 // The other half of the reported failure: the invitee is NOT a new player.
@@ -262,6 +277,10 @@ if (codeNow !== homeCode) fail('signing in should not spend the code');
 ok('the sign-in code survives being used');
 
 if (dialogs.length) fail(`unexpected error dialog: ${dialogs.join(' | ')}`);
+{
+  const toast = await relayErrorToast(home);
+  if (toast) fail(`unexpected relay error: ${toast}`);
+}
 
 console.log('\nPASS: an invitation lands a new player in the match, and never costs a returning one their account');
 await browser.close();

@@ -109,6 +109,8 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
   const dprRef = useRef<number>(Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 3.5));
 
   paddleXRef.current = paddleX;
+  const ballPropRef = useRef(ball);
+  ballPropRef.current = ball;
 
   // External trigger for screen shake (e.g. from Settings test button or goal)
   useEffect(() => {
@@ -466,6 +468,17 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       const dt = Math.min((time - lastTime) / 1000, 0.1);
       lastTime = time;
 
+      // The ball is read from a REF, not from the prop closure. App rebuilds
+      // the ball object every frame (`setBall({...})`), so with `ball` in the
+      // dependency array below this effect tore the whole rAF loop down and
+      // re-armed it sixty times a second — which is the exact bug the note on
+      // `oppPaddleXRef` above says was fixed for a different prop, with the
+      // actual culprit left in. It also re-stamped `lastTime` at commit time
+      // each frame, so `dt` measured commit-to-vsync rather than frame-to-frame
+      // and every particle, ripple and shake decay was keyed off the wrong
+      // interval.
+      const ballNow = ballPropRef.current;
+
       const rect = canvas.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 3.5);
       dprRef.current = dpr;
@@ -627,17 +640,17 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
       // ==========================================
       // DECAYING BALL TRAIL EFFECT (SHOWTRAILS)
       // ==========================================
-      if (settings.showTrails && ball.active) {
+      if (settings.showTrails && ballNow.active) {
         // Record current ball position snapshot
         const now = time;
-        const currentSpeed = ball.speedMultiplier || 1.0;
+        const currentSpeed = ballNow.speedMultiplier || 1.0;
 
         trailRef.current.push({
-          x: ball.x,
-          y: ball.y,
+          x: ballNow.x,
+          y: ballNow.y,
           speed: currentSpeed,
           time: now,
-          radius: ball.radius,
+          radius: ballNow.radius,
         });
 
         // Prune points older than 280ms or keep up to 18 points max
@@ -667,7 +680,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
             ctx.shadowColor = theme.ballGlow;
             ctx.shadowBlur = 8 * ratio;
             ctx.globalAlpha = alpha;
-            ctx.lineWidth = Math.max(2, ball.radius * width * 1.8 * ratio);
+            ctx.lineWidth = Math.max(2, ballNow.radius * width * 1.8 * ratio);
 
             ctx.beginPath();
             ctx.moveTo(p1.x * width, p1.y * height);
@@ -686,7 +699,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
             ctx.save();
             ctx.strokeStyle = '#ffffff';
             ctx.globalAlpha = alpha;
-            ctx.lineWidth = Math.max(1, ball.radius * width * 0.7 * ratio);
+            ctx.lineWidth = Math.max(1, ballNow.radius * width * 0.7 * ratio);
 
             ctx.beginPath();
             ctx.moveTo(p1.x * width, p1.y * height);
@@ -735,10 +748,10 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
 
       // Draw The Ball (Only if active in player's half, and not being held for
       // a serve — the held ball is drawn on the paddle, below).
-      if (ball.active && !isServing) {
-        const ballPx = ball.x * width;
-        const ballPy = ball.y * height;
-        const ballPr = ball.radius * width;
+      if (ballNow.active && !isServing) {
+        const ballPx = ballNow.x * width;
+        const ballPy = ballNow.y * height;
+        const ballPr = ballNow.radius * width;
 
         ctx.save();
         ctx.fillStyle = theme.ballColor;
@@ -753,7 +766,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         // spinning ball reads as spinning rather than as a mystery drift. On a
         // blind half-court the receiver never sees the stroke that produced
         // the spin, so the ball itself has to carry the tell.
-        const spin = ball.spin || 0;
+        const spin = ballNow.spin || 0;
         const spinAmount = Math.max(-1, Math.min(1, spin / SPIN_MAX));
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
@@ -810,7 +823,7 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
         ctx.shadowColor = theme.ballGlow;
         ctx.shadowBlur = 14;
         ctx.beginPath();
-        ctx.arc(paddleCenterPx, SERVE_BALL_Y * height, ball.radius * width, 0, Math.PI * 2);
+        ctx.arc(paddleCenterPx, SERVE_BALL_Y * height, ballNow.radius * width, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
@@ -924,7 +937,9 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     animId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animId);
   }, [
-    ball,
+    // `ball` and `aim` are deliberately ABSENT: both change identity every
+    // frame and both are read through refs inside the loop. Putting either
+    // back re-arms the rAF loop per frame again.
     theme,
     settings.showTrails,
     isServing,
@@ -933,7 +948,6 @@ export const CourtCanvas: React.FC<CourtCanvasProps> = ({
     showBallIndicator,
     language,
     netLabel,
-    aim,
     autoServeSeconds,
     serveCountdown,
     paddleWidth,

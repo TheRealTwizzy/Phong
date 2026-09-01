@@ -1551,3 +1551,71 @@ describe('solo XP momentum, recorded', () => {
     }
   });
 });
+
+describe('pruneStaleGuests', () => {
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  const age = (id: string, days: number) => {
+    const when = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    (db as unknown as { sql: { prepare: (q: string) => { run: (...a: unknown[]) => void } } }).sql
+      .prepare('UPDATE players SET lastActive = ? WHERE id = ?')
+      .run(when, id);
+  };
+
+  it('drops a placeholder nobody came back to', () => {
+    db.getProfile('guest_old');
+    age('guest_old', 30);
+    expect(db.pruneStaleGuests(WEEK)).toBeGreaterThanOrEqual(1);
+    expect(
+      (db as unknown as { sql: { prepare: (q: string) => { get: (...a: unknown[]) => unknown } } }).sql
+        .prepare('SELECT id FROM players WHERE id = ?')
+        .get('guest_old')
+    ).toBeUndefined();
+  });
+
+  it('keeps a placeholder that is still recent', () => {
+    db.getProfile('guest_fresh');
+    db.pruneStaleGuests(WEEK);
+    expect(db.getProfile('guest_fresh').id).toBe('guest_fresh');
+  });
+
+  it('never touches an account, however long it has been idle', () => {
+    db.getProfile('guest_real');
+    db.initializeProfile('guest_real', 'GuestReal');
+    age('guest_real', 400);
+    db.pruneStaleGuests(WEEK);
+    const back = db.getProfile('guest_real');
+    expect(back.username).toBe('GuestReal');
+    expect(back.initialized).toBe(true);
+  });
+
+  it('never touches a placeholder that has actually played', () => {
+    db.getProfile('guest_played');
+    db.initializeProfile('guest_played', 'GuestPlayed');
+    db.recordMatch({
+      playerId: 'guest_played',
+      username: 'GuestPlayed',
+      playerScore: 5,
+      opponentScore: 1,
+      bestStreak: 4,
+      endStreak: 0,
+      earnedStreak: 4,
+      mode: 'solo',
+      difficulty: 'rookie',
+      isWinner: true,
+    });
+    age('guest_played', 400);
+    db.pruneStaleGuests(WEEK);
+    expect(db.getProfile('guest_played').matchesPlayed).toBe(1);
+  });
+
+  it('leaves the seeded bots alone', () => {
+    const bots = (
+      db as unknown as { sql: { prepare: (q: string) => { all: () => { n: number }[] } } }
+    ).sql.prepare("SELECT COUNT(*) AS n FROM players WHERE id LIKE 'bot-%'").all()[0].n;
+    db.pruneStaleGuests(0);
+    const after = (
+      db as unknown as { sql: { prepare: (q: string) => { all: () => { n: number }[] } } }
+    ).sql.prepare("SELECT COUNT(*) AS n FROM players WHERE id LIKE 'bot-%'").all()[0].n;
+    expect(after).toBe(bots);
+  });
+});
