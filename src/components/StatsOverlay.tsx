@@ -94,7 +94,8 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
         id="btn-show-stats-overlay"
         onClick={onToggleVisible}
         title={t('telemetry_show', language)}
-        className="absolute top-14 left-3 z-30 flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-surface-2/80 hover:bg-surface-3 border border-line-strong/80 text-accent font-mono text-[11px] backdrop-blur-md transition-all active:scale-95 shadow-md"
+        aria-label={t('telemetry_show', language)}
+        className="absolute top-14 left-3 z-30 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-surface-2/80 hover:bg-surface-3 border border-line-strong/80 text-accent font-mono text-[11px] backdrop-blur-md transition-all active:scale-95 shadow-md"
       >
         <Activity className="w-3.5 h-3.5" />
       </button>
@@ -124,15 +125,17 @@ export const StatsOverlay: React.FC<StatsOverlayProps> = ({
         <div className="flex items-center gap-1">
           <button
             onClick={() => setIsMinimized(!isMinimized)}
-            className="p-0.5 text-ink-muted hover:text-ink rounded"
+            className="p-1.5 text-ink-muted hover:text-ink rounded"
             title={t(isMinimized ? 'telemetry_expand' : 'telemetry_minimize', language)}
+            aria-label={t(isMinimized ? 'telemetry_expand' : 'telemetry_minimize', language)}
           >
             {isMinimized ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
           </button>
           <button
             onClick={onToggleVisible}
-            className="p-0.5 text-ink-muted hover:text-ink rounded"
+            className="p-1.5 text-ink-muted hover:text-ink rounded"
             title={t('telemetry_close', language)}
+            aria-label={t('telemetry_close', language)}
           >
             <X className="w-3.5 h-3.5" />
           </button>

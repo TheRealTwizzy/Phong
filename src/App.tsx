@@ -132,7 +132,23 @@ import {
 } from './net/session';
 import { DIFFICULTY_ORDER, playableDifficulty, playableWinningScore } from './achievements';
 import { TierBadge } from './components/TierBadge';
-import confetti from 'canvas-confetti';
+import rawConfetti from 'canvas-confetti';
+
+/**
+ * Confetti, unless the player has asked for less motion.
+ *
+ * `useMotion()` governs every DOM animation in the app; confetti is drawn to
+ * its own canvas and was outside it, so a celebration fired a few hundred
+ * moving objects across the screen for somebody who had explicitly asked not
+ * to have that. Read at call time rather than once at module load, because
+ * the preference can change while the app is open.
+ */
+const confetti: typeof rawConfetti = ((opts?: Parameters<typeof rawConfetti>[0]) => {
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    return undefined;
+  }
+  return rawConfetti(opts);
+}) as typeof rawConfetti;
 import { Trophy, RefreshCw, Home, ArrowUp, ArrowDown, Circle } from 'lucide-react';
 
 /** How many times a lost invitation socket is retried before giving up. */
@@ -228,6 +244,14 @@ const newSoloMatchKey = (): string =>
  * court wondering.
  */
 const BALL_STALL_MS = 6000;
+
+/**
+ * How old a ping reading may be before it stops being reported as one. The
+ * probe runs every 5s, so anything past this has missed at least one round
+ * trip and the number on screen is describing a connection that no longer
+ * exists.
+ */
+const PING_STALE_MS = 8000;
 
 export default function App() {
   const [settings, setSettings] = useState<GameSettings>(() => {
@@ -420,6 +444,10 @@ export default function App() {
   const [opponentId, setOpponentId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [pingMs, setPingMs] = useState<number>(0);
+  // When that reading was taken. The number only moves on a `pong`, so a
+  // connection that has stopped answering went on showing its last good ping,
+  // unchanged and reassuring, for as long as the stall lasted.
+  const [pingAt, setPingAt] = useState<number>(0);
   const [rematchVotes, setRematchVotes] = useState<[boolean, boolean]>([false, false]);
   /**
    * Which side of a table this page is WATCHING, or null when it is playing.
@@ -2094,6 +2122,7 @@ export default function App() {
 
       case 'pong':
         setPingMs(Date.now() - msg.timestamp);
+        setPingAt(Date.now());
         break;
 
       case 'error':
@@ -3797,14 +3826,28 @@ export default function App() {
             activeConfig.rules.opponentSonar &&
             (mode === 'solo' || mode === 'multiplayer')
           }
-          topClass={mode === 'multiplayer' ? 'top-[5.5rem]' : 'top-14'}
+          // Clears the connection column above it — which is TWO rows when
+          // the ping is showing. The ping chip sat at exactly the offset this
+          // used for multiplayer, on the same edge and a higher z, so it
+          // painted straight over the sonar; permanently, for a spectator,
+          // since a watched table is forced onto the relay and the ping is
+          // only ever shown on the relay.
+          topClass={
+            mode !== 'multiplayer'
+              ? 'top-14'
+              : pingMs > 0 && linkStatus !== 'p2p'
+                ? 'top-[7rem]'
+                : 'top-[5.5rem]'
+          }
         />
 
-        {/* Connection badge: direct P2P vs server relay (multiplayer only) */}
+        {/* Connection badge and its ping, as ONE column so they cannot overlap
+            each other or anything positioned to clear them. */}
+        <div className="absolute top-14 right-2 z-30 flex flex-col items-end gap-1">
         {mode === 'multiplayer' && opponentId && (
           <div
             id="link-status-badge"
-            className={`absolute top-14 right-2 z-30 rounded-chip border px-2 py-0.5 text-2xs select-none ${
+            className={`rounded-chip border px-2 py-0.5 text-2xs select-none ${
               linkStatus === 'p2p'
                 ? 'bg-win/15 border-win/50 text-win'
                 : linkStatus === 'connecting'
@@ -3829,11 +3872,17 @@ export default function App() {
         {inCourtMatch && mode === 'multiplayer' && pingMs > 0 && linkStatus !== 'p2p' && (
           <div
             id="link-ping"
-            className="absolute top-[5.5rem] right-2 z-30 rounded-chip border border-line bg-surface-0/80 px-1.5 text-2xs tnum text-ink-dim select-none"
+            data-stale={Date.now() - pingAt > PING_STALE_MS ? '1' : '0'}
+            className={`rounded-chip border bg-surface-0/80 px-1.5 py-0.5 text-2xs tnum select-none ${
+              Date.now() - pingAt > PING_STALE_MS
+                ? 'border-warn/50 text-warn'
+                : 'border-line text-ink-dim'
+            }`}
           >
-            {pingMs}ms
+            {Date.now() - pingAt > PING_STALE_MS ? '···' : `${pingMs}ms`}
           </div>
         )}
+        </div>
 
         {/* Main Single Half-Court View (The Half-Pong Table) */}
         <main className="flex-1 w-full h-full pt-14 relative flex items-center justify-center">

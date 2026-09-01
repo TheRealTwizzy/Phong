@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { X } from 'lucide-react';
 import { useMotion } from './motion';
@@ -152,6 +152,44 @@ export const Sheet: React.FC<SheetProps> = ({
   const canDismiss = Boolean(onClose) && dismissOnBackdrop && !covered;
   const cardMotion = variant === 'bottom' ? m.bottomCard : m.card;
 
+  /**
+   * The three things `aria-modal="true"` promises and this component did not
+   * do: Escape closes it, focus moves into it, and focus goes back where it
+   * came from. There was no `keydown` handler anywhere in `src/`, so the
+   * attribute was a claim with nothing behind it.
+   *
+   * Only the TOP sheet, on all three counts — a covered sheet is already
+   * `inert`, and a stack where Escape closed the bottom one would leave the
+   * top one floating over nothing.
+   */
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<Element | null>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  useEffect(() => {
+    if (!isOpen || covered) return;
+    returnFocusRef.current = document.activeElement;
+    // Focus the card itself rather than its first control: a sheet opens to be
+    // READ, and jumping a screen reader to the close button skips the title.
+    cardRef.current?.focus({ preventScroll: true });
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !closeRef.current || !dismissOnBackdrop) return;
+      e.stopPropagation();
+      closeRef.current();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      const back = returnFocusRef.current;
+      // Restored only if it is still in the document and still focusable —
+      // a sheet that closes because the thing that opened it went away must
+      // not throw on the way out.
+      if (back instanceof HTMLElement && back.isConnected) back.focus({ preventScroll: true });
+    };
+  }, [isOpen, covered, dismissOnBackdrop]);
+
   return (
     <AnimatePresence>
       {isOpen && (
@@ -184,8 +222,12 @@ export const Sheet: React.FC<SheetProps> = ({
             id={cardId}
             style={cardStyle}
             data-mode={cardMode}
+            ref={cardRef}
             role="dialog"
             aria-modal="true"
+            // Focusable as a container so focus can be MOVED here on open
+            // without landing on a control; -1 keeps it out of the tab order.
+            tabIndex={-1}
             className={`w-full ${SIZE[size]} max-h-sheet flex flex-col overflow-hidden rounded-sheet border ${ACCENT[accent]} bg-surface-2 text-ink shadow-sheet ${cardClassName}`}
             {...cardMotion}
             // Transform and opacity only — motion.ts is explicit that nothing

@@ -300,7 +300,7 @@ export const MissionsModal: React.FC<Props> = ({
                       onClick={() => handleReroll(mission.id)}
                       disabled={!canReroll || rerollingId === mission.id}
                       title={t('mission_reroll_left', language, { n: left })}
-                      className="inline-flex items-center gap-1 rounded-ctl border border-line bg-surface-1 px-2 py-1 text-2xs text-ink-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+                      className="inline-flex items-center gap-1 rounded-ctl border border-line bg-surface-1 px-2 py-1.5 text-2xs text-ink-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <RefreshCw
                         className={`h-3 w-3 ${rerollingId === mission.id ? 'animate-spin' : ''}`}

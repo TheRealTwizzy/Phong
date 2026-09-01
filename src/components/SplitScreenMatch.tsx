@@ -14,7 +14,16 @@ import {
 } from '../game/physics';
 import { sound } from '../audio/soundEffects';
 import { t } from '../i18n/translations';
-import confetti from 'canvas-confetti';
+import rawConfetti from 'canvas-confetti';
+
+// Same rule as App: confetti draws to its own canvas, outside `useMotion()`,
+// so a celebration ignored `prefers-reduced-motion` entirely.
+const confetti: typeof rawConfetti = ((opts?: Parameters<typeof rawConfetti>[0]) => {
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    return undefined;
+  }
+  return rawConfetti(opts);
+}) as typeof rawConfetti;
 import { RefreshCw, Home } from 'lucide-react';
 
 // Local 2-player classic Pong on ONE device: player 1 defends the bottom

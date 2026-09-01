@@ -465,7 +465,13 @@ the decision snapshotted before the refs are cleared. Both once shared a handler
 cancel, and both fired on a shade pull — a serve nobody aimed, a page nobody turned. The
 abort paths matter as much as the commit: `lostpointercapture`, `visibilitychange` and
 `pagehide` all end a drag, because this app hands off to another browser through an `intent://`
-URL and that produces no up and no cancel at all. And **capture is for a mouse**: a touch
+URL and that produces no up and no cancel at all. **This section read as though `CourtCanvas`
+already had all three and it had none** — only `pointerup` and `pointercancel` ever removed a
+pointer there, so one that went away without either left its id at the head of
+`pointerOrderRef` forever: the paddle then followed a finger that was not on the glass, and the
+next real finger down was rank 1, which makes it the JOYSTICK — a dead paddle, with the only
+control that answers being one that exists solely during a serve. It has all three now, and an
+abort serves nothing, because no pointer was lifted. And **capture is for a mouse**: a touch
 pointer is already implicitly captured to the element it went down on, so `setPointerCapture`
 TRANSFERS it and fires a bubbling `lostpointercapture` that aborts the drag being claimed. The
 canvases capture on `pointerdown` safely only because they are `touch-none` surfaces with no

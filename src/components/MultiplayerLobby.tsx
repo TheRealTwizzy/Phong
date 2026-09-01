@@ -252,7 +252,11 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
       closeLabel={t('close', language)}
       icon={<Smartphone className="h-5 w-5" />}
       title={t('mode_multiplayer', language)}
-      subtitle={t('lobby_subtitle', language)}
+      // The one screen whose entire purpose is waiting on a network, and it
+      // said nothing about the network: `isConnected` was declared,
+      // destructured and never read. A player watching a room code with a dead
+      // socket had no way to tell that from a friend who had not typed it yet.
+      subtitle={isConnected ? t('lobby_subtitle', language) : t('lobby_offline', language)}
       bodyClassName="scroll-y p-4 flex flex-col gap-3"
       footer={
         roomId ? (
