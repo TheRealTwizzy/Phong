@@ -1407,6 +1407,35 @@ describe('reporting a run with no match to report it', () => {
     expect(db.getModeStats(id).practice?.currentStreak).toBe(8);
   });
 
+  it('does not count a visit that returned no ball as a session played', () => {
+    // The two records of one visit used to disagree: the history row was gated
+    // on the session having earned a return and the `played` counter, ten lines
+    // above it, was not. Reachable by pressing Reset on the wall while carrying
+    // a run and having returned nothing — the report still has to go out, to
+    // persist the carried run, so every press added a phantom session to the
+    // Profile's practice count.
+    const id = 'dev_practice00000001';
+    init(id, 'PracticeEmpty');
+
+    // A real session first, so the assertion below is about the DELTA rather
+    // than about a player who has never opened the wall.
+    db.recordPractice(id, { bestStreak: 6, earnedStreak: 6, endStreak: 6 });
+    const after = db.getModeStats(id).practice;
+    expect(after?.matchesPlayed).toBe(1);
+    expect(db.getMatchHistory(id, 20).filter((m) => m.mode === 'practice')).toHaveLength(1);
+
+    // Now three resets carrying that run, none of which returned anything.
+    for (let i = 0; i < 3; i++) {
+      db.recordPractice(id, { bestStreak: 6, earnedStreak: 0, endStreak: 6 });
+    }
+    const idle = db.getModeStats(id).practice;
+    expect(idle?.matchesPlayed).toBe(1);
+    expect(db.getMatchHistory(id, 20).filter((m) => m.mode === 'practice')).toHaveLength(1);
+    // The run itself is still carried, which is why the report goes out at all.
+    expect(idle?.currentStreak).toBe(6);
+    expect(idle?.bestStreak).toBe(6);
+  });
+
   it('refuses nonsense rather than storing it', () => {
     const id = 'dev_report0000000004';
     init(id, 'Reporter4');

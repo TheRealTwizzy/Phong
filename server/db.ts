@@ -1835,11 +1835,21 @@ class GameDatabase {
     const earned = Math.min(peak, whole(session.earnedStreak));
     const ended = Math.min(peak, whole(session.endStreak));
 
+    // Whether anything happened here at all, asked ONCE. The history row below
+    // was gated on it and `played` was not, ten lines apart, so the two records
+    // of one visit disagreed: no row, and a session counted. Reachable by
+    // pressing Reset on the wall while carrying a run and having returned
+    // nothing — the report still goes out, because the carried run has to be
+    // persisted, so every press added a phantom session to the Profile's
+    // practice count. The report is still SENT for a run that earned nothing;
+    // it is only the "you played a session" part that is withheld.
+    const isSession = earned >= 1;
+
     // Practice has no opponent, so it has no wins, losses or aces — a session
     // and a streak are all there is to keep. Banked whatever the daily XP cap
     // says, because the cap is about XP, not about what happened.
     this.bumpModeStats(playerId, 'practice', {
-      played: 1,
+      played: isSession ? 1 : 0,
       bestStreak: peak,
       endStreak: ended,
       // Ordered like every other write to the run. Two sessions can be left
@@ -1860,8 +1870,9 @@ class GameDatabase {
     // winnerId is NOT NULL filler — a wall session has no winner and the UI
     // never renders W/L for practice. Sessions where no ball was returned
     // (earned 0 — including one that only broke a carried run) record
-    // nothing: there is no session to remember.
-    if (earned >= 1) {
+    // nothing: there is no session to remember, which is the same `isSession`
+    // the played counter above asks, deliberately shared rather than restated.
+    if (isSession) {
       this.insertMatch({
         id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         player1Id: playerId,
