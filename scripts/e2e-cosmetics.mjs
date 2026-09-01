@@ -170,6 +170,12 @@ ok('the API refuses a locked cosmetic with 403 COSMETIC_LOCKED');
 
 // Boards refuse rows of zeros, so the owner has to have played something
 // before a viewer can reach them through the leaderboard.
+//
+// This POST names no room, so nothing can vouch for it as a duel: it pays XP
+// and deliberately moves no rating. The viewer therefore looks at the LEVEL
+// board below, whose progress filter is `xp > 0`, rather than the default
+// skill board, which filters on `rankedGames > 0`. Nothing here is about
+// which board — the check is that a public profile wears its owner's palette.
 await owner.evaluate(async () => {
   await fetch('/api/match/record', {
     method: 'POST',
@@ -193,6 +199,7 @@ if (viewerAccent === after) {
 }
 
 await viewer.click('#menu-nav-leaderboard');
+await viewer.click('#filter-leaderboard-level');
 await viewer.waitForSelector(`#leaderboard-row-${ownerId}`, { timeout: 8000 })
   .catch(() => fail('the owner never appeared on the leaderboard'));
 await viewer.click(`#leaderboard-row-${ownerId}`);
