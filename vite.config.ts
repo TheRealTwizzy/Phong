@@ -63,6 +63,18 @@ const FLOORS = {
   // together is worth arguing about in a test rather than on a live server.
   'server/matchmaking.ts': { statements: 95, branches: 92 },
   'server/db.ts': { statements: 90, branches: 88 },
+  // The cookie and session layer — the one file where a regression is somebody
+  // losing their account. The STATEMENT number is low and honest about why:
+  // most of this file is exercised by the suites that boot a real server, and
+  // those run out of process where V8 cannot see them (TESTING.md says the
+  // same about `server.ts`). The BRANCH floor is the real one — the decisions
+  // this file makes are covered, and that is what must not slide.
+  'server/auth.ts': { statements: 35, branches: 90 },
+  // Small, pure, and 100% today. Floored now that the report can see them at
+  // all: they were inside `src/components`, which the include never matched,
+  // so thirteen passing tests read as absent.
+  'src/components/ui/meterMemory.ts': { statements: 95, branches: 95 },
+  'src/components/ui/ladderTone.ts': { statements: 95, branches: 95 },
   'server/image.ts': { statements: 90, branches: 88 },
   'server/bots.ts': { statements: 100, branches: 100 },
 };
@@ -122,6 +134,17 @@ export default defineConfig(() => {
           'src/game/**/*.ts',
           'src/media/**/*.ts',
           'src/net/**/*.ts',
+          // The non-component logic that lives among the components:
+          // meterMemory, ladderTone and motion are plain modules with real
+          // unit tests, and the report could not see any of it. A module with
+          // thirteen tests reading as absent is the same blind spot as one
+          // with none.
+          'src/components/**/*.ts',
+          // 600-odd lines with no tests at all. Reported rather than floored,
+          // deliberately: procedural Web Audio needs an AudioContext, so this
+          // is honest visibility of a gap and not a threshold anybody is being
+          // asked to meet today.
+          'src/audio/**/*.ts',
           'server/**/*.ts',
         ],
         exclude: ['src/types.ts', 'src/vite-env.d.ts'],
