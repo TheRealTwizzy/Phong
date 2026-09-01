@@ -314,15 +314,23 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                 id="btn-ready-play"
                 variant="primary"
                 block
-                disabled={!opponentName || !guestReady}
+                // A machine in the chair needs no Ready tap: seating it IS the
+                // yes, and there is nobody to ask. Without this arm the relay
+                // accepts the start and the button that would send it stays
+                // disabled forever, waiting on an `opponentName` only
+                // `room_joined`/`opponent_joined` ever set — the feature not
+                // working at all, with nothing on screen to say why.
+                disabled={config.cpu ? false : !opponentName || !guestReady}
                 icon={<Play className="h-3.5 w-3.5 fill-current" />}
                 onClick={() => onStartMatch?.()}
               >
-                {!opponentName
-                  ? t('waiting_for_opponent', language)
-                  : guestReady
-                    ? t('start_match', language)
-                    : t('waiting_for_ready', language)}
+                {config.cpu
+                  ? t('start_match', language)
+                  : !opponentName
+                    ? t('waiting_for_opponent', language)
+                    : guestReady
+                      ? t('start_match', language)
+                      : t('waiting_for_ready', language)}
               </Button>
             ) : (
               <Button

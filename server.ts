@@ -1571,12 +1571,20 @@ async function startServer() {
     if (!room) {
       return res.status(404).json({ exists: false, message: 'Room not found' });
     }
-    const playerCount = room.players.filter(Boolean).length;
+    // The CPU counts as an occupant here for exactly the reason it does in
+    // the listing above: this endpoint answers "can I join that table", and a
+    // machine in the other chair is the answer no. The two must agree or the
+    // browser row says FULL and this says 1/2 about the same table — and the
+    // only caller that could act on the difference is a join, which the relay
+    // then refuses. `cpu` is exposed beside it so a caller can say WHAT the
+    // table is full of rather than only that it is.
+    const playerCount = room.players.filter(Boolean).length + (room.config.cpu ? 1 : 0);
     res.json({
       exists: true,
       roomId,
       playerCount,
       isFull: playerCount >= 2,
+      cpu: room.config.cpu,
       // Whether a ball has actually been put in play since the last start.
       // Read-only; lets a client (and the e2e) tell a waiting room from a
       // live one.
@@ -3454,6 +3462,7 @@ async function startServer() {
           // its own solo match and a `score_update` returning to it would
           // fight the local scoring.
           const cap = room.config.winningScore;
+          const prevScores: [number, number] = [room.scores[0], room.scores[1]];
           const rawScores = Array.isArray(msg.scores) ? msg.scores : [0, 0];
           room.scores = [
             clampInt(rawScores[0], 0, cap),
@@ -3461,6 +3470,29 @@ async function startServer() {
           ];
           room.inPlay = msg.live === true;
           room.matchOver = room.scores[me] >= cap || room.scores[cpuIdx] >= cap;
+
+          // Told to the WATCHERS when it moves, and only to them. In a duel
+          // the score reaches a watcher because `point_scored` broadcasts a
+          // `score_update` to the whole table — and `point_scored` is refused
+          // here, correctly, since a crossing from a lone socket is not a
+          // rally. Without this the watcher's scoreboard is frozen at whatever
+          // `spectator_sync` handed them when they sat down, which is 0-0 for
+          // anybody who arrived before the first point: a live court under a
+          // scoreboard that never moves. Not echoed to the host, whose own
+          // client is authoritative for its own solo match and would be fought
+          // by it. Sent only when it CHANGES, since this frame is ~20Hz.
+          if (room.scores[0] !== prevScores[0] || room.scores[1] !== prevScores[1]) {
+            const update = JSON.stringify({
+              type: 'score_update',
+              p1Score: room.scores[0],
+              p2Score: room.scores[1],
+              reason: 'point',
+              nextServer: room.servingPlayer,
+            });
+            for (const w of room.spectators) {
+              if (w && w.ws.readyState === WebSocket.OPEN) w.ws.send(update);
+            }
+          }
 
           // Now the six frames, and the ONE rule that decides them: `watched_*`
           // is RAW (a watcher draws that player's court in that player's own

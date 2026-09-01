@@ -333,6 +333,53 @@ describe('what a watcher sees of a CPU match', () => {
     w.close();
   }, 30_000);
 
+  it('moves the watcher’s scoreboard, and never the host’s', async () => {
+    // In a duel the score reaches a watcher because `point_scored`
+    // broadcasts to the whole table — and `point_scored` is refused here,
+    // correctly, since a crossing from a lone socket is not a rally. So this
+    // frame carries it, or the watcher sits in front of a live court under a
+    // scoreboard frozen at whatever they sat down to.
+    const host = await newDevice('CpuScore1');
+    const viewer = await newDevice('CpuScore2');
+    const { phone, roomId } = await seatCpu(host, { spectators: true, cpu: 'rookie' });
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+    const w = await relay.openPhone(viewer);
+    w.send({ type: 'spectate_room', roomId, seat: 2 });
+    await w.await('table_state');
+    w.clear();
+    phone.clear();
+
+    const frame = (scores: [number, number]) =>
+      phone.send({
+        type: 'cpu_frame',
+        hostPaddle: 0.2,
+        cpuPaddle: 0.7,
+        ball: null,
+        scores,
+        live: true,
+      });
+
+    frame([1, 0]);
+    const first = await w.await('score_update');
+    expect([first.p1Score, first.p2Score]).toEqual([1, 0]);
+    frame([1, 1]);
+    await w.awaitCount('score_update', 2);
+    expect(w.last('score_update')).toMatchObject({ p1Score: 1, p2Score: 1 });
+
+    // Repeated frames at the same score say nothing — this arrives at ~20Hz.
+    for (let i = 0; i < 5; i++) frame([1, 1]);
+    await sleep(150);
+    expect(w.all('score_update').length).toBe(2);
+
+    // And never back to the host, whose own client is authoritative for its
+    // own solo match and would be fought by it.
+    expect(phone.all('score_update').length).toBe(0);
+
+    phone.close();
+    w.close();
+  }, 30_000);
+
   it('refuses the frame at a table with no CPU in it', async () => {
     // The guard is on the TABLE having a CPU, not on `playerIndex() !== null`
     // — copying the usual pattern is the natural mistake and it is

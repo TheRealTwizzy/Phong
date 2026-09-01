@@ -159,6 +159,10 @@ export const MatchRulesPanel: React.FC<Props> = ({
 
       <div
         id={`${idPrefix}-rules-status`}
+        // The verdict itself, not the prose. A suite asserting on the
+        // rendered sentence is asserting on a translation, and this row has
+        // seven of them; the reason is the thing that has to be right.
+        data-blocker={blockers[0] ?? 'none'}
         className={`px-2.5 py-1 rounded-ctl text-2xs leading-snug ${
           ranked
             ? 'border border-win/40 bg-win/10 text-win'

@@ -32,6 +32,12 @@ handler:
   spectator, and that one guard is what already closes `paddle_move`, `point_scored`,
   `start_match`, `set_room_config` and `match_sync` to watchers for free. A new gameplay
   message inherits it only if it goes through the same check.
+- **Is a seat actually the right question?** `cpu_frame` is the counter-example and it is
+  worth reading before you copy the pattern above: it guards on the TABLE having a CPU, not
+  on `playerIndex() !== null`, because the seat check is satisfied at a real two-human duel
+  — where seat 0 could then inject a `ball_incoming` onto seat 1's live court, clearing
+  their serve and replacing the ball so the point can never end. Ask what the message is
+  ABOUT, and guard on that.
 - **Is it host-only?** `start_match` and `set_room_config` are refused to anyone but seat 0.
 - **Can it decide a match?** Then it must be idempotent by `matchKey`, and it must not trust
   a client's numbers where the room owns them.
@@ -54,8 +60,11 @@ handles **exactly** it — not a subset, not a superset:
 ball_cross_net · ball_pos · paddle_move · point_scored · quick_chat · rematch_request
 ```
 
-Everything else — joining, readying, starting, config, `rtc_signal`, `ping`, `match_sync` —
-stays on the WebSocket even during a P2P match, and the replica must **not** answer it. This
+Everything else — joining, readying, starting, config, `rtc_signal`, `ping`, `match_sync`,
+`cpu_frame` — stays on the WebSocket even during a P2P match, and the replica must **not**
+answer it. (`cpu_frame` is the easy one to get wrong: it carries paddles and a ball, so it
+LOOKS like gameplay. It is a broadcast to watchers about a match with one human in it, and
+a CPU table never negotiates P2P at all — `rtc_signal` is refused on one.) This
 is a security property, not tidiness: a peer that could answer `set_room_config` would be a
 peer that could rewrite the match its opponent is playing, with nothing on the server able to
 see it. So when you add a message, decide deliberately which side of that line it falls on,

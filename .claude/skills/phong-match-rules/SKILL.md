@@ -50,10 +50,12 @@ makes the badge lie:
 2. **`isRankedRules()`** — the server re-derives this in `recordMatch` from the rules
    themselves. A client-set `ranked` flag is ignored, always.
 3. **`unrankedReasons()`** — the whole verdict in one ordered list: mode, then **venue**,
-   then difficulty, then **outgrown** (the player is past that rung's `SOLO_MU_CAPS`
+   then **watched** (a solo match at a TABLE whose watching seats are open), then
+   difficulty, then **outgrown** (the player is past that rung's `SOLO_MU_CAPS`
    ceiling, where it moves no rating in either direction), then sonar, then the physics
    keys. This is a **display** predicate; the server still derives its own half from
-   `isRankedRules`, `soloCountsForRank` and `roomCountsForRank` and never trusts it.
+   `isRankedRules`, `soloCountsForRank`, `roomCountsForRank` and — for the watched
+   case — a vouched room, and never trusts it.
 4. **`normalizeRules()`** — clamp and snap it, because it arrives from a client and from
    storage. Its result is MEMOIZED on the input object and FROZEN: it is called several
    times per frame from the game loop, so a caller that writes into what it returns is
@@ -95,6 +97,14 @@ Telemetry, quick chat and auto-serve. They do not touch the ball and they do not
 hidden half. The sonar is the **only** non-physics RULE that unranks — if you are adding a
 second one, that is a deliberate change to the shape of the rule set, not a detail.
 
+**Two arms need a context field, and a call site that omits one silently skips it.**
+`'outgrown'` needs `rankMu` and `'watched'` needs `watched`; absent means "this caller
+has no rating / no table", which is right for a menu-started match and a silent lie
+otherwise. `tests/matchRules.test.ts` reads the CALL SITES rather than the function for
+exactly this — and for `watched` it also reads the two places that RENDER
+`MatchRulesPanel`, because the panel's own call being right says nothing about a render
+that never passes the prop.
+
 **A room can unrank a match without being a rule at all.** `RoomDef.ranked` in
 `src/venues.ts` is false for `casual` alone, and `roomCountsForRank` is the predicate both
 the badge and `recordMatch` ask. It gates `ranksThisMatch` and not `ranked`, so it is the
@@ -107,8 +117,8 @@ without a venue (the invite flow, an old bundle, the test harness) keeps rating.
 ## Verifying
 
 ```bash
-npx vitest run tests/matchRules.test.ts tests/cosmetics.test.ts
-npm run build && node scripts/e2e-run.mjs rules duel
+npx vitest run tests/matchRules.test.ts tests/cosmetics.test.ts tests/cpuTable.test.ts
+npm run build && node scripts/e2e-run.mjs rules duel lobby
 ```
 
 `tests/matchRules.test.ts` pins the bands, the sonar and the default — `DEFAULT_MATCH_RULES`
