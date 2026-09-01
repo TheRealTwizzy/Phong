@@ -401,6 +401,329 @@ describe('recording a duel', () => {
     p2.close();
   }, 45000);
 
+  it('does not rate a duel reported against a room nobody else ever sat in', async () => {
+    // The vouching guard, one step past where it first stood. Asking only for
+    // a live seat closed the ROOMLESS payload and left the same exploit within
+    // reach: create a room, sit in it alone, and POST stock-rule wins against
+    // it. The room exists and the seat is yours, so it vouched — and a fresh
+    // room mints a fresh matchKey, so it repeats without limit. Measured
+    // against the previous build over 25 rooms: rankMu 25.000 -> 45.817, tier
+    // overlord, 25 ranked games, with no opponent and no match ever started.
+    const lone = await newDevice('LoneRoomer');
+    const p1 = await Phone.open(lone);
+    for (let i = 0; i < 3; i++) {
+      p1.clear();
+      p1.send({ type: 'create_room', playerId: lone.id, config: { winningScore: 3, rules: {} } });
+      const created = await p1.await('room_created');
+      const res = await fetch(`${base}/api/match/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: lone.cookie },
+        body: JSON.stringify({
+          playerId: lone.id,
+          mode: 'multiplayer',
+          roomId: created.roomId,
+          matchSeq: 1,
+          isWinner: true,
+          playerScore: 3,
+          opponentScore: 0,
+          bestStreak: 12,
+          earnedStreak: 12,
+          endStreak: 12,
+          rules: {},
+        }),
+      });
+      expect((await res.json()).result?.rankDirection ?? 'none').toBe('none');
+    }
+
+    const p = await getProfile(lone);
+    // XP is still paid — the documented trade for a match the server cannot
+    // verify, and the same one a solo result gets. The LADDER is what a room
+    // has to vouch for.
+    expect(p.xp).toBeGreaterThan(0);
+    expect(p.rankMu).toBe(25);
+    expect(p.rankedGames).toBe(0);
+    expect(p.tier).toBe('unranked');
+    p1.close();
+  }, 45000);
+
+  it('records nothing from a socket sitting alone in a room', async () => {
+    // room.scores is not reset by a seat change and point_scored had no
+    // both-seats guard, so a host could drive the score to one short of the
+    // cap while seat 1 stood empty and land the decisive point the instant any
+    // stranger sat down. Measured before this: a real ranked LOSS against a
+    // player who had done nothing but join (25.000 -> 22.372), and a free
+    // ranked win for the host, off one message.
+    const host = await newDevice('PreloadHost');
+    const mark = await newDevice('PreloadMark');
+    const p1 = await Phone.open(host);
+    p1.send({ type: 'create_room', playerId: host.id, config: { winningScore: 3, rules: {} } });
+    const created = await p1.await('room_created');
+    for (let i = 0; i < 2; i++) {
+      p1.send({ type: 'point_scored', scorer: 'p1' });
+      await sleep(50);
+    }
+
+    const p2 = await Phone.open(mark);
+    p2.send({ type: 'join_room', roomId: created.roomId, playerId: mark.id });
+    await p2.await('room_joined');
+    p1.send({ type: 'point_scored', scorer: 'p1' });
+    await sleep(400);
+
+    for (const d of [host, mark]) {
+      const p = await getProfile(d);
+      expect(p.matchesPlayed).toBe(0);
+      expect(p.rankedGames).toBe(0);
+    }
+    p1.close();
+    p2.close();
+  }, 45000);
+
+  it('does not vouch for a match the caller was not seated for', async () => {
+    // matchSeq never goes backwards and a room outlives its occupants, so
+    // "this room started match N" and "the caller played match N" are
+    // different facts — and the vouch was reading the first as the second. A
+    // newcomer taking a vacated seat could POST a fabricated ranked win under
+    // every historical sequence, each one a fresh (playerId, matchKey) for
+    // them. Measured over a three-match room: 25.000 -> 30.762, three ranked
+    // games, having played nothing.
+    const host = await newDevice('HistSeqHost');
+    const leaver = await newDevice('HistSeqLeaver');
+    const newcomer = await newDevice('HistSeqNewcomer');
+    const { p1, p2 } = await seatDuel(host, leaver, 3);
+    const roomId = (p1.last('room_created') as { roomId: string }).roomId;
+
+    // Three real matches, so the room reaches matchSeq 3.
+    for (let m = 0; m < 3; m++) {
+      for (let i = 0; i < 3; i++) {
+        p1.send({ type: 'point_scored', scorer: 'p1' });
+        await sleep(50);
+      }
+      await sleep(250);
+      if (m < 2) {
+        p1.send({ type: 'rematch_request' });
+        p2.send({ type: 'rematch_request' });
+        await sleep(250);
+      }
+    }
+    p2.send({ type: 'leave_room' });
+    p2.close();
+    await sleep(200);
+
+    const p3 = await Phone.open(newcomer);
+    p3.send({ type: 'join_room', roomId, playerId: newcomer.id });
+    await p3.await('room_joined');
+
+    for (const seq of [1, 2, 3]) {
+      const res = await fetch(`${base}/api/match/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: newcomer.cookie },
+        body: JSON.stringify({
+          playerId: newcomer.id, mode: 'multiplayer', roomId, matchSeq: seq,
+          isWinner: true, playerScore: 3, opponentScore: 0,
+          bestStreak: 14, earnedStreak: 14, endStreak: 14, rules: {},
+        }),
+      });
+      expect((await res.json()).result?.rankDirection ?? 'none').toBe('none');
+    }
+
+    const p = await getProfile(newcomer);
+    // XP is still paid — the documented trade for a match the server cannot
+    // verify. The LADDER is what a seat has to have been sat in to move.
+    expect(p.xp).toBeGreaterThan(0);
+    expect(p.rankMu).toBe(25);
+    expect(p.rankedGames).toBe(0);
+
+    p1.close();
+    p3.close();
+  }, 60000);
+
+  it("does not let a departed player's rematch claim decide for a newcomer", async () => {
+    // seqClaims is one seat's half of an agreed rematch, and clearP2PEvidence
+    // was missing it — so a claim left behind completed the pair for whoever
+    // sat down next, and the SURVIVOR's lone snapshot filed a real ranked loss
+    // against them (25.000 -> 23.001). The p2pOffered bug returning through
+    // the state added to fix it.
+    const host = await newDevice('ClaimHost');
+    const leaver = await newDevice('ClaimLeaver');
+    const newcomer = await newDevice('ClaimNewcomer');
+    const { p1, p2, matchSeq } = await seatDuel(host, leaver, 3);
+    const roomId = (p1.last('room_created') as { roomId: string }).roomId;
+
+    for (let i = 0; i < 3; i++) {
+      p1.send({ type: 'point_scored', scorer: 'p1' });
+      await sleep(50);
+    }
+    await sleep(300);
+    // The departing player leaves half a claim behind.
+    p2.send({ type: 'match_sync', matchSeq: matchSeq + 1, rev: 1, p1Score: 0, p2Score: 0 });
+    await sleep(80);
+    p2.send({ type: 'leave_room' });
+    p2.close();
+    await sleep(200);
+
+    const p3 = await Phone.open(newcomer);
+    p3.send({ type: 'join_room', roomId, playerId: newcomer.id });
+    await p3.await('room_joined');
+    // A real handshake with the NEW pair, so p2pOffered is legitimately armed.
+    p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
+    await p3.await('rtc_signal');
+    p3.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await p1.await('rtc_signal');
+
+    p1.send({ type: 'match_sync', matchSeq: matchSeq + 1, rev: 2, p1Score: 3, p2Score: 0 });
+    await sleep(400);
+
+    const p = await getProfile(newcomer);
+    expect(p.matchesLost).toBe(0);
+    expect(p.rankedGames).toBe(0);
+
+    p1.close();
+    p3.close();
+  }, 60000);
+
+  it('does not let one seat farm rematches after a single real handshake', async () => {
+    // The farm the two-sided rematch check exists for, end to end. After ONE
+    // genuine handshake, a single socket could wait for the match to end and
+    // then send a decisive snapshot at matchSeq+1, over and over: adoption
+    // resets the room so the next one lands the same way, and every sequence
+    // mints a fresh duelMatchKey so the ledger deduplicates nothing.
+    //
+    // Measured against the parent commit over ten messages from one socket:
+    // the victim went rankMu 25.000 -> 20.185 with ten ranked losses, the
+    // sender to 34.437 with ten wins, and nothing bounded it but how long the
+    // victim stayed seated.
+    const farmer = await newDevice('RematchFarmer');
+    const mark = await newDevice('RematchMark');
+    const { p1, matchSeq } = await seatDuel(farmer, mark, 3);
+
+    for (let i = 0; i < 6; i++) {
+      p1.send({ type: 'match_sync', matchSeq: matchSeq + i, rev: i + 1, p1Score: 3, p2Score: 0 });
+      await sleep(60);
+    }
+    await sleep(400);
+
+    // Exactly one: the CURRENT match's own decisive snapshot, which is the
+    // documented client-authoritative limit after a real handshake — one
+    // forged result per match that genuinely started, and the matchKey stops
+    // it being paid twice. What is gone is walking the sequence forward.
+    const victim = await getProfile(mark);
+    expect(victim.matchesLost).toBe(1);
+    expect(victim.rankedGames).toBe(1);
+    expect((await getProfile(farmer)).matchesWon).toBe(1);
+
+    p1.close();
+  }, 45000);
+
+  it('forgets a handshake when the seat that made it changes hands', async () => {
+    // p2pOffered was documented as "set once and never cleared", and a room
+    // outlives its occupants. So a pair negotiating P2P here left the table
+    // permanently able to vouch for a replica: the guest leaves, a stranger
+    // takes the seat, and that newcomer can forge a decisive snapshot against
+    // a victim who was never party to any DataChannel.
+    const host = await newDevice('SeatKeeper');
+    const first = await newDevice('SeatLeaver');
+    const later = await newDevice('SeatTaker');
+
+    // A real pair, a real handshake — seatDuel performs both halves.
+    const { p1, p2 } = await seatDuel(host, first, 3);
+    p2.send({ type: 'leave_room' });
+    p2.close();
+    await sleep(150);
+
+    // A stranger takes the empty seat and the host restarts the match.
+    const roomId = (p1.last('room_created') as { roomId: string }).roomId;
+    const p3 = await Phone.open(later);
+    p3.send({ type: 'join_room', roomId, playerId: later.id });
+    await p3.await('room_joined');
+    p3.send({ type: 'player_ready', ready: true });
+    await p1.await('ready_state');
+    p1.clear();
+    p1.send({ type: 'start_match' });
+    const start = await p1.await('game_start');
+
+    // No handshake has happened between THESE two, so the snapshot is refused.
+    p3.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 0, p2Score: 3 });
+    await sleep(400);
+    for (const d of [host, later]) {
+      const p = await getProfile(d);
+      expect(p.matchesLost).toBe(0);
+      expect(p.matchesWon).toBe(0);
+      expect(p.rankedGames).toBe(0);
+    }
+
+    p1.close();
+    p3.close();
+  }, 45000);
+
+  it('refuses a forged snapshot on a table the victim never negotiated', async () => {
+    // The whole exploit, end to end, and the reason the p2pOffered guard could
+    // not be armed by a single frame. A seated attacker sends ONE rtc_signal —
+    // it did not have to be a valid one, `{}` was enough, because the relay was
+    // a pure pass-through with no shape check — and then a decisive match_sync
+    // naming the winning score for their own seat. applyMatchSync takes the
+    // score as a maximum and declares the match decided on it, so that filed a
+    // real ranked win for the sender and a real ranked loss for an opponent
+    // whose client never rendered a point of it: match_sync broadcasts no
+    // score_update. One preparatory frame, needing nothing from the victim.
+    //
+    // Seated by hand rather than through seatDuel, because seatDuel completes
+    // the handshake — which is the state this case is the absence of.
+    const attacker = await newDevice('SignalCheat');
+    const victim = await newDevice('SignalMark');
+    const p1 = await Phone.open(attacker);
+    p1.send({ type: 'create_room', playerId: attacker.id, config: { winningScore: 3, rules: {} } });
+    const created = await p1.await('room_created');
+    const p2 = await Phone.open(victim);
+    p2.send({ type: 'join_room', roomId: created.roomId, playerId: victim.id });
+    await p2.await('room_joined');
+    p2.send({ type: 'player_ready', ready: true });
+    await p1.await('ready_state');
+    p1.send({ type: 'start_match' });
+    const start = await p1.await('game_start');
+    await p2.await('game_start');
+
+    // Three shapes of arming frame, all from the one seat: junk, a real offer,
+    // and both halves of a handshake the attacker holds by itself. None of
+    // them is two peers.
+    p1.send({ type: 'rtc_signal', payload: {} });
+    p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
+    p1.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await sleep(60);
+    p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 3, p2Score: 0 });
+    await sleep(400);
+
+    for (const p of [await getProfile(attacker), await getProfile(victim)]) {
+      expect(p.matchesPlayed).toBe(0);
+      expect(p.matchesWon).toBe(0);
+      expect(p.matchesLost).toBe(0);
+      expect(p.rankedGames).toBe(0);
+      expect(p.xp).toBe(0);
+    }
+    expect(p1.all('match_recorded')).toHaveLength(0);
+    expect(p2.all('match_recorded')).toHaveLength(0);
+
+    // And the junk frame was not ferried to the victim either — the relay
+    // capped quick_chat at 100 characters and capped this at nothing.
+    expect(p2.all('rtc_signal').map((m) => (m.payload as { kind?: string })?.kind)).toEqual([
+      'offer',
+      'answer',
+    ]);
+
+    // The control, so this is a guard and not a wall: once the victim's own
+    // client answers, the table genuinely carries a replica and the very same
+    // snapshot is taken. Everything else in this file reaches match_sync
+    // through seatDuel, which is this handshake.
+    p2.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await p1.await('rtc_signal');
+    p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 2, p1Score: 3, p2Score: 0 });
+    const decided = await p1.await('match_recorded');
+    expect(decided.result.rankDirection).toBe('up');
+    expect((await getProfile(victim)).matchesLost).toBe(1);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
   it('does not file the WINNER a 0-0 loss when their POST outruns the sync', async () => {
     // The second route to two red arrows, and the likelier one: it needs no
     // malformed message, just an ordinary race. In a P2P duel the deciding
@@ -488,6 +811,49 @@ describe('recording a duel', () => {
     p2.close();
   }, 45000);
 
+  it('rates a seated duel whose rules are tuned inside their bands', async () => {
+    // The bands are what make the sliders usable: a player adjusts the feel of
+    // a match without dropping out of the ladder, and only the extremes cost
+    // it. tests/matchRules.test.ts pins that arithmetic; this pins that a
+    // result carrying it survives the whole recording path.
+    //
+    // It lives here, on a SEATED duel, because a PvP payload naming no room is
+    // now paid in XP and never in rank — nothing can vouch for it. This case
+    // used to be a roomless POST in scripts/e2e-rules.mjs, which made it
+    // indistinguishable from the ladder exploit that gating closed.
+    const host = await newDevice('TunedWin');
+    const guest = await newDevice('TunedLose');
+    const { p1, p2, roomId, matchSeq } = await seatDuel(host, guest, 3);
+
+    const before = await getProfile(host);
+    const tuned = await fetch(`${base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify({
+        roomId,
+        matchSeq,
+        mode: 'multiplayer',
+        isWinner: true,
+        playerScore: 3,
+        opponentScore: 1,
+        bestStreak: 14,
+        endStreak: 14,
+        earnedStreak: 14,
+        rules: { paddleScale: 1.15, ballScale: 0.85, ballSpeedMax: 1.2, servePowerMax: 1.15 },
+      }),
+    });
+    expect(tuned.status).toBe(200);
+    const result = await tuned.json();
+    expect(result.ranked).toBe(true);
+
+    const after = await getProfile(host);
+    expect(after.rankedGames).toBe(before.rankedGames + 1);
+    expect(after.xp).toBeGreaterThan(before.xp);
+
+    p1.close();
+    p2.close();
+  }, 45000);
+
   it('pays a casual duel in XP and hidden MMR, and never in rank', async () => {
     // Casual's own description has said so in seven locales since the room
     // shipped — "Any rank welcome. Play for the game, not the ladder." — while
@@ -515,6 +881,17 @@ describe('recording a duel', () => {
     p1.send({ type: 'start_match' });
     const start = await p1.await('game_start');
     await p2.await('game_start');
+
+    // Seated inline rather than through relay.seatDuel, so the WebRTC
+    // handshake that helper performs has to be performed here too: match_sync
+    // is a replica's account of a match, and the relay refuses one from a
+    // table that never negotiated a DataChannel and therefore has no replica
+    // on it. BOTH halves, from both seats — one seat's offer is not a
+    // handshake, which is what stopped a lone socket arming its own snapshot.
+    p1.send({ type: 'rtc_signal', payload: { kind: 'offer', sdp: 'v=0' } });
+    await p2.await('rtc_signal');
+    p2.send({ type: 'rtc_signal', payload: { kind: 'answer', sdp: 'v=0' } });
+    await p1.await('rtc_signal');
 
     p1.send({ type: 'match_sync', matchSeq: start.matchSeq, rev: 1, p1Score: 3, p2Score: 1 });
     const hostRecord = await p1.await('match_recorded');

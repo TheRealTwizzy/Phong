@@ -25,8 +25,11 @@ import { hasUnlock } from './src/achievements';
 import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import {
+  acceptRtcSignal,
   applyMatchSync,
+  clearP2PEvidence,
   clearSeatStreaks,
+  resetTableForNextPair,
   clampInt,
   generateRoomCode,
   performanceWeight,
@@ -70,6 +73,18 @@ import { Rating, newRating, winProbability } from './src/rating';
 type Seat = { role: 'player'; index: 0 | 1 } | { role: 'spectator'; slot: 0 | 1 };
 
 const rooms = new Map<string, Room>();
+
+/**
+ * Set once SIGTERM/SIGINT has started closing sockets.
+ *
+ * A shutdown closes every client with 1001, and each close fires vacateSeat,
+ * where `abandoned` is true of every live duel. So a deploy filed a real
+ * ranked LOSS against whichever seat's handler ran first and a real ranked WIN
+ * to the other, spent the day's abandon forgiveness, and bumped the career
+ * counters — for two players who did not leave. Neither did anything wrong;
+ * the server did.
+ */
+let shuttingDown = false;
 
 /**
  * The ranked queue: everybody currently looking for a game.
@@ -428,6 +443,8 @@ function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
   const room: Room = {
     id: code,
     players: [session(a, 0), session(b, 1)],
+    // Both sat down before startMatch bumps matchSeq off 0. See Room.seatSince.
+    seatSince: [0, 0],
     scores: [0, 0],
     streaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
     bestStreaks: [carriedStreak(a.deviceId), carriedStreak(b.deviceId)],
@@ -1085,6 +1102,17 @@ async function startServer() {
 
   // Health check
   app.get('/api/health', (req, res) => {
+    // Touch the store. This answered 'ok' off nothing but process liveness,
+    // and Docker's HEALTHCHECK, Render's healthCheckPath, Dokploy's probe and
+    // the e2e runner all key on it — so a container with a corrupt database, a
+    // full disk or a vanished volume reported healthy while every match write
+    // threw. One indexed read; the cost is nil.
+    try {
+      db.healthCheck();
+    } catch (e: any) {
+      console.error('[health] datastore unreachable:', e?.message);
+      return res.status(503).json({ status: 'degraded', build: buildId() });
+    }
     res.json({ status: 'ok', activeRooms: rooms.size, build: buildId() });
   });
 
@@ -1794,6 +1822,88 @@ async function startServer() {
           // RecordMatchContext.venueRoomId for why that is the safe side.
           context.venueRoomId = room.venueRoomId;
         }
+
+        // Whether a room can DECIDE this match and whether one can VOUCH for it
+        // are different questions, and only the second one gates the ladder.
+        // The branch above deliberately stands aside for a room that cannot
+        // decide — a rematch has reset it, or in a P2P duel the winner's own
+        // POST legitimately outran the deciding match_sync — and in all of
+        // those the relay is recording its own copy and roomId+matchSeq
+        // already gave the result a matchKey.
+        //
+        // Vouching asks three things, and it took two goes to get past the
+        // first. Originally none of them were asked: the client's scores
+        // stood; matchKey is only derived when a roomId is present, so a POST
+        // without one skipped the recorded_matches ledger entirely and could
+        // be replayed without limit; and isRankedRules(undefined) and
+        // roomCountsForRank(undefined) are both true, so it rated, against an
+        // even fallback opponent. About 25 scripted POSTs carried rankMu from
+        // 25 to 37 — Cyber Overlord, the top-100 ladder position,
+        // tier_overlord, legend-aurora, duel_10/duel_50, and elite_duel_3's
+        // permanent theme.
+        //
+        // Asking only for a live seat closed the roomless version and left the
+        // same exploit one step away, which review found: CREATE a room, sit
+        // in it alone, and POST stock-rule wins against it. The room exists and
+        // the seat is yours, so it vouched — and since a fresh room mints a
+        // fresh matchKey, the whole thing repeats without limit. Measured:
+        // rankMu 25.000 -> 45.817 and tier overlord over 25 rooms, no opponent
+        // and no match ever started.
+        //
+        // So: a live seat, an opponent in the other one, and a claimed
+        // sequence naming a match this room ACTUALLY STARTED. matchSeq is 0 on
+        // a fresh room and startMatch is the only thing that bumps it, and
+        // start_match is refused until a guest has readied — so `seq >= 1` is
+        // exactly "two people agreed to play this", which no lone socket can
+        // manufacture. The legitimate P2P race still passes all three: the
+        // room is on this matchSeq with both seats filled, and it is only the
+        // SCORE that is behind.
+        //
+        // The strictness costs one narrow case, taken deliberately: a pure-P2P
+        // duel in which no deciding match_sync ever reached the relay AND the
+        // opponent's socket closed before this POST landed would rate as
+        // unvouched. The replica syncs on every crossing, so the relay has
+        // almost always already recorded that match itself — and the failure
+        // modes are not symmetric. Being strict costs an unusual duel its rank
+        // while still paying its XP; being loose costs the ladder.
+        //
+        // XP is still paid: that is the documented trade for a match the server
+        // cannot fully verify, and the same one a solo result already gets. The
+        // ladder is not moved, and a device-scoped key brings the ledger back
+        // so a replay is answered with what the first one paid.
+        // ...and neither of those is "the caller played THIS match", which is
+        // what the ladder actually needs and what two more review rounds went
+        // on finding. `seq <= room.matchSeq` accepts every sequence the room
+        // has EVER played, and matchSeq does not move when a seat changes
+        // hands — so a newcomer taking a vacated seat could POST a fabricated
+        // ranked win under each historical sequence, every one a fresh
+        // (playerId, matchKey) for them. Measured over a three-match room:
+        // 25.000 -> 30.762 and three ranked games, having played nothing.
+        //
+        // Two conditions, because each covers what the other leaves. `current`
+        // alone still hands a newcomer the most recent match — they take the
+        // WINNER's vacated seat, the cross-check reads room.scores[seat] and
+        // files that win as theirs. `played` alone leaves an older sequence
+        // rated against an even FALLBACK opponent, since the cross-check skips
+        // unless the room is on that match and context.opponentRating is never
+        // set.
+        //
+        // `current` costs nothing real: matchSeq only advances past N through
+        // startMatch or the P2P adoption, both of which require matchOver,
+        // which is set in exactly three places and each is followed
+        // immediately by recordRoomMatch under the same duel:ROOM:N key. So a
+        // room past N already recorded N, and a late POST short-circuits on
+        // the ledger before forceUnranked is ever read.
+        const since = room?.seatSince?.[seat];
+        const played = seq !== undefined && since !== null && since !== undefined && seq > since;
+        const current = !!room && seq === room.matchSeq && seq !== undefined && seq >= 1;
+        const opposed = !!room && !!room.players[0] && !!room.players[1];
+        if (!room || seat < 0 || !played || !current || !opposed) {
+          context.forceUnranked = true;
+          if (!payload.matchKey) {
+            payload.matchKey = `unvouched:${req.deviceId}:${seq ?? 'x'}`;
+          }
+        }
       }
 
       const result = db.recordMatch(payload, context);
@@ -1806,8 +1916,17 @@ async function startServer() {
   // Global Leaderboard API
   app.get('/api/leaderboard', (req, res) => {
     try {
-      const sort = (req.query.sort as 'elo' | 'level' | 'rally' | 'wins') || 'elo';
-      const limit = Math.min(100, parseInt((req.query.limit as string) || '50', 10));
+      // Both validated at the edge as well as in db.getLeaderboard. `sort` was
+      // a bare cast, so any other value reached the query and 500'd with the
+      // SQL error text; `limit` was Math.min(100, parseInt('abc')) === NaN,
+      // and the loop guard `out.length >= NaN` is never true, so ?limit=abc
+      // returned the whole board from an unauthenticated route.
+      const asked = String(req.query.sort ?? 'elo');
+      const sort = (['elo', 'level', 'rally', 'wins'] as const).includes(asked as any)
+        ? (asked as 'elo' | 'level' | 'rally' | 'wins')
+        : 'elo';
+      const parsed = parseInt(String(req.query.limit ?? '50'), 10);
+      const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(100, parsed)) : 50;
       const includeBots = req.query.bots === '1' || req.query.bots === 'true';
       const leaderboard = db.getLeaderboard(sort, limit, includeBots);
       res.json({ leaderboard });
@@ -1969,7 +2088,15 @@ async function startServer() {
   });
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  // maxPayload, because ws defaults to 100 MiB and every frame is JSON.parsed
+  // synchronously on the event loop that serves every live match. The largest
+  // legitimate message here is an SDP offer relayed by rtc_signal, comfortably
+  // under 16KB; gameplay messages are tens of bytes.
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
+  // A ws server emits 'error' with no fallback, and an EventEmitter 'error'
+  // with no listener THROWS. See the per-socket listener in the connection
+  // handler below for why that is fatal here.
+  wss.on('error', (err) => console.warn('[ws] server error:', (err as Error)?.message));
 
   // Sweep the rooms nobody is in.
   //
@@ -2002,7 +2129,18 @@ async function startServer() {
       // Streaks only, and no abandon: that is a penalty for walking out on
       // somebody who was still playing, and a room reaped for going quiet for
       // half an hour has nobody left to have walked out on.
-      persistDuelStreaks(room);
+      // Guarded, and per room, for the same reason the queue sweep below is:
+      // reapRooms has ALREADY deleted these from the map, so a throw here —
+      // a full disk, a volume remounted read-only — would abort the sweep with
+      // the rooms gone and their occupants' sockets never closed, sitting on
+      // courts the relay no longer knows about. The close below is what
+      // returns them to the menu, and it must not be skipped because a write
+      // failed. Losing a run to a failing disk is the small half of that.
+      try {
+        persistDuelStreaks(room);
+      } catch (e) {
+        console.error(`room ${id}: could not persist streaks on reap:`, e);
+      }
       // An empty room has nothing attached by definition; the other two can
       // still have somebody sitting on a court that no longer exists. Closing
       // their socket is what returns them to the menu — the client reads an
@@ -2096,6 +2234,16 @@ async function startServer() {
     alive.set(ws, true);
     ws.on('pong', () => alive.set(ws, true));
     ws.addEventListener('close', () => alive.delete(ws));
+    // Every socket needs this, and its absence took the whole process down.
+    // ws raises receiver and socket faults as an 'error' emit, and an
+    // EventEmitter 'error' with no listener throws — from a raw-socket I/O
+    // callback, so the try/catch around the message handler below cannot see
+    // it. One invalid-UTF-8 text frame, one unmasked client frame, or RSV1 set
+    // with no permessage-deflate negotiated, from any unauthenticated socket
+    // (/ws accepts cookieless ones), exited the process. Rooms live in memory,
+    // so that dropped every live duel, every queued player and every spectator
+    // on the spot, without taking the graceful SIGTERM path.
+    ws.on('error', (err) => console.warn('[ws] socket error:', (err as Error)?.message));
 
     const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
 
@@ -2273,6 +2421,8 @@ async function startServer() {
           const hostName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 1';
           const room: Room = {
             id: code,
+            // The host sits down at matchSeq 0. See Room.seatSince.
+            seatSince: [0, null],
             players: [
               {
                 ws,
@@ -2426,6 +2576,13 @@ async function startServer() {
             : joinIdx === 0
               ? 'Player 1'
               : 'Player 2';
+          // Where this occupant came in, so the vouch in /api/match/record can
+          // tell a match they played from one the room merely remembers.
+          // Indexed on the seat ACTUALLY taken: an arrival can now adopt a
+          // hostless table by taking seat 0, and pinning this to seat 1 would
+          // leave `seatSince[0]` null — which fails closed, so that player's
+          // duel would record un-ranked for a match they really played.
+          (room.seatSince ??= [null, null])[joinIdx] = room.matchSeq;
           room.players[joinIdx] = {
             ws,
             playerId: currentPlayerId,
@@ -2750,6 +2907,9 @@ async function startServer() {
             // SEEDED from it — so there is nothing to write back, and the
             // player's own stored run is untouched and will seed them again.
             clearSeatStreaks(room, leaving);
+            // Same reason as vacateSeat: a playing seat changing hands ends
+            // whatever handshake its previous occupant was party to.
+            clearP2PEvidence(room);
           } else {
             room.spectators[seat.slot] = null;
           }
@@ -2762,6 +2922,7 @@ async function startServer() {
             sessionId: cookieSessionId,
           };
           if (toPlayer) {
+            (room.seatSince ??= [null, null])[targetIdx] = room.matchSeq;
             room.players[targetIdx] = { ...who, playerIndex: targetIdx };
             room.streaks[targetIdx] = carriedStreak(cookieDeviceId);
             room.bestStreaks[targetIdx] = room.streaks[targetIdx];
@@ -2805,14 +2966,21 @@ async function startServer() {
 
           const me = playerIndex() as 0 | 1;
           const oppIdx = me === 0 ? 1 : 0;
+          // Coerced and clamped exactly as ball_pos does fifteen lines below.
+          // This was the one gameplay stream forwarded raw: `1 - msg.x` on a
+          // string is NaN, which serializes as null and lands as 1 on the
+          // opponent; 1e308 drew their chevron at -1e308; and an object was
+          // relayed to the spectator whole, bounded only by ws's 100 MiB
+          // default. Every other message on this socket already validates.
+          const px = Math.max(0, Math.min(1, Number(msg.x) || 0));
           // Mirrored for the far side of the net — the opponent and anyone
           // watching over their shoulder get the identical bytes.
-          sendAll(viewersOf(room, oppIdx), { type: 'opponent_paddle', x: 1 - msg.x });
+          sendAll(viewersOf(room, oppIdx), { type: 'opponent_paddle', x: 1 - px });
           // RAW for the watcher on THIS side: they are drawing this player's
           // own court in this player's own coordinates, so a mirror here would
           // put the paddle on the wrong side of a screen nobody is mirroring.
           const mine = watcherBeside(room, me);
-          if (mine) mine.send(JSON.stringify({ type: 'watched_paddle', x: msg.x }));
+          if (mine) mine.send(JSON.stringify({ type: 'watched_paddle', x: px }));
         } else if (msg.type === 'ball_pos' && currentRoomId && playerIndex() !== null) {
           // The sonar's ball feed: each phone streams its OWN half's ball at
           // ~15Hz so the other side's radar has something real to draw — a
@@ -2835,6 +3003,18 @@ async function startServer() {
         } else if (msg.type === 'ball_cross_net' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
+          // Nothing crosses the net between matches. Without this, countReturn
+          // below kept counting after the final whistle: startMatchStreaks
+          // opens the next match's PEAK on room.streaks, recordRoomMatch sends
+          // that peak as bestStreak, and it lands in profile.highestRally — so
+          // a spam loop between two matches wrote a permanent career best and
+          // took the rally achievements and their cosmetics with it.
+          // startMatch clears matchOver, so a rematch is unaffected.
+          if (room.matchOver) return;
+          // Same reason as point_scored below: a crossing from a lone socket
+          // is not a rally. countReturn would bump room.bestStreaks, which
+          // startMatchStreaks opens the NEXT match's peak on.
+          if (!room.players[0] || !room.players[1]) return;
           room.lastActive = Date.now();
           // A ball over the net is the moment the terms stop being editable.
           room.inPlay = true;
@@ -2877,6 +3057,20 @@ async function startServer() {
         } else if (msg.type === 'point_scored' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
+          // The match is decided; there is no further point to report. The
+          // score was unbounded, so `decided` stayed true and every subsequent
+          // message re-ran recordRoomMatch — about thirty synchronous SQLite
+          // queries each, on the loop that serves every other match.
+          if (room.matchOver) return;
+          // ...and there is no match in an empty room. Gameplay from a socket
+          // sitting alone was scored into `room.scores`, which no seat change
+          // resets, so a host could drive the score to one short of the cap
+          // while seat 1 stood empty and land the decisive point the instant
+          // any stranger sat down: measured, a real ranked LOSS (25.000 ->
+          // 22.372) filed against a player who had done nothing but join, and
+          // a free ranked win for the host. A room with one player in it has
+          // nothing to report about a match.
+          if (!room.players[0] || !room.players[1]) return;
           room.lastActive = Date.now();
 
           // A point can be won off a serve that never crossed, so this is the
@@ -2916,6 +3110,22 @@ async function startServer() {
         } else if (msg.type === 'match_sync' && currentRoomId && playerIndex() !== null) {
           const room = rooms.get(currentRoomId);
           if (!room) return;
+          // A snapshot is a REPLICA's account of a match the relay did not
+          // see, and only a peer that negotiated a DataChannel has one. On a
+          // table where no offer was ever relayed there is no replica, so this
+          // is just a client asserting a score — and applyMatchSync takes the
+          // score as a maximum and will declare the match decided on it. One
+          // message naming the winning score for your own seat therefore filed
+          // a real ranked win for the sender and a real ranked loss for an
+          // opponent whose client never rendered it, since match_sync
+          // broadcasts no score_update.
+          //
+          // The scores are deliberately NOT step-limited instead: a snapshot
+          // is absolute rather than a delta and is applied as a maximum by
+          // design, because a P2P relay never sees the intervening points — so
+          // capping the advance leaves a legitimate match undecidable. The
+          // authority check is the honest boundary; the arithmetic is not.
+          if (!room.p2pOffered) return;
           room.lastActive = Date.now();
           // Whether this call is about to start a NEW match — the peers
           // agreeing a rematch between themselves inside applyMatchSync,
@@ -2927,7 +3137,7 @@ async function startServer() {
           // score_update arriving a round-trip late, mid-serve.
           // Recording is the caller's job now: server/room.ts stays free of
           // the database so its guards can be tested without one.
-          const synced = applyMatchSync(room, msg);
+          const synced = applyMatchSync(room, playerIndex() as 0 | 1, msg);
           if (room.matchSeq !== seqBefore) duelStartRatings(room); // see the note there
           if (synced.decided) recordRoomMatch(room);
         } else if (msg.type === 'quick_chat' && currentRoomId && playerIndex() !== null) {
@@ -2969,6 +3179,12 @@ async function startServer() {
           if (room.config.spectators) return;
 
           const me = playerIndex() as 0 | 1;
+          // Validates the payload and records what it advances of the
+          // handshake; see Room.p2pOffered for why one seat's signal is not
+          // enough to arm match_sync. A payload that is not one of the three
+          // kinds is not a signal and is not forwarded.
+          if (!acceptRtcSignal(room, me, msg.payload)) return;
+
           const oppIdx = me === 0 ? 1 : 0;
           const opponent = room.players[oppIdx];
           if (opponent?.ws && opponent.ws.readyState === WebSocket.OPEN) {
@@ -3118,7 +3334,11 @@ async function startServer() {
       // never report one, and the second player's departure from an
       // already-abandoned room records nothing.
       const bothSeated = !!(room.players[0] && room.players[1]);
-      const abandoned = bothSeated && room.inPlay && !room.matchOver && !!currentPlayerId;
+      // ...and not when WE are the reason the socket closed. Falling through
+      // leaves the persistDuelStreaks branch below, which is exactly the
+      // "this departure records no match" case a deploy should take.
+      const abandoned =
+        bothSeated && room.inPlay && !room.matchOver && !!currentPlayerId && !shuttingDown;
       if (abandoned) {
         try {
           // Same rule as recordRoomMatch: a seat that no longer holds
@@ -3176,6 +3396,12 @@ async function startServer() {
         // One player left in it. That is a room with nobody to play against,
         // however busy the survivor keeps it, so the clock starts again.
         room.soloSince = Date.now();
+        // ...and the table goes back to being a lobby for whoever sits down
+        // next. AFTER the abandon above, which reads the score. swap_seat has
+        // always done most of this; vacateSeat did only the handshake, and
+        // every field it left standing was read as the next pair's — see
+        // resetTableForNextPair for what each one cost.
+        resetTableForNextPair(room, mine);
         broadcastTableState(room);
       }
       currentRoomId = null;
@@ -3202,15 +3428,24 @@ async function startServer() {
     const distPath = fs.existsSync(path.join(bundleDir, 'index.html'))
       ? bundleDir
       : path.join(process.cwd(), 'dist');
+    // ONLY /assets is served. Mounting the whole of dist/ published
+    // `server.cjs.map` — a 667KB source map carrying `sourcesContent`, so every
+    // line of server.ts, server/auth.ts and server/db.ts was a public GET, cookie
+    // HMAC construction and session gates included — plus server.cjs and
+    // admin.cjs beside it. dist/ holds exactly index.html, assets/ and those
+    // three build outputs (there is no public/ dir), so naming the one directory
+    // the client needs is both the fix and the complete list.
+    //
     // The hashed assets under /assets are immutable and may be cached hard;
     // index.html must NOT be, or a client told its session is stale would
-    // reload straight back onto the build it was already running and the
-    // deploy would never reach it.
+    // reload straight back onto the build it was already running and the deploy
+    // would never reach it. It is served by the app.get('*') handler below,
+    // which sets that header itself — so this mount needs no setHeaders at all.
     app.use(
-      express.static(distPath, {
-        setHeaders: (res, filePath) => {
-          if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
-        },
+      '/assets',
+      express.static(path.join(distPath, 'assets'), {
+        immutable: true,
+        maxAge: '1y',
       })
     );
     app.get('*', (req, res) => {
@@ -3227,21 +3462,91 @@ async function startServer() {
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Split-Screen Half Pong server running at http://0.0.0.0:${PORT}`);
+    // Say which file this process is actually persisting to, and how much is
+    // already in it. An unmounted volume is otherwise completely silent: the
+    // Dockerfile mkdir's /data as well as setting DATA_DIR, so a missing mount
+    // leaves a writable directory in the image layer and the server starts
+    // from zero players without a word. "0 players" in the log on a server
+    // that had thousands is a five-second diagnosis; nothing was a permanent
+    // loss discovered later.
+    try {
+      const d = db.describe();
+      console.log(
+        `[db] ${d.file} — ${(d.bytes / 1024).toFixed(0)}KB, ` +
+          `${d.humans} account(s), ${d.players} row(s) incl. bots`
+      );
+      if (process.env.NODE_ENV === 'production' && d.humans === 0) {
+        console.warn(
+          '[db] WARNING: no accounts in this database. If this is not a first ' +
+            'boot, DATA_DIR is not pointing at the volume you think it is.'
+        );
+      }
+    } catch (e: any) {
+      console.error('[db] could not describe the datastore:', e?.message);
+    }
   });
 
   // Render stops the old instance on every deploy of a disk-backed service;
   // close sockets and the listener cleanly instead of dying mid-request.
-  const shutdown = (signal: string) => {
+  const shutdown = (signal: string, code = 0) => {
+    // Re-entrant guard first of all: a fatal raised while we are already
+    // shutting down must not restart the whole dance, and the shutdown path
+    // itself is what would raise it.
+    if (shuttingDown) return;
+    // Before a single socket is closed: every close below runs vacateSeat.
+    shuttingDown = true;
     console.log(`${signal} received, shutting down`);
     for (const client of wss.clients) {
       client.close(1001, 'Server restarting');
     }
     wss.close();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 5000).unref();
+    server.close(() => process.exit(code));
+    setTimeout(() => process.exit(code), 5000).unref();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+  fatalShutdown = shutdown;
 }
 
-startServer();
+/**
+ * The last resort, and it EXITS. Set by startServer once the listener exists.
+ *
+ * These two handlers first shipped as bare `console.error`, on the reasoning
+ * that a single-instance relay holding every room in memory should keep
+ * serving the other matches rather than die on one socket's fault. That
+ * reasoning was answering the wrong question: the thing it was written for —
+ * one malformed frame ending the process — is closed by the `error` listeners
+ * on `ws` and `wss`, where the fault has a known owner. What was left here was
+ * a handler that suppresses Node's default termination for faults that have no
+ * owner at all, and resuming after one of those is documented as unsafe
+ * because the process may be halfway through a mutation.
+ *
+ * It is not hypothetical here. The room reaper's interval calls
+ * `persistDuelStreaks(room)` unguarded, AFTER `reapRooms` has already deleted
+ * rooms from the map — so a throw there (a full disk, a volume remounted
+ * read-only) aborts the sweep with rooms gone and their sockets never closed,
+ * and the old handler kept the process serving in exactly that state. Worse,
+ * a process that never exits is one Docker's `restart: unless-stopped` and
+ * Dokploy's supervisor cannot recover: the crash-and-restart they exist for
+ * was being suppressed.
+ *
+ * So: log, then take the SAME controlled shutdown a SIGTERM takes, and exit
+ * non-zero. Going through `shutdown` rather than `process.exit` directly is
+ * what makes this safe for the players: it sets `shuttingDown` first, so the
+ * close of every live socket falls through to `persistDuelStreaks` instead of
+ * charging both seats of every duel in progress an abandon. A crash costs the
+ * match; it must not also cost the rating.
+ */
+let fatalShutdown: ((signal: string, code?: number) => void) | null = null;
+const onFatal = (label: string) => (err: unknown) => {
+  console.error(`[fatal] ${label}:`, err);
+  if (fatalShutdown) fatalShutdown(label, 1);
+  else process.exit(1);
+};
+process.on('uncaughtException', onFatal('uncaught exception'));
+process.on('unhandledRejection', onFatal('unhandled rejection'));
+
+startServer().catch((err) => {
+  console.error('[fatal] server failed to start:', err);
+  process.exit(1);
+});

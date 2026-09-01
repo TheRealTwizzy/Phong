@@ -115,6 +115,71 @@ export interface Room {
    */
   matchOver: boolean;
   /**
+   * Whether BOTH seats have taken part in a WebRTC handshake for this table.
+   *
+   * match_sync is a REPLICA's account of a match the relay never saw, so it is
+   * only meaningful from a peer that has one — and a peer only has one once
+   * the DataChannel was negotiated, which can only happen through rtc_signal
+   * here. On a table where that never happened there is no replica, and a
+   * snapshot is simply a client asserting a score.
+   *
+   * "An offer was relayed" is NOT enough, and shipping it that way was the
+   * bug: a seated attacker on an otherwise relayed table could send one
+   * rtc_signal — any payload at all, an empty object included — arm this, and
+   * then forge a decisive snapshot, filing a real ranked loss against an
+   * opponent whose client never rendered a thing. One preparatory frame,
+   * needing nothing from the victim. A handshake takes TWO seats and the relay
+   * stamps which one each signal came from, so an offer from one seat and an
+   * answer from the other is a thing a lone socket cannot manufacture.
+   *
+   * It narrows rather than closes, and the difference is worth stating: on a
+   * table where the victim's own client IS negotiating P2P, this becomes true
+   * legitimately and a modified peer can still lie in a snapshot. That is the
+   * client-authoritative trade the trust model already documents. What this
+   * removes is the case where the victim was never party to a DataChannel at
+   * all — a spectated table, a client with P2P off, a browser without WebRTC.
+   *
+   * Kept across a transport fallback, because a link that opens and dies leaves
+   * a peer that legitimately still holds the replica it built — that is the
+   * one-sided fallback relayCounted exists for, and it must keep working. But
+   * it belongs to the PAIR that negotiated it, not to the table: a room
+   * outlives its occupants, so one left set forever meant a player could leave,
+   * a stranger take the empty seat, and that newcomer forge a snapshot against
+   * a victim who was never party to any DataChannel — the original exploit
+   * back, needing only that somebody once played P2P here. clearP2PEvidence
+   * resets it whenever a playing seat empties or changes hands.
+   */
+  p2pOffered?: boolean;
+  /**
+   * Which NEW matchSeq each playing seat has claimed, for the two-sided
+   * rematch check in applyMatchSync. Cleared by every adoption and by
+   * startMatch. See the branch there for why one seat's word is not enough.
+   */
+  seqClaims?: [number | null, number | null];
+  /**
+   * The `matchSeq` each current occupant sat down at, or null for an empty
+   * seat. The one thing a room knows about WHEN somebody has been here.
+   *
+   * A room outlives its occupants and `matchSeq` never goes backwards, so
+   * "this room started match N" and "the caller played match N" are different
+   * facts, and `/api/match/record` was reading the first as the second: a
+   * newcomer taking a vacated seat in a room that had played several matches
+   * could POST a fabricated ranked win under every historical sequence, each
+   * one a fresh `(playerId, matchKey)` for them. Measured over three matches:
+   * 25.000 -> 30.762 and three ranked games, for a player who joined and
+   * played nothing.
+   *
+   * `startMatch` bumps `matchSeq` AFTER both players are seated, so an honest
+   * occupant always has `seatSince < seq` for every match they played,
+   * rematches included. Null refuses, so a seating path that forgets to set it
+   * costs a duel its rank rather than handing one out.
+   */
+  seatSince?: [number | null, number | null];
+  /** The seat whose valid `offer` was relayed, if any. See p2pOffered. */
+  rtcOfferFrom?: 0 | 1;
+  /** The seat whose valid `answer` was relayed, if any. See p2pOffered. */
+  rtcAnswerFrom?: 0 | 1;
+  /**
    * The lobby handshake: the guest readies, and only then can the host start.
    * Cleared whenever the terms change — a guest readied under different rules
    * has not agreed to these — and reset by every match start.
@@ -300,6 +365,8 @@ export function startMatch(room: Room, servingPlayer: 0 | 1): GameStartPayload {
   room.inPlay = false;
   room.ready = [false, false];
   room.matchSeq += 1;
+  // A relay-run start supersedes any half-agreed peer numbering.
+  room.seqClaims = [null, null];
   // Each match's snapshot revisions count from zero, so the last match's
   // high-water mark must not outlive it and reject all of this one's. And a
   // fresh match starts with the peers authoritative again: a fallback belongs
@@ -349,6 +416,8 @@ export function clampInt(value: unknown, lo: number, hi: number): number {
  */
 export function applyMatchSync(
   room: Room,
+  /** The seat this snapshot came from. The relay knows it; the payload does not. */
+  seat: 0 | 1,
   sync: {
     matchSeq: number;
     p1Score: number;
@@ -372,6 +441,27 @@ export function applyMatchSync(
   // take the result away from the other player.
   if (seq > room.matchSeq && !room.matchOver) return { decided: false };
   if (seq > room.matchSeq) {
+    // BOTH seats have to name the new number before the room adopts it, and
+    // that is the whole of what stops a farm. A rematch here is the peers
+    // agreeing BETWEEN THEMSELVES, so the relay has no vote to consult — but
+    // one seat's word let a single socket walk the sequence forward on its
+    // own: finish a match, send a decisive snapshot at matchSeq+1, and since
+    // adoption resets the room and every sequence mints a fresh
+    // duelMatchKey, the ledger deduplicates nothing. Measured over ten
+    // messages from one socket after a genuine handshake: the victim went
+    // 25.000 -> 20.185 with ten ranked losses, the sender to 34.437 with ten
+    // wins, and nothing bounded it but how long the victim stayed seated.
+    //
+    // Both peers run the same replica over the same events, so an agreed
+    // rematch is one BOTH of them number — an honest pair satisfies this in
+    // the ordinary course, at each side's first crossing of the new match.
+    // The claim is dropped rather than queued: a snapshot is absolute, so the
+    // first peer's next one re-carries whatever this one was going to say.
+    const claims = (room.seqClaims ??= [null, null]);
+    claims[seat] = seq;
+    if (claims[0] !== seq || claims[1] !== seq) return { decided: false };
+    room.seqClaims = [null, null];
+
     // The peers agreed a rematch between themselves, so the relay never ran
     // startMatch for it. Adopt their numbering and start the match over here,
     // or the new match's scores would read as a regression and be ignored.
@@ -738,6 +828,115 @@ export function clearSeatStreaks(state: StreakState, seat: 0 | 1): void {
  * A ball crossed the net from `seat`. Returns whether it counted as a return —
  * false for the serve, which opens a point rather than continuing one.
  */
+/**
+ * The most SDP a signal may carry. Real offers and answers run a few kilobytes;
+ * this is generous enough never to bite an honest one and small enough that a
+ * seated player cannot make the relay ferry megabytes for free.
+ */
+export const MAX_SDP_CHARS = 16 * 1024;
+
+/**
+ * Forget that this table ever negotiated a DataChannel.
+ *
+ * Called whenever a PLAYING seat empties or changes hands, and for exactly one
+ * reason: p2pOffered is what lets match_sync speak for a match the relay never
+ * saw, and it is evidence about the two people who exchanged the handshake. A
+ * room survives its occupants — a seat vacated by one player is taken by the
+ * next — so a flag that outlived them let a newcomer forge a decisive snapshot
+ * against an opponent who had never been on a DataChannel with anybody. It is
+ * NOT called on a transport fallback: that is the same pair, still holding the
+ * replica they built, which is the case relayCounted exists to handle.
+ */
+export function clearP2PEvidence(room: Room): void {
+  room.p2pOffered = false;
+  room.rtcOfferFrom = undefined;
+  room.rtcAnswerFrom = undefined;
+  // seqClaims belongs here for exactly the same reason and was missed when it
+  // was added: a claim is one seat's half of an agreed rematch, so a claim left
+  // behind by a departing player completed the pair for whoever sat down next.
+  // Measured before this line existed: seat 1 claims matchSeq+1, leaves, a
+  // stranger takes the seat, the new pair handshakes, and the SURVIVOR's lone
+  // snapshot filed a real ranked loss against the newcomer (25.000 -> 23.001).
+  // That is the p2pOffered bug returning through state added to fix it.
+  room.seqClaims = [null, null];
+}
+
+/**
+ * Put a table back to a lobby for whoever sits down next.
+ *
+ * A room outlives its occupants, and everything below is about the pair that
+ * has just been broken up rather than about the table. Left standing it is
+ * read as the NEW pair's, which is one bug class with several faces:
+ *
+ * - `scores` let a lone socket pre-load a match. With the both-seats guards in
+ *   server.ts that is already closed at the door; clearing here is the other
+ *   half, so a newcomer never inherits a score they did not play.
+ * - `startRatings` is the pre-match rating pair, keyed on a matchSeq that does
+ *   not move when a seat does — so the next occupant was rated against the
+ *   DEPARTED player's sample. `swap_seat` already cleared it, with that reason
+ *   written out; `vacateSeat` did not.
+ * - The four streak arrays are a run, and a run belongs to a player rather
+ *   than to a chair. `swap_seat` calls clearSeatStreaks; `vacateSeat` did not,
+ *   and `join_room` re-seeds seat 1's peak with a MAXIMUM against the stale
+ *   value, so a departed player's peak survived a bigger number.
+ * - `inPlay`/`matchOver` are the mirror case, failing closed rather than open:
+ *   they stayed true into the next pair, and `start_match` requires both to be
+ *   false, so a new guest could ready up and the host's Start button did
+ *   nothing at all, with no error.
+ *
+ * Not called when the room is being deleted — there is no next pair — and
+ * called only AFTER any abandon has been recorded, since that reads the score.
+ */
+export function resetTableForNextPair(room: Room, vacated: 0 | 1): void {
+  clearSeatStreaks(room, vacated);
+  clearP2PEvidence(room);
+  if (room.seatSince) room.seatSince[vacated] = null;
+  room.scores = [0, 0];
+  room.inPlay = false;
+  room.matchOver = false;
+  room.crossingsThisPoint = 0;
+  room.startRatings = null;
+  room.startRatingsSeq = 0;
+}
+
+/**
+ * Take one `rtc_signal` from a seat: validate it, record what it advances of
+ * the handshake, and say whether it should be relayed to the peer.
+ *
+ * Validating here rather than passing SDP through untouched is half the point.
+ * The relay was a pure pass-through with no shape check at all — `quick_chat`
+ * caps at 100 characters and this capped at nothing — so `{}` was a signal, and
+ * a signal was enough to arm p2pOffered. Everything a client can put on the
+ * wire that is not one of the three kinds is now simply not a signal: it is not
+ * forwarded, and it advances nothing.
+ *
+ * `ice` deliberately advances nothing either. Candidates trickle in any order,
+ * arrive from both seats, and a null one is the legitimate end-of-candidates
+ * marker — so they are relayed but they are not evidence of anything, and
+ * treating them as evidence would put the one-frame arming straight back.
+ */
+export function acceptRtcSignal(room: Room, seat: 0 | 1, payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const { kind, sdp } = payload as { kind?: unknown; sdp?: unknown };
+  if (kind !== 'offer' && kind !== 'answer' && kind !== 'ice') return false;
+  if (kind === 'ice') return true;
+  if (typeof sdp !== 'string' || sdp.length === 0 || sdp.length > MAX_SDP_CHARS) return false;
+
+  if (kind === 'offer') room.rtcOfferFrom = seat;
+  else room.rtcAnswerFrom = seat;
+
+  // Both halves, from DIFFERENT seats. Same-seat is the whole attack: one
+  // socket sending itself an offer and an answer is not a handshake.
+  if (
+    room.rtcOfferFrom !== undefined &&
+    room.rtcAnswerFrom !== undefined &&
+    room.rtcOfferFrom !== room.rtcAnswerFrom
+  ) {
+    room.p2pOffered = true;
+  }
+  return true;
+}
+
 export function countReturn(state: StreakState, seat: 0 | 1): boolean {
   const isServe = state.crossingsThisPoint === 0 && seat === state.servingPlayer;
   state.crossingsThisPoint += 1;

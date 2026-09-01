@@ -1,0 +1,138 @@
+#!/usr/bin/env node
+/**
+ * Take a consistent backup of the player database, and prove it is readable.
+ *
+ * `VACUUM INTO` is the right primitive and is why this is safe against a
+ * running server: it takes a read transaction, so WAL readers never block the
+ * writer and the copy is a single consistent snapshot with the WAL already
+ * folded in. Copying phong.db with `cp` is NOT equivalent — it races the WAL
+ * and can produce a file that opens but is missing the most recent writes.
+ *
+ * The destination defaults OUTSIDE DATA_DIR, and that is the point rather than
+ * a detail: a backup written next to the database it protects is lost with the
+ * volume it sits on, which is the failure it exists for. On Render that volume
+ * is also 1GB with no retention, so accumulating snapshots there eventually
+ * takes the live database down too.
+ *
+ *   node scripts/backup.mjs [--out DIR] [--keep N]
+ *
+ * DATA_DIR   where phong.db lives          (default ./data)
+ * BACKUP_DIR where snapshots are written   (default ./backups)
+ *
+ * Exits non-zero on any failure, so cron/CI notices. Run it from a scheduler
+ * and copy the result off the host — this script does not ship anything
+ * anywhere, deliberately: where your backups belong is a deployment decision.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+const arg = (flag, fallback) => {
+  const i = process.argv.indexOf(flag);
+  return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+};
+
+const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const dbFile = path.join(dataDir, 'phong.db');
+let outDir = path.resolve(arg('--out', process.env.BACKUP_DIR || path.join(process.cwd(), 'backups')));
+const keep = Math.max(1, parseInt(arg('--keep', '14'), 10) || 14);
+
+if (!fs.existsSync(dbFile)) {
+  console.error(`[backup] no database at ${dbFile} — is DATA_DIR right?`);
+  process.exit(1);
+}
+// Equality as well as descent. `startsWith(dataDir + sep)` alone is false when
+// --out resolves to DATA_DIR ITSELF, which is the likeliest way to get this
+// wrong by hand and the one that lands the snapshot directly beside phong.db —
+// the exact outcome the check exists to refuse.
+//
+// And REAL paths, not lexical ones. `--out /backups` where /backups is a
+// symlink to /data/backups compares as somewhere else entirely while
+// VACUUM INTO follows the link and writes inside DATA_DIR — the check passes
+// and the snapshot lands on the volume it exists to survive. A destination
+// that does not exist yet is resolved through its nearest existing parent,
+// since realpath cannot resolve what is not there and the link is normally
+// higher up the path than the leaf we are about to create.
+const realish = (p) => {
+  let dir = path.resolve(p);
+  const tail = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(dir), ...tail);
+    } catch {
+      const parent = path.dirname(dir);
+      // Filesystem root, and still nothing exists: nothing to resolve.
+      if (parent === dir) return path.resolve(p);
+      tail.unshift(path.basename(dir));
+      dir = parent;
+    }
+  }
+};
+const dataAbs = realish(dataDir);
+outDir = realish(outDir);
+if (outDir === dataAbs || outDir.startsWith(dataAbs + path.sep)) {
+  console.error(`[backup] refusing to write inside DATA_DIR (${dataDir}).`);
+  console.error('[backup] a backup on the volume it protects is lost with it. Pass --out.');
+  process.exit(1);
+}
+// Guarded like every other failure here, because this is the one an operator
+// meets first: the destination has to be MOUNTED and writable, and the
+// container runs unprivileged, so an unmounted --out died on a raw
+// `EACCES: permission denied, mkdir '/backups'` stack trace in a cron log.
+try {
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.accessSync(outDir, fs.constants.W_OK);
+} catch (e) {
+  console.error(`[backup] cannot write to ${outDir}: ${e?.message}`);
+  console.error('[backup] mount a writable directory there (see DEPLOYMENT.md).');
+  process.exit(1);
+}
+
+const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+const dest = path.join(outDir, `phong-${stamp}.db`);
+
+let src;
+try {
+  src = new DatabaseSync(dbFile, { readOnly: true });
+  // Bound as a value would be simpler, but VACUUM INTO takes a literal.
+  src.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
+} catch (e) {
+  console.error('[backup] VACUUM INTO failed:', e?.message);
+  process.exit(1);
+} finally {
+  try { src?.close(); } catch {}
+}
+
+// A backup nobody has opened is a backup nobody knows is good. This is the
+// step the documented manual procedure never had.
+let players = 0;
+try {
+  const check = new DatabaseSync(dest, { readOnly: true });
+  const integrity = check.prepare('PRAGMA integrity_check').get();
+  const verdict = Object.values(integrity ?? {})[0];
+  if (verdict !== 'ok') throw new Error(`integrity_check said: ${verdict}`);
+  players = check.prepare('SELECT COUNT(*) AS n FROM players').get().n;
+  check.close();
+} catch (e) {
+  console.error('[backup] the snapshot did not verify:', e?.message);
+  console.error(`[backup] leaving ${dest} in place for inspection.`);
+  process.exit(1);
+}
+
+const bytes = fs.statSync(dest).size;
+console.log(`[backup] ${dest} — ${(bytes / 1024).toFixed(0)}KB, ${players} player row(s), integrity ok`);
+
+// Prune oldest-first, and only ever files this script made.
+//
+// The pattern is the exact shape `stamp` produces above and not `phong-*.db`,
+// which would have adopted anything sharing the prefix: a hand-made
+// phong-before-upgrade.db in the same directory counted toward `keep` and was
+// eventually deleted by a tool that promises, one line up, to prune only its
+// own. It also sorted arbitrarily among the timestamped ones, so it could take
+// a real backup's place at the front of the oldest-first list.
+const MINE = /^phong-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.db$/;
+const mine = fs.readdirSync(outDir).filter((f) => MINE.test(f)).sort();
+for (const stale of mine.slice(0, Math.max(0, mine.length - keep))) {
+  fs.unlinkSync(path.join(outDir, stale));
+  console.log(`[backup] pruned ${stale}`);
+}

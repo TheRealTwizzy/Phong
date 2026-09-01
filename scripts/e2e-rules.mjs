@@ -222,9 +222,20 @@ if (afterCustom.rankedGames !== beforeCustom.rankedGames) fail('custom rules mov
 if (afterCustom.xp <= beforeCustom.xp) fail('custom rules paid no XP to the profile');
 ok(`custom-rules win: +${custom.earnedXp} XP, rankedGames unchanged at ${afterCustom.rankedGames}`);
 
-// ---- 2b. Rules tuned INSIDE their bands still move the rating ------------
-// The bands are what make these settings usable: a player can adjust the feel
-// of a match without dropping out of the ladder. Only the extremes cost it.
+// ---- 2b. A duel nothing can vouch for pays XP and moves no rating --------
+// A PvP payload naming no room is one the relay cannot check against anything
+// it owns: no score to compare, no seat to confirm, and no matchKey to dedupe
+// it by. It is paid like any unverifiable result — XP yes, ladder no.
+//
+// This used to be the suite's "rules tuned inside their bands still rate"
+// case, sent as a roomless multiplayer POST because that was the shortest way
+// to reach a rating update. It cannot be that any more, and it should not be:
+// the payload it sends is the ladder exploit, not a tuned duel. The property
+// it was really about now lives where a real room exists to carry it —
+// tests/duelRecord.test.ts, "a seated duel with rules tuned inside their bands
+// still rates" — with the band arithmetic itself pinned by
+// tests/matchRules.test.ts ("lets every slider be tuned inside its band and
+// still rate").
 const tuner = await newPlayer('Tuner');
 const beforeTuned = await me(tuner);
 const tuned = await tuner.evaluate(async () => (await fetch('/api/match/record', {
@@ -235,11 +246,12 @@ const tuned = await tuner.evaluate(async () => (await fetch('/api/match/record',
   }),
 })).json());
 const afterTuned = await me(tuner);
-if (tuned.ranked !== true) fail('a match tuned inside the bands reported itself unranked');
-if (afterTuned.rankedGames !== beforeTuned.rankedGames + 1) {
-  fail(`a tuned match did not count for rank (${beforeTuned.rankedGames} -> ${afterTuned.rankedGames})`);
+if (!(tuned.earnedXp > 0)) fail('an unvouched duel paid no XP');
+if (afterTuned.xp <= beforeTuned.xp) fail('an unvouched duel paid no XP to the profile');
+if (afterTuned.rankedGames !== beforeTuned.rankedGames) {
+  fail(`an unvouched duel moved the rank (${beforeTuned.rankedGames} -> ${afterTuned.rankedGames})`);
 }
-ok(`four rules tuned inside their bands still counted: rankedGames ${beforeTuned.rankedGames} -> ${afterTuned.rankedGames}`);
+ok(`an unvouched duel pays XP (+${tuned.earnedXp}) and leaves rankedGames at ${afterTuned.rankedGames}`);
 
 // ---- 3. Every match is progression: a loss pays real XP ------------------
 const loser = await newPlayer('Loser');

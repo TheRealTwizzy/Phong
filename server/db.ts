@@ -24,7 +24,17 @@ import {
   DELETED_PLAYER_ID,
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
-import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS } from '../src/matchRules';
+import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
+
+/**
+ * The most points a single match can legitimately put on either side: the
+ * longest format anyone can pick. An abandon records at the standing score,
+ * which is bounded by the same number.
+ */
+const MAX_MATCH_SCORE = Math.max(...WINNING_SCORES);
+
+/** How often /api/health may actually WRITE. See GameDatabase.healthCheck. */
+const HEALTH_WRITE_PROBE_MS = 10_000;
 import { roomCountsForRank } from '../src/venues';
 import { ALL_ACHIEVEMENTS, achievementById, hasUnlock, isUnlockable } from '../src/achievements';
 import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
@@ -398,6 +408,10 @@ class GameDatabase {
    * re-prepares a cached statement itself if the schema changes underneath it.
    */
   private statements = new Map<string, StatementSync>();
+
+  /** See healthCheck: when the write probe last ran, and whether it worked. */
+  private lastWriteProbeAt = 0;
+  private lastWriteProbeOk = false;
 
   private stmt(sql: string): StatementSync {
     let cached = this.statements.get(sql);
@@ -800,6 +814,26 @@ class GameDatabase {
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_players_username
          ON players(username COLLATE NOCASE) WHERE initializedAt IS NOT NULL`
     );
+    // The leaderboard's four sorts. Each was a full SCAN of players plus a
+    // TEMP B-TREE for the ORDER BY, on an unauthenticated route.
+    //
+    // Here rather than in ensureBaseSchema, and that placement is load-bearing
+    // for the same reason the index above is here: every one of these is
+    // PARTIAL on initializedAt, and ensureBaseSchema runs before the addColumn
+    // migrations that create that column — so declaring them there fails a
+    // fresh database outright with "no such column: initializedAt", which is
+    // what tests/db-wipe.test.ts and tests/shutoutRecount.test.ts caught.
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_players_board_xp
+        ON players(xp DESC, id) WHERE initializedAt IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_players_board_rally
+        ON players(highestRally DESC, id) WHERE initializedAt IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_players_board_wins
+        ON players(matchesWon DESC, id) WHERE initializedAt IS NOT NULL;
+      -- Also serves db.ladderPosition, which counts rows above a rating.
+      CREATE INDEX IF NOT EXISTS idx_players_board_mu
+        ON players(rankMu DESC, id) WHERE initializedAt IS NOT NULL;
+    `);
     // Achievement ids are persisted in each player's JSON array, so renaming
     // one silently un-awards it — and re-awards it later, paying its XP twice.
     // 'rating_1400' was named for the ELO threshold it used to key on; it has
@@ -2516,6 +2550,25 @@ class GameDatabase {
       const n = Math.floor(Number(v));
       return Number.isFinite(n) ? Math.max(0, Math.min(100000, n)) : 0;
     };
+    // The scores are read off the payload too, and were the one pair that
+    // never was. playerScore reaches matchXp raw, which multiplies it by
+    // XP_PER_POINT — so `1e307` produced Infinity, and levelFromXp's
+    // `while (xp >= next)` then never terminated, wedging the single-threaded
+    // process that holds every live room in memory. `1e9` was the quiet
+    // version: level 24,492 in 448ms of blocked event loop, permanently, since
+    // XP never regresses. And because `+=` on a string concatenates,
+    // `"5"` turned totalPointsScored 100 into 1005 while matchXp still
+    // computed numerically, so nothing else looked wrong.
+    //
+    // Bounded by the longest match anybody can play rather than by bound()'s
+    // 100000: a score above the largest winning score is not a big number, it
+    // is a lie, and clamping to the streak cap would still hand out a level in
+    // the hundreds. A room-vouched result overwrites both fields below anyway.
+    const boundScore = (v: unknown): number =>
+      Math.max(0, Math.min(MAX_MATCH_SCORE, bound(v)));
+    payload.playerScore = boundScore(payload.playerScore);
+    payload.opponentScore = boundScore(payload.opponentScore);
+
     const bestStreak = bound(payload.bestStreak);
     payload.bestStreak = bestStreak;
     // The run cannot end higher than it ever reached.
@@ -3414,6 +3467,9 @@ class GameDatabase {
    * counted as "rows above this one" cannot agree with an order that has no
    * answer. One deterministic key gives both the same one.
    */
+  /** Hard ceiling on one board query — a bound, not the public page size. */
+  private static readonly MAX_BOARD_ROWS = 1000;
+
   private static readonly LADDER_TIEBREAK = 'p.id ASC';
 
   /**
@@ -3472,6 +3528,24 @@ class GameDatabase {
     limit = 50,
     includeBots = false
   ): LeaderboardEntry[] {
+    // Both lookups below are keyed on sortBy, and an unrecognised key made
+    // BOTH of them undefined — which built `ORDER BY undefined` and
+    // `AND (undefined OR ...)`, so `?sort=anything` was a 500 echoing "no such
+    // column: undefined". Not injectable (every value here is a literal), but
+    // reachable by typing, and the route is unauthenticated. Defaulted here as
+    // well as at the route because this method is exported and has other
+    // callers.
+    const key: 'elo' | 'level' | 'rally' | 'wins' =
+      sortBy === 'level' || sortBy === 'rally' || sortBy === 'wins' ? sortBy : 'elo';
+    // NaN never satisfied `out.length >= limit`, so `?limit=abc` returned the
+    // ENTIRE board — an unauthenticated full scan plus every row serialized.
+    // Bounded here against non-finite and unbounded input only; the PUBLIC cap
+    // of 100 belongs at the route, because ladderPosition and its tests ask
+    // this method for more than a page on purpose.
+    const take = Number.isFinite(limit)
+      ? Math.max(1, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(limit)))
+      : 50;
+
     const orderBy = {
       level: 'xp DESC',
       rally: 'highestRally DESC',
@@ -3480,7 +3554,7 @@ class GameDatabase {
       // the same pair of conditions tierFor applies — from the constants, so
       // a rebalance of either cannot leave this ORDER BY sorting stale rules.
       elo: `(rankedGames >= ${PLACEMENT_GAMES} AND rankSigma <= ${PLACEMENT_SIGMA}) DESC, rankMu DESC`,
-    }[sortBy];
+    }[key];
 
     // A board only lists players with progress on the thing IT measures.
     // Rows of zeros are noise: a freshly onboarded profile is not "last
@@ -3493,25 +3567,38 @@ class GameDatabase {
       rally: 'p.highestRally > 0',
       wins: 'p.matchesWon > 0',
       elo: 'p.rankedGames > 0',
-    }[sortBy];
+    }[key];
 
     // Only initialized profiles compete — players who never finished
     // onboarding hold placeholder names and stay invisible.
+    // Bots are dropped in SQL rather than skipped in the loop below when they
+    // are not wanted. That is what lets LIMIT be exact: with them excluded
+    // every returned row is emitted, and with them included every returned row
+    // is emitted too, so `take` bounds the result either way and no over-fetch
+    // is needed. The output is identical — humanRank only ever counted
+    // non-bots, so removing rows that never incremented it changes nothing.
+    const botClause = includeBots ? '' : " AND p.id NOT LIKE 'bot-%'";
+    // LIMIT in the SQL, not just in the loop. Without it every eligible row
+    // was materialized as p.* and run through rowToProfile (which JSON.parses
+    // the achievements column) before the loop threw all but `take` away —
+    // 110ms at 10k players, synchronously, on the loop that relays paddle_move
+    // for every live match.
     const rows = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
-            AND (${progress} OR p.id LIKE 'bot-%')
-          ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}`
+            AND (${progress} OR p.id LIKE 'bot-%')${botClause}
+          ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
+          LIMIT ?`
       )
-      .all() as unknown as PlayerRow[];
+      .all(take) as unknown as PlayerRow[];
 
     // Ranks count human players only, so a human's number is identical
     // whether bot rows are interleaved into the view or not.
     const out: LeaderboardEntry[] = [];
     let humanRank = 0;
     for (const row of rows) {
-      if (out.length >= limit) break;
+      if (out.length >= take) break;
       const isBot = row.id.startsWith('bot-');
       if (isBot && !includeBots) continue;
       if (!isBot) humanRank++;
@@ -3602,6 +3689,77 @@ class GameDatabase {
       )
       .all(...binds, limit, offset) as unknown as MatchRecord[];
     return { matches, total };
+  }
+
+  /**
+   * Where this process actually persisted to, and how much is in it.
+   *
+   * DATA_DIR falls back to a cwd-relative ./data, and the Dockerfile both sets
+   * DATA_DIR=/data AND mkdir's it — so a missing or misconfigured volume mount
+   * leaves a writable /data in the image layer and the server boots happily
+   * onto an ephemeral database. Every deploy then starts from zero players
+   * with no error and nothing in the log naming the file it opened.
+   * DEPLOYMENT.md warns about this in prose; nothing in the code said a word.
+   */
+  describe(): { file: string; bytes: number; players: number; humans: number } {
+    let bytes = 0;
+    try {
+      bytes = fs.statSync(DB_FILE).size;
+    } catch {
+      /* a fresh database has no file on disk yet */
+    }
+    const row = this.stmt('SELECT COUNT(*) AS n FROM players').get() as { n: number };
+    // Humans separately, and that distinction is the whole point: the bot
+    // roster is re-seeded onto every fresh database at boot, so a server that
+    // has just lost its volume reports eight players rather than none. Only
+    // the initialized non-bot count actually distinguishes "empty" from
+    // "populated".
+    const human = this.stmt(
+      "SELECT COUNT(*) AS n FROM players WHERE initializedAt IS NOT NULL AND id NOT LIKE 'bot-%'"
+    ).get() as { n: number };
+    return { file: path.resolve(DB_FILE), bytes, players: row.n, humans: human.n };
+  }
+
+  /**
+   * A read AND a write, for /api/health.
+   *
+   * Throws if the store is unreachable — a corrupt file, a full disk, a volume
+   * that vanished — so the probe can answer 503 instead of reporting a
+   * container healthy while every match write fails.
+   *
+   * The read alone did not deliver that promise, and the gap is the awkward
+   * shape: a SELECT succeeds on a filesystem that is FULL and on one remounted
+   * READ-ONLY, which are two of the three failures named above. The probe went
+   * on returning 200 while every match, every mission claim and every profile
+   * write failed — the orchestrator's whole reason for asking. Only a write
+   * can answer the question a write cares about.
+   *
+   * Rate-limited rather than run on every call, because /api/health is
+   * unauthenticated and unmetered: at one upsert per request a flood becomes a
+   * write amplifier, which is the shape of the very findings this probe shipped
+   * alongside. A healthy server therefore writes at most once per
+   * HEALTH_WRITE_PROBE_MS and answers everything in between from the cheap
+   * read, which is far under any orchestrator's polling interval. A FAILING one
+   * is deliberately re-probed every time: caching a failure would keep a
+   * recovered volume reported unhealthy for the rest of the window, and a
+   * server that cannot write is already not serving anything to amplify.
+   */
+  healthCheck(): void {
+    this.stmt('SELECT COUNT(*) AS n FROM players').get();
+    const now = Date.now();
+    if (this.lastWriteProbeOk && now - this.lastWriteProbeAt < HEALTH_WRITE_PROBE_MS) return;
+    try {
+      this.stmt(
+        "INSERT INTO meta (key, value) VALUES ('health_probe', ?) " +
+          'ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      ).run(String(now));
+      this.lastWriteProbeOk = true;
+    } catch (e) {
+      this.lastWriteProbeOk = false;
+      throw e;
+    } finally {
+      this.lastWriteProbeAt = now;
+    }
   }
 }
 

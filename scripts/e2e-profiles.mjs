@@ -268,6 +268,13 @@ const pubName = await alice.textContent('#public-profile-username');
 if (pubName.trim() !== 'PlayerTwo') fail(`public profile shows "${pubName}"`);
 // Boards refuse rows of zeros, so PlayerTwo has to have actually played
 // something before either leaderboard scene below can find them.
+//
+// This POST names no room, so the relay has nothing to vouch for it: it pays
+// XP like any result the server cannot verify, and deliberately moves no
+// rating. The board read below therefore asks for `level` — whose progress
+// filter is `xp > 0` — rather than the default `elo`, which filters on
+// `rankedGames > 0` and would now correctly exclude them. All three
+// assertions are unchanged; only the board that can see the progress is.
 await bob.evaluate(async () => {
   await fetch('/api/match/record', {
     method: 'POST',
@@ -279,7 +286,7 @@ await bob.evaluate(async () => {
 });
 const boardChecks = await alice.evaluate(async () => {
   const me = await (await fetch('/api/profile/me')).json();
-  const opp = await (await fetch(`/api/leaderboard?limit=50`)).json();
+  const opp = await (await fetch(`/api/leaderboard?sort=level&limit=50`)).json();
   const other = opp.leaderboard.find((e) => e.id !== me.id);
   const pub = other ? await (await fetch(`/api/profile/${other.id}`)).json() : null;
   return {
@@ -306,6 +313,11 @@ await alice.click('#btn-quit-confirm');
 await alice.waitForSelector('#main-menu-screen', { timeout: 5000 });
 await alice.click('#menu-nav-leaderboard');
 await alice.waitForSelector('#menu-page-leaderboard', { timeout: 5000 });
+// The LEVEL board, for the same reason the fetch above asks for it: PlayerTwo's
+// only result is a roomless POST, which pays XP and moves no rating, and this
+// page opens on the skill board. Nothing here is about which board — the check
+// is that tapping a row opens that player's public profile.
+await alice.click('#filter-leaderboard-level');
 await alice.click('#menu-page-leaderboard button:has-text("PlayerTwo")');
 await alice.waitForSelector('#public-profile-username', { timeout: 5000 });
 ok('leaderboard row tap opens the public profile');

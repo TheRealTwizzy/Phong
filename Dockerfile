@@ -15,7 +15,18 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY --from=build /app/dist ./dist
-RUN mkdir -p /data && chown -R node:node /app /data
+# The backup tool ships with the image, or the documented
+# `docker compose exec phong node scripts/backup.mjs` has no file to run.
+# It is dependency-free (node:sqlite + node:fs) so it needs nothing else.
+COPY scripts/backup.mjs ./scripts/backup.mjs
+# /backups exists in the IMAGE so that the named volume compose mounts there
+# initializes writable: Docker seeds a fresh named volume from the image path,
+# ownership included. Without it the documented
+# `docker compose exec phong node scripts/backup.mjs --out /backups` died on
+# `EACCES: permission denied, mkdir '/backups'` — the container runs as the
+# unprivileged `node` user and / is root-owned — so an operator following the
+# runbook got a stack trace and no backups.
+RUN mkdir -p /data /backups && chown -R node:node /app /data /backups
 USER node
 VOLUME /data
 EXPOSE 3000
