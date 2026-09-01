@@ -334,9 +334,13 @@ const spectatorSeat = (slot: 0 | 1): TableSeat => (slot === 0 ? 2 : 3);
  * a host who swaps sides takes the CPU with them rather than landing on top of
  * it, and there is no second field that can disagree with `players`.
  *
- * Seat 1 is the answer for an empty table too — a table with a CPU and nobody
- * at all is on its way to being reaped, and the host seat is the one a
- * newcomer takes.
+ * There is no third answer, and there does not need to be: a table with a CPU
+ * and NOBODY is not a state this can be called in, because `vacateSeat`
+ * deletes the room the instant both playing seats are empty (the machine is
+ * not in `players`, so a lone host leaving empties them both) and ejects its
+ * watchers with it. Seat 1 is therefore the arithmetic fallback rather than a
+ * case being handled — a null arm here would be dead code carrying a comment
+ * about a bug it cannot prevent, which is worse than no arm at all.
  */
 const cpuSeatOf = (room: Room): 0 | 1 => (room.players[0] ? 1 : 0);
 
