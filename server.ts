@@ -2227,10 +2227,27 @@ async function startServer() {
             return;
           }
 
-          if (room.players[1] !== null) {
+          // The FIRST free playing seat, not seat 1. `vacateSeat` empties
+          // whichever seat left and keeps the room alive, so a host who taps
+          // Main Menu after a match leaves a table with seat 0 empty and seat
+          // 1 held — still in the map, still listed by
+          // `/api/rooms/:venueRoomId/tables` (it has a live player), and
+          // refusing every arrival as "already full (2 players)" for up to the
+          // 30-minute unpaired TTL, because this test asked about seat 1 and
+          // the write below always went to seat 1.
+          //
+          // Seat 0 is the host seat, so whoever takes it is the host — which
+          // is already the rule `swap_seat` established when it made a
+          // pre-match move into seat 0 legal. Readiness and rematch votes are
+          // cleared below, so a table adopted this way starts its handshake
+          // from scratch rather than inheriting the departed pair's.
+          const joinIdx: 0 | 1 | null =
+            room.players[0] === null ? 0 : room.players[1] === null ? 1 : null;
+          if (joinIdx === null) {
             ws.send(JSON.stringify({ type: 'error', message: 'Room is already full (2 players).' }));
             return;
           }
+          const otherIdx: 0 | 1 = joinIdx === 0 ? 1 : 0;
 
           // A PUBLIC table is one this player browsed to, so the bracket that
           // listed it applies to them as well as to its host. A PRIVATE table
@@ -2258,33 +2275,37 @@ async function startServer() {
           vacateSeat();
 
           currentPlayerId = cookieDeviceId || msg.playerId || `p_${Date.now()}`;
-          const guestName = cookieDeviceId ? db.getProfile(cookieDeviceId).username : 'Player 2';
-          room.players[1] = {
+          const guestName = cookieDeviceId
+            ? db.getProfile(cookieDeviceId).username
+            : joinIdx === 0
+              ? 'Player 1'
+              : 'Player 2';
+          room.players[joinIdx] = {
             ws,
             playerId: currentPlayerId,
             playerName: guestName,
-            playerIndex: 1,
+            playerIndex: joinIdx,
             deviceId: cookieDeviceId || null,
             sessionId: cookieSessionId,
           };
-          room.streaks[1] = carriedStreak(cookieDeviceId);
-          room.bestStreaks[1] = Math.max(room.bestStreaks[1], room.streaks[1]);
+          room.streaks[joinIdx] = carriedStreak(cookieDeviceId);
+          room.bestStreaks[joinIdx] = Math.max(room.bestStreaks[joinIdx], room.streaks[joinIdx]);
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
           // Two players: the solo clock stops. It restarts if either of them
           // leaves, which is what a room going back to one player IS.
           room.soloSince = null;
           currentRoomId = room.id;
-          seat = { role: 'player', index: 1 };
+          seat = { role: 'player', index: joinIdx };
 
           // Notify joining player
           ws.send(
             JSON.stringify({
               type: 'room_joined',
               roomId: room.id,
-              playerIndex: 1,
-              opponentName: room.players[0]?.playerName || 'Player 1',
-              opponentId: room.players[0]?.playerId || 'p1',
+              playerIndex: joinIdx,
+              opponentName: room.players[otherIdx]?.playerName || 'Player 1',
+              opponentId: room.players[otherIdx]?.playerId || 'p1',
             })
           );
 
@@ -2292,13 +2313,15 @@ async function startServer() {
           // the first serve — and can read them in the lobby.
           ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
 
-          // Notify host
-          if (room.players[0]?.ws && room.players[0].ws.readyState === WebSocket.OPEN) {
-            room.players[0].ws.send(
+          // Notify whoever was already sitting here — which is not always the
+          // host, now that an arrival can be the one taking seat 0.
+          const sitting = room.players[otherIdx];
+          if (sitting?.ws && sitting.ws.readyState === WebSocket.OPEN) {
+            sitting.ws.send(
               JSON.stringify({
                 type: 'opponent_joined',
-                opponentName: room.players[1]?.playerName || 'Player 2',
-                opponentId: room.players[1]?.playerId || 'p2',
+                opponentName: room.players[joinIdx]?.playerName || 'Player 2',
+                opponentId: room.players[joinIdx]?.playerId || 'p2',
               })
             );
           }
