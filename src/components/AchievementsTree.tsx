@@ -3,7 +3,7 @@ import { Achievement, AchievementBranch, LanguageCode } from '../types';
 import { BRANCHES, isBranchRevealed, isRevealed, isUnlockable } from '../achievements';
 import { Tier } from '../rating';
 import { t } from '../i18n/translations';
-import { ProgressBar } from './ui';
+import { Button, Panel, ProgressBar } from './ui';
 import { useArrivalRefetch } from './useArrivalRefetch';
 import {
   Award,
@@ -77,6 +77,8 @@ export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
   const [achievements, setAchievements] = useState<Achievement[]>([]);
   const [branch, setBranch] = useState<AchievementBranch>('foundation');
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
 
   useArrivalRefetch(isCurrent, () => setReloadKey((k) => k + 1));
@@ -86,18 +88,31 @@ export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
     let cancelled = false;
     setIsLoading(true);
     fetch('/api/achievements')
-      .then((res) => res.json())
-      .then((data) => {
-        if (!cancelled) setAchievements(data.achievements || []);
+      .then((res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        return res.json();
       })
-      .catch(console.error)
+      .then((data) => {
+        if (!cancelled) {
+          setAchievements(data.achievements || []);
+          setError(null);
+        }
+      })
+      .catch((e) => {
+        console.error(e);
+        // Without this the render fell through to a tree with nothing in it:
+        // the meter read "0 / 0 (0%)" and then NOTHING was drawn — no message,
+        // no retry, no way to tell a dropped connection from a player who has
+        // earned nothing. Rows already on screen are kept.
+        if (!cancelled) setError(t('load_failed', language));
+      })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [active, playerId, reloadKey]);
+  }, [active, playerId, reloadKey, retryKey, language]);
 
   const unlockedCount = achievements.filter((a) => a.unlockedAt).length;
   const earned = achievements.filter((a) => a.unlockedAt).map((a) => a.id);
@@ -195,7 +210,16 @@ export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
           nothing would otherwise read as still loading. Same rule
           `MatchHistoryList` has carried all along. */}
       {isLoading && achievements.length === 0 ? (
-        <div className="shrink-0 py-12 text-center text-2xs font-normal tracking-normal text-ink-muted">Loading trophies...</div>
+        <div className="shrink-0 py-12 text-center text-2xs font-normal tracking-normal text-ink-muted">
+          {t('trophies_loading', language)}
+        </div>
+      ) : error && achievements.length === 0 ? (
+        <Panel accent="loss" className="shrink-0 space-y-2 bg-loss/10 text-center text-ink">
+          <p className="text-2xs font-normal tracking-normal">{error}</p>
+          <Button size="sm" variant="danger" onClick={() => setRetryKey((n) => n + 1)}>
+            {t('retry', language)}
+          </Button>
+        </Panel>
       ) : !branchOpen(branch) ? (
         <div
           id="ach-branch-locked"

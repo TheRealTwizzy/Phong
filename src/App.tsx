@@ -478,6 +478,11 @@ export default function App() {
   const [leaveLobbyConfirmOpen, setLeaveLobbyConfirmOpen] = useState<boolean>(false);
   const [toastEjected, setToastEjected] = useState<boolean>(false);
   const [toastRelayError, setToastRelayError] = useState<string | null>(null);
+  // A mission claim or reroll that never reached the server. The non-network
+  // failures already resync the list, which is its own answer; a dropped
+  // request left the button doing nothing at all, with no way to tell that
+  // from a mission that was not finished.
+  const [toastActionFailed, setToastActionFailed] = useState<boolean>(false);
   const [toastRoomExpired, setToastRoomExpired] = useState<boolean>(false);
   /** The table this page was WATCHING has gone — never an abandon notice. */
   const [toastTableEnded, setToastTableEnded] = useState<boolean>(false);
@@ -1180,6 +1185,7 @@ export default function App() {
       if (data.unlocked) setToastUnlocks((prev) => [...prev, normalizeCosmeticId(data.unlocked)]);
     } catch (e) {
       console.error('Failed to claim mission reward', e);
+      setToastActionFailed(true);
     }
   };
 
@@ -1202,6 +1208,7 @@ export default function App() {
       if (data.rerolls) setRerolls(data.rerolls);
     } catch (e) {
       console.error('Failed to reroll mission', e);
+      setToastActionFailed(true);
     }
   };
 
@@ -3321,6 +3328,13 @@ export default function App() {
               ttlMs: TOAST_TTL.reward,
               content: t('practice_xp_earned', currentLanguage, { xp: toastPracticeXp }),
               onDismiss: () => setToastPracticeXp(null),
+            },
+            toastActionFailed && {
+              id: 'toast-action-failed',
+              tone: 'warn' as const,
+              ttlMs: TOAST_TTL.notice,
+              content: t('load_failed', currentLanguage),
+              onDismiss: () => setToastActionFailed(false),
             },
             toastRelayError && {
               id: 'toast-relay-error',

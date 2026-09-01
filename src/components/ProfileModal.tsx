@@ -153,6 +153,11 @@ export const ProfileModal: React.FC<Props> = ({
   const [claimBusy, setClaimBusy] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
+  // `uploadAvatar` returns a typed `{ ok, error }` and this screen threw it
+  // away, so a rejected upload — a 413 from the route's 600kb limit, a file
+  // the decoder could not read, a dropped connection — produced no visible
+  // change whatsoever: the avatar stayed as it was and nothing said why.
+  const [avatarError, setAvatarError] = useState<string | null>(null);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const handlePickAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -160,12 +165,15 @@ export const ProfileModal: React.FC<Props> = ({
     e.target.value = '';
     if (!file || avatarBusy) return;
     setAvatarBusy(true);
+    setAvatarError(null);
     try {
       const blob = await processAvatarFile(file);
       const result = await uploadAvatar(blob);
       if (result.ok) onRefreshProfile();
+      else setAvatarError(t('avatar_failed', language));
     } catch {
-      // Undecodable file — leave the current avatar untouched
+      // Undecodable file — leave the current avatar untouched, and say so.
+      setAvatarError(t('avatar_failed', language));
     } finally {
       setAvatarBusy(false);
     }
@@ -174,8 +182,10 @@ export const ProfileModal: React.FC<Props> = ({
   const handleRemoveAvatar = async () => {
     if (avatarBusy) return;
     setAvatarBusy(true);
+    setAvatarError(null);
     try {
       if (await deleteAvatar()) onRefreshProfile();
+      else setAvatarError(t('avatar_failed', language));
     } finally {
       setAvatarBusy(false);
     }
@@ -338,6 +348,15 @@ export const ProfileModal: React.FC<Props> = ({
                   className="hidden"
                   onChange={handlePickAvatar}
                 />
+                {avatarError && (
+                  <p
+                    id="avatar-error"
+                    role="alert"
+                    className="mt-1 max-w-[9rem] text-2xs font-normal leading-snug tracking-normal text-loss"
+                  >
+                    {avatarError}
+                  </p>
+                )}
               </div>
 
               <div className="flex-1 min-w-0">
