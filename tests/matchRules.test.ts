@@ -525,3 +525,54 @@ describe('a match can always be started', () => {
     expect(party.rules.autoServeSeconds).toBe(0);
   });
 });
+
+describe('normalizeRules is cheap enough to call from the game loop', () => {
+  // It is called several times per FRAME while a ball is in play: the four
+  // physics helpers each call it, `clampBallSpeed` calls it twice on its own,
+  // and `predictLanding` calls it inside its integration loop. Every one of
+  // those rebuilt an eleven-field object and ran six clamps — each with a
+  // `toFixed` string allocation — to produce a value identical to the last.
+  it('answers the same object for the same input', () => {
+    const rules = { ...DEFAULT_MATCH_RULES, paddleScale: 1.1 };
+    expect(normalizeRules(rules)).toBe(normalizeRules(rules));
+  });
+
+  it('still answers a fresh input freshly', () => {
+    const a = normalizeRules({ paddleScale: 1.1 });
+    const b = normalizeRules({ paddleScale: 1.3 });
+    expect(a.paddleScale).toBeCloseTo(1.1, 6);
+    expect(b.paddleScale).toBeCloseTo(1.3, 6);
+    expect(a).not.toBe(b);
+  });
+
+  it('hands back something a caller cannot corrupt for everyone else', () => {
+    // The result is shared now, so a caller writing into it would rewrite the
+    // rules for every other holder of the same input. `normalizeRoomConfig`
+    // was doing exactly that with the ranked auto-serve floor.
+    const rules = { ...DEFAULT_MATCH_RULES, paddleScale: 1.05 };
+    const first = normalizeRules(rules);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(() => {
+      (first as { paddleScale: number }).paddleScale = 99;
+    }).toThrow();
+    expect(normalizeRules(rules).paddleScale).toBeCloseTo(1.05, 6);
+  });
+
+  it('still forces the ranked auto-serve floor without touching the shared object', () => {
+    const rules = { ...DEFAULT_MATCH_RULES, autoServeSeconds: 0 as const };
+    const shared = normalizeRules(rules);
+    const room = normalizeRoomConfig({ winningScore: 5, rules });
+    expect(room.rules.autoServeSeconds).toBe(RANKED_AUTO_SERVE_SECONDS);
+    expect(shared.autoServeSeconds).toBe(0);
+  });
+
+  it('clamps and snaps identically to the string-rounding it replaced', () => {
+    for (const v of [0.5999999, 1.0000001, 1.234567, 1.7999999, 2.5, -1, 0]) {
+      const viaString = Math.min(
+        1.8,
+        Math.max(0.6, Number((Math.round(v / 0.05) * 0.05).toFixed(4)))
+      );
+      expect(clampRule('ballScale', v)).toBeCloseTo(viaString, 10);
+    }
+  });
+});

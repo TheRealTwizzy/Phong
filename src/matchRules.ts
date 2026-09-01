@@ -129,12 +129,40 @@ export function clampRule(key: PhysicsRuleKey, value: number): number {
   const spec = PHYSICS_RULES[key];
   if (!Number.isFinite(value)) return spec.default;
   const snapped = Math.round(value / spec.step) * spec.step;
-  return Math.min(spec.max, Math.max(spec.min, Number(snapped.toFixed(4))));
+  // Four decimal places, by arithmetic. This was `Number(snapped.toFixed(4))`,
+  // which allocates a string per rule per call — and `normalizeRules` below is
+  // called several times per FRAME while a ball is in play.
+  return Math.min(spec.max, Math.max(spec.min, Math.round(snapped * 1e4) / 1e4));
 }
+
+/**
+ * Everything `normalizeRules` has already answered, keyed on the object it was
+ * asked about.
+ *
+ * The rules for a match are fixed once the first ball crosses the net and are
+ * held in a ref, so the same object is asked about over and over: the physics
+ * helpers alone (`paddleWidthFor`, `ballRadiusFor`, `minBallSpeedFor`,
+ * `maxBallSpeedFor`) call this four times, `clampBallSpeed` calls it twice on
+ * its own, and `predictLanding` calls it inside its integration loop —
+ * measured at 12.6us with rules against 2.4us without, five times the cost of
+ * the prediction itself. Each call rebuilt an eleven-field object and ran six
+ * clamps to produce a value identical to the last one.
+ *
+ * A WeakMap rather than a cache with a size limit: the key IS the caller's own
+ * object, so an entry lives exactly as long as the rules it describes and a
+ * match that ends takes its entry with it. The result is frozen, because a
+ * shared cached object that a caller could mutate would be a far worse bug
+ * than the allocation this avoids.
+ */
+const NORMALIZED = new WeakMap<object, MatchRules>();
+const DEFAULT_NORMALIZED: MatchRules = Object.freeze({ ...DEFAULT_MATCH_RULES }) as MatchRules;
 
 /** Normalize anything arriving from a client or from storage. */
 export function normalizeRules(input: Partial<MatchRules> | null | undefined): MatchRules {
-  const raw = input || {};
+  if (input === null || input === undefined) return DEFAULT_NORMALIZED;
+  const cached = NORMALIZED.get(input);
+  if (cached) return cached;
+  const raw = input;
   const rules: MatchRules = { ...DEFAULT_MATCH_RULES };
   for (const key of PHYSICS_RULE_KEYS) {
     if (raw[key] !== undefined) rules[key] = clampRule(key, Number(raw[key]));
@@ -148,6 +176,8 @@ export function normalizeRules(input: Partial<MatchRules> | null | undefined): M
     : DEFAULT_MATCH_RULES.autoServeSeconds;
   // A minimum above the maximum would make the speed clamp meaningless.
   if (rules.ballSpeedMin > rules.ballSpeedMax) rules.ballSpeedMin = rules.ballSpeedMax;
+  Object.freeze(rules);
+  NORMALIZED.set(input, rules);
   return rules;
 }
 
@@ -308,15 +338,23 @@ export function normalizeRoomConfig(
   input: Partial<RoomMatchConfig> | null | undefined
 ): RoomMatchConfig {
   const raw = input || {};
-  const rules = normalizeRules(raw.rules);
+  const normalized = normalizeRules(raw.rules);
   // Ranked play MUST carry an auto-serve timer. With rating on the line,
   // "off" would let a losing player stall the match indefinitely by simply
   // never serving; the timer is what makes a ranked result something the
   // other player can always reach. An unranked party match may still stall —
   // nothing is at stake there.
-  if (isRankedRules(rules) && rules.autoServeSeconds === 0) {
-    rules.autoServeSeconds = RANKED_AUTO_SERVE_SECONDS;
-  }
+  //
+  // A COPY, never a write into `normalized`: that object is shared (see the
+  // cache above `normalizeRules`) and frozen, so mutating it would have
+  // rewritten the rules for everyone else holding the same input. Harmless
+  // while every call built a fresh object, and a real bug the moment one did
+  // not — which is what the freeze is there to make impossible rather than
+  // merely unlikely.
+  const rules: MatchRules =
+    isRankedRules(normalized) && normalized.autoServeSeconds === 0
+      ? { ...normalized, autoServeSeconds: RANKED_AUTO_SERVE_SECONDS }
+      : normalized;
   return {
     winningScore: normalizeWinningScore(raw.winningScore),
     rules,
