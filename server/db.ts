@@ -2887,8 +2887,8 @@ class GameDatabase {
     if (profile.dailyStreak >= 30) unlock('daily_30');
 
     // Daily mission progress rides the same server-verified match record, so
-    // it can never be reported independently of an actual game.
-    this.advanceMissions(payload.playerId, payload, now);
+    // it can never be reported independently of an actual game — and it is
+    // advanced INSIDE the transaction below, not here. See the note there.
 
     // Achievement XP can push the profile over a level threshold too
     const finalLevel = calculateLevelFromXp(profile.xp);
@@ -2929,12 +2929,24 @@ class GameDatabase {
       rankDirection,
       rankMagnitude,
       newAchievements,
-      missions: this.getMissions(payload.playerId, now),
+      // Filled from inside the transaction below, after the progress it
+      // reports has actually been written.
+      missions: [],
     };
 
     this.sql.exec('BEGIN');
     try {
       this.bumpModeStats(profile.id, payload.mode, modeDelta);
+      // Mission progress is a WRITE with no ceiling of its own — a target
+      // clamps a mission at its own goal, but nothing stops the same match
+      // advancing it twice — and it used to run before this transaction
+      // opened. So a rollback here (a full disk, a constraint, anything the
+      // catch below is for) left the progress banked while the
+      // `recorded_matches` stamp did not exist, and the client's retry of the
+      // very same match advanced it a second time. Same transaction as the
+      // payout and the stamp: a match is either paid, counted and marked, or
+      // none of the three.
+      this.advanceMissions(payload.playerId, payload, now);
       // The fatigue tally rides the same transaction and the same idempotency
       // as everything else here: this line is only reached when the matchKey
       // is unstamped, so a replayed match no more double-counts a day's games
@@ -2948,6 +2960,12 @@ class GameDatabase {
       // behind for the rest of the page session. `result` holds this same
       // object, so the stamp below records the fresh rows too.
       profile.modeStats = this.getModeStats(profile.id);
+      // Read back inside the transaction that advanced it, for the same reason
+      // `modeStats` is: `result` is handed to the client whole, and the stamp
+      // below persists this object for the replay path, so a pre-advance read
+      // would report — and then keep reporting — a match's worth of stale
+      // mission progress.
+      result.missions = this.getMissions(payload.playerId, now);
       this.upsertProfile(profile);
       this.insertMatch(matchRecord); // carries its own per-player retention trim
       // Same transaction as the payout: a match is either paid and marked, or
