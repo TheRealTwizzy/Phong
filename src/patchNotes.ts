@@ -37,6 +37,14 @@ export const PATCH_NOTES: PatchNote[] = [
     version: APP_VERSION,
     date: '2026-09-02',
     lines: [
+      'Release notes now show one update per page, so you can page back through everything that changed.',
+      'Every update gets its own page from here on, however small it was.',
+    ],
+  },
+  {
+    version: '1.0.1',
+    date: '2026-09-02',
+    lines: [
       'You can sit the AI down at a PvP table now — tap the empty Opponent chair and pick a rung.',
       'Your table stays listed while you play the machine, so somebody can take its seat when the match ends.',
       'A machine match with the watching seats open does not move your rank, the same way the sonar does not.',

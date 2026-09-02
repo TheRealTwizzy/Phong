@@ -100,9 +100,14 @@ Write the lines **for a player**. The suite refuses a line naming a source file,
 identifier written as a call — the pressure `lint:notes` creates is exactly what produces
 "refactor `roomConfigFor()` to clamp difficulty", and that is not a release note.
 
-**A stack that ships together carries ONE entry, on the pull request that completes it.** Three
-version numbers for one shipment makes the version a merge counter, which `src/version.ts`
-says out loud it must not be. Merge the stack bottom-up; the note rides the last one.
+**Every merged pull request is its own release** — its own version, its own entry, including
+the middle of a stack. Merge bottom-up and give each one a note before you merge it, not a
+single note on the last. That was tried for one stack and rejected: three deploys where only
+the last says anything means a player reading the notes after the first two is told nothing
+changed while the build under their feet moved twice.
+
+The sheet shows **one release per page**, so a note is a page. Six short bullets read; twelve
+do not.
 
 **Test between every merge, not once at the end.** After each merge:
 

@@ -38,7 +38,9 @@ So doc updates are part of the change, not a follow-up.
   commit message in its place — and caps a line at 150 characters, because that same pressure
   produces an essay in one bullet. `PatchNotesSheet` renders them at `text-xs` in
   `text-ink-dim`: a line is a BULLET. Two short bullets read better than one long one and cost
-  nothing. Convention §17 carries the whole rule.
+  nothing. **Every merged pull request gets its own version and its own entry**, and the sheet
+  shows one release per page — so an entry is a page, and a page of twelve bullets is one
+  nobody finishes. Convention §17 carries the whole rule.
 
 ## The voice
 
