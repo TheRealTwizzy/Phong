@@ -46,6 +46,11 @@ Two questions with no skill behind them, which is why they are spelled out here:
   a live court routes through `exitConfirm`, or is a way to escape a losing record.
 - **Does it gate anything?** The menu draws it and the **server enforces it** — the menu is the
   client. `roomEntryVerdict` is asked by both, as `DIFFICULTY_LOCKED` sits behind the record route.
+  And count the DOORS, not the check: a bracket is enforced at `create_room`, at a public
+  `join_room` **and** at a `swap_seat` promoting a watcher into a playing seat. That third one was
+  missing for a release, and it was missing where it mattered — watching is deliberately ungated,
+  so the gate was two messages from being walked around. Whenever a rule guards a resource, list
+  every way in and check the list, rather than checking the way in you were thinking about.
 
 ## The spine, and the order it has to go in
 
