@@ -245,6 +245,7 @@ describe('readinessLines', () => {
   const facts = {
     dirWritable: true,
     dirError: null,
+    onMountedVolume: true as boolean | null,
     sameDeviceAsData: false,
     lastOkAt: null,
     lastUploadOkAt: null,
@@ -267,13 +268,48 @@ describe('readinessLines', () => {
     expect(warn.join(' ')).toContain('never leaves the host');
   });
 
-  it('warns when BACKUP_DIR shares a filesystem with DATA_DIR', () => {
-    // The check that actually catches the primary deployment: an unmounted
-    // /backups is writable in the image layer, so the backup appears to work
-    // and is discarded on every deploy.
-    const { warn } = readinessLines(cfg(), { ...facts, sameDeviceAsData: true }, 0);
-    expect(warn.join(' ')).toContain('same filesystem');
-    expect(warn.join(' ')).toContain('thrown away on every deploy');
+  it('WARNS when BACKUP_DIR is not a mounted volume and there is no bucket', () => {
+    // The one that catches the primary deployment, and the reason this pair
+    // was rewritten. An unmounted BACKUP_DIR is a directory in the image, so
+    // every snapshot verifies, reports success, and is destroyed by the next
+    // deploy while the boot line says the scheduler is armed.
+    const { warn } = readinessLines(cfg(), { ...facts, onMountedVolume: false }, 0);
+    expect(warn.join(' ')).toContain('not a mounted volume');
+    expect(warn.join(' ')).toContain('destroyed by the next deploy');
+  });
+
+  it('does not raise that alarm when the bucket is the backup', () => {
+    // render.yaml deliberately stages in /tmp and says so. An alarm that fires
+    // on a documented setup is one operators learn to scroll past, which costs
+    // more than it catches — so it is a note there, and only there.
+    const target = { endpoint: 'https://s3.example.com', bucket: 'b', region: 'us-east-1',
+      prefix: 'phong/', accessKeyId: 'k', sessionToken: null, virtualHost: false,
+      unsignedPayload: false, sse: null };
+    const { info, warn } = readinessLines(
+      cfg({ target }), { ...facts, onMountedVolume: false }, 0
+    );
+    expect(warn.join(' ')).not.toContain('not a mounted volume');
+    expect(info.join(' ')).toContain('staging area');
+  });
+
+  it('says nothing about mounting when it could not be determined', () => {
+    // `null` is "cannot tell", and the alarm is loud. Firing it on a stat
+    // failure is the false positive this whole check exists to remove.
+    const { info, warn } = readinessLines(cfg(), { ...facts, onMountedVolume: null }, 0);
+    expect(warn.join(' ')).not.toContain('mounted volume');
+    expect(info.join(' ')).not.toContain('mounted volume');
+  });
+
+  it('NOTES a shared filesystem rather than warning about it', () => {
+    // True of a perfectly good bind mount that shares a disk with the Docker
+    // volume — the healthy setup — so it is a note. It used to be a warning
+    // claiming to be the deploy check above, which it never was: an unmounted
+    // /backups is on overlayfs and /data is a bind mount, so their devices
+    // DIFFER and the comparison stayed silent on the failure it existed for.
+    const { info, warn } = readinessLines(cfg(), { ...facts, sameDeviceAsData: true }, 0);
+    expect(info.join(' ')).toContain('same filesystem');
+    expect(info.join(' ')).toContain('one disk loss takes both');
+    expect(warn.join(' ')).not.toContain('same filesystem');
   });
 
   it('says when the destination cannot be written at all', () => {
