@@ -792,6 +792,28 @@ export interface SpectatorSnapshot {
   p2Score: number;
   servingPlayer: 0 | 1;
   matchSeq: number;
+  /**
+   * Whether the table has a match on it at all — started, and not reset since.
+   *
+   * A watcher cannot work this out from the two fields around it, and read it
+   * wrong for as long as watching seats have existed. `matchSeq > 0 &&
+   * !matchOver` looks like "a match is running" and is not: putting a table
+   * back to a lobby clears `matchOver` and leaves `matchSeq` alone — both
+   * correct, neither negotiable — so every seat that empties after a whistle
+   * leaves the pair reading LIVE with nothing being played, and the next
+   * watcher to sit down was walked onto an empty court. `inPlay` cannot stand
+   * in either: false before the first serve of any match, and false for the
+   * whole of an unwatched machine match.
+   *
+   * Scoped to a watcher ARRIVING, deliberately, because that is all a
+   * snapshot can reach. Somebody already seated when a duel's loser walks out
+   * post-whistle is not re-synced — `vacateSeat` broadcasts only
+   * `table_state`, whose watching branch never touches the screen — and they
+   * are left on the result overlay of the match they just watched, which is
+   * the same place they would be if nobody had left. Unchanged, and a
+   * different problem: it needs a message, not a field.
+   */
+  matchStarted: boolean;
   inPlay: boolean;
   matchOver: boolean;
   config: RoomMatchConfig;
@@ -875,6 +897,14 @@ export type WSClientMessage =
 export type RelayErrorCode =
   | 'ROOM_NOT_FOUND'
   | 'ROOM_FULL'
+  // Distinct from ROOM_FULL because it is a different fact and a
+  // different remedy: the table is not full, its MATCH is running, and the
+  // chair opens again when it ends. It shared ROOM_FULL's code while a
+  // machine table's row was permanently disabled and the only way to reach
+  // it was typing the code; now that the row is tappable between matches,
+  // this is the ordinary outcome of tapping one the 3-second poll saw a
+  // moment too early.
+  | 'ROOM_MID_MATCH'
   | 'ALREADY_AT_TABLE'
   | 'SEAT_TAKEN'
   | 'SEATS_LOCKED'

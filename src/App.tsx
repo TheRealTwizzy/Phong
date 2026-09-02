@@ -563,6 +563,14 @@ export default function App() {
    * ball_incoming work here with no spectating branch at all.
    */
   const [spectating, setSpectating] = useState<{ roomId: string; side: 0 | 1 } | null>(null);
+  /**
+   * Whether this device is owed a walk back to the lobby, because the machine
+   * it was playing has given its chair to a person.
+   *
+   * A flag rather than a navigation, so the walk can wait for `resultSettled`
+   * — see the effect below.
+   */
+  const [tableReturnPending, setTableReturnPending] = useState(false);
   /** Who is sitting where at the table, as the relay last described it. */
   const [tableState, setTableState] = useState<{
     seats: TableSeatInfo[];
@@ -1409,6 +1417,50 @@ export default function App() {
    */
   const resultSettled = !!lastMatchResult || toastRecordFailed || recordTimedOut || !!spectating;
 
+  /**
+   * Walk back to the lobby when the machine's chair is taken by a person.
+   *
+   * Deferred until `resultSettled`, and that is the same call `#btn-play-again`
+   * already makes one screen down: leaving the court takes the result strip
+   * with it, so a host whose `/api/match/record` has not come back would never
+   * learn what the match they just finished did to their XP or their ladder —
+   * which is the failure "the whole result strip is rendered always" exists to
+   * prevent. A watcher settles at once (they record nothing); anybody else
+   * reaching here has a result coming, because the guard that sets the flag
+   * requires being on the COURT and the machine's chair is only claimable
+   * once its match is over — so at worst this waits out `RESULT_WAIT_MS`. What stops it STICKING is the seat check below, and not
+   * the three doors of `resultSettled`, which is what this comment claimed
+   * first and is wrong: Main Menu stays live on the overlay throughout (so
+   * this is never anybody's only exit), and taking it runs `resetMatch`, which
+   * clears `lastMatchResult` and — through `setWinner(null)` — re-arms the
+   * timeout effect, un-setting two of those three doors. The flag would then
+   * have outlived the table and fired on an unrelated later match, yanking the
+   * player off a court and opening a lobby with no room in it.
+   *
+   * `winner` is cleared HERE rather than left standing: the overlay is inside
+   * the game screen and would not be drawn from the menu, but a result left
+   * set is a result the next thing to read it inherits. Clearing it re-arms
+   * the record guard through the effect above, which is correct — the next
+   * match is a different match, under a different key.
+   */
+  useEffect(() => {
+    if (!tableReturnPending) return;
+    // The seat went away while the result was still landing — Main Menu, an
+    // ejection, a reaped table. There is no lobby to walk back to, so the debt
+    // is dropped rather than carried: held, it would open a room-less lobby
+    // sheet over the menu seconds later, or over whatever court this player
+    // had reached by then.
+    if (!roomId) {
+      setTableReturnPending(false);
+      return;
+    }
+    if (!resultSettled) return;
+    setTableReturnPending(false);
+    setWinner(null);
+    setScreen('menu');
+    setIsMultiplayerOpen(true);
+  }, [tableReturnPending, resultSettled, roomId]);
+
   // Daily Mission Claim Handler
   const handleClaimMissionReward = async (missionId: string) => {
     try {
@@ -1960,6 +2012,31 @@ export default function App() {
         // A watcher is exempt — they run no simulation and are watching a
         // relayed match whichever kind it is.
         if (!spectatingRef.current) setMode(msg.config.cpu ? 'solo' : 'multiplayer');
+        // The machine's chair has changed hands, so this table is a duel now
+        // and its next match needs a Ready and a Start — both of which live in
+        // the lobby, and neither of which is reachable from a court.
+        //
+        // Nothing used to move anybody. The host sat on the winner overlay of
+        // the machine match with exactly two live controls, since the overlay
+        // is `inset-0` over the HUD: Main Menu, which gives up the table, and
+        // Play Again, which sends `rematch_request` — dropped by the relay,
+        // because `resetTableForNextPair` clears `matchOver` for the pair
+        // about to sit down. So the host had no way forward, the arrival sat
+        // readied in a lobby waiting on a Start nobody could press, and any
+        // watcher held a stale result overlay. `start_match` would have
+        // succeeded the whole time; the wedge was purely that no message took
+        // the host back to where the button is.
+        //
+        // Keyed on the TRANSITION, not on the value: `configRef` still holds
+        // the previous terms here (it is refreshed on render, and this runs
+        // before the next one), so this fires only where a machine really was
+        // in the chair. And gated on being on the COURT, because
+        // `room_config` legitimately reaches people who are already on the
+        // menu — the arrival themselves, a watcher taking a seat, a queue
+        // pairing — and every one of those paths is already correct.
+        if (configRef.current.cpu && !msg.config.cpu && screenRef.current === 'game') {
+          setTableReturnPending(true);
+        }
         break;
 
       case 'ready_state':
@@ -2267,7 +2344,15 @@ export default function App() {
         // something to watch, so the court is the surface. A table between
         // matches keeps its lobby, which is where the seats are — and the
         // next `game_start` walks this watcher on with everybody else.
-        if (snap.matchSeq > 0 && !snap.matchOver) {
+        //
+        // `matchStarted`, not `matchSeq > 0`. The two look interchangeable and
+        // are not: putting a table back to a lobby clears `matchOver` and
+        // leaves `matchSeq` where it is — both correct, neither negotiable —
+        // so this pair read LIVE at a table with nothing on it and walked the
+        // watcher onto an empty court. Reachable since watching seats shipped,
+        // by any seat emptying after a whistle: a duel whose loser leaves, or
+        // a machine handing its chair to a joiner.
+        if (snap.matchStarted && !snap.matchOver) {
           setIsMultiplayerOpen(false);
           setScreen('game');
         }
@@ -3115,9 +3200,13 @@ export default function App() {
                 : [statsRef.current.opponentScore, statsRef.current.score],
             // The loop's effect lists `winner` in its deps, so this closure is
             // rebuilt when it changes and reads the current value. `live` is
-            // what sets `room.inPlay`, which is what decides whether a joiner
-            // may take the CPU's seat — and, with the score, what the relay
-            // derives `matchOver` from.
+            // what sets `room.inPlay` and, with the score, what the relay
+            // derives `matchOver` from — and it is `matchOver` that decides
+            // whether a joiner may take the CPU's seat (`cpuSeatClaimable`),
+            // never `inPlay`. That distinction is the whole of #98: at a
+            // table with one human the ~20Hz stream below is watcher-gated,
+            // so an unwatched match reads `inPlay: false` throughout and a
+            // guard spelled that way never fired.
             //
             // The final SCORE rides out correctly for the same reason: the
             // rebuild cannot run before the render that commits it to

@@ -218,7 +218,12 @@ describe('a table with a CPU in it', () => {
     const guest = await relay.openPhone(walkUp);
     guest.send({ type: 'join_room', roomId, playerId: walkUp.id });
     const refused = await guest.await('error');
-    expect(refused.code).toBe('ROOM_FULL');
+    // Its own code, not ROOM_FULL: the table is not full, its MATCH is
+    // running, and the chair opens when that ends. The row is tappable
+    // between matches now, so this refusal is the ordinary outcome of a
+    // 3-second poll seeing the table a moment before Start was pressed —
+    // and it has to say the thing the player can act on.
+    expect(refused.code).toBe('ROOM_MID_MATCH');
 
     // Between matches: the CPU gives up its chair.
     phone.send({ type: 'cpu_frame', hostPaddle: 0.5, cpuPaddle: 0.5, ball: null, scores: [3, 0], live: false });
@@ -663,11 +668,105 @@ describe('when a machine table is mid-match', () => {
     other.send({ type: 'join_room', roomId, playerId: arrival.id });
     await sleep(120);
 
-    expect(other.last('error')?.code).toBe('ROOM_FULL');
+    expect(other.last('error')?.code).toBe('ROOM_MID_MATCH');
     expect(other.last('room_joined')).toBeUndefined();
     // And the table is untouched: the machine still holds its chair.
     expect((await roomInfo(roomId)).cpu).toBe('rookie');
     other.close();
     phone.close();
+  }, 25_000);
+});
+
+describe('the door into a machine table', () => {
+  const roomInfo = async (roomId: string) =>
+    fetch(`${base}/api/room/${roomId}`).then((r) => r.json());
+  const listed = async (roomId: string) => {
+    const body = await fetch(`${base}/api/rooms/casual/tables`).then((r) => r.json());
+    return (
+      body.tables as { id: string; isFull: boolean; playerCount: number; cpu: string | null }[]
+    ).find(
+      (t) => t.id === roomId
+    );
+  };
+
+  /** A LISTED machine table: public, in a bracket the browser can see. */
+  async function openListedCpuTable(host: Device, spectators = true) {
+    const phone = await relay.openPhone(host);
+    phone.send({
+      type: 'create_room',
+      playerId: host.id,
+      venueRoomId: 'casual',
+      visibility: 'public',
+      config: { winningScore: 3, rules: {}, spectators, cpu: 'rookie' },
+    } as never);
+    const created = await phone.await('room_created');
+    return { phone, roomId: created.roomId as string };
+  }
+
+  it('is offered exactly when join_room would actually take the chair', async () => {
+    // The whole premise of seating a machine is that you play it until
+    // somebody takes its chair — and `join_room` genuinely hands the chair
+    // over between matches (the case two describes up). But both listing
+    // routes counted the CPU into `isFull`, and the lobby row is
+    // `disabled={table.isFull}`, so that table was greyed out at 2/2 for
+    // every browsing player. The relay said yes and the row never asked: the
+    // warm seat had no door.
+    //
+    // `playerCount` is deliberately NOT the field that moves. It answers a
+    // different question — what is the table full OF — and a row that says
+    // "Alice vs Rookie" is one worth walking up to.
+    const host = await newDevice('CpuDoorHost');
+    const walkUp = await newDevice('CpuDoorGuest');
+    const { phone, roomId } = await openListedCpuTable(host);
+
+    // Before the first ball. The host is still in the lobby, and somebody
+    // walking in now is exactly the trade the feature offers.
+    expect((await roomInfo(roomId)).isFull).toBe(false);
+    expect((await listed(roomId))?.isFull).toBe(false);
+    expect((await roomInfo(roomId)).playerCount).toBe(2);
+    expect((await listed(roomId))?.playerCount).toBe(2);
+    // The rung, which is what lets the row say what it is full OF. Pinned
+    // here and not only in the browser: deleting it from the route leaves the
+    // whole fast layer green and fails ten minutes later as a `data-cpu`
+    // mismatch, which reads as a client bug.
+    expect((await listed(roomId))?.cpu).toBe('rookie');
+    expect((await roomInfo(roomId)).cpu).toBe('rookie');
+
+    // Mid-match, with nobody watching — so `inPlay` is false throughout and
+    // only `matchSeq > 0 && !matchOver` can answer.
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+    expect((await roomInfo(roomId)).isFull).toBe(true);
+    expect((await listed(roomId))?.isFull).toBe(true);
+
+    // The whistle: one terminal frame, and the chair is claimable again.
+    phone.send({
+      type: 'cpu_frame',
+      hostPaddle: 0.5,
+      cpuPaddle: 0.5,
+      ball: null,
+      scores: [3, 0],
+      live: false,
+    } as never);
+    await sleep(60);
+    expect((await roomInfo(roomId)).isFull).toBe(false);
+    expect((await listed(roomId))?.isFull).toBe(false);
+
+    // And the relay agrees with the row, which is the only reason the row is
+    // worth printing: a listing that says JOINABLE and a handler that answers
+    // ROOM_FULL is the same failure as the reverse.
+    const guest = await relay.openPhone(walkUp);
+    guest.send({ type: 'join_room', roomId, playerId: walkUp.id });
+    expect((await guest.await('room_joined')).playerIndex).toBe(1);
+
+    // Two humans: genuinely full, by the clause that was always right — and
+    // asserted on BOTH routes here as in every state above, because the whole
+    // defect was two routes answering the same question differently.
+    expect((await roomInfo(roomId)).isFull).toBe(true);
+    expect((await roomInfo(roomId)).playerCount).toBe(2);
+    expect((await listed(roomId))?.isFull).toBe(true);
+    expect((await listed(roomId))?.playerCount).toBe(2);
+    phone.close();
+    guest.close();
   }, 25_000);
 });

@@ -200,6 +200,30 @@ export interface Room {
    * recorded under (see duelMatchKey).
    */
   matchSeq: number;
+  /**
+   * The `matchSeq` this table was last put back to a lobby at.
+   *
+   * `matchStarted()` is the only reader and the doc is really its: a watcher
+   * sitting down has to be told whether there is a match to walk onto, and no
+   * combination of the fields above can say. `matchOver` is cleared by
+   * `resetTableForNextPair` — rightly, since the next pair must be able to
+   * press Start — while `matchSeq` never goes backwards, rightly for the same
+   * reason it is half of `duelMatchKey`. So the pair reads LIVE at a table
+   * with nothing on it, and `inPlay` cannot stand in: it is false before the
+   * first serve of every match, and false for the whole of an UNWATCHED
+   * machine match, whose only writer is the watcher-gated `cpu_frame`.
+   *
+   * A recorded sequence rather than a `matchStarted` boolean, and that is the
+   * whole reason it is shaped this way: a boolean has to be set at every site
+   * that begins a match, and `startMatch` is not the only one —
+   * `applyMatchSync`'s adoption branch assigns `room.matchSeq = seq` directly,
+   * because the PEERS agreed that rematch over a DataChannel and the relay
+   * never ran `startMatch` for it. (The queue's start is not a third: it goes
+   * through `startMatch` like everything else.) Derived, it is right at both
+   * for free, and at the third nobody has written yet. One writer, and it is
+   * the reset.
+   */
+  matchResetSeq: number;
   lastActive: number;
   /**
    * Since when this room has had nobody to play against — null while both
@@ -709,6 +733,59 @@ export function isRoomEmpty(room: Room, isLive: SocketLiveness): boolean {
 }
 
 /**
+ * Whether the machine's chair at this table can be taken right now.
+ *
+ * The one predicate `join_room` and both listing routes ask, for the reason
+ * `roomEntryVerdict` is one predicate: a rule enforced at one of two doors is
+ * a rule you get past by asking twice — and here the failure is the mirror of
+ * that. The relay accepts a join between matches while `isFull` counted the
+ * CPU unconditionally, so the lobby row (`disabled={table.isFull}`) was greyed
+ * out at 2/2 on every machine table in the game and the warm seat — you play
+ * the machine until somebody takes its chair — had no door at all. A listing
+ * that says FULL about a table the handler would seat you at is the same
+ * failure as a listing that says JOINABLE about one it refuses; only the
+ * direction of the lie changes.
+ *
+ * The window is `matchSeq > 0 && !matchOver`, which is the lock `swap_seat`
+ * has always used and emphatically NOT `inPlay`: at a table with one human,
+ * `inPlay` is only ever set by `cpu_frame`, whose stream is watcher-gated, so
+ * an UNWATCHED machine match reads false from the first serve to the last.
+ *
+ * Deliberately silent about the CHAIR's own occupancy: the machine is never in
+ * `players`, so a table naming a CPU always has a free playing seat — and
+ * `set_room_config` refuses to seat a machine on top of a person, so there is
+ * no state where both are true of one chair.
+ */
+export function cpuSeatClaimable(room: Room): boolean {
+  return !!room.config.cpu && !(room.matchSeq > 0 && !room.matchOver);
+}
+
+/**
+ * Whether a match has been started at this table and not reset since.
+ *
+ * What `spectator_sync` owes a watcher who has just sat down, because the
+ * client cannot work it out: it read `matchSeq > 0 && !matchOver` as "a match
+ * is running" and was walked onto an empty court every time a seat emptied
+ * after a whistle — a duel whose loser leaves, or a machine giving up its
+ * chair to a joiner. See `matchResetSeq` for why neither field can answer
+ * alone.
+ *
+ * Deliberately NOT `&& !matchOver`: the snapshot already carries `matchOver`
+ * and the two say different things — this one is about the TABLE having a
+ * match on it, that one about the match being decided. Keeping them separate
+ * is what lets a consumer choose; today's one does not, and saying so here is
+ * the point of the sentence. `spectator_sync`'s handler clears `winner` and
+ * then asks `matchStarted && !matchOver`, so a watcher who sits down after
+ * the whistle is left in the lobby rather than shown the result. That is
+ * unchanged from what `matchSeq > 0 && !matchOver` did and is not this
+ * field's business to fix — but a reader should not infer a promise from the
+ * shape of the predicate.
+ */
+export function matchStarted(room: Room): boolean {
+  return room.matchSeq > room.matchResetSeq;
+}
+
+/**
  * Delete the rooms nobody can be in, and hand them back so the caller can
  * close whatever is still attached and say what it did.
  *
@@ -879,6 +956,10 @@ export function clearP2PEvidence(room: Room): void {
  *   than to a chair. `swap_seat` calls clearSeatStreaks; `vacateSeat` did not,
  *   and `join_room` re-seeds seat 1's peak with a MAXIMUM against the stale
  *   value, so a departed player's peak survived a bigger number.
+ * - `matchResetSeq` is what makes the two below sayable at all: clearing
+ *   `matchOver` is right for the next pair and leaves the table reading LIVE
+ *   to a watcher sitting down, since `matchSeq` cannot go backwards to say
+ *   otherwise. See `matchStarted`.
  * - `inPlay`/`matchOver` are the mirror case, failing closed rather than open:
  *   they stayed true into the next pair, and `start_match` requires both to be
  *   false, so a new guest could ready up and the host's Start button did
@@ -889,6 +970,10 @@ export function clearP2PEvidence(room: Room): void {
  */
 export function resetTableForNextPair(room: Room, vacated: 0 | 1): void {
   clearSeatStreaks(room, vacated);
+  // The table has no match on it again. `matchSeq` deliberately stays where
+  // it is — it never goes backwards — so this is what remembers that the
+  // sequence it holds belongs to a match nobody is playing. See matchStarted.
+  room.matchResetSeq = room.matchSeq;
   clearP2PEvidence(room);
   if (room.seatSince) room.seatSince[vacated] = null;
   room.scores = [0, 0];
