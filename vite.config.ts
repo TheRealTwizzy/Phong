@@ -90,6 +90,19 @@ const FLOORS = {
   // `include` does not match `scripts/`. A wrong signature is a failure you
   // discover at the exact moment you need a restore.
   'server/sigv4.ts': { statements: 100, branches: 100 },
+  // Config parsing, the due decision and the tick, with every dependency
+  // injected. That seam is the whole point of the module: it turns each
+  // failure path DEPLOYMENT.md's backup section describes into a fast unit
+  // test, including the two branches whose absence stops backups SILENTLY and
+  // permanently (a backwards clock, an unreadable stamp).
+  'server/backup.ts': { statements: 95, branches: 90 },
+  // Lower and honest: some branches here need a real socket to fail on, and
+  // the loopback server can only produce so many of them.
+  'server/s3.ts': { statements: 85, branches: 80 },
+  // Lower again, for the reason `server.ts` is absent from this report
+  // entirely: most of what this does happens in a CHILD process, where V8
+  // cannot see it. What is measured is the wrapper around the spawn.
+  'server/backupRun.ts': { statements: 80, branches: 70 },
 };
 
 export default defineConfig(() => {
