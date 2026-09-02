@@ -91,6 +91,10 @@ package-lock.json  "version" in BOTH places — just run `npm install`
 src/patchNotes.ts  a new entry at the TOP, version: APP_VERSION
 ```
 
+If a change genuinely has nothing player-facing, label the PR `no-release-note` — and label it
+**before** CI runs, or `verify` goes red on a rule the label has already answered. GitHub reads
+a step's `if:` at job start and does not re-trigger on `labeled`; re-run the job or push again.
+
 The lockfile is the one people forget, and it drifted through two releases before a test
 read it: `npm ci` tolerates a mismatched top-level version, so nothing failed. `npm install`
 after the bump fixes it; `tests/version.test.ts` is what notices if you don't.
