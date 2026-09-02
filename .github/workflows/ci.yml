@@ -24,6 +24,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The release-note check below diffs against the pull request's base
+          # commit, which a shallow clone does not have. Cheap on a repository
+          # this size, and the alternative — fetching the base by sha in the
+          # step itself — puts the reason somewhere nobody reading the checkout
+          # would find it.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -39,6 +46,26 @@ jobs:
       # suite it was never told about.
       - name: Every browser suite is registered
         run: npm run lint:suites
+
+      # Beside lint:suites, and for the same reason: no dependencies, and it
+      # answers a question nothing else in this repository can. A merge to
+      # `main` is a DEPLOY here, so a merge with no release note is a release
+      # players cannot see — and src/version.ts says out loud that the version
+      # must move only when the game does. tests/patchNotes.test.ts holds the
+      # SHAPE of that file and cannot know whether the diff beside it deserved
+      # a line; this is what does.
+      #
+      # The escape is a label on the pull request, so declining to write a note
+      # is a decision somebody takes in the open rather than a magic string in
+      # a commit message.
+      - name: Shipped changes carry a release note
+        if: >-
+          github.event_name == 'pull_request' &&
+          !contains(github.event.pull_request.labels.*.name, 'no-release-note')
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: npm run lint:notes
 
       - name: Install dependencies
         run: npm ci

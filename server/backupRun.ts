@@ -136,6 +136,11 @@ export async function snapshotOnce(cfg: BackupConfig, opts: RunOptions = {}): Pr
     }
   );
 
+  // The child tags its own lines `[backup] …` and so does every caller of
+  // this, so the prefix is dropped here rather than printed twice. Not a
+  // contract with the script — a missing prefix leaves the line untouched.
+  const said = result.stdout.trim().replace(/^\[backup\]\s*/, '');
+
   let after: string[];
   try {
     after = fs.readdirSync(cfg.dir);
@@ -169,7 +174,7 @@ export async function snapshotOnce(cfg: BackupConfig, opts: RunOptions = {}): Pr
     // Exit 0 and nothing appeared. Reachable only if the clock went far enough
     // backwards that the new stamp sorted oldest and the script's own prune
     // deleted it. The local backup is fine; there is simply nothing to upload.
-    return { ok: true, created: null, detail: `${result.stdout.trim() || 'snapshot ok'} (no new file seen)` };
+    return { ok: true, created: null, detail: `${said || 'snapshot ok'} (no new file seen)` };
   }
   if (created.length > 1) {
     // Two snapshots inside one run should not happen; say so rather than pick
@@ -177,12 +182,12 @@ export async function snapshotOnce(cfg: BackupConfig, opts: RunOptions = {}): Pr
     return {
       ok: true,
       created: path.join(cfg.dir, created[created.length - 1]),
-      detail: `${result.stdout.trim()} (saw ${created.length} new files, took the newest)`,
+      detail: `${said} (saw ${created.length} new files, took the newest)`,
     };
   }
   return {
     ok: true,
     created: path.join(cfg.dir, created[0]),
-    detail: result.stdout.trim() || `wrote ${created[0]}`,
+    detail: said || `wrote ${created[0]}`,
   };
 }

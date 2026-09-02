@@ -45,8 +45,8 @@ export const PRIVACY: LegalSection = {
     'Your IP address is used only to rate-limit abusive traffic. It is held in memory for a few minutes and is never written to the database, never logged, and never used to locate you.',
     'There is no analytics service, no advertising, and no third-party tracking of any kind. The game counts a handful of totals per day — how many people opened it, how many matches were played — and those are plain numbers with nobody attached to them.',
     'If you send a report, we receive what you wrote plus the diagnostics shown to you on that screen before you send it.',
-    'Everything lives in a single database file on the server that runs this game. It is not shared with anyone.',
-    'You can delete your account at any time from your profile. It is complete: your profile, avatar, stats, achievements and history are erased and your username goes back into the pool. Matches you played against other people stay in THEIR history, with your name removed, because that game happened to them too.',
+    'Everything lives in a single database file on the server that runs this game, and a copy of that file is taken each day so the game can be brought back if the server is lost. Where those copies are kept — on the same machine, or with a storage provider over an encrypted connection — is set by whoever runs this instance. A copy is only ever used to restore the game: it is not shared with anyone, and nobody is handed one to read.',
+    'You can delete your account at any time from your profile. It is complete: your profile, avatar, stats, achievements and history are erased and your username goes back into the pool. Those daily copies are kept for about two weeks, so an erased account can still sit inside one until it ages out. Matches you played against other people stay in THEIR history, with your name removed, because that game happened to them too.',
   ],
 };
 

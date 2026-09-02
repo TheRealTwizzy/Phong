@@ -153,7 +153,14 @@ export interface RecordMatchContext {
 
 // Overridable so production can point at a persistent volume (e.g. /data on
 // the KVM); the default cwd-relative path serves local development.
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+/**
+ * Exported so nothing has to re-derive it. server.ts's backup readiness check
+ * compares this directory's device number against BACKUP_DIR's, and a second
+ * copy of the `process.env.DATA_DIR || ./data` rule would be a copy that can
+ * drift — silently, into a comparison that is simply about the wrong two
+ * directories.
+ */
+export const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'phong.db');
 
 // One-shot destructive migrations, keyed in the meta table so each runs at

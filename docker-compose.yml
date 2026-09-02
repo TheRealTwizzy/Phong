@@ -16,6 +16,25 @@ services:
       PORT: 3000
       TURN_URL: ${TURN_URL:-}
       TURN_STATIC_SECRET: ${TURN_STATIC_SECRET:-}
+      # Backups. Off unless BACKUP_ENABLED is set, so an operator pasting keys
+      # in to test them does not also start a schedule. See deploy/.env.example.
+      BACKUP_ENABLED: ${BACKUP_ENABLED:-}
+      BACKUP_DIR: /backups
+      BACKUP_KEEP: ${BACKUP_KEEP:-}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-}
+      # Offsite. Empty endpoint = local snapshots only, which is half a backup:
+      # losing the host is the likeliest thing you are recovering from.
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-}
+      BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      BACKUP_S3_SESSION_TOKEN: ${BACKUP_S3_SESSION_TOKEN:-}
+      BACKUP_S3_VIRTUAL_HOST: ${BACKUP_S3_VIRTUAL_HOST:-}
+      BACKUP_S3_SSE: ${BACKUP_S3_SSE:-}
+      BACKUP_S3_UNSIGNED_PAYLOAD: ${BACKUP_S3_UNSIGNED_PAYLOAD:-}
+      BACKUP_S3_ALLOW_INSECURE: ${BACKUP_S3_ALLOW_INSECURE:-}
     volumes:
       - phong-data:/data
       # Backups go on their own volume, never on the one they protect — that
@@ -28,6 +47,10 @@ services:
       # `mkdir -p backups && chown 1000:1000 backups` first — a bind mount
       # takes the host directory's ownership, and Docker creates a missing one
       # as root.
+      #
+      # The in-process scheduler writes here too (BACKUP_ENABLED=1), so this
+      # mount is what stops it landing on the same filesystem as /data — which
+      # the boot log warns about, because a volume loss would take both.
       - phong-backups:/backups
     expose:
       - "3000"

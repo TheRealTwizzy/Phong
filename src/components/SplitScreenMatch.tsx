@@ -494,7 +494,7 @@ export const SplitScreenMatch: React.FC<SplitScreenMatchProps> = ({
     pointerOwnersRef.current.delete(pointerId);
   }, []);
 
-  // The abort paths, which CLAUDE.md §17 requires and this component had none
+  // The abort paths, which CLAUDE.md §18 requires and this component had none
   // of — only `pointerup` and `pointercancel` ever released a half. A pointer
   // that goes away without either (the app switcher, a tab change, capture
   // taken elsewhere) left `halfOwnerRef` holding a pointer id that will never

@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   BACKUP_RETRY_MS,
   DEFAULT_BACKUP_INTERVAL_HOURS,
   DEFAULT_BACKUP_KEEP,
   backupDue,
+  probeBackupDir,
   readBackupConfig,
 } from '../server/backup';
 
@@ -251,5 +255,60 @@ describe('readBackupConfig', () => {
     // The structural guarantee: it is not reachable from the object the
     // uploader and every log line pass around.
     expect(JSON.stringify(cfg.target)).not.toContain(SECRET);
+  });
+});
+
+describe('probeBackupDir', () => {
+  const made: string[] = [];
+  const tmp = () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-probe-'));
+    made.push(d);
+    return d;
+  };
+  afterEach(() => {
+    while (made.length) fs.rmSync(made.pop()!, { recursive: true, force: true });
+  });
+
+  it('creates the directory and reports it writable', () => {
+    const root = tmp();
+    const dir = path.join(root, 'backups', 'nested');
+    expect(fs.existsSync(dir)).toBe(false);
+    const probe = probeBackupDir(dir, path.join(root, 'data'));
+    expect(probe.dirWritable).toBe(true);
+    expect(probe.dirError).toBeNull();
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  it('says why, rather than throwing, when it cannot', () => {
+    // A file where a directory should be: mkdir -p fails with EEXIST/ENOTDIR.
+    // The boot line has to survive this — a server that will not start because
+    // its BACKUP_DIR is wrong is a worse outcome than one that says so.
+    const root = tmp();
+    const blocked = path.join(root, 'not-a-dir');
+    fs.writeFileSync(blocked, 'in the way');
+    const probe = probeBackupDir(blocked, root);
+    expect(probe.dirWritable).toBe(false);
+    expect(probe.dirError).toBeTruthy();
+  });
+
+  // The check that actually catches the primary deployment, and the only one
+  // that can: the Dockerfile mkdirs /backups, so an UNMOUNTED /backups is
+  // writable in the image layer and the paths still differ. Device numbers are
+  // what distinguishes "on its own volume" from "about to be thrown away on
+  // the next deploy".
+  it('notices when the backup directory shares a filesystem with the data', () => {
+    const root = tmp();
+    const probe = probeBackupDir(path.join(root, 'backups'), root);
+    expect(probe.sameDeviceAsData).toBe(true);
+  });
+
+  it('does not claim a shared filesystem when DATA_DIR does not exist yet', () => {
+    // A first boot: the data directory has not been created. Nothing to
+    // compare, and the honest answer is not to raise the warning — it would
+    // fire on every fresh install and stop meaning anything.
+    const root = tmp();
+    const probe = probeBackupDir(path.join(root, 'backups'), path.join(root, 'no-such-data'));
+    expect(probe.dirWritable).toBe(true);
+    expect(probe.sameDeviceAsData).toBe(false);
   });
 });

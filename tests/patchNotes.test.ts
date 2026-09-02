@@ -39,4 +39,43 @@ describe('patch notes', () => {
   it('names each version once', () => {
     expect(new Set(PATCH_NOTES.map((n) => n.version)).size).toBe(PATCH_NOTES.length);
   });
+
+  it('is written for a player, not for whoever wrote the diff', () => {
+    // These notes are the only place the product speaks to a player about a
+    // change, and the failure mode is not a typo — it is a line that reads
+    // like a commit message. `scripts/check-release-note.mjs` makes every
+    // shipped change add a line here, which is exactly the pressure that
+    // produces "refactor roomConfigFor() to clamp difficulty", so the guard
+    // belongs beside the rule that creates the pressure.
+    //
+    // Narrow on purpose: a filename, a source path, or an identifier written
+    // as a call. Prose about "the relay" or "the ladder" is fine — players
+    // read those words in the game.
+    for (const note of PATCH_NOTES) {
+      for (const line of note.lines) {
+        expect(line, `${note.version}: names a source file`).not.toMatch(/\.tsx?\b/);
+        expect(line, `${note.version}: names a path`).not.toMatch(/\b(src|server|tests|scripts)\//);
+        expect(line, `${note.version}: names a function`).not.toMatch(/\w\(\)/);
+      }
+    }
+  });
+
+  it('keeps a line to something a phone can show', () => {
+    // PatchNotesSheet renders these at `text-xs` in `text-ink-dim`, bulleted,
+    // inside a scrolling sheet. A line is a BULLET, not a paragraph: at that
+    // size on a 390px phone, 150 characters is about three lines and is the
+    // point where a release note stops being scanned and starts being
+    // skipped.
+    //
+    // Written after 1.0.1 shipped its first draft at 240 characters a bullet
+    // against 1.0.0's 60-to-125. The rule that forces a line for every shipped
+    // change is exactly the pressure that produces an essay in one, so the
+    // ceiling belongs next to it. Split a long one into two bullets — they are
+    // free, and two short lines read better than one long one.
+    for (const note of PATCH_NOTES) {
+      for (const line of note.lines) {
+        expect(line.length, `${note.version}: "${line.slice(0, 48)}…" is ${line.length} chars`).toBeLessThanOrEqual(150);
+      }
+    }
+  });
 });

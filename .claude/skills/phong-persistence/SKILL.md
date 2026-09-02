@@ -80,6 +80,20 @@ Two more things about migrations here:
 Each migration gets a suite: `db-wipe`, `taskReset`, `placementRescue`, `rankedBackfill`,
 `chaosRelabel`.
 
+**`meta` is not only for migration flags.** Three rows hold the backup schedule —
+`backup_attempt_at`, `backup_ok_at`, `backup_upload_ok_at` — and they are there rather than in
+`BACKUP_DIR` on purpose: the backup directory is the thing that may be ephemeral, and a stamp
+that vanishes makes every boot "due", which on a crash-loop is a backup storm. They are not
+`playerId`-keyed, so they are correctly absent from `PLAYER_KEYED_TABLES` and are neither
+moved by `moveAccount` nor cleared by `deleteAccount`; they describe the SERVER, not a player.
+A wipe clears `meta`, which loses them — harmless, since the next boot reads "never" and takes
+a backup, and a wipe is the one moment there is nothing worth backing up.
+
+**A backup is why deleting an account is complete in the database and not in the system.** Up
+to `DEFAULT_BACKUP_KEEP` daily snapshots still contain the erased row until they age out, and
+`src/legal.ts` says so in the privacy notice with `tests/legal.test.ts` holding the number
+against the constant. If you change the retention, change the sentence in the same commit.
+
 ## Writing inside `recordMatch`
 
 Everything it derives — the profile upsert, the match row, the `recorded_matches` stamp, the
@@ -100,5 +114,5 @@ verified to take a profile from level 1 to 15 in ten requests.
 ## Resetting locally
 
 `npm run db:reset -- --yes` (server stopped first). `node dist/admin.cjs whois <username>` is
-the read-only support CLI — it deliberately does not import `db.ts`, whose constructor would
+the read-only support CLI (and `backups` there answers when this server last backed itself up) — it deliberately does not import `db.ts`, whose constructor would
 run migrations and seed bots as a side effect of answering a support question.

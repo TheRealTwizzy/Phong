@@ -92,6 +92,12 @@ describe('snapshotOnce', () => {
     expect(made).toHaveLength(1);
     expect(made[0]).toMatch(/^phong-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.db$/);
     expect(res.created).toBe(path.join(outDir, made[0]));
+    // The child tags its own line `[backup] …` and so does every caller of
+    // snapshotOnce, so the detail carries the prefix exactly zero times. It
+    // read `[backup] [backup] /backups/phong-….db — 212KB, …` in a real boot
+    // log, which is how this was noticed.
+    expect(res.detail.startsWith('[backup]')).toBe(false);
+    expect(res.detail).toContain('integrity ok');
 
     // The snapshot is a real database with the real rows in it — which is what
     // the whole feature is for, and is not implied by an exit code.

@@ -27,6 +27,18 @@ So doc updates are part of the change, not a follow-up.
 - **`TESTING.md`** — the two test layers, what each suite owns, the coverage floors, and §5's
   **standing invariants**. A rule the *suite* exists to hold goes here; a rule the *product*
   obeys goes in CLAUDE.md. Several rules legitimately appear in both, stated from each side.
+- **`src/patchNotes.ts`** — the same obligation pointed at a PLAYER, and it is the one file in
+  this skill's remit that ships. Every change a player can observe adds a line and moves the
+  version (`package.json` + `src/version.ts` + a new top entry, all three); `npm run lint:notes`
+  fails a pull request that touched shipped code without touching it, and CI runs the same
+  check. The voice is the opposite of the one below: **no reasoning, no history, no
+  identifiers** — say what a player can now do, or what stopped being broken, in a sentence
+  they would say themselves. `tests/patchNotes.test.ts` refuses a line naming a file, a path,
+  or a function, because the check that forces a line is exactly the pressure that produces a
+  commit message in its place — and caps a line at 150 characters, because that same pressure
+  produces an essay in one bullet. `PatchNotesSheet` renders them at `text-xs` in
+  `text-ink-dim`: a line is a BULLET. Two short bullets read better than one long one and cost
+  nothing. Convention §17 carries the whole rule.
 
 ## The voice
 

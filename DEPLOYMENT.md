@@ -30,6 +30,7 @@ The too-many-coins.com KVM runs Dokploy, whose Traefik terminates TLS for every 
    - **Source**: this GitHub repository, branch `main`. Build type: **Dockerfile**.
    - **Environment**: nothing required — the Dockerfile defaults `NODE_ENV=production`, `PORT=3000`, `DATA_DIR=/data`. (Add `TURN_URL`/`TURN_STATIC_SECRET` here later if you enable TURN.)
    - **Advanced → Mounts**: add a **Volume Mount**, name `phong-data`, mount path `/data`. **This is the step that keeps player data across deploys** — skip it and every deploy silently resets profiles, ELO, and history.
+   - **Advanced → Mounts, a SECOND one**: name `phong-backups`, mount path `/backups`. Dokploy builds the `Dockerfile` and does **not** read `docker-compose.yml`, so the `phong-backups` volume that compose declares does not exist here — you have to add it. Skipping it is quieter than skipping `/data` and just as bad: the `Dockerfile` `mkdir`s `/backups` so it is *writable inside the image layer*, the scheduler runs, snapshots appear, and every deploy throws them away. The boot log says so — `[backup] WARNING: BACKUP_DIR is on the same filesystem as DATA_DIR` — which is the only way to catch it, since the paths differ and only the device numbers agree.
    - **Domains**: add `phong.too-many-coins.com`, container port **3000**, HTTPS on (Let's Encrypt).
    - **Advanced → Replicas: leave it at 1.** This is not a performance
      preference, it is a correctness requirement, and Dokploy will happily let
@@ -44,7 +45,7 @@ The too-many-coins.com KVM runs Dokploy, whose Traefik terminates TLS for every 
 
 3. **Verify** — `curl -s https://phong.too-many-coins.com/api/health` returns `{"status":"ok",...}`, then the real test: two phones, create a room, scan the QR, rally across the net. The in-game badge shows `P2P` when the phones connect directly, `RELAY` otherwise.
 
-Updating = push to `main` (with auto-deploy) or click Deploy. Backups: the SQLite file lives in the `phong-data` volume — same `VACUUM INTO` technique as below, via the container's terminal in Dokploy.
+Updating = push to `main` (with auto-deploy) or click Deploy. Backups: set `BACKUP_ENABLED=1` in the app's environment and add the `/backups` mount above; the server then snapshots itself daily and, with `BACKUP_S3_*` set, ships each one offsite. See [Backups](#backups) — it is the only setting in this runbook whose absence is unrecoverable.
 
 The optional coturn TURN relay can still run alongside Dokploy (it uses UDP 3478 + 49160–49200, which Traefik doesn't touch): `docker compose --profile turn up -d coturn` with `TURN_STATIC_SECRET` in `.env`, then set the same values in the Dokploy app's environment.
 
@@ -112,28 +113,135 @@ file.** Losing it is unrecoverable and nothing else in this runbook matters as
 much, so treat the schedule below as part of deploying rather than as an
 afterthought.
 
-`scripts/backup.mjs` takes a consistent snapshot of a running server, verifies
-it, and prunes old ones:
+**The server backs itself up**, and that is the whole of the schedule on the
+Docker deployments — there is no cron to install. It is **off until you turn it
+on**, deliberately: pasting credentials in to check them should not also start
+uploading the player database.
+
+```bash
+BACKUP_ENABLED=1          # off unless set. the only required one
+BACKUP_DIR=/backups       # already set in the Dockerfile. MUST NOT be inside DATA_DIR
+BACKUP_KEEP=14            # LOCAL snapshots. not the offsite retention — see below
+BACKUP_INTERVAL_HOURS=24
+```
+
+The boot log says what it is going to do, which is the point of printing it at
+all — the day you discover the schedule was never armed must not be the day you
+need a restore:
+
+```
+[backup] on: /backups, keep 14, every 24h. First check in 2m.
+[backup] offsite: s3://my-bucket/phong/ @ https://s3.example.com (path-style, us-east-1)
+[backup] last verified snapshot 3h ago; last offsite upload 3h ago.
+```
+
+`node /app/dist/admin.cjs backups` answers the same question later, from inside
+the container. It is deliberately **not** on `/api/health`: that route is
+unauthenticated and unmetered, and a bucket name plus the time of the last
+backup is free reconnaissance.
+
+Three things about the cadence are decisions rather than details:
+
+- **The timer is not the schedule.** A `setInterval(…, 24h)` would very likely
+  never fire once — this project force-refreshes every session on every
+  deployment, deployments restart the process, and a daily timer restarted every
+  few hours never elapses. So the schedule is persisted in the `meta` table
+  (`backup_attempt_at`, `backup_ok_at`, `backup_upload_ok_at`) and the timer only
+  asks whether it is due. Those rows live in `DATA_DIR`, on purpose: `BACKUP_DIR`
+  is the thing that may be ephemeral, and a stamp that vanishes makes every boot
+  "due", which on a crash-loop is a backup storm.
+- **The attempt is stamped before the child runs**, which is also the log rate
+  limit: a standing misconfiguration produces at most 24 failure lines a day
+  rather than 96, and a container crash-looping every 30 seconds attempts at
+  most hourly.
+- **A snapshot that verified but did not upload is a successful local backup.**
+  The two are stamped separately, so a broken bucket does not make the server
+  re-run the vacuum hourly for a problem the vacuum cannot fix.
+
+#### Offsite
+
+**A backup that never leaves the host is not a backup**, because losing the host
+is the likeliest thing you are recovering from — and a second Docker volume
+survives a wiped `phong-data`, a changed mount and a full data disk, but not the
+machine. With these set, each verified snapshot is `PUT` to an S3-compatible
+bucket immediately after it is taken:
+
+```bash
+BACKUP_S3_ENDPOINT=https://s3.<region>.<provider>.com   # empty = offsite off
+BACKUP_S3_BUCKET=my-phong-backups
+BACKUP_S3_REGION=us-east-1
+BACKUP_S3_PREFIX=phong/
+BACKUP_S3_ACCESS_KEY_ID=...
+BACKUP_S3_SECRET_ACCESS_KEY=...
+```
+
+Signing is SigV4 in-repo (`server/sigv4.ts`) rather than an SDK: the runtime
+dependency list is exactly `express` and `ws`, the privacy notice's "no
+third-party anything" is enforced against it by `tests/legal.test.ts`, and one
+`PUT` does not justify spending that. Path-style addressing by default, so
+MinIO, R2, B2, Garage, Wasabi and Spaces all work; set
+`BACKUP_S3_VIRTUAL_HOST=1` only if your provider insists on `bucket.endpoint`.
+
+Four things worth getting right:
+
+- **Use a PutObject-only credential.** A key that can delete means an attacker
+  who reaches this server can erase the backups — which is precisely the
+  scenario offsite backup exists for. There is no `DeleteObject` and no list
+  call anywhere in this codebase, and there must never be one.
+- **`BACKUP_KEEP` is local retention only.** Nothing here ever deletes an
+  object. Offsite retention is a **bucket lifecycle rule** you configure with
+  your provider; without one the bucket grows forever, and if you assume the
+  14 applies there you will be wrong in whichever direction hurts.
+- **Objects are not encrypted by this server.** Whoever holds the bucket holds
+  every player's username, avatar bytes and match history. That is an accepted
+  trade for a private bucket and a write-only key — say so to yourself
+  deliberately rather than discovering it later. `BACKUP_S3_SSE=AES256` turns on
+  the provider's own at-rest encryption where it is offered.
+- **There is no fallback to `AWS_ACCESS_KEY_ID`.** Ambient credentials on a
+  build host must never silently begin shipping the player database somewhere.
+
+A failed upload logs the HTTP status and the S3 error code and nothing else —
+never the credential, never the `Authorization` header, never the response body
+(gateways echo request headers into error pages):
+
+```
+[backup] offsite upload failed (403 SignatureDoesNotMatch) — snapshot is on disk at /backups/phong-2026-09-01T04-17-02-113Z.db
+```
+
+The second half of that line is the point: the local backup succeeded, and it
+names the file so you can ship it by hand while you fix the bucket.
+
+#### The script itself
+
+`scripts/backup.mjs` is what the scheduler runs, in a child process, and it is
+still the right thing to run by hand during an incident:
 
 ```bash
 docker compose exec phong node scripts/backup.mjs --out /backups --keep 14
 ```
 
-**`/backups` is mounted by `docker-compose.yml`, and it has to be.** This
-command shipped once with nothing mounted there, and it could not work at all:
-the container runs as the unprivileged `node` user and `/` is root-owned, so it
-died on `EACCES: permission denied, mkdir '/backups'` — a raw stack trace in a
-cron log, and an operator following this runbook exactly ended up with no
-backups. It is a **named volume** (`phong-backups`) rather than a bind mount so
-this works with no host-side setup: Docker seeds a fresh named volume from the
-image, where the `Dockerfile` has already created the directory and given it to
-`node`. The script now also refuses a destination it cannot write, with a
-message instead of a stack trace.
+It is spawned rather than imported for three reasons, each sufficient: it is
+top-level straight-line code that `process.exit(1)`s on four paths;
+`PRAGMA integrity_check` is synchronous and walks the whole file, so in-process
+it would stall every live match and get worse as the game succeeds; and
+`server.ts` turns an unhandled rejection into a full shutdown. It also **ships
+nothing anywhere** — the uploader lives beside it, not in it, so that
+`npm run db:backup`, run inside a production container where the credentials are
+live, cannot be the command that pushes an object somewhere by accident.
 
-To put backups on a host path instead — worth doing, since the offsite step
-below is then a plain `rsync` — swap the mount for `- ./backups:/backups` and
-create it first, or Docker will make it root-owned and you are back to
-`EACCES`:
+**`/backups` has to be mounted.** This command shipped once with nothing mounted
+there and could not work at all: the container runs as the unprivileged `node`
+user and `/` is root-owned, so it died on `EACCES: permission denied, mkdir
+'/backups'` — a raw stack trace in a cron log, and an operator following this
+runbook exactly ended up with no backups. `docker-compose.yml` mounts a **named
+volume** (`phong-backups`) rather than a bind mount so this works with no
+host-side setup; **Dokploy does not read that file**, which is why the setup
+above adds the mount by hand.
+
+To put backups on a host path instead — worth doing if you would rather ship
+them with `rsync`/`restic`/`rclone` than to a bucket — swap the mount for
+`- ./backups:/backups` and create it first, or Docker will make it root-owned
+and you are back to `EACCES`:
 
 ```bash
 mkdir -p backups && sudo chown 1000:1000 backups   # 1000 is the `node` user
@@ -144,7 +252,7 @@ the writer, so this is safe against a live server and folds the WAL into the
 copy. **`cp phong.db` is not equivalent**: it races the WAL and can produce a
 file that opens fine and is missing the newest writes.
 
-Three things it does that the old hand-rolled one-liner did not:
+Four things it does that the old hand-rolled one-liner did not:
 
 - **Writes outside `DATA_DIR`, and refuses not to** — `DATA_DIR` itself
   included, which the first version let through: it tested only for a path
@@ -166,33 +274,72 @@ Three things it does that the old hand-rolled one-liner did not:
 - **Opens the snapshot and runs `PRAGMA integrity_check`** before reporting
   success, and prints the row count. A backup nobody has opened is a backup
   nobody knows is good.
-- **Exits non-zero on any failure**, so a scheduler notices.
+- **Exits non-zero on any failure**, so a scheduler notices. That contract is
+  what the in-process scheduler consumes, and `tests/backupRun.test.ts` drives
+  the real script in CI — which it had never had before, since `npm test` does
+  not touch `scripts/`, `tsc` does not read `.mjs`, and `lint:suites` polices
+  only `e2e-*.mjs`.
 
-It deliberately does not ship the file anywhere — where backups belong is a
-deployment decision. From the named volume, out to the host:
+#### A host cron, if you still want one
 
-```bash
-docker compose cp phong:/backups ./backups
-```
-
-...and then offsite with `rsync`/`restic`/`rclone`, or use the bind-mount
-variant above and skip the copy. **A backup that never leaves the host is not a
-backup**, because the most likely thing you are recovering from is losing the
-host — and a second Docker volume survives a wiped `phong-data`, a changed
-mount and a full data disk, but not the machine.
-
-Schedule it. On the Dokploy KVM, a nightly cron on the host:
+The in-process scheduler makes this optional, and mostly it is not worth the
+second moving part. It has exactly one honest advantage, which is real: **it
+runs while the app is crash-looping and the in-process scheduler does not.** A
+container that boots, throws and restarts never reaches its first tick, and that
+is a state you might sit in for a day.
 
 ```cron
 17 4 * * * docker compose -f /path/to/docker-compose.yml exec -T phong \
   node scripts/backup.mjs --out /backups --keep 14 >> /var/log/phong-backup.log 2>&1
 ```
 
-**Restore**: stop the server, copy a snapshot to the volume as
-`/data/phong.db`, remove any stale `phong.db-wal` / `phong.db-shm` beside it,
-and start again. The boot log names the file it opened and counts the accounts
-in it (`[db] /data/phong.db — …, N account(s)`), which is how you confirm the
-restore took. Practise this once before you need it.
+Running both is safe — the snapshots are timestamped to the millisecond and the
+prune is oldest-first — but set `BACKUP_KEEP` high enough that a cron run does
+not evict the day's scheduled one.
+
+#### Restore
+
+The only test that matters, and the one nobody has run when they need it.
+**Practise it once, now, on a throwaway container.**
+
+From a local snapshot:
+
+```bash
+# 1. verify the copy BEFORE you touch anything live
+sqlite3 backups/phong-2026-09-01T04-17-02-113Z.db 'PRAGMA integrity_check'
+# 2. stop the server
+docker compose stop phong
+# 3. put it in place, and clear the stale WAL beside it — a -wal/-shm left from
+#    the old database is journal for a file that no longer exists
+docker compose run --rm -v "$PWD/backups:/restore" phong sh -c \
+  'cp /restore/phong-2026-09-01T04-17-02-113Z.db /data/phong.db && rm -f /data/phong.db-wal /data/phong.db-shm'
+# 4. start, and read the boot line
+docker compose start phong
+docker compose logs phong | grep '\[db\]'
+```
+
+That last line is the confirmation: `[db] /data/phong.db — 412KB, 87 account(s),
+95 row(s) incl. bots`. An account count of zero means you restored an empty
+file.
+
+From the bucket, which is the case that actually happens — the host is gone and
+you are standing up a new one:
+
+```bash
+# any S3 client; the AWS CLI is easiest and is not a dependency of this project
+aws --endpoint-url "$BACKUP_S3_ENDPOINT" s3 ls "s3://$BACKUP_S3_BUCKET/phong/"
+aws --endpoint-url "$BACKUP_S3_ENDPOINT" s3 cp \
+  "s3://$BACKUP_S3_BUCKET/phong/phong-2026-09-01T04-17-02-113Z.db" ./restore.db
+
+# verify the DOWNLOADED copy, not the one in the bucket
+sqlite3 ./restore.db 'PRAGMA integrity_check'
+sqlite3 ./restore.db 'SELECT COUNT(*) FROM players'
+```
+
+...then step 2 onward above. Note that the credential in your environment is
+PutObject-only if you followed the advice above, so **`ls` and `cp` will be
+denied by it** — that is the point, and you use your own admin credential for a
+restore. Check that you can, before you need to.
 
 ## Support: an account somebody can't get back into
 
