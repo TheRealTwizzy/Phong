@@ -41,11 +41,11 @@ The too-many-coins.com KVM runs Dokploy, whose Traefik terminates TLS for every 
      the second is told "room not found"; a queued player is only ever paired
      with somebody the load balancer sent to the same process. Nothing crashes
      and nothing logs, which is what makes it worth writing down here.
-   - **Deploy.** Optionally enable auto-deploy on push (Dokploy sets up the GitHub webhook).
+   - **Deploy, and turn AUTO-DEPLOY ON** (Dokploy sets up the GitHub webhook). It is on for `phong.too-many-coins.com`, and CLAUDE.md convention §17 is built on that: a merge to `main` IS a release, which is why every pull request has to carry a `PATCH_NOTES` entry and a version bump. Leave it off and that rule silently becomes aspirational — the notes say a version shipped while the build in front of players is whatever was last deployed by hand.
 
 3. **Verify** — `curl -s https://phong.too-many-coins.com/api/health` returns `{"status":"ok",...}`, then the real test: two phones, create a room, scan the QR, rally across the net. The in-game badge shows `P2P` when the phones connect directly, `RELAY` otherwise.
 
-Updating = push to `main` (with auto-deploy) or click Deploy. Backups: set `BACKUP_ENABLED=1` in the app's environment and add the `/backups` mount above; the server then snapshots itself daily and, with `BACKUP_S3_*` set, ships each one offsite. See [Backups](#backups) — it is the only setting in this runbook whose absence is unrecoverable.
+Updating = merge to `main`, which deploys. (Or click Deploy, if auto-deploy is ever off.) Backups: set `BACKUP_ENABLED=1` in the app's environment and add the `/backups` mount above; the server then snapshots itself daily and, with `BACKUP_S3_*` set, ships each one offsite. See [Backups](#backups) — it is the only setting in this runbook whose absence is unrecoverable.
 
 The optional coturn TURN relay can still run alongside Dokploy (it uses UDP 3478 + 49160–49200, which Traefik doesn't touch): `docker compose --profile turn up -d coturn` with `TURN_STATIC_SECRET` in `.env`, then set the same values in the Dokploy app's environment.
 
