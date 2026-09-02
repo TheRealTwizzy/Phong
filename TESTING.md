@@ -57,7 +57,7 @@ coverage number.
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `seatGate` | The bracket on the THIRD door into a playing seat, against a real server: a watcher cannot promote past a gate `spectate_room` never asked, one who passes it still can, a private table is not bracketed (an invitation is not a bracket), and a player already seated is not re-judged. Plus the ORDERING that makes a refusal free: a `VENUE_LOCKED` join leaves the machine in its chair, because `join_room`'s eviction used to run above the gate and a refused arrival took the CPU with it |
-| `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing). Plus the window: a joiner is refused at a machine table mid-match **with no `cpu_frame` ever sent**, which is the shape a watcher-gated stream makes ordinary and the pre-existing case could not reach, since it manufactures `inPlay` by hand. Plus the END of such a table: that its one player leaving deletes it and closes its watchers (a different `vacateSeat` path from the two-human one — the machine is not in `players`, so the FIRST leave empties both seats), that a terminal frame is what makes `spectator_sync` say `matchOver`, and that a rematch reaches the watchers and not just the host. Those three drive `cpu_frame` by HAND and so pin the wire, not the client — the client's half of all three had shipped broken with this file's relay assertions green, which is why `spectate` carries them too |
+| `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing). Plus the window: a joiner is refused at a machine table mid-match **with no `cpu_frame` ever sent**, which is the shape a watcher-gated stream makes ordinary and the pre-existing case could not reach, since it manufactures `inPlay` by hand. Plus the DOOR into one — that both listing routes report it joinable exactly when `join_room` would take the chair (before the first match, mid-match, after the whistle, and with two humans), which had never been asserted at all in either claimable state and is how the row and the relay came to disagree for two releases. Plus the END of such a table: that its one player leaving deletes it and closes its watchers (a different `vacateSeat` path from the two-human one — the machine is not in `players`, so the FIRST leave empties both seats), that a terminal frame is what makes `spectator_sync` say `matchOver`, and that a rematch reaches the watchers and not just the host. Those three drive `cpu_frame` by HAND and so pin the wire, not the client — the client's half of all three had shipped broken with this file's relay assertions green, which is why `spectate` carries them too |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `seatGate` `p2pParity` `headers` | Twelve suites that boot the real server (see §4) |
@@ -85,6 +85,30 @@ the result, that Play Again carries them into the second match, and that the hos
 closes the table on them and delists it. Every one of those three failed in the field while the
 relay suite was green, because the relay's half of each was already right and nothing on the
 client could produce the message that reached it.
+
+`spectate` also owns the WARM SEAT end to end — a person taking the machine's chair — for the
+same reason and in a sharper form. The relay had accepted that join since the CPU seat shipped
+and `cpuTable` pinned it; what was broken was a payload field nobody asserted (`isFull` counted
+the machine, so the lobby row was `disabled` on every machine table in the game and the seat
+had no door) and a screen nobody was taken off (the host sat on the machine match's result
+overlay, whose only two controls give up the table or send a `rematch_request` the relay drops).
+Neither is reachable from the wire: assert the browser row's `data-full` on both sides of the
+whistle, then that the host AND the watcher land back in `#multiplayer-lobby-modal` and the
+handshake completes. Checked by mutation — with the client's lobby-return disabled the leg
+fails on `the host was left on the machine match's result overlay`, which is the bug verbatim, and
+with the client's `spectator_sync` read put back to `matchSeq > 0` it fails on the watcher who
+arrives between matches. That last one is the only place in the suite where the old predicate and
+the new one disagree — every other watcher here sits down at a live match, where they agree — and
+it is the only layer that can hold it at all, since vitest never loads a `.tsx`.
+
+**Two branches of that fix are deliberately unpinned, and saying so is cheaper than a suite that
+pretends otherwise.** The lobby-return waits on `resultSettled` and bails out if the seat has
+gone; neither is reachable from a browser without engineering a race against `RESULT_WAIT_MS` —
+the challenger has to load a page, onboard, cross two menus and wait out a 3-second poll, by
+which time the result landed long ago. Both are protective rather than functional (one keeps a
+result strip on screen, the other drops a debt whose table no longer exists), so the cost of
+being wrong is bounded and visible; a suite contorted into forcing a four-second window would be
+the more expensive mistake.
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. That isolation is

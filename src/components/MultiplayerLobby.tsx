@@ -125,6 +125,20 @@ export interface TableSummary {
   isFull: boolean;
   inPlay: boolean;
   waitingMs: number | null;
+  /**
+   * The AI rung in the other chair, or null for a table between two people.
+   *
+   * The route has always sent the whole `config` and no row ever read it, so
+   * a machine table was indistinguishable from a two-human one — not even by
+   * the Watch button beside it, which follows `spectatorsEnabled` and is
+   * offered by any table whose host opened the seats. That mattered less
+   * while such a row was permanently disabled; now that the machine gives its
+   * chair up between matches the row is tappable, and "2/2" beside a live
+   * Join button says nothing about what the 2 is. Named here as one field
+   * rather than the whole config, because the row wants the rung and not the
+   * terms.
+   */
+  cpu?: AIDifficulty | null;
   /** Whether this table opens its two watching seats at all. */
   spectatorsEnabled?: boolean;
   spectatorCount?: number;
@@ -774,6 +788,16 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                         <button
                           id={`table-${table.id}`}
                           data-full={table.isFull ? 'true' : 'false'}
+                          // The rung, for a suite to read without reading COPY.
+                          // `room_rookie` is 'Rookie' only in English —
+                          // 'Neuling' in de, 'Novato' in es and pt, 'Recrue'
+                          // in fr, 'ルーキー' in ja, '菜鸟' in zh — so an
+                          // assertion on the rendered text is coupled to one
+                          // locale, and matched against the row's whole
+                          // textContent it can also be satisfied by a player
+                          // NAMED Rookie. Same reason e2e-lobby stopped
+                          // regexing panel text.
+                          data-cpu={table.cpu ?? 'none'}
                           disabled={table.isFull}
                           onClick={() => onJoinRoom(table.id)}
                           className={`flex w-full items-center gap-2 rounded-card border p-2.5 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100 ${
@@ -784,10 +808,23 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                             <span className="truncate text-2xs text-ink">
                               {table.hostName || t('lobby_tables_host_unknown', language)}
                             </span>
+                            {/* A machine table names its rung instead of its
+                                match state, because its match state is not
+                                knowable here: `inPlay` is only ever set by
+                                `cpu_frame`, whose stream is watcher-gated, so
+                                an unwatched machine match reads "Waiting for
+                                an opponent" from the first serve to the last.
+                                The row already says whether the chair is free
+                                — it is tappable, or it is not — so this line
+                                is spent on the thing nothing else says. */}
                             <span className="text-2xs font-normal tracking-normal text-ink-dim">
-                              {table.inPlay
-                                ? t('lobby_tables_in_play', language)
-                                : t('lobby_tables_waiting', language)}
+                              {table.cpu
+                                ? t('lobby_tables_vs', language, {
+                                    name: t(rungLabelKey(table.cpu), language),
+                                  })
+                                : table.inPlay
+                                  ? t('lobby_tables_in_play', language)
+                                  : t('lobby_tables_waiting', language)}
                             </span>
                           </div>
                           <span className="shrink-0 text-2xs tnum font-normal tracking-normal text-ink-muted">

@@ -16,6 +16,12 @@
 //      rematch, and takes its table down when its one player walks out — all
 //      three of which the wire tests can only ever assert by hand, because
 //      the frame that says so is one the client had no path to producing.
+//   7. The warm seat actually works end to end: a machine table's row is
+//      OPEN when its chair is claimable and shut while its match runs, and
+//      taking the chair walks the host and the watcher off the dead result
+//      overlay and back to the lobby, where the Start this table now needs
+//      lives. The relay was right about all of this throughout; what was
+//      wrong was a payload field nobody asserted and a screen nobody left.
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs).
 import { chromium, devices } from 'playwright-core';
 
@@ -299,11 +305,22 @@ ok('and sit back down, which is what "pre-match" means');
   await onlooker.click('#building-pvp');
   await onlooker.click('#room-casual');
   await onlooker.waitForSelector(`#table-${cpuCode}-watch`, { timeout: 10000 });
-  // Full, because the machine holds the other chair — the browser row counts
-  // it, or the row would read 1/2 and then answer ROOM_FULL on a tap.
+  // Full because the MATCH IS RUNNING, which is a narrower claim than the one
+  // this used to make. `isFull` is *can I join*, and the machine gives its
+  // chair up between matches — so a machine table is only closed while its
+  // match is on. Section 8 asserts the other half.
   if ((await onlooker.getAttribute(`#table-${cpuCode}`, 'data-full')) !== 'true') {
-    fail('a table with a machine in it is not showing as full');
+    fail('a machine table is joinable while its match is running');
   }
+  // And the row says what it is full OF. The route has always sent this and no
+  // row ever read it, so a machine table was indistinguishable from a duel.
+  // Read off `data-cpu` and not off the rendered text: the rung's label is
+  // translated, and matched against the row's whole textContent an English
+  // regex would also be satisfied by a player whose NAME contained it.
+  if ((await onlooker.getAttribute(`#table-${cpuCode}`, 'data-cpu')) !== 'rookie') {
+    fail('the row does not name the machine it is full of');
+  }
+  ok('the browser row names the machine, and is shut while its match runs');
   await onlooker.click(`#table-${cpuCode}-watch`);
   await onlooker.waitForSelector('#half-court-canvas', { timeout: 10000 });
   if ((await onlooker.getAttribute('#half-court-container', 'data-readonly')) !== '1') {
@@ -416,6 +433,220 @@ ok('and sit back down, which is what "pre-match" means');
 
   await onlooker.context().close();
   await solo.context().close();
+}
+
+// ---- 8. The warm seat: a person takes the machine's chair -----------------
+//
+// The whole premise of seating a CPU is that you play it until somebody takes
+// its chair. Nothing had ever walked that path end to end, and it was broken
+// at both ends.
+//
+// The door did not exist: both listing routes counted the machine into
+// `isFull`, and the row is `disabled={table.isFull}`, so every machine table
+// in the game was greyed out at 2/2 — while `join_room` would happily have
+// seated the tapper between matches. And walking through it wedged the table
+// for both people: `resetTableForNextPair` clears `matchOver` for the pair
+// about to sit down, so the host was left on the winner overlay of the machine
+// match with two live controls, one of which (Play Again → `rematch_request`)
+// the relay silently drops on `!matchOver` and the other of which gives up the
+// table — while the arrival sat readied in a lobby waiting on a Start nobody
+// could press.
+//
+// Neither half is visible from the wire. The relay's own behaviour was correct
+// throughout and is already pinned by tests/cpuTable.test.ts; what was wrong
+// was a payload field nobody had asserted and a screen nobody was taken off.
+{
+  const host = await newPlayer('WarmHost');
+  await host.click('#building-pvp');
+  await host.click('#room-casual');
+  await host.waitForSelector('#btn-create-room', { timeout: 8000 });
+  await host.click('#btn-create-room');
+  const code = await host
+    .waitForFunction(() => {
+      const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+      return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
+    }, { timeout: 8000 })
+    .then((h) => h.jsonValue());
+
+  await host.waitForSelector('#toggle-spectators', { timeout: 8000 });
+  await host.click('#toggle-spectators input');
+  await host.click('#lobby-pts-3');
+  await host.click('#seat-1');
+  await host.waitForSelector('#cpu-picker', { timeout: 5000 });
+  await host.click('#cpu-rookie');
+  await host.waitForSelector('#cpu-picker', { state: 'detached', timeout: 5000 });
+  await host.waitForFunction(
+    () => document.querySelector('#seat-1')?.getAttribute('data-occupant') === 'cpu',
+    { timeout: 8000 }
+  );
+
+  // Somebody watching, so the fix has to take THEM back to the lobby too —
+  // they were left holding a stale result overlay.
+  const fan = await newPlayer('WarmFan');
+  await fan.click('#building-pvp');
+  await fan.click('#room-casual');
+  await fan.waitForSelector(`#table-${code}-watch`, { timeout: 10000 });
+
+  // Before Start, the chair is claimable — so the row is OPEN. This is the
+  // state the old `isFull` was most wrong about: a host who has seated a
+  // machine and not yet pressed Start is advertising a free seat, and the
+  // relay would have taken the join.
+  //
+  // The wait on `data-cpu` is what stops this passing VACUOUSLY. The listing
+  // polls every 3 seconds and the Watch button above needs only
+  // `spectatorsEnabled`, which is set several UI steps before the machine is
+  // seated — so a poll that landed in between shows a row with no CPU and one
+  // player, which is `isFull: false` for the ordinary reason and says nothing
+  // whatever about the clause under test.
+  await fan.waitForFunction(
+    (id) => document.querySelector(`#table-${id}`)?.getAttribute('data-cpu') === 'rookie',
+    code,
+    { timeout: 15000 }
+  );
+  if ((await fan.getAttribute(`#table-${code}`, 'data-full')) !== 'false') {
+    fail('a machine table with no match on it is showing as full');
+  }
+  await fan.click(`#table-${code}-watch`);
+  ok('a machine table offers its chair before the match starts');
+
+  await host.click('#btn-ready-play');
+  await host.waitForSelector('#half-court-canvas', { timeout: 10000 });
+
+  // Play it out. Same shape as section 7 — real points, real rallies.
+  await host.keyboard.down('KeyA');
+  const finish = Date.now() + 90000;
+  while (Date.now() < finish) {
+    if (await shown(host, '#winner-modal-overlay')) break;
+    await host.keyboard.press('Space').catch(() => {});
+    await host.waitForTimeout(700);
+  }
+  await host.keyboard.up('KeyA');
+  if (!(await shown(host, '#winner-modal-overlay'))) fail('the machine match never finished');
+  ok('the machine match is played to the whistle');
+
+  // The door. A third player browses, and the row has opened up.
+  const challenger = await newPlayer('WarmChallenger');
+  await challenger.click('#building-pvp');
+  await challenger.click('#room-casual');
+  const opened = await challenger
+    .waitForFunction(
+      (id) => {
+        const row = document.querySelector(`#table-${id}`);
+        // Both, so this cannot be satisfied by a row that has already lost its
+        // machine to somebody else.
+        return row?.getAttribute('data-cpu') === 'rookie' && row?.getAttribute('data-full') === 'false';
+      },
+      code,
+      { timeout: 15000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!opened) fail(`table ${code} never offered the machine's chair after the whistle`);
+  ok('after the whistle the row opens up, and the machine’s chair is offered');
+
+  await challenger.click(`#table-${code}`);
+  // Waited on the SEAT, not on the lobby sheet: the challenger is already
+  // looking at that sheet — it is where the table browser lives — so a refused
+  // join (the ROOM_MID_MATCH race this change introduces by making the row
+  // tappable, or a bracket verdict) would leave it open and satisfy it. The
+  // footer's Ready/Start control renders only once `roomId` is set.
+  await challenger.waitForSelector('#btn-ready-play', { timeout: 10000 });
+
+  // ...and the host is taken off the dead result overlay and back to the
+  // lobby, which is the only place the Start this table now needs lives.
+  const hostReturned = await host
+    .waitForFunction(
+      () =>
+        !document.querySelector('#winner-modal-overlay') &&
+        !!document.querySelector('#multiplayer-lobby-modal'),
+      undefined,
+      { timeout: 20000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!hostReturned) fail('the host was left on the machine match’s result overlay');
+
+  const fanReturned = await fan
+    .waitForFunction(
+      () =>
+        !document.querySelector('#winner-modal-overlay') &&
+        !!document.querySelector('#multiplayer-lobby-modal'),
+      undefined,
+      { timeout: 20000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!fanReturned) fail('the watcher was left on the machine match’s result overlay');
+  ok('taking the chair takes the host and the watcher back to the lobby');
+
+  // ---- and the one moment the two predicates DISAGREE --------------------
+  //
+  // Right now this table has `matchSeq > 0` (a machine match was played on it)
+  // and `matchOver: false` (the eviction ran `resetTableForNextPair`), with
+  // nothing being played. That is the ONLY state in which the client's old
+  // read and its new one differ, and it is not reachable anywhere else in this
+  // suite: every other watcher here sits down at a live match, where the two
+  // agree. Old, a watcher arriving here was walked onto an empty court.
+  //
+  // Vitest cannot reach this — it never loads a .tsx — and the relay half is
+  // pinned by tests/spectators.test.ts, which can only assert the FIELD. This
+  // is the assertion that says the client reads it.
+  const straggler = await newPlayer('WarmStraggler');
+  await straggler.click('#building-pvp');
+  await straggler.click('#room-casual');
+  await straggler.waitForSelector(`#table-${code}-watch`, { timeout: 10000 });
+  await straggler.click(`#table-${code}-watch`);
+  // Wait for the SEAT to appear in the map, not for the lobby sheet — the
+  // sheet is where the table browser lives, so it is already open and would
+  // satisfy anything. A watching seat marked as mine means `table_state` and
+  // the `spectator_sync` behind it have both landed, which is what makes the
+  // negative below mean something rather than mean "not yet".
+  await straggler.waitForFunction(
+    () =>
+      document.querySelector('#seat-2')?.getAttribute('data-mine') === 'true' ||
+      document.querySelector('#seat-3')?.getAttribute('data-mine') === 'true',
+    undefined,
+    { timeout: 10000 }
+  );
+  if (await shown(straggler, '#half-court-canvas')) {
+    fail('a watcher sitting down between matches was walked onto an empty court');
+  }
+  ok('and a watcher arriving between matches gets the table, not an empty court');
+
+  // And the table works: the handshake the relay was ready for all along.
+  await challenger.click('#btn-ready-play');
+  await host.waitForFunction(
+    () => {
+      const b = document.querySelector('#btn-ready-play');
+      return !!b && !b.disabled;
+    },
+    undefined,
+    { timeout: 10000 }
+  );
+  await host.click('#btn-ready-play');
+  for (const [page, who] of [[host, 'host'], [challenger, 'challenger'], [fan, 'watcher']]) {
+    // Both halves, because all three are sitting in the lobby right now and
+    // the host and the watcher were on a court a moment ago: waiting on the
+    // canvas alone could be satisfied by a node that never went away. The
+    // lobby sheet closing is what `game_start` does, and only it.
+    const onCourt = await page
+      .waitForFunction(
+        () =>
+          !document.querySelector('#multiplayer-lobby-modal') &&
+          !!document.querySelector('#half-court-canvas'),
+        undefined,
+        { timeout: 15000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (!onCourt) fail(`the ${who} never reached the duel that replaced the machine match`);
+  }
+  ok('the machine’s chair became a real duel, watchers and all');
+
+  await straggler.context().close();
+  await challenger.context().close();
+  await fan.context().close();
+  await host.context().close();
 }
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);

@@ -11,23 +11,36 @@ const frame = (over: Partial<ErrorFrame> = {}): ErrorFrame => ({
   ...over,
 });
 
-// Every code the protocol declares. Written out rather than derived, so a code
-// added to the union without a translation fails here instead of silently
-// falling back to English for the rest of its life.
-const CODES: RelayErrorCode[] = [
-  'ROOM_NOT_FOUND',
-  'ROOM_FULL',
-  'ALREADY_AT_TABLE',
-  'SEAT_TAKEN',
-  'SEATS_LOCKED',
-  'NEEDS_A_PLAYER',
-  'NO_WATCH_SEATS',
-  'WATCH_SEATS_FULL',
-  'NOT_A_SEAT',
-  'NEEDS_USERNAME',
-  'LEAVE_TABLE_FIRST',
-  'VENUE_LOCKED',
-];
+// Every code the protocol declares — spelled as an exhaustive RECORD rather
+// than as a bare array, and that change is the point.
+//
+// The array this replaces carried exactly this comment, claiming that a code
+// added to the union without a translation would "fail here instead of
+// silently falling back to English for the rest of its life". A hand-written
+// list cannot deliver that: it is only ever as complete as the last person to
+// remember it, and it is not the kind of omission review notices, because the
+// suite goes on passing over the codes that ARE listed. `ROOM_MID_MATCH` is
+// how it was found — added to the union, translated into seven locales, and
+// covered by nothing.
+//
+// A Record keyed on the union makes the compiler answer instead: a member
+// missing from here is a tsc error, not a quiet gap.
+const ALL_CODES: Record<RelayErrorCode, true> = {
+  ROOM_NOT_FOUND: true,
+  ROOM_FULL: true,
+  ROOM_MID_MATCH: true,
+  ALREADY_AT_TABLE: true,
+  SEAT_TAKEN: true,
+  SEATS_LOCKED: true,
+  NEEDS_A_PLAYER: true,
+  NO_WATCH_SEATS: true,
+  WATCH_SEATS_FULL: true,
+  NOT_A_SEAT: true,
+  NEEDS_USERNAME: true,
+  LEAVE_TABLE_FIRST: true,
+  VENUE_LOCKED: true,
+};
+const CODES = Object.keys(ALL_CODES) as RelayErrorCode[];
 
 describe('relayErrorText', () => {
   it('says every coded refusal in every locale, and never in English by accident', () => {

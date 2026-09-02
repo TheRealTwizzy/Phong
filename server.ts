@@ -41,6 +41,8 @@ import {
   applyMatchSync,
   clearP2PEvidence,
   clearSeatStreaks,
+  cpuSeatClaimable,
+  matchStarted,
   resetTableForNextPair,
   clampInt,
   generateRoomCode,
@@ -447,6 +449,7 @@ function sendSpectatorSync(room: Room, ws: WebSocket): void {
     p2Score: room.scores[1],
     servingPlayer: room.servingPlayer,
     matchSeq: room.matchSeq,
+    matchStarted: matchStarted(room),
     inPlay: room.inPlay,
     matchOver: room.matchOver,
     config: room.config,
@@ -577,6 +580,7 @@ function seatQueuePair(a: QueueEntry, b: QueueEntry): void {
     // Both seats consented by queueing, so the handshake is already done.
     ready: [true, true],
     matchSeq: 0,
+    matchResetSeq: 0,
     lastActive: Date.now(),
     // Both seats filled from the first instant: no unpaired clock to run.
     soloSince: null,
@@ -1559,19 +1563,32 @@ async function startServer() {
       if (room.visibility !== 'public') continue;
       const seated = room.players.filter((p) => p && p.ws.readyState === WebSocket.OPEN);
       if (seated.length === 0) continue;
+      const humans = room.players.filter(Boolean).length;
       tables.push({
         id: room.id,
         hostName: room.players[0]?.playerName ?? null,
         hostId: room.players[0]?.playerId ?? null,
-        // The CPU counts as an occupant, so a browsing player is not offered
-        // a table as "1/2, waiting" and then answered ROOM_FULL when they tap
-        // it. `cpu` rides along in `config` below, so a row can say WHAT it is
-        // full of — "Alice vs Cyber" is a table worth walking up to, and
-        // "Alice, 2/2" is one you skip.
-        playerCount: room.players.filter(Boolean).length + (room.config.cpu ? 1 : 0),
-        isFull: room.players.filter(Boolean).length + (room.config.cpu ? 1 : 0) >= 2,
+        // The CPU counts as an occupant HERE, and deliberately not below.
+        // The two fields answer different questions and only one of them
+        // changed when the machine learned to give up its chair.
+        //
+        // `playerCount` is what the table is full OF — "Alice vs Cyber" is a
+        // row worth walking up to and "Alice, 2/2" is one you skip — so it
+        // still counts the machine, and `cpu` below names it.
+        playerCount: humans + (room.config.cpu ? 1 : 0),
+        // `isFull` is *can I join*, and it must be `join_room`'s own answer
+        // or the row is lying in one direction or the other. It counted the
+        // machine unconditionally, so every machine table in the game was
+        // greyed out at 2/2 — while the relay would happily have seated the
+        // tapper between matches. See cpuSeatClaimable.
+        isFull: humans >= 2 || (!!room.config.cpu && !cpuSeatClaimable(room)),
         inPlay: room.inPlay,
         config: room.config,
+        // Lifted out of `config` beside it, matching what /api/room/:roomId
+        // has always done — the row wants the rung, not the terms, and the
+        // two routes describing the same table differently is what this pair
+        // of fields was just fixed for.
+        cpu: room.config.cpu,
         waitingMs: room.soloSince === null ? null : Date.now() - room.soloSince,
         spectatorCount: room.spectators.filter(Boolean).length,
         spectatorsEnabled: room.config.spectators,
@@ -1587,19 +1604,22 @@ async function startServer() {
     if (!room) {
       return res.status(404).json({ exists: false, message: 'Room not found' });
     }
-    // The CPU counts as an occupant here for exactly the reason it does in
-    // the listing above: this endpoint answers "can I join that table", and a
-    // machine in the other chair is the answer no. The two must agree or the
-    // browser row says FULL and this says 1/2 about the same table — and the
-    // only caller that could act on the difference is a join, which the relay
-    // then refuses. `cpu` is exposed beside it so a caller can say WHAT the
-    // table is full of rather than only that it is.
-    const playerCount = room.players.filter(Boolean).length + (room.config.cpu ? 1 : 0);
+    // Split for exactly the reason the listing above is, and the two must
+    // stay in step: this endpoint and that row answer the same two questions
+    // about the same table, and a caller acting on a difference between them
+    // is a join the relay then contradicts.
+    //
+    // `playerCount` counts the machine — it says what the table is full OF,
+    // with `cpu` exposed beside it to name the thing. `isFull` says whether a
+    // join would be taken, which for a machine table depends on whether its
+    // match is running.
+    const humans = room.players.filter(Boolean).length;
+    const playerCount = humans + (room.config.cpu ? 1 : 0);
     res.json({
       exists: true,
       roomId,
       playerCount,
-      isFull: playerCount >= 2,
+      isFull: humans >= 2 || (!!room.config.cpu && !cpuSeatClaimable(room)),
       cpu: room.config.cpu,
       // Whether a ball has actually been put in play since the last start.
       // Read-only; lets a client (and the e2e) tell a waiting room from a
@@ -2882,6 +2902,7 @@ async function startServer() {
             inPlay: false,
             ready: [false, false],
             matchSeq: 0,
+            matchResetSeq: 0,
             lastActive: Date.now(),
             // One player, from this moment — the clock that expires a room
             // nobody ever joins, and a room somebody has left.
@@ -2990,10 +3011,17 @@ async function startServer() {
           // `startRatings` — and cleared `config.cpu`, which is what the
           // record vouch asks for, so `forceUnrankedLadder` came off the
           // match in flight.
-          const cpuMidMatch = room.matchSeq > 0 && !room.matchOver;
-          if (room.config.cpu && cpuMidMatch) {
+          //
+          // Spelled through `cpuSeatClaimable` rather than inline so this
+          // verdict and the one both listing routes print are the same
+          // function. They disagreed for two releases and the row lost.
+          if (room.config.cpu && !cpuSeatClaimable(room)) {
             ws.send(
-              JSON.stringify({ type: 'error', code: 'ROOM_FULL', message: 'That table is mid-match — watch, or try again when it ends.' })
+              JSON.stringify({
+                type: 'error',
+                code: 'ROOM_MID_MATCH',
+                message: 'That table is mid-match — watch, or try again when it ends.',
+              })
             );
             return;
           }

@@ -23,6 +23,7 @@ import type { LanguageCode, RelayErrorCode, WSServerMessage } from '../types';
 const RELAY_ERROR_KEY: Record<Exclude<RelayErrorCode, 'VENUE_LOCKED'>, string> = {
   ROOM_NOT_FOUND: 'relay_err_room_not_found',
   ROOM_FULL: 'relay_err_room_full',
+  ROOM_MID_MATCH: 'relay_err_room_mid_match',
   ALREADY_AT_TABLE: 'relay_err_already_at_table',
   SEAT_TAKEN: 'relay_err_seat_taken',
   SEATS_LOCKED: 'relay_err_seats_locked',

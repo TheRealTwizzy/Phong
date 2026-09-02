@@ -716,3 +716,73 @@ describe('a seat that changes hands after the whistle', () => {
     fan.close();
   }, 30_000);
 });
+
+describe('what a watcher is told when there is nothing to watch', () => {
+  it('does not report a live match at a table between matches', async () => {
+    // `spectator_sync` shipped `matchSeq` and `matchOver`, and the client read
+    // exactly that pair as "a match is running" — so it walked a watcher onto
+    // the court whenever `matchSeq > 0 && !matchOver`.
+    //
+    // `resetTableForNextPair` clears `matchOver` and leaves `matchSeq` alone,
+    // which is correct on both counts (a sequence never goes backwards; the
+    // next pair must be able to press Start). So the pair reads LIVE at a
+    // table with nothing on it, and neither half can be repaired without
+    // breaking what it is for. Nothing else on the snapshot can answer it
+    // either: `inPlay` is false for the whole of an unwatched machine match
+    // and false before the first serve of any match.
+    //
+    // Deliberately reproduced on a DUEL rather than a machine table: this is
+    // not the CPU feature's bug. Any seat emptying after the whistle does it,
+    // and it has been reachable since watching seats shipped.
+    //
+    // About a watcher ARRIVING, which is all a snapshot can be about. One
+    // already seated here is not re-synced and is not covered: they stay on
+    // the result overlay of the match they watched, which is where they would
+    // be if nobody had left.
+    const { p1, p2, code } = await livePair(['SyncLiveHost', 'SyncLiveGuest']);
+
+    // Finish the match, so the whistle has really gone.
+    p1.send({ type: 'point_scored', scorer: 'p1' });
+    p1.send({ type: 'point_scored', scorer: 'p1' });
+    p1.send({ type: 'point_scored', scorer: 'p1' });
+    await p1.await('score_update');
+    await sleep(80);
+
+    // The loser leaves. `vacateSeat` runs `resetTableForNextPair`, which is
+    // what puts the table into the state under test.
+    p2.close();
+    await sleep(160);
+
+    const fan = await watch(code, 2, 'SyncLiveFan');
+    const snap = (await fan.phone.await('spectator_sync')).snapshot;
+
+    // The two fields the client used to read say LIVE, and are right to —
+    // each is answering its own question correctly.
+    expect(snap.matchSeq).toBeGreaterThan(0);
+    expect(snap.matchOver).toBe(false);
+    // So the snapshot has to answer the question itself.
+    expect(snap.matchStarted).toBe(false);
+
+    fan.phone.close();
+    p1.close();
+  }, 25_000);
+
+  it('still reports a live match to a watcher who arrives mid-rally', async () => {
+    // The other side of the same assertion, and the reason it cannot simply
+    // be hard-coded false: somebody sitting down at 2-1 must still be walked
+    // onto the court, which is what `spectator_sync` exists for.
+    const { p1, p2, code } = await livePair(['SyncMidHost', 'SyncMidGuest']);
+    p1.send({ type: 'point_scored', scorer: 'p1' });
+    await p1.await('score_update');
+
+    const fan = await watch(code, 3, 'SyncMidFan');
+    const snap = (await fan.phone.await('spectator_sync')).snapshot;
+    expect(snap.matchStarted).toBe(true);
+    expect(snap.matchOver).toBe(false);
+    expect(snap.p1Score).toBe(1);
+
+    fan.phone.close();
+    p1.close();
+    p2.close();
+  }, 25_000);
+});

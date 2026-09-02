@@ -19,6 +19,8 @@ import {
   ROOM_CODE_ALPHABET,
   MAX_SDP_CHARS,
   startMatch,
+  cpuSeatClaimable,
+  matchStarted,
 } from '../server/room';
 import { normalizeRoomConfig } from '../src/matchRules';
 
@@ -53,6 +55,8 @@ const room = (over: Partial<Room> = {}): Room => ({
   ready: [false, false],
   inPlay: false,
   matchSeq: 1,
+  // The factory's default room has a match ON it: matchSeq 1, never reset.
+  matchResetSeq: 0,
   lastActive: 0,
   startRatings: null,
   startRatingsSeq: 0,
@@ -1180,5 +1184,91 @@ describe('resetTableForNextPair', () => {
     // The seat that STAYED keeps its own run — it is the same player.
     expect(r.bestStreaks[0]).toBe(14);
     expect(r.seatSince?.[0]).toBe(0);
+  });
+});
+
+describe('cpuSeatClaimable', () => {
+  // The one predicate `join_room` and both listing routes ask. They spelled it
+  // separately and drifted: the relay hands the machine's chair over between
+  // matches, while `isFull` counted the CPU unconditionally — so the lobby row
+  // (`disabled={table.isFull}`) was greyed out at 2/2 on every machine table in
+  // the game, and the warm seat had no door.
+  const cpuRoom = (over: Partial<Room> = {}) =>
+    room({ config: normalizeRoomConfig({ winningScore: 5, cpu: 'rookie' }), ...over });
+
+  it('offers the chair before the first match and after the last point', () => {
+    expect(cpuSeatClaimable(cpuRoom({ matchSeq: 0, matchOver: false }))).toBe(true);
+    expect(cpuSeatClaimable(cpuRoom({ matchSeq: 3, matchOver: true }))).toBe(true);
+  });
+
+  it('refuses it while the match is running', () => {
+    expect(cpuSeatClaimable(cpuRoom({ matchSeq: 1, matchOver: false }))).toBe(false);
+  });
+
+  it('reads the match lock and NOT inPlay', () => {
+    // `inPlay` is only ever set at a machine table by `cpu_frame`, whose
+    // stream is watcher-gated — so an UNWATCHED machine match reads false from
+    // the first serve to the last, and a predicate spelled `inPlay` would hand
+    // the chair away mid-rally. That is the bug #98 shipped for.
+    expect(cpuSeatClaimable(cpuRoom({ matchSeq: 1, matchOver: false, inPlay: false }))).toBe(false);
+    expect(cpuSeatClaimable(cpuRoom({ matchSeq: 1, matchOver: false, inPlay: true }))).toBe(false);
+  });
+
+  it('says nothing about a table with no machine at it', () => {
+    expect(cpuSeatClaimable(room({ matchSeq: 0, matchOver: false }))).toBe(false);
+    expect(cpuSeatClaimable(room({ matchSeq: 3, matchOver: true }))).toBe(false);
+  });
+});
+
+describe('matchStarted', () => {
+  // What `spectator_sync` owes a watcher sitting down, and what no field on
+  // the room could answer before: `matchSeq > 0 && !matchOver` reads LIVE at a
+  // table between matches, because putting one back to a lobby clears
+  // `matchOver` and leaves `matchSeq` alone. Both are right to; neither can
+  // change. So the answer is recorded rather than inferred.
+  it('is false on a table nothing has been played at', () => {
+    expect(matchStarted(room({ matchSeq: 0, matchResetSeq: 0 }))).toBe(false);
+  });
+
+  it('is true once a match has begun, and stays true when it is decided', () => {
+    expect(matchStarted(room({ matchSeq: 1, matchResetSeq: 0, matchOver: false }))).toBe(true);
+    // Deliberately not `&& !matchOver`: the snapshot carries that separately,
+    // and a watcher arriving on a finished match wants the result rather than
+    // the lobby.
+    expect(matchStarted(room({ matchSeq: 1, matchResetSeq: 0, matchOver: true }))).toBe(true);
+  });
+
+  it('goes false when the table is put back to a lobby, with matchSeq untouched', () => {
+    const r = room({ matchSeq: 4, matchResetSeq: 0, matchOver: true });
+    resetTableForNextPair(r, 1);
+    expect(r.matchSeq).toBe(4);
+    expect(r.matchOver).toBe(false);
+    // The pair a client used to read says LIVE. This is the whole defect.
+    expect(r.matchSeq > 0 && !r.matchOver).toBe(true);
+    expect(matchStarted(r)).toBe(false);
+  });
+
+  it('is true again for a rematch the PEERS agree, which never runs startMatch', () => {
+    // The reason this is a recorded sequence rather than a boolean. A boolean
+    // needs setting at every site that begins a match and this is the third —
+    // `applyMatchSync` adopts a higher matchSeq itself, because the peers
+    // agreed the rematch over a DataChannel the relay never saw. Derived, it
+    // is right here for free.
+    const r = room({ matchSeq: 4, matchResetSeq: 0, matchOver: true });
+    resetTableForNextPair(r, 1);
+    expect(matchStarted(r)).toBe(false);
+    r.matchOver = true;
+    r.seqClaims = [null, null];
+    applyMatchSync(r, 0, sync({ matchSeq: 5, p1Score: 0, p2Score: 0 }));
+    applyMatchSync(r, 1, sync({ matchSeq: 5, p1Score: 0, p2Score: 0 }));
+    expect(r.matchSeq).toBe(5);
+    expect(matchStarted(r)).toBe(true);
+  });
+
+  it('is true after startMatch, from a table that had just been reset', () => {
+    const r = room({ matchSeq: 4, matchResetSeq: 0, matchOver: true });
+    resetTableForNextPair(r, 1);
+    startMatch(r, 0);
+    expect(matchStarted(r)).toBe(true);
   });
 });
