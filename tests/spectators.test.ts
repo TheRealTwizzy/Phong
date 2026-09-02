@@ -664,3 +664,55 @@ describe('a table that goes away', () => {
     p1.close();
   });
 });
+
+describe('a seat that changes hands after the whistle', () => {
+  it('lets a player stand up and a watcher take the chair they freed', async () => {
+    // The premise behind a client-side guard, pinned here because it is the
+    // relay's to keep: this sequence is PERMITTED, and it is the one sequence
+    // that clears a watcher's `spectating` while their `winner` is still set.
+    //
+    // Every step passes a guard that is doing its job. `matchOver` is true, so
+    // the seat lock (`matchSeq > 0 && !matchOver`) is open — correctly, since
+    // the whole point of it is the countdown window and there is no match on.
+    // `NEEDS_A_PLAYER` lets the first player stand up because the second is
+    // still sitting. And freeing a seat this way does NOT run
+    // `resetTableForNextPair` — only `vacateSeat` does — so `matchOver` stays
+    // true and the next swap is legal too.
+    //
+    // What that leaves is a client holding a result overlay about a match it
+    // only watched, at the moment it stops being a watcher. App.tsx's record
+    // effect returns early for a spectator and must MARK its ref on the way
+    // out, or the promotion files somebody else's match onto this account.
+    // Nothing here can observe that — it is a POST from a browser — so the
+    // behavioural half is `scripts/e2e-spectate.mjs`, which can only reach it
+    // once a watcher has a way to take a seat without leaving the table.
+    const { p1, p2, code } = await livePair(['HandoverHost', 'HandoverGuest']);
+    const { phone: fan } = await watch(code, 2, 'HandoverFan');
+    await fan.await('table_state');
+
+    for (let i = 0; i < 3; i++) {
+      p1.send({ type: 'point_scored', scorer: 'p1' } as never);
+      await sleep(30);
+    }
+    expect(fan.last('score_update')?.p1Score).toBe(3);
+
+    // The winner stands up to watch. Seat 0 is now free and `matchOver` still
+    // true, because nothing here went through `vacateSeat`.
+    p1.clear();
+    p1.send({ type: 'swap_seat', seat: 3 } as never);
+    const stood = await awaitState(p1, (s) => s.yourSeat === 3, 'the player is watching');
+    expect(stood.yourSeat).toBe(3);
+    expect(p1.last('error')).toBeUndefined();
+
+    // And the watcher takes it.
+    fan.clear();
+    fan.send({ type: 'swap_seat', seat: 0 } as never);
+    const seated = await awaitState(fan, (s) => s.yourSeat === 0, 'the watcher is playing');
+    expect(seated.yourSeat).toBe(0);
+    expect(fan.last('error')).toBeUndefined();
+
+    p1.close();
+    p2.close();
+    fan.close();
+  }, 30_000);
+});

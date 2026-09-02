@@ -56,8 +56,8 @@ coverage number.
 | `ladderTone` | Which stop of the rank meter's fixed ramp a fill is at — the one tone in the app picked by a value rather than a meaning |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
-| `seatGate` | The bracket on the THIRD door into a playing seat, against a real server: a watcher cannot promote past a gate `spectate_room` never asked, one who passes it still can, a private table is not bracketed (an invitation is not a bracket), and a player already seated is not re-judged |
-| `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing). Plus the END of such a table: that its one player leaving deletes it and closes its watchers (a different `vacateSeat` path from the two-human one — the machine is not in `players`, so the FIRST leave empties both seats), that a terminal frame is what makes `spectator_sync` say `matchOver`, and that a rematch reaches the watchers and not just the host. Those three drive `cpu_frame` by HAND and so pin the wire, not the client — the client's half of all three had shipped broken with this file's relay assertions green, which is why `spectate` carries them too |
+| `seatGate` | The bracket on the THIRD door into a playing seat, against a real server: a watcher cannot promote past a gate `spectate_room` never asked, one who passes it still can, a private table is not bracketed (an invitation is not a bracket), and a player already seated is not re-judged. Plus the ORDERING that makes a refusal free: a `VENUE_LOCKED` join leaves the machine in its chair, because `join_room`'s eviction used to run above the gate and a refused arrival took the CPU with it |
+| `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing). Plus the window: a joiner is refused at a machine table mid-match **with no `cpu_frame` ever sent**, which is the shape a watcher-gated stream makes ordinary and the pre-existing case could not reach, since it manufactures `inPlay` by hand. Plus the END of such a table: that its one player leaving deletes it and closes its watchers (a different `vacateSeat` path from the two-human one — the machine is not in `players`, so the FIRST leave empties both seats), that a terminal frame is what makes `spectator_sync` say `matchOver`, and that a rematch reaches the watchers and not just the host. Those three drive `cpu_frame` by HAND and so pin the wire, not the client — the client's half of all three had shipped broken with this file's relay assertions green, which is why `spectate` carries them too |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `seatGate` `p2pParity` `headers` | Twelve suites that boot the real server (see §4) |
@@ -159,6 +159,14 @@ the seat stayed held, `isRoomEmpty` saw a live player, and a spectator sat in fr
 frame for half an hour. `tests/spectators.test.ts` and `tests/cpuTable.test.ts` hold the relay
 half; `scripts/e2e-spectate.mjs` holds the half where the message has to be SENT, and it is the
 only layer that can.
+
+**A guard that skips must also MARK, when what it skips is keyed on a ref.** The
+record effect returns early for a spectator, correctly — but `spectating` is in its
+deps, so an unmarked ref let it re-run the moment a watcher took a playing seat, with
+`winner` still set, filing a match this device only watched onto this account. The relay
+permits that seat move at every step (`tests/spectators.test.ts` pins the sequence), and
+the harm is permanent, so the premise is held at the relay and the behaviour is held in
+the browser — the same split as the row above.
 
 **A relay message costs its sender only, or it is a bug.** "Gameplay is
 client-authoritative" has always meant a client can lie about its *own* match. Four handlers

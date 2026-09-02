@@ -181,3 +181,50 @@ describe('a bracket gates the third door too', () => {
     p1.close();
   }, 30_000);
 });
+
+describe('a refusal costs the table nothing', () => {
+  it('does not evict the machine on its way out of a VENUE_LOCKED join', async () => {
+    // `join_room`'s CPU eviction ran ABOVE the bracket gate, so a refusal was
+    // not free: `config.cpu` was already null and `resetTableForNextPair` had
+    // already run by the time the joiner was turned away. The host — who is
+    // told nothing, since the eviction broadcast nothing — was left at a
+    // table whose machine had silently vanished, whose Start does nothing
+    // (`canStart` wants an empty opposite seat once a CPU is named, and there
+    // is no longer one named), and whose scores and `startRatings` had been
+    // reset under them.
+    //
+    // It is the rule written three lines below it in the same handler:
+    // nothing that can REFUSE may run after state has moved. `swap_seat` has
+    // always had its eviction below its gate for exactly this reason.
+    const host = await relay.newDevice('GateCpuHost');
+    const legend = await relay.newDevice('GateCpuLegend');
+    seedLadder(legend, 35); // Far above beginner's ceiling.
+
+    const p1 = await relay.openPhone(host);
+    p1.send({
+      type: 'create_room',
+      playerId: host.id,
+      venueRoomId: 'beginner',
+      visibility: 'public',
+      config: { winningScore: 3, rules: {}, spectators: true, cpu: 'rookie' },
+    } as never);
+    const created = await p1.await('room_created');
+    const roomId = created.roomId as string;
+
+    const intruder = await relay.openPhone(legend);
+    intruder.send({ type: 'join_room', roomId, playerId: legend.id });
+    await sleep(150);
+
+    expect(intruder.last('error')?.code).toBe('VENUE_LOCKED');
+    expect(intruder.last('room_joined')).toBeUndefined();
+
+    // The machine is still in its chair, and the host was never told otherwise.
+    const info = await fetch(`${relay.base}/api/room/${roomId}`).then((r) => r.json());
+    expect(info.cpu).toBe('rookie');
+    expect(p1.all('room_config').some((m) => (m.config as { cpu: unknown }).cpu === null)).toBe(
+      false
+    );
+    p1.close();
+    intruder.close();
+  }, 30_000);
+});

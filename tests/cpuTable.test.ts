@@ -626,3 +626,48 @@ describe('a CPU table that stops being played', () => {
     phone.close();
   }, 25_000);
 });
+
+describe('when a machine table is mid-match', () => {
+  const roomInfo = async (roomId: string) =>
+    fetch(`${base}/api/room/${roomId}`).then((r) => r.json());
+
+  it('refuses a joiner even though nobody was watching it', async () => {
+    // `inPlay` is NOT a machine table's match clock, and reading it as one
+    // left the chair takeable mid-rally.
+    //
+    // `startMatch` sets `inPlay` false, and the only thing that can set it
+    // true at a table with one human is `cpu_frame` — whose ~20Hz stream is
+    // watcher-gated. So an UNWATCHED machine match reads `inPlay: false` from
+    // the first serve to the last, and a guard spelled `inPlay && !matchOver`
+    // never fires on one. The room code is published by the unauthenticated
+    // tables listing, so this needed nothing but the code: the arrival ran
+    // `resetTableForNextPair` under a live point — wiping the host's streaks
+    // and their `startRatings` — and cleared `config.cpu`, which is what the
+    // record vouch asks for, so `forceUnrankedLadder` came off the match in
+    // flight and a watched machine match started moving the visible ladder
+    // again halfway through.
+    //
+    // The window is `matchSeq > 0 && !matchOver`, which is the lock
+    // `swap_seat` has always used. The existing "mid-match" case below cannot
+    // see this, because it MANUFACTURES `inPlay` by sending a frame by hand —
+    // which is exactly what a watched table would do and an unwatched one
+    // never does.
+    const host = await newDevice('CpuUnwatched1');
+    const arrival = await newDevice('CpuUnwatched2');
+    const { phone, roomId } = await seatCpu(host, { cpu: 'rookie' });
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+
+    // Deliberately no `cpu_frame` of any kind: nobody is watching.
+    const other = await relay.openPhone(arrival);
+    other.send({ type: 'join_room', roomId, playerId: arrival.id });
+    await sleep(120);
+
+    expect(other.last('error')?.code).toBe('ROOM_FULL');
+    expect(other.last('room_joined')).toBeUndefined();
+    // And the table is untouched: the machine still holds its chair.
+    expect((await roomInfo(roomId)).cpu).toBe('rookie');
+    other.close();
+    phone.close();
+  }, 25_000);
+});
