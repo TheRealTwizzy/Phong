@@ -81,6 +81,15 @@ const FLOORS = {
   // below 100 means a rule went in without a case, and the rules here decide
   // whether three unauthenticated routes have a ceiling at all.
   'server/rateLimit.ts': { statements: 100, branches: 100 },
+  // Hand-rolled AWS SigV4, at the same tier and for a sharper version of the
+  // same reason: it is small, it is pure, and every branch of it is a rule
+  // somebody else wrote down. It is hand-rolled because the runtime dependency
+  // list is asserted to be exactly express+ws by the PRIVACY suite, so an AWS
+  // SDK would turn tests/legal.test.ts red — and it lives in server/ rather
+  // than beside scripts/backup.mjs because `tsc` does not read .mjs and this
+  // `include` does not match `scripts/`. A wrong signature is a failure you
+  // discover at the exact moment you need a restore.
+  'server/sigv4.ts': { statements: 100, branches: 100 },
 };
 
 export default defineConfig(() => {
