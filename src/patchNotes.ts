@@ -37,6 +37,14 @@ export const PATCH_NOTES: PatchNote[] = [
     version: APP_VERSION,
     date: '2026-09-02',
     lines: [
+      'Nobody can take the computer\u2019s chair in the middle of your match any more \u2014 only once it has ended.',
+      'Being turned away from a table you are not ranked for no longer removes the computer from it.',
+    ],
+  },
+  {
+    version: '1.0.3',
+    date: '2026-09-02',
+    lines: [
       'Watching a machine match now ends when the match does, instead of leaving you on a court nobody is playing on.',
       'Leaving a table closes it, so nobody is left watching an empty one.',
       'Play Again at a table starts a real second match, and anyone watching comes with you.',

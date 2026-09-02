@@ -2977,21 +2977,25 @@ async function startServer() {
           // either side agreed to, and the host's result is already being
           // rated against a CPU.
           //
-          // The eviction has to clear the pair state itself, because a CPU
-          // seat never passes through `vacateSeat` — nothing clears `scores`,
-          // `inPlay`, `matchOver`, `startRatings` or the departing seat's
-          // streaks. Leave it and the pair sit at a table stuck `matchOver` at
-          // the CPU match's final score, with a Start button that does nothing
-          // and no error to explain it.
-          if (room.config.cpu) {
-            if (room.inPlay && !room.matchOver) {
-              ws.send(
-                JSON.stringify({ type: 'error', code: 'ROOM_FULL', message: 'That table is mid-match — watch, or try again when it ends.' })
-              );
-              return;
-            }
-            room.config = { ...room.config, cpu: null };
-            resetTableForNextPair(room, joinIdx);
+          // The window is `matchSeq > 0 && !matchOver`, which is the lock
+          // `swap_seat` has always used — and NOT `inPlay`, which is not a
+          // machine table's match clock at all. `startMatch` sets `inPlay`
+          // false and the only thing that can set it true at a table with one
+          // human is `cpu_frame`, whose ~20Hz stream is watcher-gated. So an
+          // UNWATCHED machine match reads false from the first serve to the
+          // last, and the guard this replaces never fired on one: the room
+          // code is published by the unauthenticated tables listing, so
+          // anybody could take the chair MID-RALLY. That ran the reset below
+          // under a live point — wiping the host's streaks and their
+          // `startRatings` — and cleared `config.cpu`, which is what the
+          // record vouch asks for, so `forceUnrankedLadder` came off the
+          // match in flight.
+          const cpuMidMatch = room.matchSeq > 0 && !room.matchOver;
+          if (room.config.cpu && cpuMidMatch) {
+            ws.send(
+              JSON.stringify({ type: 'error', code: 'ROOM_FULL', message: 'That table is mid-match — watch, or try again when it ends.' })
+            );
+            return;
           }
 
           // A PUBLIC table is one this player browsed to, so the bracket that
@@ -3017,6 +3021,31 @@ async function startServer() {
               );
               return;
             }
+          }
+
+          // Taking a CPU's chair, which is the whole point of a listed CPU
+          // table: you play the machine until somebody takes its seat.
+          //
+          // BELOW the bracket gate, and that ordering is the rule written
+          // three lines above it: nothing that can REFUSE may run after state
+          // has moved. It used to sit above, so a refusal was not free — the
+          // machine was already evicted and the table already reset by the
+          // time the joiner was turned away, and since nothing was broadcast
+          // the host was never told. They were left at a table whose machine
+          // had silently vanished and whose Start does nothing, because
+          // `canStart` wants an empty opposite seat once a CPU is named and
+          // there was no longer one named.
+          //
+          // The eviction has to clear the pair state itself, because a CPU
+          // seat never passes through `vacateSeat` — nothing clears `scores`,
+          // `inPlay`, `matchOver`, `startRatings` or the departing seat's
+          // streaks. Leave it and the pair sit at a table stuck `matchOver` at
+          // the CPU match's final score, with a Start button that does nothing
+          // and no error to explain it.
+          const evictedCpu = !!room.config.cpu;
+          if (evictedCpu) {
+            room.config = { ...room.config, cpu: null };
+            resetTableForNextPair(room, joinIdx);
           }
 
           // The destination is real and has room, so the old seat can go. See
@@ -3087,7 +3116,16 @@ async function startServer() {
 
           // The guest plays the host's match, so they are told its terms before
           // the first serve — and can read them in the lobby.
-          ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
+          //
+          // Broadcast rather than sent, when this arrival took the MACHINE's
+          // chair: the terms changed for everybody at the table, not just for
+          // the newcomer. Told only the joiner, the host kept a stale
+          // `config.cpu` — so their Play Again went on taking the machine-table
+          // branch and sent a `rematch_request` the relay drops on
+          // `!matchOver`, a button that looks alive and reports nothing. A
+          // watcher had the same stale terms.
+          if (evictedCpu) broadcast(room, { type: 'room_config', config: room.config });
+          else ws.send(JSON.stringify({ type: 'room_config', config: room.config }));
 
           // Notify whoever was already sitting here — which is not always the
           // host, now that an arrival can be the one taking seat 0.

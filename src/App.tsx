@@ -1360,7 +1360,23 @@ export default function App() {
     // this account: XP, rating, achievements and streaks for a match this
     // device never played. The relay refuses it, but a POST that has to be
     // refused is a POST that should not have been sent.
-    if (spectating) return;
+    //
+    // MARKED, not merely skipped, and the difference is the whole guard.
+    // `spectating` is in this effect's deps and can clear while `winner` is
+    // still set — a watcher taking a playing seat is exactly that, and the
+    // relay permits it (a player standing up after the whistle frees a chair
+    // without running `resetTableForNextPair`, so `matchOver` stays true and
+    // the seat lock stays open). Unmarked, the effect re-runs the instant the
+    // watcher stops being one, the guard below passes, and the match this
+    // device only WATCHED is filed onto this account. The room vouch refuses
+    // it the rating and it is recorded anyway: XP, a PvP history row, mode
+    // stats, and a `bestStreak` read from the run of the player being
+    // watched — which is a maximum, so permanent, and takes the rally rungs
+    // with it.
+    if (spectating) {
+      recordedWinnerRef.current = winner;
+      return;
+    }
     if (recordedWinnerRef.current === winner) return;
     recordedWinnerRef.current = winner;
     recordMatchCompletion(winner === 'player');
