@@ -12,6 +12,7 @@
 // explicit design. This is the thing that runs it.
 
 import fs from 'node:fs';
+import path from 'node:path';
 
 import type { S3Target } from './s3';
 
@@ -335,23 +336,77 @@ export interface DirProbe {
   dirWritable: boolean;
   dirError: string | null;
   /**
+   * Whether BACKUP_DIR lives on a filesystem MOUNTED into this container, or
+   * on the image's own writable layer. `null` when it cannot be determined.
+   *
+   * This is the check that catches the primary deployment, and it replaces one
+   * that could not. `sameDeviceAsData` was written for this job and gets it
+   * exactly backwards, because an unmounted /backups sits on **overlayfs**
+   * while /data is a bind mount from the host: their device numbers DIFFER, so
+   * the comparison stayed silent on the one failure it existed for — snapshots
+   * written into the container and discarded on every deploy, with a boot line
+   * still saying the scheduler was armed. Meanwhile it fired on a correctly
+   * bind-mounted /backups that merely shares a disk with the Docker volume,
+   * which is the healthy setup. Silent on the danger, loud on the fine case:
+   * the arrangement that teaches an operator to stop reading boot warnings.
+   *
+   * Asking whether the directory is ON a mount answers it directly. Walking
+   * PARENTS rather than testing the directory itself is what makes a path
+   * inside a mount (`/backups/phong`, where `/backups` is the mount) come out
+   * true; crossing a device boundary on the way up is the mount point.
+   */
+  onMountedVolume: boolean | null;
+  /**
    * Whether BACKUP_DIR sits on the same filesystem as DATA_DIR.
    *
-   * The check that actually catches the primary deployment. The Dockerfile does
-   * `mkdir -p /backups && chown node`, so an UNMOUNTED /backups is writable in
-   * the image layer: the backup appears to work and is thrown away on every
-   * deploy. A path comparison cannot see that — `scripts/backup.mjs` only
-   * refuses paths inside DATA_DIR — but device numbers can.
+   * Kept, demoted, and no longer pretending to be the deploy check above. It
+   * answers a real and different question — one disk loss takes both copies —
+   * which is true of a perfectly good bind mount and is why offsite exists. A
+   * note, not an alarm.
    */
   sameDeviceAsData: boolean;
 }
 
 /**
- * Can we write there, and is it the same disk as the data?
+ * Is `dir` on a mounted filesystem, or on the one its root is on?
+ *
+ * Pure over `devOf` so the four shapes are a fast test rather than something
+ * only a live container can show — no `/proc`, so it is not Linux-only, and
+ * no privileges, so a test does not need to mount anything to describe one.
+ *
+ * `null` on any error: a directory that cannot be walked is one this must say
+ * NOTHING about. The alarm it feeds is loud, and firing it on a stat failure
+ * would be the false positive this whole change exists to remove.
+ */
+export function onMountedVolume(
+  dir: string,
+  devOf: (p: string) => number,
+  realpath: (p: string) => string = (p) => p
+): boolean | null {
+  try {
+    let cur = realpath(dir);
+    let dev = devOf(cur);
+    for (;;) {
+      const parent = path.dirname(cur);
+      // `path.dirname('/')` is `/`, so this is the top and nothing was
+      // crossed: the directory lives on the root filesystem.
+      if (parent === cur) return false;
+      const parentDev = devOf(parent);
+      if (parentDev !== dev) return true;
+      cur = parent;
+      dev = parentDev;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Can we write there, is it mounted, and is it the same disk as the data?
  *
  * The only impure function in this file, and it is here rather than in
- * server.ts so the check that actually catches the primary deployment is a
- * fast test instead of something only a live container can show.
+ * server.ts so the checks that catch a misconfigured deployment are fast tests
+ * instead of something only a live container can show.
  */
 export function probeBackupDir(dir: string, dataDir: string): DirProbe {
   let dirWritable = false;
@@ -364,10 +419,14 @@ export function probeBackupDir(dir: string, dataDir: string): DirProbe {
     dirError = (e as Error)?.message ?? String(e);
   }
 
-  // Device numbers, not a path comparison. `scripts/backup.mjs` already
-  // refuses a destination INSIDE DATA_DIR, and that is a different question:
-  // /backups and /data are different paths on the same disk whenever the mount
-  // is missing, which is precisely the case that looks like it is working.
+  const mounted = onMountedVolume(
+    dir,
+    (p) => fs.statSync(p).dev,
+    // Followed, or the walk climbs the symlink's own path while every device
+    // number comes from the target's.
+    (p) => fs.realpathSync(p)
+  );
+
   let sameDeviceAsData = false;
   try {
     sameDeviceAsData = fs.statSync(dir).dev === fs.statSync(dataDir).dev;
@@ -376,7 +435,7 @@ export function probeBackupDir(dir: string, dataDir: string): DirProbe {
        line above already says so if it is the backup directory. */
   }
 
-  return { dirWritable, dirError, sameDeviceAsData };
+  return { dirWritable, dirError, onMountedVolume: mounted, sameDeviceAsData };
 }
 
 export interface ReadinessFacts extends DirProbe {
@@ -424,10 +483,36 @@ export function readinessLines(
       `[backup] on: ${cfg.dir}, keep ${cfg.keep}, every ${hours}h. ` +
         `First check in ${Math.round(BACKUP_BOOT_DELAY_MS / 60000)}m.`
     );
+    // The alarm, and the reason this pair was rewritten: an unmounted
+    // BACKUP_DIR is a directory in the image, so every snapshot verifies,
+    // reports success, and is destroyed by the next deploy. Nothing else says
+    // so — the scheduler is working exactly as designed.
+    //
+    // Suppressed when offsite is configured, because there it is not a
+    // mistake: render.yaml deliberately stages in /tmp and says the bucket IS
+    // the backup. An alarm that fires on a documented setup is one operators
+    // learn to scroll past, which costs more than it catches.
+    if (facts.onMountedVolume === false) {
+      if (cfg.target) {
+        info.push(
+          '[backup] note: BACKUP_DIR is not a mounted volume, so local snapshots are a staging area — ' +
+            'they are discarded on the next deploy and the bucket is the backup.'
+        );
+      } else {
+        warn.push(
+          '[backup] WARNING: BACKUP_DIR is not a mounted volume — every snapshot is written inside the ' +
+            'container and destroyed by the next deploy. Nothing here survives, and offsite is off.'
+        );
+      }
+    }
+    // A note rather than a warning, and no longer claiming to be the check
+    // above. It is true of a perfectly good bind mount that happens to share a
+    // disk with the Docker volume — the healthy setup — and what it actually
+    // says is that one disk loss takes both copies.
     if (facts.sameDeviceAsData) {
-      warn.push(
-        '[backup] WARNING: BACKUP_DIR is on the same filesystem as DATA_DIR — a volume loss takes both, ' +
-          'and an unmounted /backups is thrown away on every deploy.'
+      info.push(
+        '[backup] note: BACKUP_DIR and DATA_DIR are on the same filesystem, so one disk loss takes ' +
+          'both copies. Offsite is what covers that.'
       );
     }
   }

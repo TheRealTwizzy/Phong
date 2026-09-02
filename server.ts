@@ -4357,7 +4357,7 @@ async function startServer() {
       // who never opted in should not find a stray directory appear.
       const probe = backupCfg.enabled
         ? probeBackupDir(backupCfg.dir, DATA_DIR)
-        : { dirWritable: false, dirError: null, sameDeviceAsData: false };
+        : { dirWritable: false, dirError: null, onMountedVolume: null, sameDeviceAsData: false };
       const facts = {
         ...probe,
         lastOkAt: Number(db.getMeta(META_OK)) || null,

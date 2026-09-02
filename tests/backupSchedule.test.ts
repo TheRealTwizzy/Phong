@@ -7,6 +7,7 @@ import {
   DEFAULT_BACKUP_INTERVAL_HOURS,
   DEFAULT_BACKUP_KEEP,
   backupDue,
+  onMountedVolume,
   probeBackupDir,
   readBackupConfig,
 } from '../server/backup';
@@ -258,6 +259,57 @@ describe('readBackupConfig', () => {
   });
 });
 
+describe('onMountedVolume', () => {
+  // The four shapes, over a fake device map rather than a real filesystem,
+  // because describing a mount in a test must not require making one: no
+  // privileges, no /proc, and the same answer on every machine. What a real
+  // filesystem would add is the confidence that `statSync().dev` behaves the
+  // way this assumes, which the last case here takes from the actual root.
+  const fs_ = (devs: Record<string, number>) => (p: string) => {
+    if (!(p in devs)) throw new Error(`no such path ${p}`);
+    return devs[p];
+  };
+
+  it('sees a directory mounted straight in', () => {
+    // /backups is a bind mount: crossing into / changes device.
+    expect(onMountedVolume('/backups', fs_({ '/backups': 42, '/': 1 }))).toBe(true);
+  });
+
+  it('sees a directory INSIDE a mount, which is why parents are walked', () => {
+    // Testing the directory against its own parent alone would call this
+    // false: /backups/phong and /backups share a device. The boundary is one
+    // level further up.
+    expect(
+      onMountedVolume('/backups/phong', fs_({ '/backups/phong': 42, '/backups': 42, '/': 1 }))
+    ).toBe(true);
+  });
+
+  it('sees an UNMOUNTED directory in the image layer', () => {
+    // The case the old check could not catch, and the whole reason for this
+    // one. Nothing is crossed on the way to the root.
+    expect(onMountedVolume('/backups', fs_({ '/backups': 1, '/': 1 }))).toBe(false);
+  });
+
+  it('says nothing at all when a path cannot be walked', () => {
+    // null is "cannot tell". The alarm it feeds is loud, and firing it on a
+    // stat failure is the false positive this check exists to remove.
+    expect(onMountedVolume('/gone', fs_({ '/': 1 }))).toBeNull();
+  });
+
+  it('follows a symlink before walking, or every device is the target’s', () => {
+    // The walk climbs the PATH while the devices come from wherever it points.
+    // Unfollowed, /link would be compared against / and read as unmounted.
+    const devs = { '/backups': 42, '/': 1 };
+    expect(onMountedVolume('/link', fs_(devs), () => '/backups')).toBe(true);
+  });
+
+  it('agrees with the real filesystem that the root is not a mounted volume', () => {
+    // The one case that is the same everywhere and needs no privileges:
+    // dirname('/') is '/', so the walk reaches the top having crossed nothing.
+    expect(onMountedVolume('/', (p) => fs.statSync(p).dev, (p) => fs.realpathSync(p))).toBe(false);
+  });
+});
+
 describe('probeBackupDir', () => {
   const made: string[] = [];
   const tmp = () => {
@@ -300,6 +352,16 @@ describe('probeBackupDir', () => {
     const root = tmp();
     const probe = probeBackupDir(path.join(root, 'backups'), root);
     expect(probe.sameDeviceAsData).toBe(true);
+  });
+
+  it('reports whether the directory is on a mounted volume', () => {
+    // Through the real filesystem this time. A temp directory is on whatever
+    // /tmp is on, which differs by machine — so this asserts the field is
+    // ANSWERED rather than which way, and the four shapes are pinned above
+    // where they can be stated deterministically.
+    const root = tmp();
+    const probe = probeBackupDir(path.join(root, 'backups'), root);
+    expect(probe.onMountedVolume === true || probe.onMountedVolume === false).toBe(true);
   });
 
   it('does not claim a shared filesystem when DATA_DIR does not exist yet', () => {
