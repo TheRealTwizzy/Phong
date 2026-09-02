@@ -24,6 +24,7 @@
  * opened `readOnly`, and it is safe to run against a live server (SQLite is in
  * WAL mode, so readers never block the writer).
  */
+import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 
@@ -139,6 +140,65 @@ function orphans(): void {
   );
 }
 
+/**
+ * Where backups stand. Here rather than on `/api/health`, deliberately: that
+ * route is unauthenticated and unmetered, so a bucket name and the time of the
+ * last successful backup would be free reconnaissance for anybody who wanted
+ * to know when this server is least likely to be watched. This tool already
+ * requires a shell inside the container.
+ *
+ * Read-only like everything else here: three rows out of `meta`, and a
+ * directory listing.
+ */
+function backups(): void {
+  const meta = (key: string): string | null =>
+    all<{ value: string }>('SELECT value FROM meta WHERE key = ?', key)[0]?.value ?? null;
+  const when = (raw: string | null): string => {
+    const at = Number(raw);
+    if (!raw || !Number.isFinite(at)) return 'never';
+    const mins = Math.round((Date.now() - at) / 60000);
+    return `${new Date(at).toISOString()} (${mins < 90 ? `${mins}m` : `${Math.round(mins / 60)}h`} ago)`;
+  };
+
+  const enabled = process.env.BACKUP_ENABLED === '1' || process.env.BACKUP_ENABLED === 'true';
+  const dir = process.env.BACKUP_DIR || '(unset)';
+  console.log(`scheduler:      ${enabled ? 'on' : 'OFF — snapshots are manual'}`);
+  console.log(`local dir:      ${dir}`);
+  console.log(`last attempt:   ${when(meta('backup_attempt_at'))}`);
+  console.log(`last verified:  ${when(meta('backup_ok_at'))}`);
+  console.log(`last offsite:   ${when(meta('backup_upload_ok_at'))}`);
+
+  // The endpoint and bucket, never the credential. This process has the secret
+  // in its own environment and there is no reason to put it on a terminal.
+  const endpoint = process.env.BACKUP_S3_ENDPOINT;
+  console.log(
+    `offsite:        ${endpoint ? `s3://${process.env.BACKUP_S3_BUCKET ?? '?'}/${process.env.BACKUP_S3_PREFIX ?? 'phong/'} @ ${endpoint}` : 'OFF (BACKUP_S3_ENDPOINT unset)'}`
+  );
+
+  if (dir !== '(unset)') {
+    try {
+      const files = fs
+        .readdirSync(dir)
+        .filter((f) => /^phong-\d{4}-\d{2}-\d{2}T/.test(f))
+        .sort();
+      console.log(`\n${files.length} local snapshot(s) in ${dir}:`);
+      for (const f of files.slice(-5)) {
+        const bytes = fs.statSync(path.join(dir, f)).size;
+        console.log(`  ${f}  ${(bytes / 1024).toFixed(0)}KB`);
+      }
+      if (files.length > 5) console.log(`  … and ${files.length - 5} older`);
+    } catch (e) {
+      console.log(`\ncannot read ${dir}: ${(e as Error)?.message}`);
+    }
+  }
+
+  console.log(
+    '\nA verified local snapshot is half a backup: losing the host is the likeliest\n' +
+      'thing you are recovering from. "last offsite: never" with the scheduler on\n' +
+      'means the uploads are failing — the server log carries the status and code.'
+  );
+}
+
 const [command, argument] = process.argv.slice(2);
 switch (command) {
   case 'whois':
@@ -151,11 +211,15 @@ switch (command) {
   case 'orphans':
     orphans();
     break;
+  case 'backups':
+    backups();
+    break;
   default:
     console.log(`Phong support CLI — read-only, safe to run against a live server.
 
   node /app/dist/admin.cjs whois <username|deviceId>   one account: recovery code, history, verdict
   node /app/dist/admin.cjs orphans                     accounts that look unreachable
+  node /app/dist/admin.cjs backups                     when this server last backed itself up
 
 Reading from ${DB_FILE} (override with DATA_DIR or DB_FILE).
 

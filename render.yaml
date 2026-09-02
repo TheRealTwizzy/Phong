@@ -17,6 +17,33 @@ services:
         value: production
       - key: DATA_DIR
         value: /data
+      # Backups. Render gives a service ONE disk and the starter plan cannot
+      # attach a second, so unlike the Docker deployments there is nowhere on
+      # this host for a snapshot to live that would survive losing the disk:
+      # **on Render the bucket IS the backup**, and BACKUP_DIR below is only a
+      # staging area for the file on its way out. Hence keep 2 rather than 14 —
+      # /tmp is ephemeral and shares the instance's own storage.
+      - key: BACKUP_ENABLED
+        value: "1"
+      - key: BACKUP_DIR
+        value: /tmp/backups
+      - key: BACKUP_KEEP
+        value: "2"
+      # Offsite. Set these in the dashboard, not here — `sync: false` means
+      # Render prompts for a value and never stores one in the repo. With the
+      # endpoint empty the scheduler still takes local snapshots, which on this
+      # plan means it is writing to ephemeral storage and protecting nothing.
+      # Use a PutObject-only credential.
+      - key: BACKUP_S3_ENDPOINT
+        sync: false
+      - key: BACKUP_S3_BUCKET
+        sync: false
+      - key: BACKUP_S3_REGION
+        sync: false
+      - key: BACKUP_S3_ACCESS_KEY_ID
+        sync: false
+      - key: BACKUP_S3_SECRET_ACCESS_KEY
+        sync: false
     disk:
       name: phong-data
       mountPath: /data

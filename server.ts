@@ -4,7 +4,7 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { db, RecordMatchContext } from './server/db';
+import { DATA_DIR, db, RecordMatchContext } from './server/db';
 import { BOT_ROSTER } from './server/bots';
 import {
   clearSessionCookie,
@@ -22,6 +22,18 @@ import {
 } from './server/auth';
 import { buildId } from './server/build';
 import { hasUnlock, playableDifficulty } from './src/achievements';
+import {
+  BACKUP_BOOT_DELAY_MS,
+  BACKUP_CHECK_MS,
+  META_OK,
+  META_UPLOAD_OK,
+  probeBackupDir,
+  readBackupConfig,
+  readinessLines,
+  runBackupTick,
+} from './server/backup';
+import { snapshotOnce } from './server/backupRun';
+import { putObject } from './server/s3';
 import { normalizeDifficulty } from './src/rating';
 import { transformBallForOpponent } from './server/transform';
 import {
@@ -2606,6 +2618,39 @@ async function startServer() {
   sweepGuests();
   setInterval(sweepGuests, 60 * 60 * 1000).unref?.();
 
+  // Backups, on the same shape as the sweep above: a try/catch'd function and
+  // an interval that does not hold the process open.
+  //
+  // What is NOT the same is the cadence. `setInterval(…, 24h)` would very
+  // likely never fire once — every deploy restarts this process, which is what
+  // server/build.ts's session refresh is built on, so a daily timer restarted
+  // every few hours never elapses. The schedule lives in the `meta` table and
+  // this only asks whether it is due yet; see server/backup.ts.
+  //
+  // Not called eagerly at t=0, unlike sweepGuests: boot is when migrations run,
+  // the bot roster seeds and the reconnect stampede lands. Two minutes is still
+  // well inside the window an operator watches a deploy, which is the point.
+  const backupCfg = readBackupConfig(process.env);
+  const backupTick = () => {
+    // `void … .catch()` and not a bare call: server.ts turns an unhandled
+    // rejection into a full shutdown via onFatal, so an escaped rejection from
+    // a BACKUP would close every socket on the server. runBackupTick is built
+    // never to reject; this is the second belt.
+    void runBackupTick(backupCfg, {
+      now: () => Date.now(),
+      getMeta: (k) => db.getMeta(k),
+      setMeta: (k, v) => db.setMeta(k, v),
+      runSnapshot: (cfg) => snapshotOnce(cfg),
+      upload: (file, target, secret) => putObject(file, target, secret),
+      log: (line) => console.log(line),
+      warn: (line) => console.warn(line),
+    }).catch((e) => console.error('[backup] tick failed:', (e as Error)?.message));
+  };
+  if (backupCfg.enabled) {
+    setTimeout(backupTick, BACKUP_BOOT_DELAY_MS).unref?.();
+    setInterval(backupTick, BACKUP_CHECK_MS).unref?.();
+  }
+
   wss.on('connection', (ws: WebSocket, upgradeReq: http.IncomingMessage) => {
     // Answered the last probe. A fresh socket has not been probed yet, so it
     // starts alive rather than one sweep away from being terminated.
@@ -4191,6 +4236,30 @@ async function startServer() {
       }
     } catch (e: any) {
       console.error('[db] could not describe the datastore:', e?.message);
+    }
+
+    // And the same courtesy for backups, for the same reason one line up: the
+    // day you find out the schedule was never armed must not be the day you
+    // need a restore. Printed at boot because that is the one moment somebody
+    // is watching; deliberately NOT on /api/health, which is unauthenticated
+    // and unmetered, so a bucket name and a last-backup time there would be
+    // free reconnaissance.
+    try {
+      // Probed only when the schedule is on: the probe MKDIRS, and an operator
+      // who never opted in should not find a stray directory appear.
+      const probe = backupCfg.enabled
+        ? probeBackupDir(backupCfg.dir, DATA_DIR)
+        : { dirWritable: false, dirError: null, sameDeviceAsData: false };
+      const facts = {
+        ...probe,
+        lastOkAt: Number(db.getMeta(META_OK)) || null,
+        lastUploadOkAt: Number(db.getMeta(META_UPLOAD_OK)) || null,
+      };
+      const { info, warn } = readinessLines(backupCfg, facts, Date.now());
+      for (const line of info) console.log(line);
+      for (const line of warn) console.warn(line);
+    } catch (e: any) {
+      console.error('[backup] could not report readiness:', e?.message);
     }
   });
 

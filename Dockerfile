@@ -16,8 +16,14 @@ RUN npm run build
 
 # ---- runtime stage: only production deps (express, ws) + dist ----
 FROM node:22-alpine
+# BACKUP_DIR is set here even though the schedule is off by default, and that
+# is the point: without it an operator who sets only BACKUP_ENABLED=1 gets
+# /app/backups — writable, inside the image, on a DIFFERENT device from /data,
+# so it slips past the same-filesystem warning and is discarded on every
+# deploy. Naming /backups makes the missing mount visible instead.
 ENV NODE_ENV=production \
     DATA_DIR=/data \
+    BACKUP_DIR=/backups \
     PORT=3000
 WORKDIR /app
 COPY package.json package-lock.json ./

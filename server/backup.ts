@@ -11,6 +11,8 @@
 // What was missing is that nothing ran it, and it ships nothing anywhere by
 // explicit design. This is the thing that runs it.
 
+import fs from 'node:fs';
+
 import type { S3Target } from './s3';
 
 /**
@@ -328,7 +330,7 @@ export async function runBackupTick(cfg: BackupConfig, deps: BackupDeps): Promis
   }
 }
 
-export interface ReadinessFacts {
+export interface DirProbe {
   /** Whether BACKUP_DIR could be created and written. */
   dirWritable: boolean;
   dirError: string | null;
@@ -342,6 +344,42 @@ export interface ReadinessFacts {
    * refuses paths inside DATA_DIR — but device numbers can.
    */
   sameDeviceAsData: boolean;
+}
+
+/**
+ * Can we write there, and is it the same disk as the data?
+ *
+ * The only impure function in this file, and it is here rather than in
+ * server.ts so the check that actually catches the primary deployment is a
+ * fast test instead of something only a live container can show.
+ */
+export function probeBackupDir(dir: string, dataDir: string): DirProbe {
+  let dirWritable = false;
+  let dirError: string | null = null;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+    dirWritable = true;
+  } catch (e) {
+    dirError = (e as Error)?.message ?? String(e);
+  }
+
+  // Device numbers, not a path comparison. `scripts/backup.mjs` already
+  // refuses a destination INSIDE DATA_DIR, and that is a different question:
+  // /backups and /data are different paths on the same disk whenever the mount
+  // is missing, which is precisely the case that looks like it is working.
+  let sameDeviceAsData = false;
+  try {
+    sameDeviceAsData = fs.statSync(dir).dev === fs.statSync(dataDir).dev;
+  } catch {
+    /* one of them does not exist — nothing to compare, and the writability
+       line above already says so if it is the backup directory. */
+  }
+
+  return { dirWritable, dirError, sameDeviceAsData };
+}
+
+export interface ReadinessFacts extends DirProbe {
   lastOkAt: number | null;
   lastUploadOkAt: number | null;
 }
