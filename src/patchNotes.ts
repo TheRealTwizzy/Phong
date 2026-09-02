@@ -37,6 +37,17 @@ export const PATCH_NOTES: PatchNote[] = [
     version: APP_VERSION,
     date: '2026-09-02',
     lines: [
+      'Watching a machine match now ends when the match does, instead of leaving you on a court nobody is playing on.',
+      'Leaving a table closes it, so nobody is left watching an empty one.',
+      'Play Again at a table starts a real second match, and anyone watching comes with you.',
+      'Your rally run at a table is your solo run again — it was opening on your PvP one.',
+      'A machine match with the watching seats open really does leave your rank alone now, as the badge always said.',
+    ],
+  },
+  {
+    version: '1.0.2',
+    date: '2026-09-02',
+    lines: [
       'Release notes now show one update per page, so you can page back through everything that changed.',
       'Every update gets its own page from here on, however small it was.',
     ],

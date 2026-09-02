@@ -12,6 +12,10 @@
 //      told where it already got to rather than opening on 0-0.
 //   5. Standing up asks nothing (no match, no abandon) and returns to the
 //      menu, and the players carry on.
+//   6. A machine match ENDS on the watcher's screen too, carries them into a
+//      rematch, and takes its table down when its one player walks out — all
+//      three of which the wire tests can only ever assert by hand, because
+//      the frame that says so is one the client had no path to producing.
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs).
 import { chromium, devices } from 'playwright-core';
 
@@ -275,6 +279,9 @@ ok('and sit back down, which is what "pre-match" means');
 
   await solo.waitForSelector('#toggle-spectators', { timeout: 8000 });
   await solo.click('#toggle-spectators input');
+  // First to 3, the shortest match anybody can pick, because this leg plays
+  // one out to the whistle and every point is a real rally in a real browser.
+  await solo.click('#lobby-pts-3');
   await solo.click('#seat-1');
   await solo.waitForSelector('#cpu-picker', { timeout: 5000 });
   await solo.click('#cpu-rookie');
@@ -332,6 +339,80 @@ ok('and sit back down, which is what "pre-match" means');
     fail(`the watcher shows ${await totalPoints(onlooker)} points, the machine match has ${seen}`);
   }
   ok(`and the court is live: the watcher follows the score (${seen} point(s))`);
+
+  // ---- and the END of it, which is where this all used to fall apart -----
+  //
+  // The relay learns a machine match is over from one thing only: a
+  // `cpu_frame` carrying `live: false` and the deciding score. The publisher
+  // sat below the loop's `isServing || winner` return, so that frame could
+  // never be produced — the relay kept the table `inPlay` at a stale score,
+  // the watcher never got the final `score_update`, and they sat in front of
+  // a court that had simply stopped. None of that is visible from the wire
+  // tests, which send the frame by hand.
+  await solo.keyboard.down('KeyA');
+  const finish = Date.now() + 90000;
+  while (Date.now() < finish) {
+    if (await shown(solo, '#winner-modal-overlay')) break;
+    await solo.keyboard.press('Space').catch(() => {});
+    await solo.waitForTimeout(700);
+  }
+  await solo.keyboard.up('KeyA');
+  if (!(await shown(solo, '#winner-modal-overlay'))) fail('the machine match never finished');
+
+  const sawResult = await onlooker
+    .waitForSelector('#winner-modal-overlay', { timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!sawResult) fail('the watcher was left on a court whose match had ended');
+  ok('the watcher is told the machine match is over');
+
+  // Play Again has to go through the relay, or match two happens on the
+  // host's phone alone: no game_start, so the watcher's court is never reset
+  // and — now that they HAVE a result overlay — the next match plays out
+  // underneath it, since game_start is one of only two things that clears one.
+  await solo.click('#btn-play-again');
+  const followedIn = await onlooker
+    .waitForFunction(
+      () =>
+        !document.querySelector('#winner-modal-overlay') &&
+        (document.querySelector('#score-player')?.textContent || '').trim() === '0' &&
+        (document.querySelector('#score-opponent')?.textContent || '').trim() === '0',
+      undefined,
+      { timeout: 15000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!followedIn) fail('the watcher was not taken into the rematch');
+  ok('Play Again starts a real second match, and the watcher is taken into it');
+
+  // And the reported bug: leaving. A machine table's host is in `solo` mode,
+  // so Main Menu never reached the code that leaves a room — the socket
+  // stayed open, the seat stayed held, and `isRoomEmpty` therefore saw a live
+  // player, so neither the vacate path nor the reaper touched the table for
+  // half an hour. Meanwhile the loop stops publishing the moment the screen is
+  // no longer the court, so the watcher sat on a still frame of a match
+  // nobody was playing, and could walk back into the same dead table.
+  await solo.click('#btn-quit-to-menu');
+  if (await shown(solo, '#quit-confirm-modal')) await solo.click('#btn-quit-confirm');
+  await solo.waitForSelector('#main-menu-screen', { timeout: 10000 });
+
+  const ejected = await onlooker
+    .waitForSelector('#half-court-canvas', { state: 'detached', timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!ejected) fail('the watcher is still sitting at a table with nobody playing at it');
+  ok('leaving a machine table closes it, and the watchers with it');
+
+  // Gone from the browser too, not merely closed on the people who were in it.
+  await onlooker.waitForSelector('#main-menu-screen', { timeout: 10000 });
+  await onlooker.click('#building-pvp');
+  await onlooker.click('#room-casual');
+  const delisted = await onlooker
+    .waitForFunction((id) => !document.querySelector(`#table-${id}`), cpuCode, { timeout: 15000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!delisted) fail(`table ${cpuCode} is still listed with nobody playing at it`);
+  ok('and it is gone from the room browser');
 
   await onlooker.context().close();
   await solo.context().close();

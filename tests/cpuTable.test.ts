@@ -512,3 +512,117 @@ describe('what a CPU match is worth', () => {
     other.phone.close();
   }, 30_000);
 });
+
+describe('a CPU table that stops being played', () => {
+  const roomInfo = async (roomId: string) =>
+    fetch(`${base}/api/room/${roomId}`).then((r) => r.json());
+
+  it('closes, with its watchers, the moment its one player leaves', async () => {
+    // tests/spectators.test.ts covers the two-human shape. The CPU path
+    // through vacateSeat is a different one and it is the one that shipped
+    // broken: the machine is not in `players`, so a lone host leaving empties
+    // BOTH playing seats on the FIRST leave — `bothSeated` is false so no
+    // abandon is judged, `persistDuelStreaks` returns early, and the room is
+    // deleted with `ejectSpectators` behind it.
+    //
+    // Mid-match deliberately: that is the state the bug was reported in, and
+    // it is the one where every clause of the abandon test would be true of a
+    // watcher if the spectator branch were ever folded into it.
+    const host = await newDevice('CpuLeave1');
+    const onlooker = await newDevice('CpuLeave2');
+    const { phone, roomId } = await seatCpu(host, { spectators: true, cpu: 'rookie' });
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+
+    const w = await relay.openPhone(onlooker);
+    w.send({ type: 'spectate_room', roomId, seat: 2 });
+    await w.await('table_state');
+
+    // A live match under way, so the table is genuinely mid-play.
+    phone.send({
+      type: 'cpu_frame',
+      hostPaddle: 0.5,
+      cpuPaddle: 0.5,
+      ball: { side: 0, x: 0.5, y: 0.5 },
+      scores: [1, 0],
+      live: true,
+    });
+    await sleep(50);
+    expect((await roomInfo(roomId)).exists).not.toBe(false);
+
+    const closed = new Promise<void>((resolve) => w.ws.once('close', () => resolve()));
+    phone.send({ type: 'leave_room' });
+    await Promise.race([closed, sleep(3000)]);
+
+    expect(w.ws.readyState).toBe(3);
+    expect((await roomInfo(roomId)).exists).toBe(false);
+    phone.close();
+  }, 25_000);
+
+  it('tells a watcher who sits down after the whistle that it is over', async () => {
+    // The terminal cpu_frame, stated on the wire. Nobody watches this match
+    // while it is played, which is the case that needs the frame to be
+    // unconditional: without it the relay keeps `inPlay` true and `matchOver`
+    // false at a stale score, and the client walks a watcher onto the court
+    // on exactly that pair — a dead court they can leave and re-enter.
+    const host = await newDevice('CpuOver1');
+    const latecomer = await newDevice('CpuOver2');
+    const { phone, roomId } = await seatCpu(host, { spectators: true, cpu: 'rookie' });
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+    phone.send({
+      type: 'cpu_frame',
+      hostPaddle: 0.5,
+      cpuPaddle: 0.5,
+      ball: null,
+      scores: [3, 0],
+      live: false,
+    });
+    await sleep(50);
+
+    const w = await relay.openPhone(latecomer);
+    w.send({ type: 'spectate_room', roomId, seat: 2 });
+    const sync = await w.await('spectator_sync');
+    const snap = sync.snapshot as { matchOver: boolean; inPlay: boolean; p1Score: number };
+    expect(snap.matchOver).toBe(true);
+    expect(snap.inPlay).toBe(false);
+    expect(snap.p1Score).toBe(3);
+    w.close();
+    phone.close();
+  }, 25_000);
+
+  it('takes its watchers into the next match with it', async () => {
+    // The rematch test above only checks the HOST's copy of game_start, which
+    // is the half that already worked. A watcher's court is reset by that
+    // message and by nothing else — and their result overlay is cleared by it
+    // and by nothing else — so a rematch they are not told about leaves them
+    // watching a live match from behind the last one's final score.
+    const host = await newDevice('CpuAgain1');
+    const onlooker = await newDevice('CpuAgain2');
+    const { phone, roomId } = await seatCpu(host, { spectators: true, cpu: 'rookie' });
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+
+    const w = await relay.openPhone(onlooker);
+    w.send({ type: 'spectate_room', roomId, seat: 2 });
+    await w.await('table_state');
+
+    phone.send({
+      type: 'cpu_frame',
+      hostPaddle: 0.5,
+      cpuPaddle: 0.5,
+      ball: null,
+      scores: [3, 0],
+      live: false,
+    });
+    await sleep(50);
+    w.clear();
+
+    phone.send({ type: 'rematch_request' });
+    const watched = await w.await('game_start');
+    expect(watched.matchSeq).toBe(2);
+    expect((watched.config as any).cpu).toBe('rookie');
+    w.close();
+    phone.close();
+  }, 25_000);
+});
