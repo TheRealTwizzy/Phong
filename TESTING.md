@@ -57,7 +57,7 @@ coverage number.
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `seatGate` | The bracket on the THIRD door into a playing seat, against a real server: a watcher cannot promote past a gate `spectate_room` never asked, one who passes it still can, a private table is not bracketed (an invitation is not a bracket), and a player already seated is not re-judged |
-| `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing) |
+| `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing). Plus the END of such a table: that its one player leaving deletes it and closes its watchers (a different `vacateSeat` path from the two-human one — the machine is not in `players`, so the FIRST leave empties both seats), that a terminal frame is what makes `spectator_sync` say `matchOver`, and that a rematch reaches the watchers and not just the host. Those three drive `cpu_frame` by HAND and so pin the wire, not the client — the client's half of all three had shipped broken with this file's relay assertions green, which is why `spectate` carries them too |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `seatGate` `p2pParity` `headers` | Twelve suites that boot the real server (see §4) |
@@ -79,7 +79,12 @@ cost of it is on the CLIENT and `tsc` names none of the branches: `lobby` proves
 opens from the free chair, that Start is live with nobody opposite, and — the witness that
 matters — that the court comes up with the HUD's **Reset** button, which is hidden in a duel,
 so `mode` genuinely stayed `'solo'` at a relay seat. `spectate` proves a machine match is a
-listed, watchable table whose scoreboard actually follows the play.
+listed, watchable table whose scoreboard actually follows the play — and then drives it to the
+whistle and out of it, which is the leg that only a browser can run: that the watcher is shown
+the result, that Play Again carries them into the second match, and that the host walking out
+closes the table on them and delists it. Every one of those three failed in the field while the
+relay suite was green, because the relay's half of each was already right and nothing on the
+client could produce the message that reached it.
 
 Each gets its own free port, throwaway `DATA_DIR` and `node dist/server.cjs` — a shared
 database would let one suite's players decide another suite's assertions. That isolation is
@@ -144,6 +149,16 @@ duplication has drifted once already: every P2P duel was recorded 0-0 and *both*
 a loss. `tests/protocolParity.test.ts` reads the source and fails the moment a message is
 added to one side only; `tests/p2pParity.test.ts` runs one identical script through both
 transports and compares what each player is told.
+
+**A table with nobody in a playing seat does not exist.** `isRoomEmpty` asks only about live
+PLAYERS, so two spectators and no player is empty and the reaper sweeps it within 15 seconds;
+`vacateSeat` deletes the room outright and ejects the watchers when the last playing seat
+empties. That was held from the relay side alone, and the gap it left is the shape to remember:
+a machine table's host is in `'solo'` mode, so their Main Menu never sent `leave_room` at all —
+the seat stayed held, `isRoomEmpty` saw a live player, and a spectator sat in front of a still
+frame for half an hour. `tests/spectators.test.ts` and `tests/cpuTable.test.ts` hold the relay
+half; `scripts/e2e-spectate.mjs` holds the half where the message has to be SENT, and it is the
+only layer that can.
 
 **A relay message costs its sender only, or it is a bug.** "Gameplay is
 client-authoritative" has always meant a client can lie about its *own* match. Four handlers

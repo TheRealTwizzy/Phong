@@ -667,6 +667,24 @@ describe('every consumer asks the verdict the same way', () => {
     expect(props).toMatch(/difficulty=/);
     expect(props).toMatch(/rankMu=/);
   });
+
+  // The SERVER half of the same verdict, and it has the same failure shape one
+  // level out: `forceUnrankedLadder` is behind a room vouch that needs a
+  // `matchSeq`, and the client sent one only for a `multiplayer` payload. A
+  // machine match at a table is `solo` by design, so the clause could never
+  // pass and a watched machine match went on moving the visible ladder —
+  // while the badge, the quit confirmation and the shipped release note all
+  // said it did not. The route's own tests missed it because they supply
+  // `matchSeq` by hand, which tests the route and not that anything reaches
+  // it. Source, because this lives in a .tsx and there is no jsdom here.
+  it('the record payload sends matchSeq for a table, not just for a duel', () => {
+    const src = readFileSync(resolve(__dirname, '..', 'src/App.tsx'), 'utf8');
+    const at = src.indexOf('matchSeq:', src.indexOf('roomId: roomId'));
+    expect(at).toBeGreaterThan(-1);
+    const expr = src.slice(at, src.indexOf(',\n', at));
+    expect(expr).toMatch(/roomId/);
+    expect(expr).not.toMatch(/multiplayer/);
+  });
 });
 
 describe('autoServeForced', () => {

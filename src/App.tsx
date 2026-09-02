@@ -800,6 +800,17 @@ export default function App() {
   const lastBallPosSentRef = useRef<number>(0);
   const lastCpuFrameSentRef = useRef<number>(0);
   /**
+   * Whether this match's ONE terminal `cpu_frame` has gone out.
+   *
+   * The stream is throttled; the frame that says the match is over is not, it
+   * is sent once and then never again — otherwise a host parked on the winner
+   * overlay would publish `live: false` at 20Hz for as long as they sat there.
+   * Reset in BOTH places a new match can begin: `resetMatch` (the HUD's Reset,
+   * a quit, and walking onto the court from the menu) and the `game_start`
+   * handler, which is the rematch and does not go through `resetMatch`.
+   */
+  const cpuFinalSentRef = useRef<boolean>(false);
+  /**
    * Whether anybody is watching this CPU table.
    *
    * Set from `table_state`, which is the only message that says who is in the
@@ -1274,10 +1285,18 @@ export default function App() {
           // duel that somehow never learned its number says nothing rather
           // than claiming match 0, and the server falls back to the match the
           // room is on — which still deduplicates against the relay's record.
-          matchSeq:
-            modeRef.current === 'multiplayer' && matchSeqRef.current > 0
-              ? matchSeqRef.current
-              : undefined,
+          //
+          // Keyed on holding a ROOM, not on the mode. It asked for
+          // `multiplayer` and a machine match at a table is `solo` by design,
+          // so the number never went out for one — and the server's vouch for
+          // a watched machine match requires it. The whole rule was therefore
+          // unreachable from the shipped client: a match at a table with the
+          // watching seats open went on moving the visible ladder, against
+          // what the pre-match badge, the quit confirmation and the 1.0.1
+          // release note had all been telling the player. The suite missed it
+          // because it supplies `matchSeq` by hand and so tests the route
+          // without testing that anything reaches it.
+          matchSeq: roomId && matchSeqRef.current > 0 ? matchSeqRef.current : undefined,
           // What makes recording this match idempotent. It travels with the
           // payload, so a retry and a replay from the on-device queue carry
           // the same key the first attempt did.
@@ -1956,18 +1975,39 @@ export default function App() {
         shownMatchKeyRef.current = '';
         setRoomConfig(msg.config);
         p2pRef.current?.setConfig(msg.config);
+        // A CPU table plays a SOLO match, so it opens on the solo run — and
+        // the relay's number is not merely the wrong mode's, it is a number
+        // the relay cannot possibly have: `ball_cross_net` is refused at a
+        // table with one human in it, so `countReturn` never runs and
+        // `room.streaks` is frozen at whatever `create_room` seeded it with.
+        // That seed is `carriedStreak`, which reads the DUEL run — so a solo
+        // match opened on the player's PvP streak. Wrong in both directions
+        // and only one of them is merely annoying: the solo carry was
+        // confiscated, and a duel run of N became a free solo `bestStreak` of
+        // N with nothing earned, which is permanent through `highestRally`
+        // and takes the rally rungs, `perpetual-blue` and `quantum-gold` with
+        // it. The `??` never saved it, because `0` is not nullish.
+        //
+        // A WATCHER is excluded, and that clause is load-bearing: they run
+        // this same handler with `playerIndexRef` set to the side they sit
+        // beside, so keying on the config alone would seed somebody else's
+        // seat from the watcher's own solo run.
+        const cpuSeat = !spectatingRef.current && !!msg.config.cpu;
         setStats((s) =>
           startMatchStreaks(
             { ...s, score: 0, opponentScore: 0, aces: 0, matchesWon: 0 },
             // The relay's number, not the profile's: it seeded the seat from
             // the store and it is what this match will be recorded on, so a
             // phone that disagrees is a phone showing something else.
-            (playerIndexRef.current !== null ? msg.streaks?.[playerIndexRef.current] : undefined) ??
-              carriedStreak('multiplayer'),
+            cpuSeat
+              ? carriedStreak('solo')
+              : ((playerIndexRef.current !== null
+                  ? msg.streaks?.[playerIndexRef.current]
+                  : undefined) ?? carriedStreak('multiplayer')),
             // The other seat's, for the telemetry overlay. Shown, never
             // counted: what the opponent is paid and rated on is their own
-            // phone's business and the relay's.
-            msg.streaks?.[playerIndexRef.current === 0 ? 1 : 0] ?? 0
+            // phone's business and the relay's. A machine has no run at all.
+            cpuSeat ? 0 : (msg.streaks?.[playerIndexRef.current === 0 ? 1 : 0] ?? 0)
           )
         );
         setTotalTouches(0);
@@ -1975,6 +2015,29 @@ export default function App() {
         setIsPlayerServer(msg.servingPlayer === playerIndexRef.current);
         setIsServing(true);
         setWinner(null);
+        // `game_start` is the OTHER way a match begins, and it is not
+        // `resetMatch` — so everything `resetMatch` clears that describes the
+        // last match has to be cleared here too, or a rematch inherits it.
+        // This was invisible while the only rematch was a duel's, where the
+        // AI is not simulated and a fresh point is opened by the countdown
+        // anyway; routing a CPU table's Play Again through the relay is what
+        // put a locally simulated opponent on the far side of this message.
+        //
+        // A new match opens on a new POINT: who served it, whether the
+        // opponent has returned anything, and how many balls have crossed.
+        // Unconditional, because that is true of a duel rematch as well and
+        // the last two are not self-healing — `oppReturned` carried across a
+        // restart refuses the next match's first genuine ace.
+        servedThisPointRef.current = true;
+        oppReturnedThisPointRef.current = false;
+        oppCrossingsThisPointRef.current = 0;
+        // And a new match to tell the table about when it ends.
+        cpuFinalSentRef.current = false;
+        // The machine, though, only when there IS one and we are the one
+        // simulating it: a watcher runs no physics, and its paddle would
+        // otherwise open match two wherever it stopped in match one, with its
+        // rally state intact and its reaction timer part-spent.
+        if (cpuSeat) aiRef.current.reset();
         setOppBall(null);
         setLastMatchResult(null);
         setRematchVotes([false, false]);
@@ -2476,6 +2539,11 @@ export default function App() {
           // than the one that started, decided by a dropped packet.
           setRoomId(null);
           setTableState(null);
+          // The table is gone, so nobody is watching it. `watchersRef` is only
+          // ever SET by `table_state`, so without this it outlives the table
+          // it describes — harmless while `sendNetRef` no-ops on a dead
+          // socket, and a stale claim about the world either way.
+          watchersRef.current = false;
           setIsMultiplayerOpen(false);
           setToastTableLost(true);
           return;
@@ -2846,6 +2914,9 @@ export default function App() {
     setSpectating(null);
     spectatingRef.current = null;
     setTableState(null);
+    // Same reason as the degrade path above: this ref is set by `table_state`
+    // and cleared by nothing, so leaving a table has to clear it by hand.
+    watchersRef.current = false;
     watchedBallRef.current = null;
     // A seating that never reached game_start would otherwise leave the lobby
     // suppressed for the NEXT room this page opens.
@@ -2950,6 +3021,97 @@ export default function App() {
         stallHandledRef.current = false;
       }
 
+      // Hoisted above the serving/winner return below, because the CPU-table
+      // publisher under it needs the mode and that return is what used to
+      // keep the publisher from ever running at the end of a match.
+      const currentMode = modeRef.current;
+
+      // Publish the whole visible table to anyone WATCHING this CPU match.
+      //
+      // ABOVE the serving/winner return below, and that placement is the
+      // whole of two bug fixes. Under it, the block was unreachable in the
+      // two states that matter most: `isServing` is true between every single
+      // point, so the stream went silent for every serve wind-up and a
+      // watcher's court froze after each point until the next ball; and
+      // `winner` is true for the rest of the match, so `live: !winner` — the
+      // line written for exactly this — could never be evaluated in its false
+      // form. The relay was therefore never told a machine match had ended.
+      // It kept `inPlay` true and `matchOver` false at a stale score, so the
+      // watcher got no final `score_update` and never reached the result
+      // overlay, `join_room` refused the machine's chair as mid-match
+      // forever, `rematch_request` was a silent no-op, and a watcher who came
+      // back was walked onto the dead court by `spectator_sync`.
+      //
+      // Off the refs, which are assigned in the render body, so top or bottom
+      // of the loop reads the same ball. `aiRef.current.paddleX` is the one
+      // exception — it is mutated further down — so the paddle it publishes
+      // is one frame old, which is nothing against a 50ms stream.
+      //
+      // The ball is a SIDE rather than a crossing, so the relay sees it leave
+      // a half rather than having to be told: the AI's serve materialises
+      // inside its own half and its miss ends past its baseline, and neither
+      // is a crossing anybody could report.
+      //
+      // Both clauses of the discriminator are needed. `roomId` alone is not a
+      // CPU table, and `config.cpu` alone survives the table: the degrade
+      // path keeps the room's TERMS while nulling the room, so a match that
+      // lost its table still reports a machine. A menu-started solo match
+      // fails both.
+      if (currentMode === 'solo' && roomIdRef.current && configRef.current.cpu) {
+        // Two arms, because they answer different questions. The STREAM is
+        // for a watcher and costs nothing when there is none — the relay runs
+        // no simulation, so these frames exist purely for somebody else's
+        // eyes. The TERMINAL frame is a fact about the TABLE, so it goes
+        // whether or not anybody is watching: without it a watcher who sits
+        // down AFTER an unwatched match gets `matchOver: false` in their
+        // `spectator_sync` and is walked onto a court with nothing on it.
+        // One message per match, once.
+        const finished = !!winner;
+        const due = finished
+          ? !cpuFinalSentRef.current
+          : watchersRef.current && time - lastCpuFrameSentRef.current > 50;
+        if (due) {
+          if (finished) cpuFinalSentRef.current = true;
+          else lastCpuFrameSentRef.current = time;
+          const mine = ballRef.current;
+          const theirs = oppBallRef.current;
+          sendNetRef.current({
+            type: 'cpu_frame',
+            hostPaddle: paddleXRef.current,
+            cpuPaddle: aiRef.current.paddleX,
+            ball: mine.active
+              ? { side: 0, x: mine.x, y: mine.y }
+              : theirs?.active
+                ? { side: 1, x: theirs.x, y: theirs.y }
+                : null,
+            // In SEAT order, because that is how the relay reads it
+            // (`room.scores[me]`, `room.scores[cpuIdx]`) — not because the two
+            // differ today. Only seat 0 can seat a machine, since
+            // `set_room_config` is host-only and the host is whoever holds seat
+            // 0 right now, so `cpuSeatOf` is always 1 and mine-first would give
+            // the same array. Written by seat because the cost is nothing and
+            // the failure if that ever stops being true is silent: both
+            // watchers' scoreboards inverted, and the relay reading the
+            // MACHINE's score as the one that ends the match.
+            scores:
+              (playerIndexRef.current ?? 0) === 0
+                ? [statsRef.current.score, statsRef.current.opponentScore]
+                : [statsRef.current.opponentScore, statsRef.current.score],
+            // The loop's effect lists `winner` in its deps, so this closure is
+            // rebuilt when it changes and reads the current value. `live` is
+            // what sets `room.inPlay`, which is what decides whether a joiner
+            // may take the CPU's seat — and, with the score, what the relay
+            // derives `matchOver` from.
+            //
+            // The final SCORE rides out correctly for the same reason: the
+            // rebuild cannot run before the render that commits it to
+            // `statsRef`, so the terminal frame is always a later frame than
+            // the point that decided the match, never the same one.
+            live: !finished,
+          });
+        }
+      }
+
       if (isServingRef.current || winner) {
         animId = requestAnimationFrame(gameLoop);
         return;
@@ -2984,7 +3146,6 @@ export default function App() {
         setToastRallyStalled(true);
       }
 
-      const currentMode = modeRef.current;
       const currentSettings = settingsRef.current;
 
       // ==============================================================
@@ -3303,61 +3464,6 @@ export default function App() {
         setOppBall(ob);
       }
 
-      // Publish the whole visible table to anyone WATCHING this CPU match.
-      //
-      // AFTER both halves and off the refs, not inside either section: section
-      // 3 runs only while the ball is on the player's half and section 4 only
-      // while it is on the AI's, so a publisher inside either would go silent
-      // for half of every rally — and the watcher would freeze mid-flight
-      // rather than see the ball cross.
-      //
-      // Only while somebody is watching. The relay has no simulation, so
-      // these frames exist purely for a spectator, and the ordinary case —
-      // nobody watching — must cost nothing. `watchersRef` comes from
-      // `table_state`, which is the only message that knows.
-      //
-      // The ball is a SIDE rather than a crossing, so the relay sees it leave
-      // a half rather than having to be told: the AI's serve materialises
-      // inside its own half and its miss ends past its baseline, and neither
-      // is a crossing anybody could report.
-      if (
-        currentMode === 'solo' &&
-        watchersRef.current &&
-        time - lastCpuFrameSentRef.current > 50
-      ) {
-        lastCpuFrameSentRef.current = time;
-        const mine = ballRef.current;
-        const theirs = oppBallRef.current;
-        sendNetRef.current({
-          type: 'cpu_frame',
-          hostPaddle: paddleXRef.current,
-          cpuPaddle: aiRef.current.paddleX,
-          ball: mine.active
-            ? { side: 0, x: mine.x, y: mine.y }
-            : theirs?.active
-              ? { side: 1, x: theirs.x, y: theirs.y }
-              : null,
-          // In SEAT order, because that is how the relay reads it
-          // (`room.scores[me]`, `room.scores[cpuIdx]`) — not because the two
-          // differ today. Only seat 0 can seat a machine, since
-          // `set_room_config` is host-only and the host is whoever holds seat
-          // 0 right now, so `cpuSeatOf` is always 1 and mine-first would give
-          // the same array. Written by seat because the cost is nothing and
-          // the failure if that ever stops being true is silent: both
-          // watchers' scoreboards inverted, and the relay reading the
-          // MACHINE's score as the one that ends the match.
-          scores:
-            (playerIndexRef.current ?? 0) === 0
-              ? [statsRef.current.score, statsRef.current.opponentScore]
-              : [statsRef.current.opponentScore, statsRef.current.score],
-          // The loop's effect lists `winner` in its deps, so this closure is
-          // rebuilt when it changes and reads the current value. `live` is
-          // what sets `room.inPlay`, which is what decides whether a joiner
-          // may take the CPU's seat.
-          live: !winner,
-        });
-      }
-
       animId = requestAnimationFrame(gameLoop);
     };
 
@@ -3409,6 +3515,8 @@ export default function App() {
     // A new match is a new thing to record and a new result to show.
     matchKeyRef.current = '';
     shownMatchKeyRef.current = '';
+    // And a new match to tell the table about when it ends.
+    cpuFinalSentRef.current = false;
     aiRef.current.reset();
     // Back into the server's hand, exactly as a fresh match opens.
     setBall({
@@ -3573,6 +3681,35 @@ export default function App() {
       rememberCarry(carryRef.current, modeRef.current, statsRef.current.streak);
       if (abandoningLiveSoloMatch()) void recordMatchCompletion(false);
       else void reportStreak(modeRef.current, statsRef.current.streak);
+    }
+    // A solo match can be played AT A TABLE, and walking out of one has to
+    // actually leave it. This is the only door: a CPU table's host is in
+    // `solo` mode by design, so quitToMenu's `multiplayer` arm above never
+    // sees them and they fell straight to the tail below — which sets the
+    // screen and nothing else. The socket stayed open, the seat stayed held,
+    // `config.cpu` stayed set, and `isRoomEmpty` therefore saw a live player,
+    // so neither vacateSeat nor the reaper touched the room for the 30
+    // minutes until its unpaired TTL. Meanwhile the loop stops publishing
+    // (screen is no longer `game`), so anybody watching sat in front of a
+    // court that had simply stopped moving, could leave, and could walk back
+    // into the same dead table. The relay half was always right — vacateSeat
+    // empties the last playing seat, deletes the room and ejects the
+    // watchers; nothing ever told it.
+    //
+    // Guarded on holding a ROOM rather than on `config.cpu`: this function is
+    // only reachable at solo/practice/split, a CPU table is the only one of
+    // those that holds a seat today, and a narrower test would reproduce this
+    // exact bug for the next table shape that does. handleLeaveRoom ends with
+    // the same `setScreen('menu')` and `resetMatch()` as the tail, so this is
+    // that tail plus the leave.
+    //
+    // AFTER the record above, never before: recordMatchCompletion builds its
+    // payload synchronously up to its first await and reads `roomId` from the
+    // closure, so leaving first would file the match with no table to vouch
+    // for it.
+    if (roomIdRef.current) {
+      handleLeaveRoom();
+      return;
     }
     setScreen('menu');
     resetMatch();
@@ -3996,6 +4133,23 @@ export default function App() {
                 currentLanguage
               )}
             </p>
+            {/* And that walking out takes the match away from other people
+                too. Leaving a table is what closes it, so the watchers are
+                ejected with it — a consequence the player cannot see from
+                the court, which is exactly the kind this sheet exists to
+                name. Read off `tableState`, not `watchersRef`: a ref does
+                not re-render, so the line would be a frame behind the seat
+                it describes. Not shown for a Reset, which keeps the table
+                and simply restarts the match under it. */}
+            {exitConfirm !== 'solo-reset' &&
+              tableState?.seats.some((s) => s.seat >= 2 && s.playerId !== null) && (
+                <p
+                  id="quit-confirm-watchers"
+                  className="text-2xs leading-relaxed font-normal tracking-normal text-ink-dim"
+                >
+                  {t('quit_confirm_watchers', currentLanguage)}
+                </p>
+              )}
           </div>
         </Sheet>
 
@@ -4575,7 +4729,36 @@ export default function App() {
                   size="lg"
                   block
                   onClick={() => {
-                    if (mode === 'multiplayer') {
+                    // A machine match played AT A TABLE restarts through the
+                    // relay, not locally. It is a solo match, so it used to
+                    // take the branch below and match two happened entirely
+                    // on this phone: the relay never ran `startMatch`, never
+                    // bumped `matchSeq` and never broadcast `game_start` — so
+                    // anybody watching sat out the whole of it on the last
+                    // match's state. Worse once the terminal frame exists,
+                    // since they now HAVE a result overlay and only
+                    // `game_start` or `spectator_sync` clears one: match two
+                    // would have played out underneath it.
+                    //
+                    // `resetMatch` is deliberately NOT called on this path.
+                    // The inbound `game_start` is what restarts the court,
+                    // and doing both would open the match locally at 0-0 with
+                    // `live: true` while the relay still had the old one
+                    // decided.
+                    //
+                    // The socket clause is the degrade rule and it has a real
+                    // trigger, not a hypothetical one: `soloSince` is never
+                    // cleared at a machine table, so the reaper takes it as
+                    // `unpaired` after thirty minutes however busy the host
+                    // keeps it. When that happens the table is gone and this
+                    // is a plain local solo match again — which must not mean
+                    // a Play Again button that does nothing.
+                    const atTable =
+                      roomId &&
+                      activeConfig.cpu &&
+                      ws !== null &&
+                      ws.readyState === WebSocket.OPEN;
+                    if (mode === 'multiplayer' || atTable) {
                       sendNetRef.current({ type: 'rematch_request' });
                     } else {
                       resetMatch();
