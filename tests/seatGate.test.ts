@@ -227,4 +227,48 @@ describe('a refusal costs the table nothing', () => {
     p1.close();
     intruder.close();
   }, 30_000);
+
+  it('does not evict the machine on its way out of a VENUE_LOCKED seat claim', async () => {
+    // The same rule at the third door, which now has an eviction of its own.
+    // Watching is ungated by design — the bracket gates who PLAYS — so a
+    // Legend can sit down at a beginner table and reach for the machine's
+    // chair from inside. The gate refuses them, and that refusal has to be
+    // free: the comment above says `swap_seat` has always had its eviction
+    // below its gate, which was trivially true while it had no eviction at
+    // all. It has one now, so this is what makes the claim mean something.
+    const host = await relay.newDevice('SwapCpuHost');
+    const legend = await relay.newDevice('SwapCpuLegend');
+    seedLadder(legend, 35);
+
+    const p1 = await relay.openPhone(host);
+    p1.send({
+      type: 'create_room',
+      playerId: host.id,
+      venueRoomId: 'beginner',
+      visibility: 'public',
+      config: { winningScore: 3, rules: {}, spectators: true, cpu: 'rookie' },
+    } as never);
+    const roomId = (await p1.await('room_created')).roomId as string;
+
+    const intruder = await relay.openPhone(legend);
+    intruder.send({ type: 'spectate_room', roomId, seat: 3 } as never);
+    expect((await intruder.await('table_state')).yourSeat).toBe(3);
+
+    intruder.clear();
+    p1.clear();
+    intruder.send({ type: 'swap_seat', seat: 1 } as never);
+    await sleep(150);
+
+    expect(intruder.last('error')?.code).toBe('VENUE_LOCKED');
+    // Still watching, and the machine still playing.
+    expect(intruder.last('table_state')).toBeUndefined();
+    const info = await fetch(`${relay.base}/api/room/${roomId}`).then((r) => r.json());
+    expect(info.cpu).toBe('rookie');
+    expect(info.spectatorCount).toBe(1);
+    expect(p1.all('room_config').some((m) => (m.config as { cpu: unknown }).cpu === null)).toBe(
+      false
+    );
+    p1.close();
+    intruder.close();
+  }, 30_000);
 });

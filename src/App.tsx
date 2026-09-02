@@ -155,7 +155,7 @@ const confetti: typeof rawConfetti = ((opts?: Parameters<typeof rawConfetti>[0])
   }
   return rawConfetti(opts);
 }) as typeof rawConfetti;
-import { Trophy, RefreshCw, Home, ArrowUp, ArrowDown, Circle } from 'lucide-react';
+import { Trophy, RefreshCw, Home, ArrowUp, ArrowDown, Circle, User } from 'lucide-react';
 
 /** How many times a lost invitation socket is retried before giving up. */
 const MAX_INVITE_RETRIES = 2;
@@ -571,6 +571,17 @@ export default function App() {
    * — see the effect below.
    */
   const [tableReturnPending, setTableReturnPending] = useState(false);
+  /**
+   * Whether that walk has a result to wait for, decided when the flag is set.
+   *
+   * `resultSettled` reads `!!spectating`, so a WATCHER settles at once — and a
+   * watcher who takes the machine's chair stops being one in the very next
+   * message. Read at effect time, that flips to false with `winner` still set
+   * and no timer re-armed, and the promoted player is stranded on the result
+   * overlay of a match they only watched. Captured here it cannot: they had
+   * nothing to record then and still have nothing to record now.
+   */
+  const tableReturnNeedsResultRef = useRef(true);
   /** Who is sitting where at the table, as the relay last described it. */
   const [tableState, setTableState] = useState<{
     seats: TableSeatInfo[];
@@ -1454,7 +1465,7 @@ export default function App() {
       setTableReturnPending(false);
       return;
     }
-    if (!resultSettled) return;
+    if (tableReturnNeedsResultRef.current && !resultSettled) return;
     setTableReturnPending(false);
     setWinner(null);
     setScreen('menu');
@@ -2035,6 +2046,7 @@ export default function App() {
         // menu — the arrival themselves, a watcher taking a seat, a queue
         // pairing — and every one of those paths is already correct.
         if (configRef.current.cpu && !msg.config.cpu && screenRef.current === 'game') {
+          tableReturnNeedsResultRef.current = !spectatingRef.current;
           setTableReturnPending(true);
         }
         break;
@@ -2322,7 +2334,35 @@ export default function App() {
           setLinkStatus('relay');
         } else if (msg.yourSeat !== null) {
           // Playing. Kept in step because a seat can change hands.
+          //
+          const me: 0 | 1 = msg.yourSeat === 1 ? 1 : 0;
+          // A watcher who has just TAKEN a playing seat learns which side they
+          // are on here, because they get no `room_joined` — that message
+          // belongs to `join_room`, and this player never joined; they were
+          // already at the table.
+          if (spectatingRef.current) {
+            setPlayerIndex(me);
+            playerIndexRef.current = me;
+          }
           setSpectating(null);
+
+          // And this is where ANYONE at the table learns who is opposite them,
+          // which is the same gap seen from the other side: a claimed chair
+          // sends no `opponent_joined` either, so the host's `opponentName`
+          // stayed null and their Start button — `!opponentName || !guestReady`
+          // once the machine is gone — never enabled. The guest had readied
+          // and the host could not act on it.
+          //
+          // Gated on a HUMAN opposite rather than run unconditionally: the
+          // seat map names a machine `AI (rookie)`, and writing that into
+          // `opponentName` would put it on the HUD and the winner overlay of
+          // every solo-at-a-table match, where nothing has ever shown it. A
+          // seat emptying is left alone too — `opponent_left` owns that.
+          const opp = msg.seats[me === 0 ? 1 : 0];
+          if (opp?.occupant === 'human') {
+            setOpponentName(opp.playerName);
+            setOpponentId(opp.playerId);
+          }
         }
         break;
       }
@@ -4823,6 +4863,35 @@ export default function App() {
                 )}
 
               <div className="mt-1 flex w-full items-center gap-2">
+                {/* The warm seat, offered where the watcher actually is.
+                    A machine match that has just ended leaves them on this
+                    overlay looking at the empty chair, and the premise of
+                    seating a machine at all is that you play it until
+                    somebody takes its chair. The relay allows the claim from
+                    the moment the match is over, which is exactly when this
+                    overlay is up — so the control and the verdict agree by
+                    construction rather than by a second check.
+
+                    The seat comes off the TABLE, not from arithmetic: the
+                    relay marks whichever chair the machine is in, and reading
+                    it here means no second answer to `cpuSeatOf`. */}
+                {spectating &&
+                  (() => {
+                    const chair = tableState?.seats.find((s) => s.occupant === 'cpu');
+                    if (!chair) return null;
+                    return (
+                      <Button
+                        id="btn-take-seat"
+                        variant="primary"
+                        size="lg"
+                        block
+                        onClick={() => handleSwapSeat(chair.seat)}
+                        icon={<User className="h-4 w-4" />}
+                      >
+                        {t('seat_take', currentLanguage)}
+                      </Button>
+                    );
+                  })()}
                 {/* No rematch control for a watcher: a rematch is a vote, and
                     a watcher has no vote to cast. The next match of the same
                     table needs nothing from them either — game_start resets

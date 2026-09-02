@@ -597,7 +597,16 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
                     // seat at their own table was a guaranteed error message.
                     const opponentChair =
                       isHost && !watchSeat && !mine && (free || cpuHere) && !!onUpdateRoomConfig;
-                    const tappable = opponentChair || (info.enabled && free && !mine);
+                    // A WATCHER may take the machine's chair, which is the
+                    // warm seat reached from inside the table rather than
+                    // from the room browser. Safe to offer whenever they are
+                    // looking at this list: a watcher is only ever in the
+                    // lobby BETWEEN matches — `spectator_sync` walks them
+                    // onto the court while one is running — which is exactly
+                    // the window the relay accepts the claim in.
+                    const claimCpuChair = (tableState.yourSeat ?? 0) >= 2 && !watchSeat && cpuHere;
+                    const tappable =
+                      opponentChair || claimCpuChair || (info.enabled && free && !mine);
                     return (
                       <button
                         key={info.seat}
