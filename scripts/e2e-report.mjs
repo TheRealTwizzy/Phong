@@ -18,6 +18,13 @@
 //  3. The unread dot appears for a device that has never opened the notes and
 //     is gone afterwards — the one thing that makes patch notes findable for
 //     a player who is not looking for them.
+//  3c. ONE RELEASE PER PAGE, and the pager actually moves. Every merged pull
+//     request adds a release (CLAUDE.md §17), so this list only grows; the
+//     sheet used to render all of them in one scroll. The assertion that
+//     matters is the ABSENCE — an older release must not be in the DOM while
+//     a newer one is on screen — because a pager that renders every page and
+//     hides none is the bug wearing the fix's clothes, and it looks identical
+//     in a screenshot.
 //  4. Send is refused until there is actually a report, the category control
 //     selects, and the exploit category says a security report is private.
 //  5. A report reaches the server with diagnostics NOBODY TYPED — the build,
@@ -134,6 +141,57 @@ ok(`patch notes name the running version and build ("${header}")`);
 
 const cta = await assertReachable(page, '#btn-patch-notes-done', 'the patch-notes CTA');
 ok(`patch-notes CTA is reachable (bottom at ${Math.round(cta)}px)`);
+
+// ---- 3c. One release per page, and the pager moves ------------------------
+const position = async () => (await page.textContent('#patch-notes-position'))?.trim() ?? '';
+const shown = async () =>
+  page.$$eval('[id^="patch-note-"]', (els) => els.map((e) => e.id.replace('patch-note-', '')));
+
+// A version has dots in it, so `#patch-note-1.0.2` is a class selector as far
+// as CSS is concerned. Attribute form rather than CSS.escape: shorter, and it
+// cannot be got subtly wrong.
+const card = (v) => `[id="patch-note-${v}"]`;
+
+const opened = await shown();
+if (opened.length !== 1) {
+  fail(`the sheet shows ${opened.length} releases at once — one page is one release`);
+}
+const first = await position();
+if (!/\b1\b/.test(first)) fail(`opened on "${first}" rather than the newest release`);
+ok(`opens on the newest release alone (v${opened[0]}, "${first}")`);
+
+// The newest is page 1, so there is nothing newer. A pager whose disabled
+// state is decorative walks off the end and renders an empty sheet.
+if (!(await page.$eval('#patch-notes-newer', (el) => el.disabled))) {
+  fail('the "newer" control is live on the newest release');
+}
+if (await page.$eval('#patch-notes-older', (el) => el.disabled)) {
+  fail('the "older" control is dead — this build has more than one release');
+}
+
+await page.click('#patch-notes-older');
+await page.waitForFunction(
+  (was) => document.querySelector('#patch-notes-position')?.textContent?.trim() !== was,
+  first,
+  { timeout: 4000 }
+);
+const older = await shown();
+if (older.length !== 1) fail(`page 2 shows ${older.length} releases`);
+if (older[0] === opened[0]) fail('the "older" control did not change the release');
+// The one that actually matters: the newest release is GONE from the DOM, not
+// merely scrolled past or visually hidden.
+if (await page.$(card(opened[0]))) {
+  fail(`v${opened[0]} is still in the DOM while v${older[0]} is on screen`);
+}
+if (await page.$eval('#patch-notes-newer', (el) => el.disabled)) {
+  fail('the "newer" control stayed disabled after paging away from the newest');
+}
+ok(`paging back reaches v${older[0]} alone ("${await position()}")`);
+
+await page.click('#patch-notes-newer');
+await page.waitForSelector(card(opened[0]), { timeout: 4000 });
+if (await page.$(card(older[0]))) fail(`v${older[0]} survived paging forward`);
+ok('paging forward returns to the newest release');
 
 // ---- 3b. ...and gone once they have been read ----------------------------
 await page.click('#btn-patch-notes-done');
