@@ -39,4 +39,24 @@ describe('patch notes', () => {
   it('names each version once', () => {
     expect(new Set(PATCH_NOTES.map((n) => n.version)).size).toBe(PATCH_NOTES.length);
   });
+
+  it('is written for a player, not for whoever wrote the diff', () => {
+    // These notes are the only place the product speaks to a player about a
+    // change, and the failure mode is not a typo — it is a line that reads
+    // like a commit message. `scripts/check-release-note.mjs` makes every
+    // shipped change add a line here, which is exactly the pressure that
+    // produces "refactor roomConfigFor() to clamp difficulty", so the guard
+    // belongs beside the rule that creates the pressure.
+    //
+    // Narrow on purpose: a filename, a source path, or an identifier written
+    // as a call. Prose about "the relay" or "the ladder" is fine — players
+    // read those words in the game.
+    for (const note of PATCH_NOTES) {
+      for (const line of note.lines) {
+        expect(line, `${note.version}: names a source file`).not.toMatch(/\.tsx?\b/);
+        expect(line, `${note.version}: names a path`).not.toMatch(/\b(src|server|tests|scripts)\//);
+        expect(line, `${note.version}: names a function`).not.toMatch(/\w\(\)/);
+      }
+    }
+  });
 });

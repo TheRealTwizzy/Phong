@@ -35,6 +35,17 @@ export interface PatchNote {
 export const PATCH_NOTES: PatchNote[] = [
   {
     version: APP_VERSION,
+    date: '2026-09-02',
+    lines: [
+      'You can now sit the AI down at a PvP table: tap the empty Opponent chair and pick a difficulty. The table stays in the room’s list, so somebody can take the machine’s seat when the match ends — and can watch, if you have opened the watching seats.',
+      'A machine match with the watching seats open does not move your rank. Somebody watching sees the half you are not allowed to, which is the same trade the Opponent Sonar makes.',
+      'Fixed: a player above a room’s skill bracket could take a watching seat and then sit down in a playing one. The bracket is checked at that door now too.',
+      'Your account, stats and match history are backed up every day, and the server can copy each backup off the machine it runs on — so losing that machine no longer loses the game.',
+      'The privacy notice now says those daily copies exist, where they may be kept, and that a deleted account can still sit inside one for about two weeks until it ages out.',
+    ],
+  },
+  {
+    version: '1.0.0',
     date: '2026-09-01',
     lines: [
       'Phong is open to everyone. Anyone can create an account and play.',

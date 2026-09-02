@@ -447,12 +447,15 @@ rather than the noble one. `verify` runs
 `test:coverage` rather than a bare `npm test`: per-module floors on the shared pure logic,
 set in `vite.config.ts` beside the reasoning, with deliberately **no global threshold** — the
 components are Playwright's job, and one number would either fail on that bet or be set low
-enough to measure nothing. It also opens with `lint:suites`, before `npm ci`, because that
-one needs no dependencies and costs milliseconds: a file named `scripts/e2e-<name>.mjs` that
+enough to measure nothing. It also opens with `lint:suites` and `lint:notes`, before `npm ci`,
+because neither needs dependencies and both cost milliseconds. The first: a file named `scripts/e2e-<name>.mjs` that
 is missing from `e2e-run.mjs`'s `SUITES` is not a skipped test, it is a test **nobody knows is
 not running** — it reads as coverage in review and never executes. Nothing else in the repo
 can notice: `npm test` does not touch those files, `tsc` does not read them, and the runner
-cannot report a suite it was never told about. A **targeted** E2E run is deliberately not
+cannot report a suite it was never told about. The second is convention §17: a merge to `main`
+DEPLOYS, so a shipped change with no `PATCH_NOTES` line is a release players are on without
+being told what changed, and `tests/patchNotes.test.ts` holds that file's shape without being
+able to see the diff beside it. A **targeted** E2E run is deliberately not
 offered: a changed-file→suite map was built and deleted, because the coupling that decides it
 (which suites play a match, or a relayed point) is behavioural rather than static, and every
 rule anybody checked was too narrow in the direction that lets a green run hide a broken flow.
@@ -511,7 +514,9 @@ asserting old behaviour is changed rather than left to be read later.
 
 16. **A paddle moves per SECOND, and a component that drives one per FRAME is twice as fast on a 120Hz display.** Both `CourtCanvas` and `SplitScreenMatch` drive a keyboard paddle and only the first was fixed, in the commit that fixed it — and in the second it is no longer only a speed, because those positions are differentiated into the paddle velocity that feeds `driveCoupling`, so the refresh rate decided the angle, the pace and the SPIN of an otherwise identical return. The guard reads the source, for the reason the paddle call sites do: this lives in a `useEffect` in a `.tsx`, and a frame-rate dependence compiles, runs and looks correct on whatever display you happen to own.
 
-17. **A gesture commits on `pointerup` and never on `pointercancel`.** A cancel is the browser
+17. **A merge to `main` is a DEPLOY, so every shipped change carries a release note — and the version moves with it.** Dokploy auto-deploys the branch, so there is no separate release step at which somebody would remember; the merge IS the release, and a release nobody can see is one players are on without knowing what changed. `package.json`, `src/version.ts` and the newest `PATCH_NOTES` entry move together: the "what's new" dot compares the version a player last saw against `latestPatchNote().version`, so a note added without a bump never fires the dot and a bump without a note points the dot at nothing. `scripts/check-release-note.mjs` (`npm run lint:notes`, and a CI step beside `lint:suites`) fails a pull request that changes shipped code without touching `src/patchNotes.ts`, because **nothing else in the repository can notice**: `tests/patchNotes.test.ts` holds the SHAPE of the file — newest entry is the running version, ordered, dated, non-empty — and cannot know whether the diff beside it deserved a line. It is scoped to code a player can observe (`src/`, `server/`, `server.ts`, the shipped scripts) and not to tests, docs, CI or the deployment manifests, since a rule that fires when it should not is a rule people learn to route around; the one escape is a `no-release-note` LABEL on the pull request, which is a decision taken in the open rather than a magic string in a commit message. **A stack that ships together carries ONE entry, on the pull request that completes it** — three version numbers for one shipment would make the version a merge counter, which is precisely what `src/version.ts` says it must not be. And the notes are written for a PLAYER: `tests/patchNotes.test.ts` refuses a line naming a source file, a path or a function, because the pressure this rule creates is exactly what produces a line that reads like a commit message.
+
+18. **A gesture commits on `pointerup` and never on `pointercancel`.** A cancel is the browser
 saying it has taken the pointer — a notification shade, an edge swipe, a system gesture — so the
 player never finished the thing being read as finished. `CourtCanvas.releasePointer(e, serve)`
 and `useMenuSwipe`'s `release(e, settle)` are deliberately the same shape: one body, one boolean,

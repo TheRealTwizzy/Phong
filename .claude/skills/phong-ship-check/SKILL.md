@@ -21,6 +21,7 @@ seconds.
 ```bash
 npm run lint            # tsc --noEmit
 npm run lint:suites     # every browser suite is registered with the runner
+npm run lint:notes      # a shipped change updated src/patchNotes.ts
 npm run test:coverage   # the fast layer PLUS the per-module floors CI enforces
 npm run build           # vite + esbuild → dist/
 npm run test:e2e        # the browser suites, against the production build
@@ -37,6 +38,12 @@ Each step exists to fail before the expensive one:
   a test nobody knows is not running — it reads as coverage in review and never executes.
   Nothing else can notice: `npm test` does not touch those files, `tsc` does not read them,
   and the runner cannot report a suite it was never told about.
+- **`lint:notes`** costs milliseconds too, and it is the one check here about the PRODUCT
+  rather than the code. A merge to `main` is a deploy — Dokploy auto-deploys the branch — so a
+  shipped change with no `PATCH_NOTES` line is a release players are on without being told
+  what changed. Nothing else can notice: `tests/patchNotes.test.ts` holds the file's SHAPE
+  (newest entry is the running version, ordered, dated, non-empty) and cannot see the diff
+  beside it. See "Merging" below for what a green result actually requires.
 - **`test:coverage`, not bare `npm test`.** CI's `verify` job runs the coverage variant, so a
   module that slipped under its floor in `vite.config.ts` goes red there and not here. Same
   suites, same runtime, strictly more information.
@@ -71,6 +78,44 @@ claim that looks precise, is trusted because it looks precise, and is wrong.
 
 Nineteen suites cost minutes. Being quiet about a broken flow costs a release. If you are
 tempted to rebuild the map, the honest version of it is this section.
+
+## Merging
+
+**Patch notes are not optional, and the version moves with them.** Three files change
+together or the feature is invisible:
+
+```
+package.json      "version": "1.0.1"
+src/version.ts    APP_VERSION = '1.0.1'
+src/patchNotes.ts a new entry at the TOP, version: APP_VERSION
+```
+
+The "what's new" dot compares the version a player last saw against `latestPatchNote()`, so a
+note without a bump never fires it and a bump without a note points it at nothing.
+`tests/patchNotes.test.ts` pins the newest entry to `APP_VERSION` and `tests/version.test.ts`
+pins that to `package.json`, so getting one of the three wrong is a red test rather than a
+quiet miss.
+
+Write the lines **for a player**. The suite refuses a line naming a source file, a path, or an
+identifier written as a call — the pressure `lint:notes` creates is exactly what produces
+"refactor `roomConfigFor()` to clamp difficulty", and that is not a release note.
+
+**A stack that ships together carries ONE entry, on the pull request that completes it.** Three
+version numbers for one shipment makes the version a merge counter, which `src/version.ts`
+says out loud it must not be. Merge the stack bottom-up; the note rides the last one.
+
+**Test between every merge, not once at the end.** After each merge:
+
+```bash
+git checkout main && git pull origin main
+npm run lint && npm run test:coverage && npm run build && npm run test:e2e
+```
+
+Then rebase the next branch in the stack onto the new `main` and merge that. Two PRs that are
+each green against their own base can still be red together — GitHub tests the merge commit
+for conflicts, not for behaviour, and nothing about a clean three-way merge says the two
+changes agree. This repo has already paid for that lesson once: #91 went `dirty` the moment
+#90 squash-merged under it.
 
 ## Reading a failure
 
