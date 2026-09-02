@@ -3003,7 +3003,24 @@ async function startServer() {
             sessionId: cookieSessionId,
           };
           room.streaks[joinIdx] = carriedStreak(cookieDeviceId);
-          room.bestStreaks[joinIdx] = Math.max(room.bestStreaks[joinIdx], room.streaks[joinIdx]);
+          // Assigned rather than maxed against the seat's old value, matching
+          // `swap_seat` — and the honest note is that NEITHER spelling can be
+          // observed, so this is a consistency fix and not a bug fix.
+          //
+          // A maximum here looks like it could inherit the previous
+          // occupant's peak, which would be permanent (it reaches
+          // `profile.highestRally` and the rally cosmetics). It cannot, twice
+          // over: `resetTableForNextPair` clears the seat on the way out, and
+          // `startMatchStreaks` overwrites `bestStreaks` from `streaks` for
+          // BOTH seats on every `start_match` — which a match cannot begin
+          // without. So the value written here is gone before anything reads
+          // it. Verified by removing both guards and watching a peak test
+          // still pass; the test was deleted rather than kept, since an
+          // assertion nothing can break is worse than none.
+          //
+          // It stays an assignment so a reader does not infer that the
+          // maximum is load-bearing and build on that.
+          room.bestStreaks[joinIdx] = room.streaks[joinIdx];
           room.rematchVotes = [false, false];
           room.lastActive = Date.now();
           // Two players: the solo clock stops. It restarts if either of them
@@ -3310,6 +3327,43 @@ async function startServer() {
             const other = room.players[seat.index === 0 ? 1 : 0];
             if (!other) {
               ws.send(JSON.stringify({ type: 'error', code: 'NEEDS_A_PLAYER', message: 'Somebody has to be playing.' }));
+              return;
+            }
+          }
+
+          // The bracket, for somebody standing UP into a playing seat.
+          //
+          // `create_room` judges the host and a public `join_room` judges the
+          // joiner, and this was the third door into a playing seat with no
+          // lock on it. Watching is ungated by design — the bracket gates who
+          // PLAYS — so at `beginner` or `intermediate`, the two bracketed
+          // rooms that permit watchers at all, anybody could `spectate_room`
+          // and then promote into a free chair: exactly the Legend farming
+          // beginners that brackets exist to stop, reached in two messages.
+          //
+          // Only a SPECTATOR is judged. A player already at this table passed
+          // the gate on the way in (or arrived on a key, below), so re-asking
+          // on a 0↔1 swap would refuse somebody whose visible tier drifted
+          // mid-session out of a seat they are already sitting in.
+          //
+          // And only a PUBLIC table, which is the same line `join_room` draws:
+          // a private table is an invitation, and an invitation is not
+          // bracketed — two friends in different brackets are who the key
+          // flow exists for.
+          //
+          // Above the assignments for the reason everything else here is:
+          // nothing that can REFUSE may run after a seat has moved.
+          if (toPlayer && seat.role === 'spectator' && room.visibility === 'public') {
+            const swapRefused = venueRefusal(room.venueRoomId);
+            if (swapRefused) {
+              ws.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 'VENUE_LOCKED',
+                  verdict: swapRefused,
+                  message: venueRefusalText(swapRefused),
+                })
+              );
               return;
             }
           }

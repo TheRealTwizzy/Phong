@@ -56,10 +56,11 @@ coverage number.
 | `ladderTone` | Which stop of the rank meter's fixed ramp a fill is at — the one tone in the app picked by a value rather than a meaning |
 | `tableBrowser` | The table listing and the relay's bracket enforcement, against a real server |
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
+| `seatGate` | The bracket on the THIRD door into a playing seat, against a real server: a watcher cannot promote past a gate `spectate_room` never asked, one who passes it still can, a private table is not bracketed (an invitation is not a bracket), and a player already seated is not re-judged |
 | `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing) |
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
 | `queue` | Joining, pairing, seating and starting, against a real server |
-| `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `p2pParity` `headers` | Eleven suites that boot the real server (see §4) |
+| `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `seatGate` `p2pParity` `headers` | Twelve suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` | The one-shot migrations |
 
 ### Browser layer
