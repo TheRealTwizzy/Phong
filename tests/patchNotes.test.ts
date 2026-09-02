@@ -59,4 +59,23 @@ describe('patch notes', () => {
       }
     }
   });
+
+  it('keeps a line to something a phone can show', () => {
+    // PatchNotesSheet renders these at `text-xs` in `text-ink-dim`, bulleted,
+    // inside a scrolling sheet. A line is a BULLET, not a paragraph: at that
+    // size on a 390px phone, 150 characters is about three lines and is the
+    // point where a release note stops being scanned and starts being
+    // skipped.
+    //
+    // Written after 1.0.1 shipped its first draft at 240 characters a bullet
+    // against 1.0.0's 60-to-125. The rule that forces a line for every shipped
+    // change is exactly the pressure that produces an essay in one, so the
+    // ceiling belongs next to it. Split a long one into two bullets — they are
+    // free, and two short lines read better than one long one.
+    for (const note of PATCH_NOTES) {
+      for (const line of note.lines) {
+        expect(line.length, `${note.version}: "${line.slice(0, 48)}…" is ${line.length} chars`).toBeLessThanOrEqual(150);
+      }
+    }
+  });
 });

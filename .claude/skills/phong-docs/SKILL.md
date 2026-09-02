@@ -35,7 +35,10 @@ So doc updates are part of the change, not a follow-up.
   identifiers** — say what a player can now do, or what stopped being broken, in a sentence
   they would say themselves. `tests/patchNotes.test.ts` refuses a line naming a file, a path,
   or a function, because the check that forces a line is exactly the pressure that produces a
-  commit message in its place. Convention §17 carries the whole rule.
+  commit message in its place — and caps a line at 150 characters, because that same pressure
+  produces an essay in one bullet. `PatchNotesSheet` renders them at `text-xs` in
+  `text-ink-dim`: a line is a BULLET. Two short bullets read better than one long one and cost
+  nothing. Convention §17 carries the whole rule.
 
 ## The voice
 
