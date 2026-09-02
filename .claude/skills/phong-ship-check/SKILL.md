@@ -81,14 +81,19 @@ tempted to rebuild the map, the honest version of it is this section.
 
 ## Merging
 
-**Patch notes are not optional, and the version moves with them.** Three files change
+**Patch notes are not optional, and the version moves with them.** Four files change
 together or the feature is invisible:
 
 ```
-package.json      "version": "1.0.1"
-src/version.ts    APP_VERSION = '1.0.1'
-src/patchNotes.ts a new entry at the TOP, version: APP_VERSION
+package.json       "version": "1.0.1"
+src/version.ts     APP_VERSION = '1.0.1'
+package-lock.json  "version" in BOTH places — just run `npm install`
+src/patchNotes.ts  a new entry at the TOP, version: APP_VERSION
 ```
+
+The lockfile is the one people forget, and it drifted through two releases before a test
+read it: `npm ci` tolerates a mismatched top-level version, so nothing failed. `npm install`
+after the bump fixes it; `tests/version.test.ts` is what notices if you don't.
 
 The "what's new" dot compares the version a player last saw against `latestPatchNote()`, so a
 note without a bump never fires it and a bump without a note points it at nothing.
