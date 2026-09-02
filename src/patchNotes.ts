@@ -37,6 +37,14 @@ export const PATCH_NOTES: PatchNote[] = [
     version: APP_VERSION,
     date: '2026-09-02',
     lines: [
+      'Watching someone play the computer? When their match ends you can take its chair yourself.',
+      'The seat you take is a real one \u2014 ready up and the next match starts, with no waiting around.',
+    ],
+  },
+  {
+    version: '1.0.5',
+    date: '2026-09-02',
+    lines: [
       'You can now walk up to a table where somebody is playing the computer and take its chair.',
       'A table like that shows who is in the other seat, and opens up the moment its match ends.',
       'Sitting down no longer strands either of you \u2014 everyone goes back to the lobby for the next match.',

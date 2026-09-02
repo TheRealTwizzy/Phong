@@ -770,3 +770,87 @@ describe('the door into a machine table', () => {
     guest.close();
   }, 25_000);
 });
+
+describe('a watcher taking the machine’s chair', () => {
+  const roomInfo = async (roomId: string) =>
+    fetch(`${base}/api/room/${roomId}`).then((r) => r.json());
+
+  it('is refused while the machine match is running, and taken once it ends', async () => {
+    // The warm seat from the OTHER direction. `join_room` is for somebody
+    // walking up from the room browser; this is for somebody already at the
+    // table, watching — which is where the premise puts them, since a watcher
+    // whose machine match has just ended is sitting on its result overlay.
+    //
+    // `swap_seat` treated the CPU's chair as occupied unconditionally, and it
+    // was right to while nothing could evict the machine: the HOST swapping
+    // onto it would have shared the chair and wedged the table. That reason
+    // is about a PLAYER, not about a watcher, and the guard did not
+    // distinguish them.
+    const host = await newDevice('ChairHost');
+    const fan = await newDevice('ChairFan');
+    const { phone, roomId } = await seatCpu(host, { spectators: true, cpu: 'rookie' });
+
+    const watcher = await relay.openPhone(fan);
+    watcher.send({ type: 'spectate_room', roomId, seat: 3 });
+    expect((await watcher.await('table_state')).yourSeat).toBe(3);
+
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+
+    // Mid-match: the seat lock, exactly as for any playing seat.
+    watcher.clear();
+    watcher.send({ type: 'swap_seat', seat: 1 });
+    expect((await watcher.await('error')).code).toBe('SEATS_LOCKED');
+    expect((await roomInfo(roomId)).cpu).toBe('rookie');
+
+    // The whistle.
+    phone.send({
+      type: 'cpu_frame',
+      hostPaddle: 0.5,
+      cpuPaddle: 0.5,
+      ball: null,
+      scores: [3, 0],
+      live: false,
+    } as never);
+    await sleep(60);
+
+    // And now the chair is theirs.
+    watcher.clear();
+    phone.clear();
+    watcher.send({ type: 'swap_seat', seat: 1 });
+    const seated = await watcher.await('table_state');
+    expect(seated.yourSeat).toBe(1);
+    expect(seated.seats[1].playerId).not.toBeNull();
+    expect(seated.seats[1].occupant).toBe('human');
+
+    // The machine is gone, and BOTH of them are told — the host's own terms
+    // changed, and a stale `config.cpu` there is a Play Again that sends a
+    // `rematch_request` the relay drops.
+    expect((await watcher.await('room_config')).config.cpu).toBeNull();
+    expect((await phone.await('room_config')).config.cpu).toBeNull();
+    expect((await roomInfo(roomId)).cpu).toBeNull();
+
+    // A duel now, and one the host can actually start.
+    const info = await roomInfo(roomId);
+    expect(info.playerCount).toBe(2);
+    expect(info.isFull).toBe(true);
+    expect(info.spectatorCount).toBe(0);
+
+    watcher.close();
+    phone.close();
+  }, 25_000);
+
+  it('refuses a PLAYER the machine’s chair, so the table cannot be wedged', async () => {
+    // The original reason the seat reads as occupied, and it still holds: the
+    // host swapping onto the machine's chair leaves seat 0 empty and silently
+    // unseats the opponent they chose. There is nothing to gain and a table
+    // to lose, so only a WATCHER may claim it.
+    const host = await newDevice('ChairSolo');
+    const { phone, roomId } = await seatCpu(host, { cpu: 'rookie' });
+    phone.clear();
+    phone.send({ type: 'swap_seat', seat: 1 });
+    expect((await phone.await('error')).code).toBe('SEAT_TAKEN');
+    expect((await roomInfo(roomId)).cpu).toBe('rookie');
+    phone.close();
+  }, 25_000);
+});

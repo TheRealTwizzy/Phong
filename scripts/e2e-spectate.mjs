@@ -16,7 +16,11 @@
 //      rematch, and takes its table down when its one player walks out — all
 //      three of which the wire tests can only ever assert by hand, because
 //      the frame that says so is one the client had no path to producing.
-//   7. The warm seat actually works end to end: a machine table's row is
+//   7. A WATCHER can take the machine's chair from the result overlay they
+//      are already standing on, land in a playing seat, and — the one that
+//      costs somebody something if it is wrong — not be charged for the match
+//      they only watched.
+//   8. The warm seat actually works end to end: a machine table's row is
 //      OPEN when its chair is claimable and shut while its match runs, and
 //      taking the chair walks the host and the watcher off the dead result
 //      overlay and back to the lobby, where the Start this table now needs
@@ -645,6 +649,176 @@ ok('and sit back down, which is what "pre-match" means');
 
   await straggler.context().close();
   await challenger.context().close();
+  await fan.context().close();
+  await host.context().close();
+}
+
+// ---- 9. The warm seat from INSIDE: a watcher takes the chair --------------
+//
+// Section 8 is the warm seat reached from the room browser. This is the same
+// promise reached from where a watcher actually is: sitting on the result
+// overlay of the machine match they just watched, looking at an empty chair.
+//
+// `swap_seat` treated that chair as occupied unconditionally — right about a
+// PLAYER, whose swapping onto it would leave seat 0 empty and silently unseat
+// the opponent the host chose, and wrong about a watcher, for whom it is the
+// only door. The relay half is pinned by tests/cpuTable.test.ts; what only a
+// browser can say is that the control exists, that taking it lands the
+// watcher in a playing seat rather than back on a dead court, and — the one
+// that costs a player something if it is wrong — that they are not charged
+// for the match they only WATCHED.
+{
+  const host = await newPlayer('ChairHost');
+  await host.click('#building-pvp');
+  await host.click('#room-casual');
+  await host.waitForSelector('#btn-create-room', { timeout: 8000 });
+  await host.click('#btn-create-room');
+  const code = await host
+    .waitForFunction(() => {
+      const id = document.querySelector('#lobby-table')?.getAttribute('data-room-id') || '';
+      return /^[A-HJ-NP-Z2-9]{4}$/.test(id) ? id : null;
+    }, { timeout: 8000 })
+    .then((h) => h.jsonValue());
+
+  await host.waitForSelector('#toggle-spectators', { timeout: 8000 });
+  await host.click('#toggle-spectators input');
+  await host.click('#lobby-pts-3');
+  await host.click('#seat-1');
+  await host.waitForSelector('#cpu-picker', { timeout: 5000 });
+  await host.click('#cpu-rookie');
+  await host.waitForSelector('#cpu-picker', { state: 'detached', timeout: 5000 });
+  await host.waitForFunction(
+    () => document.querySelector('#seat-1')?.getAttribute('data-occupant') === 'cpu',
+    { timeout: 8000 }
+  );
+
+  const fan = await newPlayer('ChairFan');
+  await fan.click('#building-pvp');
+  await fan.click('#room-casual');
+  await fan.waitForSelector(`#table-${code}-watch`, { timeout: 10000 });
+  await fan.click(`#table-${code}-watch`);
+  await fan.waitForFunction(
+    () =>
+      document.querySelector('#seat-2')?.getAttribute('data-mine') === 'true' ||
+      document.querySelector('#seat-3')?.getAttribute('data-mine') === 'true',
+    undefined,
+    { timeout: 10000 }
+  );
+
+  // What this account had played before it watched anything.
+  const playedBefore = await fan.evaluate(async () => {
+    const p = await (await fetch('/api/profile/me')).json();
+    // Named exactly, with no `?? 0` fallback: a defaulted read of a field
+    // that had been renamed would compare 0 to 0 and pass while measuring
+    // nothing.
+    return { played: p.matchesPlayed, xp: p.xp };
+  });
+
+  await host.click('#btn-ready-play');
+  await host.waitForSelector('#half-court-canvas', { timeout: 10000 });
+  await fan.waitForSelector('#half-court-canvas', { timeout: 10000 });
+
+  await host.keyboard.down('KeyA');
+  const finish = Date.now() + 90000;
+  while (Date.now() < finish) {
+    if (await shown(host, '#winner-modal-overlay')) break;
+    await host.keyboard.press('Space').catch(() => {});
+    await host.waitForTimeout(700);
+  }
+  await host.keyboard.up('KeyA');
+  if (!(await shown(host, '#winner-modal-overlay'))) fail('the machine match never finished');
+  await fan.waitForSelector('#winner-modal-overlay', { timeout: 15000 });
+  ok('a watched machine match reaches the whistle on both screens');
+
+  // The control, on the overlay where the watcher is standing.
+  await fan.waitForSelector('#btn-take-seat', { timeout: 10000 });
+  await fan.click('#btn-take-seat');
+
+  // They land in a PLAYING seat, in the lobby — not back on the dead court
+  // the machine match left behind.
+  const seated = await fan
+    .waitForFunction(
+      () =>
+        !document.querySelector('#winner-modal-overlay') &&
+        !!document.querySelector('#multiplayer-lobby-modal') &&
+        (document.querySelector('#seat-0')?.getAttribute('data-mine') === 'true' ||
+          document.querySelector('#seat-1')?.getAttribute('data-mine') === 'true'),
+      undefined,
+      { timeout: 20000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!seated) fail('the watcher who took the chair did not land in a playing seat');
+
+  // The host comes off the same overlay, because their table is a duel now.
+  const hostReturned = await host
+    .waitForFunction(
+      () =>
+        !document.querySelector('#winner-modal-overlay') &&
+        !!document.querySelector('#multiplayer-lobby-modal'),
+      undefined,
+      { timeout: 20000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!hostReturned) fail('the host was left on the machine match’s result overlay');
+  ok('taking the chair seats the watcher and returns the host to the lobby');
+
+  // The one that costs somebody something if it is wrong. A watcher's
+  // `winner` is set — the whole fan-out makes them look like the player they
+  // sit beside — and the record effect is keyed on it, so the instant they
+  // stop being a watcher it can file a match this device only WATCHED onto
+  // this account.
+  //
+  // TWO independent things stop it, and on this path either alone is enough,
+  // which is worth knowing before anyone edits one of them: the lobby-return
+  // clears `winner` before `table_state` clears `spectating`, and the record
+  // effect MARKS its ref on the spectator branch rather than merely skipping.
+  // Measured by removing them one at a time — the suite stays green — and
+  // then both, where this assertion fires with `played 0 -> 1` and
+  // `xp 0 -> 366`. So it is an OUTCOME check with real teeth and no single
+  // mechanism it pins; do not read it as cover for either one.
+  const playedAfter = await fan.evaluate(async () => {
+    const p = await (await fetch('/api/profile/me')).json();
+    // Named exactly, with no `?? 0` fallback: a defaulted read of a field
+    // that had been renamed would compare 0 to 0 and pass while measuring
+    // nothing.
+    return { played: p.matchesPlayed, xp: p.xp };
+  });
+  if (playedAfter.played !== playedBefore.played || playedAfter.xp !== playedBefore.xp) {
+    fail(
+      `the promoted watcher was charged for the match they watched: ` +
+        `${JSON.stringify(playedBefore)} -> ${JSON.stringify(playedAfter)}`
+    );
+  }
+  ok('and they are not charged for the match they only watched');
+
+  // And the table plays: the handshake, from a seat nobody joined.
+  await fan.click('#btn-ready-play');
+  await host.waitForFunction(
+    () => {
+      const b = document.querySelector('#btn-ready-play');
+      return !!b && !b.disabled;
+    },
+    undefined,
+    { timeout: 10000 }
+  );
+  await host.click('#btn-ready-play');
+  for (const [page, who] of [[host, 'host'], [fan, 'promoted watcher']]) {
+    const onCourt = await page
+      .waitForFunction(
+        () =>
+          !document.querySelector('#multiplayer-lobby-modal') &&
+          !!document.querySelector('#half-court-canvas'),
+        undefined,
+        { timeout: 15000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (!onCourt) fail(`the ${who} never reached the duel the claimed chair became`);
+  }
+  ok('the claimed chair became a real duel');
+
   await fan.context().close();
   await host.context().close();
 }

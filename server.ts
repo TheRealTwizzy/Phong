@@ -3399,9 +3399,26 @@ async function startServer() {
           // becomes 1, so every host-only guard — set_room_config,
           // start_match, set_table_visibility — then refuses the only person
           // at the table, the CPU cannot be removed, and the table is wedged.
+          //
+          // A WATCHER is the exception, and only for the machine's chair.
+          // That is the whole warm seat from the inside: `join_room` is for
+          // somebody walking up from the room browser, and this is for
+          // somebody already at the table — which is where the premise
+          // actually puts them, since a watcher whose machine match has just
+          // ended is sitting on its result overlay with the empty chair in
+          // front of them. The reason above is about a PLAYER and stays true
+          // of one; it simply never distinguished the two.
+          //
+          // Deliberately NOT gated on `cpuSeatClaimable` here. Mid-match the
+          // seat lock below is the better answer — "seats are locked until
+          // the match ends" tells the watcher to wait, where "that seat is
+          // taken" tells them to give up — and it is a guard that already
+          // exists rather than a second spelling of the same window.
           const cpuSeat = room.config.cpu ? cpuSeatOf(room) : null;
+          const claimingCpuChair =
+            toPlayer && seat.role === 'spectator' && cpuSeat === targetIdx;
           const occupied = toPlayer
-            ? room.players[targetIdx] ?? (cpuSeat === targetIdx ? CPU_HOLDS_SEAT : null)
+            ? room.players[targetIdx] ?? (cpuSeat === targetIdx && !claimingCpuChair ? CPU_HOLDS_SEAT : null)
             : room.spectators[targetIdx];
           if (occupied !== null) {
             ws.send(JSON.stringify({ type: 'error', code: 'SEAT_TAKEN', message: 'That seat is taken.' }));
@@ -3479,6 +3496,24 @@ async function startServer() {
             }
           }
 
+          // The machine gives up its chair, exactly as it does for a
+          // `join_room` — same eviction, same reset, same broadcast.
+          //
+          // BELOW the bracket gate, which is the rule #98 was written for:
+          // nothing that can REFUSE may run after state has moved. Above it,
+          // a `VENUE_LOCKED` refusal would already have cost the host their
+          // opponent, with nothing broadcast to say so.
+          //
+          // The reset is not optional. A CPU seat never passes through
+          // `vacateSeat`, so without it nothing clears `scores`, `inPlay`,
+          // `matchOver`, `startRatings` or `matchResetSeq` — and the pair
+          // would sit at a table stuck `matchOver` at the machine match's
+          // final score, with a Start that does nothing.
+          if (claimingCpuChair) {
+            room.config = { ...room.config, cpu: null };
+            resetTableForNextPair(room, targetIdx);
+          }
+
           // Nothing below this line can fail, so nothing above it may move a
           // seat. Node is single-threaded and nothing here awaits, so the
           // occupancy checks above and these assignments are one step —
@@ -3542,6 +3577,13 @@ async function startServer() {
           // clock, and closing that by not writing the field beats closing it
           // with a role check.
 
+          // Broadcast, not sent: the terms changed for everybody at the
+          // table. Told only the claimer, the host would keep a stale
+          // `config.cpu` — so their Play Again goes on taking the
+          // machine-table branch and sends a `rematch_request` the relay
+          // drops on `!matchOver`, a button that looks alive and reports
+          // nothing. The same reason `join_room` broadcasts it.
+          if (claimingCpuChair) broadcast(room, { type: 'room_config', config: room.config });
           broadcast(room, { type: 'ready_state', ready: room.ready });
           broadcast(room, { type: 'rematch_state', votes: room.rematchVotes });
           broadcastTableState(room);
