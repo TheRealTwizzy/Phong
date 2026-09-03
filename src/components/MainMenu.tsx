@@ -23,6 +23,7 @@ import {
 } from '../rating';
 import { normalizeRules } from '../matchRules';
 import { hasUnlock, unlockedBy } from '../achievements';
+import { ELITE_SLOTS, REGULAR_SLOTS } from '../game/missions';
 import { MatchRulesPanel } from './MatchRulesPanel';
 import { QuickMatch } from '../net/useQuickMatch';
 import { wrapIndex } from '../gestures';
@@ -62,6 +63,7 @@ import {
   ChevronRight,
   Lock,
   Sparkles,
+  CheckCircle2,
 } from 'lucide-react';
 
 // Out-of-match hub. Reads top-down as WHO YOU ARE → WHAT YOU PLAY → WHAT'S
@@ -650,9 +652,11 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                 `data-swipe="off"` and a drag across it turns the page like
                 anywhere else — the gesture got simpler, not more special-cased.
 
-                No `!claimed` filter: claiming auto-rerolls the slot server-side,
-                free and unlimited (CLAUDE.md §7), so the replacement arrives by
-                itself and the count stays at four all day. */}
+                No `!claimed` filter: claiming re-deals the slot server-side,
+                free a fixed number of times a day (CLAUDE.md §7), so the
+                replacement arrives by itself. Past that allowance a claim
+                CLEARS its slot, and a cleared tile stands in for it so the
+                grid keeps its 2x2 shape and says why the list got shorter. */}
             <div
               id="menu-daily-grid"
               aria-label={t('daily_missions', lang)}
@@ -685,6 +689,16 @@ export const MainMenu: React.FC<MainMenuProps> = ({
                     {mi.current}/{mi.target} · +{mi.xpReward} XP
                   </span>
                 </button>
+              ))}
+              {Array.from({ length: Math.max(0, REGULAR_SLOTS + ELITE_SLOTS - missions.length) }).map((_, i) => (
+                <div
+                  key={`cleared-${i}`}
+                  data-cleared="true"
+                  className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-card border border-dashed border-line p-2.5 text-center"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5 text-win" />
+                  <span className="text-2xs text-ink-dim">{t('mission_slot_cleared', lang)}</span>
+                </div>
               ))}
             </div>
           </>

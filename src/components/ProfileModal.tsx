@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { PlayerProfile, PlayerStatus, LanguageCode, CosmeticId } from '../types';
+import { PlayerProfile, PlayerStatus, LanguageCode, CosmeticId, TitleId } from '../types';
 import { COSMETICS, COSMETIC_IDS, cosmeticVars, isCosmeticUnlocked } from '../game/cosmetics';
+import { TITLES, TITLE_IDS, isTitleUnlocked } from '../game/titles';
 import { sound } from '../audio/soundEffects';
 import { USERNAME_MAX } from '../profileRules';
-import { PLACEMENT_GAMES, xpForLevel } from '../rating';
+import { PLACEMENT_GAMES, duelsShortOf, xpForLevel } from '../rating';
 import { processAvatarFile, uploadAvatar, deleteAvatar } from '../media/avatar';
 import { AvatarImage } from './AvatarImage';
 import { MatchHistoryList } from './MatchHistoryList';
@@ -40,6 +41,9 @@ interface Props {
   onViewProfile?: (id: string) => void;
   equippedCosmetic: CosmeticId;
   onEquipCosmetic: (id: CosmeticId) => void;
+  /** The title worn, or null for none — the second reward type, see titles.ts. */
+  equippedTitle: TitleId | null;
+  onEquipTitle: (id: TitleId | null) => void;
   language?: LanguageCode;
   /**
    * Deleting the account, offered only when it is safe to offer.
@@ -124,6 +128,58 @@ const CosmeticPicker: React.FC<{
   );
 };
 
+/**
+ * The titles this player owns, and nothing else — the same "absent, not
+ * dimmed" rule as the picker above, for the same reason: the unlock moment is
+ * when a player meets a reward, and a list of greyed-out words is a list of
+ * spoilers. Chips rather than tiles, since a title has nothing to preview but
+ * itself. The None chip is a real choice, not the absence of one: wearing no
+ * title is the ordinary state and the server takes `null` for it.
+ */
+const TitlePicker: React.FC<{
+  profile: PlayerProfile;
+  equipped: TitleId | null;
+  onEquip: (id: TitleId | null) => void;
+  language: LanguageCode;
+}> = ({ profile, equipped, onEquip, language }) => {
+  const owned = TITLE_IDS.filter((id) => isTitleUnlocked(id, profile));
+  const chip = (active: boolean) =>
+    `rounded-chip border px-2.5 py-1 text-2xs transition-colors active:scale-95 motion-reduce:active:scale-100 ${
+      active ? 'border-accent bg-accent/15 text-accent' : 'border-line bg-surface-2 text-ink-muted'
+    }`;
+  return (
+    <div className="flex flex-col gap-2">
+      <p id="title-owned-count" className="text-2xs text-ink-dim">
+        {t('titles_owned', language, { n: String(owned.length) })}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button
+          id="title-btn-none"
+          data-equipped={equipped === null ? 'true' : 'false'}
+          onClick={() => onEquip(null)}
+          className={chip(equipped === null)}
+        >
+          {t('title_none', language)}
+        </button>
+        {owned.map((id) => (
+          <button
+            key={id}
+            id={`title-btn-${id}`}
+            data-equipped={id === equipped ? 'true' : 'false'}
+            onClick={() => {
+              onEquip(id);
+              sound.playPaddleHit(1.0);
+            }}
+            className={chip(id === equipped)}
+          >
+            {t(TITLES[id].nameKey, language)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 // Solo before duel before practice: the order a player meets them in.
 const MODE_ORDER = ['solo', 'multiplayer', 'practice'] as const;
 // The mode names the rest of the app already uses, rather than a third
@@ -145,6 +201,8 @@ export const ProfileModal: React.FC<Props> = ({
   onViewProfile,
   equippedCosmetic,
   onEquipCosmetic,
+  equippedTitle,
+  onEquipTitle,
   language = 'en',
   onDeleteAccount,
   stack,
@@ -457,6 +515,28 @@ export const ProfileModal: React.FC<Props> = ({
                     size="md"
                     ladderPosition={profile.ladderPosition}
                   />
+                  {profile.title && TITLES[profile.title] && (
+                    <span
+                      id="profile-title-chip"
+                      className="rounded-chip border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent"
+                    >
+                      {t(TITLES[profile.title].nameKey, language)}
+                    </span>
+                  )}
+                  {(() => {
+                    // The apex asks for ranked duels beyond the rating. Derived
+                    // from the same table the badge reads, so the hint can never
+                    // disagree with it about what is held back or by how much.
+                    const short = duelsShortOf(profile.rankMu, profile.rankedGames, profile.rankSigma, profile.rankedDuels);
+                    return short ? (
+                      <span id="profile-duels-progress" className="text-[10px] text-ink-muted font-mono">
+                        {t('overlord_duels_progress', language, {
+                          have: String(short.have),
+                          need: String(short.need),
+                        })}
+                      </span>
+                    ) : null;
+                  })()}
                   {profile.tier === 'unranked' && (
                     <span className="text-[10px] text-ink-muted font-mono">
                       {t('placement_progress', language, {
@@ -559,12 +639,23 @@ export const ProfileModal: React.FC<Props> = ({
       bodyClassName="p-4 space-y-4"
     >
             {activeTab === 'cosmetics' ? (
-              <CosmeticPicker
-                profile={profile}
-                equipped={equippedCosmetic}
-                onEquip={onEquipCosmetic}
-                language={language}
-              />
+              <div className="space-y-5">
+                <CosmeticPicker
+                  profile={profile}
+                  equipped={equippedCosmetic}
+                  onEquip={onEquipCosmetic}
+                  language={language}
+                />
+                <section className="space-y-2">
+                  <h3 className="text-2xs uppercase tracking-wider text-ink-dim">{t('titles', language)}</h3>
+                  <TitlePicker
+                    profile={profile}
+                    equipped={equippedTitle}
+                    onEquip={onEquipTitle}
+                    language={language}
+                  />
+                </section>
+              </div>
             ) : activeTab === 'stats' ? (
               <div className="space-y-4">
                 {/* Daily Streak Highlight Banner */}

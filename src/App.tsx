@@ -60,6 +60,8 @@ import {
   bounceOffWall,
 } from './game/physics';
 import { START_MU, normalizeDifficulty, xpForLevel } from './rating';
+import type { RerollsRemaining, TitleId } from './types';
+import { TITLE_IDS, isTitleUnlocked, unlockNameKey } from './game/titles';
 import {
   DEFAULT_MATCH_RULES,
   DEFAULT_ROOM_CONFIG,
@@ -307,9 +309,11 @@ export default function App() {
   const [missions, setMissions] = useState<DailyMission[]>([]);
   // Rerolls left today, per tier. Server-owned and day-keyed, so they expire
   // with the missions rather than banking up.
-  const [rerolls, setRerolls] = useState<{ regular: number; elite: number }>({
+  const [rerolls, setRerolls] = useState<RerollsRemaining>({
     regular: 0,
     elite: 0,
+    regularFree: 0,
+    eliteFree: 0,
   });
   const [isMissionsOpen, setIsMissionsOpen] = useState<boolean>(false);
 
@@ -444,7 +448,9 @@ export default function App() {
    * and the raw-stat fallback beside it both opening on the same match — and
    * the single slot this replaced silently dropped whichever arrived second.
    */
-  const [toastUnlocks, setToastUnlocks] = useState<CosmeticId[]>([]);
+  // Reward ids — a cosmetic's or a title's — resolved to a name at render time
+  // through `unlockNameKey`, so one toast serves both catalogues.
+  const [toastUnlocks, setToastUnlocks] = useState<string[]>([]);
   // 'won' when the relay recorded the abandoned match as this player's win,
   // 'plain' when there was no match to win (a stranded guest in a lobby).
   const [toastOpponentLeft, setToastOpponentLeft] = useState<'won' | 'plain' | null>(null);
@@ -1087,7 +1093,29 @@ export default function App() {
   };
 
   /**
-   * Announce a cosmetic the moment it opens.
+   * Equip a title, or take it off with null. Profile-only — unlike the
+   * cosmetic there is no device half to keep in step, because a title paints
+   * nothing on this phone; it is a word other players read beside the name.
+   * The server re-derives the unlock, so a refusal simply leaves the profile
+   * as it was.
+   */
+  const handleEquipTitle = async (id: TitleId | null): Promise<void> => {
+    if (!profile?.initialized) return;
+    try {
+      const res = await fetch('/api/profile/me', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: id }),
+      });
+      const data = await res.json();
+      if (res.ok && data && data.id) setProfile(data);
+    } catch {
+      /* the profile on screen is still the truth */
+    }
+  };
+
+  /**
+   * Announce a cosmetic — or a title — the moment it opens.
    *
    * Load-bearing rather than decorative: locked cosmetics are absent from the
    * picker entirely, so this is the ONLY moment a player learns one exists.
@@ -1101,10 +1129,15 @@ export default function App() {
    * establishes the baseline — without that guard, every load would announce all
    * five free cosmetics.
    */
-  const knownCosmeticsRef = useRef<Set<CosmeticId> | null>(null);
+  const knownCosmeticsRef = useRef<Set<string> | null>(null);
   useEffect(() => {
     if (!profile) return;
-    const owned = new Set(COSMETIC_IDS.filter((id) => isCosmeticUnlocked(id, profile)));
+    // Titles are absent from their picker until owned too, so they ride the
+    // same diff: the two catalogues share one id namespace by construction.
+    const owned = new Set<string>([
+      ...COSMETIC_IDS.filter((id) => isCosmeticUnlocked(id, profile)),
+      ...TITLE_IDS.filter((id) => isTitleUnlocked(id, profile)),
+    ]);
     const previous = knownCosmeticsRef.current;
     knownCosmeticsRef.current = owned;
     if (!previous) return;
@@ -1185,6 +1218,9 @@ export default function App() {
     if (result.profile) setProfile(result.profile);
     // The server advanced today's missions as part of recording the match.
     if (result.missions) setMissions(result.missions);
+    // And says where the day's re-deals stand, so the note beside the list is
+    // never a fetch behind it.
+    if (result.rerolls) setRerolls(result.rerolls);
 
     // Both, not one or the other: levelling up and unlocking something are
     // separate things to be told, and the `else if` this replaced meant a
@@ -1489,7 +1525,12 @@ export default function App() {
       if (data.profile) setProfile(data.profile);
       if (data.missions) setMissions(data.missions);
       if (data.rerolls) setRerolls(data.rerolls);
-      if (data.unlocked) setToastUnlocks((prev) => [...prev, normalizeCosmeticId(data.unlocked)]);
+      // A reward id from either catalogue. NOT through normalizeCosmeticId,
+      // which answers 'neon' for anything it does not know — a title would
+      // have been announced as the default look.
+      if (data.unlocked && unlockNameKey(data.unlocked)) {
+        setToastUnlocks((prev) => (prev.includes(data.unlocked) ? prev : [...prev, data.unlocked]));
+      }
     } catch (e) {
       console.error('Failed to claim mission reward', e);
       setToastActionFailed(true);
@@ -4088,7 +4129,7 @@ export default function App() {
               tone: 'xp' as const,
               ttlMs: TOAST_TTL.reward,
               content: t('mission_unlock_earned', currentLanguage, {
-                name: t(COSMETICS[id].nameKey, currentLanguage),
+                name: t(unlockNameKey(id) ?? id, currentLanguage),
               }),
               onDismiss: () => setToastUnlocks((prev) => prev.filter((x) => x !== id)),
             })),
@@ -5119,6 +5160,8 @@ export default function App() {
           onViewProfile={openPublicProfile}
           equippedCosmetic={equippedCosmeticId}
           onEquipCosmetic={(id) => void handleEquipCosmetic(id)}
+          equippedTitle={profile?.title ?? null}
+          onEquipTitle={(id) => void handleEquipTitle(id)}
           language={currentLanguage}
           // Menu only, and this modal is why the rule needs restating rather
           // than moving: SettingsModal had one door and this has TWO — the

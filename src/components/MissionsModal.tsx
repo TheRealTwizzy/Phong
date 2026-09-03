@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { DailyMission, LanguageCode } from '../types';
+import { DailyMission, LanguageCode, RerollsRemaining } from '../types';
 import { t } from '../i18n/translations';
-import { formatMissionReset } from '../game/missions';
+import { ELITE_SLOTS, REGULAR_SLOTS, formatMissionReset } from '../game/missions';
 import { sound } from '../audio/soundEffects';
 import { Sheet, Button, Panel, ProgressBar, useMotion } from './ui';
 import confetti from 'canvas-confetti';
@@ -16,6 +16,10 @@ import {
   Sparkles,
   Zap,
   RefreshCw,
+  Crosshair,
+  Shield,
+  Hourglass,
+  Flame,
 } from 'lucide-react';
 
 interface Props {
@@ -27,8 +31,8 @@ interface Props {
   missions: DailyMission[];
   onClaimReward: (missionId: string) => Promise<void>;
   onReroll: (missionId: string) => Promise<void>;
-  /** Rerolls left today, per tier. Both reset with the UTC day. */
-  rerolls: { regular: number; elite: number };
+  /** Rerolls left today, per tier — paid and free. All reset with the UTC day. */
+  rerolls: RerollsRemaining;
   language: LanguageCode;
 }
 
@@ -87,10 +91,25 @@ export const MissionsModal: React.FC<Props> = ({
         return <Smartphone className="h-5 w-5 text-fuchsia-400 cos-light:text-fuchsia-700" />;
       case 'points_scored':
         return <Target className="h-5 w-5 text-loss" />;
+      case 'close_wins':
+        return <Crosshair className="h-5 w-5 text-warn" />;
+      case 'dominant_wins':
+        return <Shield className="h-5 w-5 text-accent" />;
+      case 'long_wins':
+        return <Hourglass className="h-5 w-5 text-accent" />;
+      case 'win_streak':
+        return <Flame className="h-5 w-5 text-warn" />;
+      case 'practice_returns':
+        return <Activity className="h-5 w-5 text-win" />;
       default:
         return <Target className="h-5 w-5 text-accent" />;
     }
   };
+
+  // Slots cleared for the day: a claim past its tier's free re-deals blanks
+  // its slot rather than dealing into it, and getMissions drops the blank. The
+  // tile keeps the day's shape on screen and says why the list is shorter.
+  const clearedSlots = Math.max(0, REGULAR_SLOTS + ELITE_SLOTS - missions.length);
 
   const handleClaim = async (mission: DailyMission) => {
     if (mission.claimed || mission.current < mission.target || claimingId) return;
@@ -168,7 +187,9 @@ export const MissionsModal: React.FC<Props> = ({
         id="missions-free-reroll-note"
         className="flex-1 text-2xs leading-snug font-normal tracking-normal text-ink-dim"
       >
-        {t('mission_free_reroll', language)}
+        {rerolls.regularFree > 0
+          ? t('mission_free_reroll', language, { n: String(rerolls.regularFree) })
+          : t('mission_free_reroll_spent', language)}
       </p>
       <Button size="sm" variant="secondary" onClick={onClose}>
         {t('close', language)}
@@ -315,6 +336,25 @@ export const MissionsModal: React.FC<Props> = ({
           </Panel>
         );
       })}
+      {/* One tile per slot cleared for the day, after the live tasks. The
+          tile carries no id per slot on purpose: which slot cleared is not a
+          fact the player can act on, only that the day's hand is shorter and
+          why. Hidden on an all-clear day, where the note above says it. */}
+      {!allClear &&
+        Array.from({ length: clearedSlots }).map((_, i) => (
+          <Panel
+            key={`cleared-${i}`}
+            id={i === 0 ? 'mission-slot-cleared' : undefined}
+            variant="inset"
+            className="flex items-center gap-2.5 border-dashed opacity-65"
+            data-cleared="true"
+          >
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-win" />
+            <span className="text-2xs font-normal tracking-normal text-ink-dim">
+              {t('mission_slot_cleared', language)}
+            </span>
+          </Panel>
+        ))}
     </Sheet>
   );
 };
