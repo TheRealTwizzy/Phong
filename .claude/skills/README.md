@@ -166,7 +166,7 @@ vocabulary is shadcn's — `background`, `foreground`, `primary`, `destructive`,
 a near-white muted hover surface where ours is the brand cyan `--color-ink-on-accent` exists to sit
 on: redefining the single shared token is worse than sharing none. And it themes with `@theme` plus
 a `.dark` class — two modes swapped by a class, with runtime publishing mentioned nowhere — where we
-publish twenty palettes from `cosmeticVars()` as an inline style and `PublicProfileModal` paints a
+publish twenty-five palettes from `cosmeticVars()` as an inline style and `PublicProfileModal` paints a
 different one on a subtree. It covers the case we do not have, omits the one we do, and walks into
 convention 13's trap; `phong-ui` already owns this and gets it right. Its three siblings ship in the
 same plugin and cannot be disabled separately — `react-state-management` opens on Zustand against

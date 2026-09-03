@@ -11,7 +11,8 @@ import type { MatchEndPayload } from '../src/types';
  *
  * Cyber Overlord is the one rung with nothing above it, so it reads as a
  * position — `#1` through `#100` — rather than as a word every player up there
- * shares. Reaching it is still `rankMu >= 37` and nothing else: making the
+ * shares. Reaching it is still `rankMu >= 37` plus that player's own
+ * `OVERLORD_MIN_DUELS` ranked duels, and nothing else: making the
  * headcount DECIDE the tier would put every other player's activity inside
  * `tierFor`, and on a server with fewer than a hundred ranked players it would
  * promote everyone placed.

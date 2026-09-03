@@ -26,7 +26,7 @@ Private matches connect the two phones **directly over WebRTC**, with the relay 
 
 Two separate currencies that never substitute for each other. **XP and levels** come from every match — solo included — and never go down. **Skill tier** is a TrueSkill-style rating (μ with an uncertainty σ) shown as a badge rather than a number, moved by PvP and by solo at a difficulty you had to earn, and capped per rung so farming one converges and stops. The game predicts your odds before every match and scales XP by how surprising the result was.
 
-Beyond that: daily tasks dealt as a hand of four, a branching tree of 56 achievements across eight lines of play (three of them concealed until you stumble into them), and twenty cosmetics that retheme the **whole app** rather than the court.
+Beyond that: daily tasks dealt as a hand of four, a branching tree of 78 achievements across eight lines of play (three of them concealed until you stumble into them), twenty-five cosmetics that retheme the **whole app** rather than the court, and titles to wear beside your name. The top of the ladder is earned against people: Cyber Overlord takes the rating and 25 ranked duels.
 
 ## Accounts
 
