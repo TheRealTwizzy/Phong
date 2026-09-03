@@ -5,10 +5,12 @@
 //  3. Beating a hard AI pays materially more XP than beating an easy one,
 //     and a loss still pays something (XP never goes backwards).
 //  4. Solo counts for rank only at a difficulty you had to earn: Rookie is
-//     open from the first match and never moves it, Pro and Cyber do.
+//     open from the first match and never moves it, Pro and Cyber do — and
+//     both estimators stop AT the rung's solo cap rather than climbing past it.
 //  5. A public profile exposes a tier and never mu/sigma.
 // Run it with `npm run test:e2e` (see scripts/e2e-run.mjs), which builds
 // nothing but hands this a fresh server, port, DATA_DIR and Chromium.
+import fs from 'node:fs';
 import { chromium, devices } from 'playwright-core';
 
 
@@ -16,6 +18,20 @@ import { chromium, devices } from 'playwright-core';
 // it is part of onboarding now, not a menu row. Every suite past this point
 // wants the menu, so it is waved away here. Tolerant: a suite that reaches
 // this another way is not broken by its absence.
+// The per-rung solo cap, read from the module that decides it (the way
+// e2e-elite reads its slot counts) rather than restated here: re-tuning the
+// ladder must not leave this suite red over a number it was never testing.
+// Cyber's cap moved once already — 36.9 to 33.9, so that only Chaos reaches
+// Legend — and the leg below turned red on that move for exactly this reason.
+const ratingSrc = fs.readFileSync(new URL('../src/rating.ts', import.meta.url), 'utf8');
+const soloCap = (difficulty) => {
+  const table = ratingSrc.match(/export const SOLO_MU_CAPS[^{]*\{([^}]*)\}/);
+  const m = table && table[1].match(new RegExp(`\\b${difficulty}:\\s*([\\d.]+)`));
+  if (!m) throw new Error(`could not read SOLO_MU_CAPS.${difficulty} from src/rating.ts`);
+  return Number(m[1]);
+};
+const CYBER_CAP = soloCap('cyber');
+
 const BASE = process.env.E2E_URL || 'http://localhost:3000';
 const EXEC = process.env.CHROMIUM_PATH;
 if (!EXEC) {
@@ -245,9 +261,22 @@ for (let i = 0; i < 6; i++) {
 }
 const after = await me(alice);
 if (!(after.rankedGames > before.rankedGames)) fail('Cyber solo did not count toward placement');
-if (after.rankMu === before.rankMu) fail('Cyber solo did not move the ranked rating');
-if (after.mmrMu === before.mmrMu) fail('solo play did not move hidden MMR');
-ok(`6 Cyber wins carry rank: ${before.rankedGames} -> ${after.rankedGames} ranked games, tier "${after.tier}"`);
+// Both estimators climb toward the rung's cap and stop AT it — above a rung's
+// ceiling that rung moves nothing, in either direction (CLAUDE.md §7). Alice
+// arrives here off a ladder walk of ten Elite wins, and Elite shares Cyber's
+// cap, so whether she stands under it or on it depends on the arithmetic
+// rather than on this suite: the assertion is therefore conditional on where
+// she stood, and states the rule in both branches instead of assuming the
+// one that happened to hold when the cap was 36.9.
+for (const [name, b, a] of [['rankMu', before.rankMu, after.rankMu], ['mmrMu', before.mmrMu, after.mmrMu]]) {
+  if (b < CYBER_CAP - 1e-6) {
+    if (a === b) fail(`Cyber solo did not move ${name} from ${b} (cap ${CYBER_CAP})`);
+  } else if (a !== b) {
+    fail(`Cyber solo moved ${name} although it stood at the cap: ${b} -> ${a} (cap ${CYBER_CAP})`);
+  }
+  if (a > CYBER_CAP + 1e-9) fail(`${name} climbed past the Cyber cap: ${a} > ${CYBER_CAP}`);
+}
+ok(`6 Cyber wins carry rank: ${before.rankedGames} -> ${after.rankedGames} ranked games, tier "${after.tier}"; rankMu ${before.rankMu.toFixed(3)} -> ${after.rankMu.toFixed(3)}, mmrMu ${before.mmrMu.toFixed(3)} -> ${after.mmrMu.toFixed(3)}, cap ${CYBER_CAP}`);
 
 // ---- 5. Public profile carries a tier, never mu/sigma --------------------
 const leak = await alice.evaluate(async () => {
