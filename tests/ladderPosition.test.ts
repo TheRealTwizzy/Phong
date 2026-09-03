@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
-import { LADDER_TOP_N } from '../src/rating';
+import { LADDER_TOP_N, OVERLORD_MIN_DUELS } from '../src/rating';
 import type { MatchEndPayload } from '../src/types';
 
 /**
@@ -41,9 +41,13 @@ let db: typeof import('../server/db').db;
  */
 function setRating(id: string, rankMu: number, rankedGames = 10) {
   const raw = new DatabaseSync(DB_FILE);
+  // The apex asks for OVERLORD_MIN_DUELS ranked duels beyond the rating, so a
+  // fixture standing somebody at mu 45 has to give them the duels too, or
+  // every Overlord these assertions are about reads Legend and holds no
+  // position at all.
   raw
-    .prepare('UPDATE players SET rankMu = ?, rankSigma = ?, rankedGames = ? WHERE id = ?')
-    .run(rankMu, 2, rankedGames, id);
+    .prepare('UPDATE players SET rankMu = ?, rankSigma = ?, rankedGames = ?, rankedDuels = ? WHERE id = ?')
+    .run(rankMu, 2, rankedGames, Math.max(rankedGames, OVERLORD_MIN_DUELS), id);
   raw.close();
 }
 

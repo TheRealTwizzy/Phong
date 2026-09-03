@@ -29,6 +29,8 @@ import {
   RANK_MOVE_LARGE_MU,
   rankMoveSize,
   START_SIGMA,
+  OVERLORD_MIN_DUELS,
+  duelsShortOf,
 } from '../src/rating';
 
 const fresh = (): Rating => newRating();
@@ -351,7 +353,10 @@ describe('solo is capped and always lighter than PvP', () => {
     expect(soloMuCap('rookie')).toBe(START_MU); // farming the open rung from a standing start moves nothing
     expect(soloMuCap('pro')).toBe(30.9);
     expect(soloMuCap('elite')).toBe(33.9);
-    expect(soloMuCap('cyber')).toBe(36.9);
+    // Cyber shares Elite's ceiling: only CHAOS, the last rung, reaches Legend.
+    // While Cyber sat at 36.9 the Chaos gate (ten Cyber wins at Grandmaster)
+    // bought the badge nothing Cyber had not already given it.
+    expect(soloMuCap('cyber')).toBe(33.9);
     expect(soloMuCap('chaos')).toBe(36.9);
     // Every cap is a constant that sits strictly below the Overlord floor
     // (37): the apex is a PvP achievement, however much solo is farmed.
@@ -410,7 +415,7 @@ describe('placement and tiers', () => {
         r = updateRating(r, fresh(), won, { ...PLACEMENT_UPDATE });
       }
       expect(isPlaced(PLACEMENT_GAMES, r.sigma)).toBe(true);
-      expect(tierFor(r.mu, PLACEMENT_GAMES, r.sigma)).not.toBe('unranked');
+      expect(tierFor(r.mu, PLACEMENT_GAMES, r.sigma, 0)).not.toBe('unranked');
     }
   });
 
@@ -419,7 +424,7 @@ describe('placement and tiers', () => {
     for (let i = 1; i < PLACEMENT_GAMES; i++) {
       r = updateRating(r, fresh(), true, { ...PLACEMENT_UPDATE });
       expect(isPlaced(i, r.sigma)).toBe(false);
-      expect(tierFor(r.mu, i, r.sigma)).toBe('unranked');
+      expect(tierFor(r.mu, i, r.sigma, 0)).toBe('unranked');
     }
   });
 
@@ -451,15 +456,39 @@ describe('placement and tiers', () => {
     expect(isPlaced(PLACEMENT_GAMES - 1, 2)).toBe(false);
     expect(isPlaced(PLACEMENT_GAMES, 8)).toBe(false);
     expect(isPlaced(PLACEMENT_GAMES, 2)).toBe(true);
-    expect(tierFor(40, PLACEMENT_GAMES - 1, 2)).toBe('unranked');
+    expect(tierFor(40, PLACEMENT_GAMES - 1, 2, 100)).toBe('unranked');
   });
 
   it('maps mu onto the tier ladder once placed', () => {
-    expect(tierFor(15, 10, 2)).toBe('rookie');
-    expect(tierFor(20, 10, 2)).toBe('contender');
-    expect(tierFor(25, 10, 2)).toBe('ace');
-    expect(tierFor(30, 10, 2)).toBe('master');
-    expect(tierFor(40, 10, 2)).toBe('overlord');
+    expect(tierFor(15, 10, 2, 0)).toBe('rookie');
+    expect(tierFor(20, 10, 2, 0)).toBe('contender');
+    expect(tierFor(25, 10, 2, 0)).toBe('ace');
+    expect(tierFor(30, 10, 2, 0)).toBe('master');
+    expect(tierFor(40, 10, 2, OVERLORD_MIN_DUELS)).toBe('overlord');
+  });
+
+  it('holds the apex back until the duels are played, and says by how much', () => {
+    // Every solo cap sits 0.1 under a tier floor, so the tier above a farmed
+    // rung was one dominant duel away: a solo-farmed 36.9 became Cyber
+    // Overlord off two duels. The cap could never say "through PvP"; a count
+    // of ranked duels can, and only the apex reads it.
+    expect(tierFor(40, 10, 2, 0)).toBe('legend');
+    expect(tierFor(40, 10, 2, OVERLORD_MIN_DUELS - 1)).toBe('legend');
+    expect(tierFor(40, 10, 2, OVERLORD_MIN_DUELS)).toBe('overlord');
+    expect(tierFor(35, 10, 2, 0)).toBe('legend');
+    expect(tierFor(30, 10, 2, 0)).toBe('master');
+    // The hint the profile shows is derived from the same table, so the two
+    // cannot disagree about what is being held and by how much.
+    expect(duelsShortOf(40, 10, 2, 3)).toEqual({ tier: 'overlord', need: OVERLORD_MIN_DUELS, have: 3 });
+    expect(duelsShortOf(40, 10, 2, OVERLORD_MIN_DUELS)).toBeNull();
+    expect(duelsShortOf(35, 10, 2, 0)).toBeNull();
+    // Unplaced is unplaced, whatever the count says — placement is the
+    // first gate and this is a second one, never a substitute.
+    expect(tierFor(40, PLACEMENT_GAMES - 1, 2, 100)).toBe('unranked');
+    expect(duelsShortOf(40, PLACEMENT_GAMES - 1, 2, 0)).toBeNull();
+    // The requirement is real: a zero here is how the whole gate disappears
+    // with nothing red anywhere, which is why the constant is asserted too.
+    expect(OVERLORD_MIN_DUELS).toBeGreaterThan(0);
   });
 
   // tierProgress had no test at all until the top band changed under it, which
@@ -492,8 +521,8 @@ describe('placement and tiers', () => {
   it('does NOT change tier as sigma alone shrinks', () => {
     // Regression: a conservative mu-3*sigma rating would drift an average
     // player two tiers upward purely from playing more games.
-    const early = tierFor(25, 10, 3.9);
-    const converged = tierFor(25, 200, 0.7);
+    const early = tierFor(25, 10, 3.9, 0);
+    const converged = tierFor(25, 200, 0.7, 0);
     expect(converged).toBe(early);
   });
 
@@ -504,7 +533,10 @@ describe('placement and tiers', () => {
       r = updateRating(r, strong, true, PVP_UPDATE);
     }
     expect(isPlaced(PLACEMENT_GAMES, r.sigma)).toBe(true);
-    expect(['legend', 'overlord']).toContain(tierFor(r.mu, PLACEMENT_GAMES, r.sigma));
+    // Five duels is five duels: a smurf who climbs past 37 in placement reads
+    // Legend until the apex's duel count is met, which is the rule working.
+    expect(['legend', 'overlord']).toContain(tierFor(r.mu, PLACEMENT_GAMES, r.sigma, PLACEMENT_GAMES));
+    expect(tierFor(r.mu, PLACEMENT_GAMES, r.sigma, PLACEMENT_GAMES)).not.toBe('overlord');
   });
 });
 

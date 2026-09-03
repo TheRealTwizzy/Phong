@@ -116,6 +116,7 @@ describe('achievement XP scales with what was actually beaten', () => {
       'ai_elite',
       'ai_pro',
       'ai_rookie',
+      'chaos_shutout',
       'cyber_shutout',
       'cyber_slayer',
       'duel_shutout',

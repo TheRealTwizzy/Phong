@@ -29,7 +29,7 @@ import { ELITE_POOL } from '../src/game/missions';
 const base = (over: Partial<PlayerProfile> = {}): PlayerProfile =>
   ({
     id: 'x', username: 'x', level: 1, xp: 0, xpNext: 250,
-    mmrMu: 25, mmrSigma: 8.33, rankMu: 25, rankSigma: 8.33, rankedGames: 0,
+    mmrMu: 25, mmrSigma: 8.33, rankMu: 25, rankSigma: 8.33, rankedGames: 0, rankedDuels: 0,
     matchesPlayed: 0, matchesWon: 0, matchesLost: 0, highestRally: 0,
     totalPointsScored: 0, totalAces: 0, multiplayerWins: 0, dailyStreak: 0,
     tier: 'unranked', achievements: [], eliteUnlocks: [],
@@ -73,6 +73,13 @@ const CATALOGUE: Record<CosmeticId, Partial<PlayerProfile>[] | 'free'> = {
   'molten-core': [{ eliteUnlocks: ['molten-core'] }],
   'signal-lost': [{ eliteUnlocks: ['signal-lost'] }],
   'gilded-age': [{ eliteUnlocks: ['gilded-age'] }],
+
+  // The progression-depth release: four elite looks and the apex's.
+  'event-horizon': [{ eliteUnlocks: ['event-horizon'] }],
+  glasshouse: [{ eliteUnlocks: ['glasshouse'] }],
+  floodlights: [{ eliteUnlocks: ['floodlights'] }],
+  'moss-court': [{ eliteUnlocks: ['moss-court'] }],
+  'overlord-chrome': [{ achievements: ['tier_overlord'] }, { tier: 'overlord' }],
 };
 
 const themeIds = Object.keys(COSMETICS) as CosmeticId[];
@@ -86,12 +93,25 @@ describe('the theme catalogue', () => {
     expect(ghosts, `catalogue names themes that do not exist: ${ghosts.join(', ')}`).toEqual([]);
   });
 
-  it('ships twenty themes: five open, nine earned, six elite', () => {
+  it('ships twenty-five themes: five open, ten earned, ten elite', () => {
     const free = themeIds.filter((id) => !COSMETICS[id].unlockRequirement);
     const elite = themeIds.filter((id) => COSMETICS[id].unlockRequirement?.eliteMissionId);
-    expect(themeIds).toHaveLength(20);
+    expect(themeIds).toHaveLength(25);
     expect(free).toHaveLength(5);
-    expect(elite).toHaveLength(6);
+    expect(elite).toHaveLength(10);
+  });
+
+  it('keeps the new looks out of the bands that were already full', () => {
+    // The five added with the progression-depth release were authored in the
+    // regions the DISTINCT floor still had room in: light mode, which had one
+    // entry, and desaturated green/teal. The first moss-court draft was sage
+    // and bone and landed 0.067 from gilded-age's gold and cream — under the
+    // floor however different it looked in a swatch — so the light/teal rule
+    // is pinned here as the mode split, and the pairwise floor below does the
+    // rest.
+    const light = themeIds.filter((id) => COSMETICS[id].mode === 'light');
+    expect(light).toEqual(expect.arrayContaining(['glasshouse', 'floodlights', 'overlord-chrome']));
+    expect(light.length).toBeGreaterThanOrEqual(4);
   });
 });
 

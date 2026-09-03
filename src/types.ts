@@ -36,7 +36,42 @@ export type CosmeticId =
   | 'arctic-glass'
   | 'molten-core'
   | 'signal-lost'
-  | 'gilded-age';
+  | 'gilded-age'
+  // The progression-depth release: three elite tasks and the apex tier. All
+  // authored in light mode or desaturated green/teal — the only regions the
+  // palette-distinctness floor still had room in (see cosmetics.ts).
+  | 'event-horizon'
+  | 'glasshouse'
+  | 'floodlights'
+  | 'moss-court'
+  | 'overlord-chrome';
+
+/**
+ * A TITLE is the second permanent reward type, beside cosmetics: a word a
+ * player wears beside their name on the two profile cards. Unlocked by an elite
+ * task or an achievement, equipped through the same PUT as a cosmetic, and
+ * validated server-side the same way (see src/game/titles.ts). Optional — a
+ * profile may hold none, which is why it normalizes to null and never to a
+ * default.
+ */
+export type TitleId =
+  // Banked permanently by completing an elite daily task.
+  | 'unbroken'
+  | 'scoreboard'
+  | 'sniper'
+  | 'wallbreaker'
+  | 'clutch'
+  | 'cold-steel'
+  // Earned from the deep rungs of the achievement tree.
+  | 'centurion'
+  | 'overlord'
+  | 'chaos-ender'
+  | 'fixture'
+  | 'metronome'
+  | 'regular'
+  | 'duelist'
+  | 'juggernaut'
+  | 'ten-thousand';
 
 export type SoundscapeType = 'none' | 'stadium' | 'cyberpunk' | 'zen';
 
@@ -51,7 +86,39 @@ export type MissionType =
   | 'multiplayer'
   | 'points_scored'
   | 'aces'
-  | 'shutouts';
+  | 'shutouts'
+  // The five kinds added with the progression-depth release. The first three
+  // are read off the scoreline; win_streak is a MAXIMUM of the pooled
+  // consecutive-wins counter; practice_returns is the one type the Practice
+  // Wall feeds, as a maximum of the day's returns.
+  | 'close_wins'
+  | 'dominant_wins'
+  | 'long_wins'
+  | 'win_streak'
+  | 'practice_returns';
+
+/**
+ * What a recorded match knows beyond its own payload when it advances a task.
+ * `winStreak` is the pooled players.winStreak AFTER this match — the server
+ * bumps it before the mission pass, so a win_streak task reads the run the
+ * player is actually on rather than counting one of its own from mid-day.
+ */
+export interface MissionContext {
+  winStreak?: number;
+}
+
+/**
+ * The day's reroll allowances still standing, per tier. `regular`/`elite` are
+ * the PAID rerolls; `regularFree`/`eliteFree` are the free re-deals a claim may
+ * still trigger today (FREE_REDEALS_* in missions.ts). Both pairs reset with
+ * the UTC day and never bank.
+ */
+export interface RerollsRemaining {
+  regular: number;
+  elite: number;
+  regularFree: number;
+  eliteFree: number;
+}
 
 export interface DailyMission {
   id: string;
@@ -253,6 +320,13 @@ export interface PlayerProfile {
   rankMu: number;
   rankSigma: number;
   rankedGames: number;
+  /**
+   * Ranked DUELS only — the subset of rankedGames played against a person.
+   * What Cyber Overlord is gated on beyond the rating (OVERLORD_MIN_DUELS):
+   * rankedGames pools solo results at earned difficulties, so it cannot say
+   * whether a rating was ever tested against another human.
+   */
+  rankedDuels: number;
   matchesPlayed: number;
   matchesWon: number;
   matchesLost: number;
@@ -291,6 +365,11 @@ export interface PlayerProfile {
    * else sees when they open this player's profile.
    */
   cosmetic?: CosmeticId;
+  /**
+   * The title this player wears, or none. Profile-owned for the same reason the
+   * cosmetic is: it is what everyone else reads beside the name.
+   */
+  title?: TitleId;
   /**
    * Stats kept per mode, keyed by GameMode. Only ever sent to the profile's
    * OWN device — PublicProfile is a separate, sanitized shape.
@@ -348,6 +427,8 @@ export interface PublicProfile {
   totalAces: number;
   /** PvP wins only — solo wins never count toward the duel branch. */
   multiplayerWins: number;
+  /** Ranked duels played — a count, not a rating, so it may be public. */
+  rankedDuels: number;
   /**
    * Permanent unlocks banked by completing elite daily missions. Kept for
    * good: the mission's XP is a daily reward, this is not.
@@ -355,6 +436,8 @@ export interface PublicProfile {
   eliteUnlocks?: string[];
   /** Equipped cosmetic — a viewer renders this profile in the OWNER's look. */
   cosmetic?: CosmeticId;
+  /** The title the owner wears, shown beside their name. */
+  title?: TitleId;
   dailyStreak: number;
   // Tier only — a public profile never exposes raw mu/sigma numbers.
   tier: Tier;
@@ -667,6 +750,13 @@ export interface MatchEndResult {
   // Today's missions after this match advanced them — server-owned, so the
   // client never computes mission progress itself.
   missions: DailyMission[];
+  /**
+   * The reroll allowances as they stand after this match. Nothing here spends
+   * one, but the client shows the missions and the allowance together and a
+   * result that carried one without the other left the note beside the list a
+   * fetch behind it. Optional so a result stamped by an older build replays.
+   */
+  rerolls?: RerollsRemaining;
   /**
    * True when this match had already been recorded under the same matchKey —
    * a retry, a replayed queue entry, or the client's POST arriving after the

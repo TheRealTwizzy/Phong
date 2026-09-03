@@ -1696,7 +1696,7 @@ async function startServer() {
   // from the server's own definition table.
   app.put('/api/profile/me', requireActiveSession, (req, res) => {
     try {
-      const { username, cosmetic } = req.body ?? {};
+      const { username, cosmetic, title } = req.body ?? {};
       let profile = null;
 
       if (username !== undefined) {
@@ -1724,6 +1724,23 @@ async function startServer() {
         const result = db.setCosmetic(req.deviceId!, cosmetic);
         if (!result.ok) {
           const status = result.code === 'COSMETIC_INVALID' || result.code === 'COSMETIC_UNKNOWN' ? 400 : 403;
+          return res.status(status).json({ error: result.code });
+        }
+        profile = result.profile;
+      }
+
+      if (title !== undefined) {
+        // `null` is a legal value here — it takes the title OFF — so the type
+        // check admits it where the cosmetic's does not. Otherwise the same
+        // rule: the picker lists only owned titles, but the picker is the
+        // client, and db.setTitle re-derives the unlock from the profile this
+        // server holds.
+        if (title !== null && typeof title !== 'string') {
+          return res.status(400).json({ error: 'TITLE_INVALID' });
+        }
+        const result = db.setTitle(req.deviceId!, title);
+        if (!result.ok) {
+          const status = result.code === 'TITLE_UNKNOWN' ? 400 : 403;
           return res.status(status).json({ error: result.code });
         }
         profile = result.profile;

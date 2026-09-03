@@ -70,5 +70,7 @@ export function botProfileFields(bot: BotSeed) {
     totalPointsScored: bot.totalPointsScored,
     multiplayerWins: bot.matchesWon,
     rankedGames: Math.max(PLACEMENT_GAMES, bot.matchesPlayed),
+    // A roster row is a career of duels, so the apex gate reads it as one.
+    rankedDuels: bot.matchesPlayed,
   };
 }

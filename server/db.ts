@@ -16,7 +16,10 @@ import {
   GameMode,
   DailyMission,
   CosmeticId,
+  TitleId,
   GameUnlock,
+  MissionContext,
+  RerollsRemaining,
 } from '../src/types';
 import {
   validateUsername,
@@ -38,9 +41,12 @@ const HEALTH_WRITE_PROBE_MS = 10_000;
 import { roomCountsForRank } from '../src/venues';
 import { ALL_ACHIEVEMENTS, achievementById, hasUnlock, isUnlockable } from '../src/achievements';
 import { COSMETICS, isCosmeticUnlocked, normalizeCosmeticId } from '../src/game/cosmetics';
+import { TITLES, isTitleUnlocked, normalizeTitleId } from '../src/game/titles';
 import {
   Rating,
   Tier,
+  TIER_ORDER,
+  OVERLORD_MIN_DUELS,
   AI_RATINGS,
   aiRating,
   newRating,
@@ -78,8 +84,11 @@ import {
   ELITE_SLOTS,
   REROLLS_REGULAR,
   REROLLS_ELITE,
+  FREE_REDEALS_REGULAR,
+  FREE_REDEALS_ELITE,
   MissionDef,
   applyMatchToProgress,
+  applyPracticeToProgress,
   dealOrder,
   dealablePool,
   findMission,
@@ -326,6 +335,13 @@ export interface CosmeticResult {
   code?: string;
 }
 
+/** Same shape as CosmeticResult, for the same reasons — a title equips like a look. */
+export interface TitleResult {
+  ok: boolean;
+  profile?: PlayerProfile;
+  code?: string;
+}
+
 export interface UsernameResult {
   ok: boolean;
   profile?: PlayerProfile;
@@ -384,6 +400,8 @@ interface PlayerRow {
   cyberWins: number | null;
   chaosWins: number | null;
   abandons: number | null;
+  rankedDuels: number | null;
+  title: string | null;
   id: string;
   username: string;
   level: number;
@@ -432,9 +450,13 @@ function rowToProfile(row: PlayerRow): PlayerProfile {
   const { avatarUpdatedAt, eloRating, rankTitle, ...rest } = row;
   return {
     ...rest,
-    tier: tierFor(row.rankMu, row.rankedGames, row.rankSigma),
+    tier: tierFor(row.rankMu, row.rankedGames, row.rankSigma, row.rankedDuels || 0),
     // Defaulted rather than required: a row written before the column existed
     // reads back as null under the ALTER TABLE default.
+    rankedDuels: row.rankedDuels || 0,
+    // Null, not a default — a title is optional, and a row from before titles
+    // existed (or naming one this build no longer ships) simply wears none.
+    title: normalizeTitleId(row.title) ?? undefined,
     multiplayerWins: row.multiplayerWins || 0,
     winStreak: row.winStreak || 0,
     bestWinStreak: row.bestWinStreak || 0,
@@ -527,6 +549,7 @@ class GameDatabase {
         rankMu REAL NOT NULL DEFAULT 25,
         rankSigma REAL NOT NULL DEFAULT 8.3333,
         rankedGames INTEGER NOT NULL DEFAULT 0,
+        rankedDuels INTEGER NOT NULL DEFAULT 0,
         matchesPlayed INTEGER NOT NULL,
         matchesWon INTEGER NOT NULL,
         matchesLost INTEGER NOT NULL,
@@ -554,7 +577,8 @@ class GameDatabase {
         usernameChangedAt TEXT,
         activeSessionId TEXT,
         activeSessionAt TEXT,
-        cosmetic TEXT
+        cosmetic TEXT,
+        title TEXT
       );
       CREATE TABLE IF NOT EXISTS matches (
         id TEXT PRIMARY KEY,
@@ -659,6 +683,10 @@ class GameDatabase {
         dayKey TEXT NOT NULL,
         regularUsed INTEGER NOT NULL DEFAULT 0,
         eliteUsed INTEGER NOT NULL DEFAULT 0,
+        -- Free re-deals a CLAIM has triggered today, per tier. Day-keyed like
+        -- the paid allowance beside it and for the same reason: it expires.
+        regularFree INTEGER NOT NULL DEFAULT 0,
+        eliteFree INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (playerId, dayKey)
       );
       -- PERMANENT, deliberately not dayKey'd: the first time an elite mission
@@ -909,6 +937,16 @@ class GameDatabase {
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakChainId TEXT');
       this.sql.exec('ALTER TABLE player_mode_stats ADD COLUMN streakSeq INTEGER NOT NULL DEFAULT 0');
     }
+    // daily_rerolls grew the free re-deal counters when a claim stopped dealing
+    // without limit. An existing row reads 0 spent, which is the right answer
+    // for a day that began under the old rule.
+    const rerollCols = this.sql
+      .prepare('PRAGMA table_info(daily_rerolls)')
+      .all() as unknown as Array<{ name: string }>;
+    if (rerollCols.length && !rerollCols.some((c) => c.name === 'regularFree')) {
+      this.sql.exec('ALTER TABLE daily_rerolls ADD COLUMN regularFree INTEGER NOT NULL DEFAULT 0');
+      this.sql.exec('ALTER TABLE daily_rerolls ADD COLUMN eliteFree INTEGER NOT NULL DEFAULT 0');
+    }
     // And for matches: whether the match counted for the visible ladder,
     // recorded so history can filter Ranked from Un-Ranked. Nullable on
     // purpose — see the CREATE TABLE comment: a row from before the column
@@ -941,6 +979,12 @@ class GameDatabase {
     addColumn('cyberWins', 'cyberWins INTEGER NOT NULL DEFAULT 0');
     addColumn('chaosWins', 'chaosWins INTEGER NOT NULL DEFAULT 0');
     addColumn('abandons', 'abandons INTEGER NOT NULL DEFAULT 0');
+    // Ranked duels apart from ranked games: what the apex tier is gated on.
+    // Backfilled from `matches` by backfillRankedDuels below.
+    addColumn('rankedDuels', 'rankedDuels INTEGER NOT NULL DEFAULT 0');
+    // Nullable with no default, like `cosmetic` — and unlike it, null is also
+    // the RIGHT answer for a player who wears no title.
+    addColumn('title', 'title TEXT');
     // One account, one live session. Which one is recorded here.
     // Nullable with no default: a row written before cosmetics existed reads
     // back null, which rowToProfile resolves to the shipped default rather than
@@ -992,6 +1036,9 @@ class GameDatabase {
     this.backfillMatchRanked();
     this.relabelChaosMatches();
     this.recountShutouts();
+    // After backfillMatchRanked, which classifies legacy rows' `ranked` — a
+    // duel judged before that reads NULL and is not counted.
+    this.backfillRankedDuels();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -1162,6 +1209,39 @@ class GameDatabase {
   }
 
   /**
+   * Count the ranked duels already on disk into `rankedDuels`.
+   *
+   * The column arrives through `addColumn(... DEFAULT 0)`, so every duel played
+   * before it existed contributes nothing — and Cyber Overlord now asks for
+   * OVERLORD_MIN_DUELS of them, so without this every existing Overlord would
+   * read Legend on the next load, owing duels they had genuinely played.
+   *
+   * `MAX`, never an assignment, for the reason `recountShutouts` gives:
+   * `matches` is trimmed to the newest 500 rows per player, so a straight
+   * count could only ever take duels away from the accounts that have played
+   * the most. `m.ranked = 1` is `ranksThisMatch` as it was persisted, which is
+   * why this runs AFTER `backfillMatchRanked` has classified the rows from
+   * before that column existed — judged first, a legacy duel reads NULL and is
+   * missed. `player1Id` alone, since each seat files its own row.
+   */
+  private backfillRankedDuels(): void {
+    const KEY = 'ranked_duels_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `UPDATE players SET rankedDuels = MAX(rankedDuels, (
+           SELECT COUNT(*) FROM matches m
+            WHERE m.player1Id = players.id
+              AND m.mode = 'multiplayer'
+              AND m.ranked = 1))`
+      )
+      .run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`ranked_duels_backfill_v1: counted ranked duels for ${rows.changes} player(s)`);
+    }
+  }
+
+  /**
    * Clear everybody's active tasks once, so the day is dealt afresh.
    *
    * Hands dealt under the old rules carry state the new ones cannot repair on
@@ -1250,15 +1330,16 @@ class GameDatabase {
 
   private upsertProfile(p: PlayerProfile): void {
     this.stmt(
-        `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, matchesPlayed, matchesWon,
+        `INSERT INTO players (id, username, level, xp, xpNext, mmrMu, mmrSigma, rankMu, rankSigma, rankedGames, rankedDuels, matchesPlayed, matchesWon,
            matchesLost, highestRally, totalPointsScored, totalAces, multiplayerWins,
            winStreak, bestWinStreak, shutoutsWon, rookieWins, proWins, eliteWins, cyberWins, chaosWins, abandons, dailyStreak, lastDailyDate,
-           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt, cosmetic)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           achievements, createdAt, lastActive, recoveryCode, initializedAt, usernameChangedAt, cosmetic, title)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            username=excluded.username, level=excluded.level, xp=excluded.xp, xpNext=excluded.xpNext,
            mmrMu=excluded.mmrMu, mmrSigma=excluded.mmrSigma, rankMu=excluded.rankMu,
            rankSigma=excluded.rankSigma, rankedGames=excluded.rankedGames,
+           rankedDuels=excluded.rankedDuels,
            matchesPlayed=excluded.matchesPlayed,
            matchesWon=excluded.matchesWon, matchesLost=excluded.matchesLost,
            highestRally=excluded.highestRally, totalPointsScored=excluded.totalPointsScored,
@@ -1272,7 +1353,8 @@ class GameDatabase {
            lastDailyDate=excluded.lastDailyDate, achievements=excluded.achievements,
            createdAt=excluded.createdAt, lastActive=excluded.lastActive,
            recoveryCode=excluded.recoveryCode, initializedAt=excluded.initializedAt,
-           usernameChangedAt=excluded.usernameChangedAt, cosmetic=excluded.cosmetic`
+           usernameChangedAt=excluded.usernameChangedAt, cosmetic=excluded.cosmetic,
+           title=excluded.title`
       )
       .run(
         p.id,
@@ -1285,6 +1367,7 @@ class GameDatabase {
         p.rankMu,
         p.rankSigma,
         p.rankedGames,
+        p.rankedDuels || 0,
         p.matchesPlayed,
         p.matchesWon,
         p.matchesLost,
@@ -1311,7 +1394,8 @@ class GameDatabase {
         p.recoveryCode ?? null,
         p.initializedAt ?? null,
         p.usernameChangedAt ?? null,
-        p.cosmetic ?? null
+        p.cosmetic ?? null,
+        p.title ?? null
       );
   }
 
@@ -1427,6 +1511,7 @@ class GameDatabase {
         rankMu: newRating().mu,
         rankSigma: newRating().sigma,
         rankedGames: 0,
+        rankedDuels: 0,
         matchesPlayed: 0,
         matchesWon: 0,
         matchesLost: 0,
@@ -1567,13 +1652,42 @@ class GameDatabase {
     return { ok: true, profile: updated };
   }
 
+  /**
+   * Equip a title, or take it off with `null`.
+   *
+   * The same gate as `setCosmetic`, for the same reason: the picker lists only
+   * what a player owns, and the picker is the client. Unknown ids are refused
+   * rather than normalized — normalizing is for READING a stored value, never
+   * for accepting a new one. Null is a first-class answer here where it is not
+   * for a cosmetic, because a player always wears some look and wears a title
+   * only if they choose to.
+   */
+  public setTitle(id: string, title: string | null): TitleResult {
+    const profile = this.getProfile(id);
+    if (!profile.initializedAt) return { ok: false, code: 'PROFILE_NOT_INITIALIZED' };
+    if (title === null) {
+      if (!profile.title) return { ok: true, profile }; // no-op
+      const cleared = { ...profile, title: undefined };
+      this.upsertProfile(cleared);
+      return { ok: true, profile: cleared };
+    }
+    if (!(title in TITLES)) return { ok: false, code: 'TITLE_UNKNOWN' };
+    const next = title as TitleId;
+    if (!isTitleUnlocked(next, profile)) return { ok: false, code: 'TITLE_LOCKED' };
+    if (profile.title === next) return { ok: true, profile }; // no-op
+    const updated = { ...profile, title: next };
+    this.upsertProfile(updated);
+    return { ok: true, profile: updated };
+  }
+
   // Client-trusted XP grant (daily mission rewards). Clamped small so the
   // endpoint can't be used to speed-level; level/rank re-derive from XP.
   /**
    * Award XP for a Practice Wall session. The client reports the streak it
    * reached; the server decides what that is worth and how much of the daily
    * allowance is left, so nothing here takes an XP amount from the caller.
-   * Practice records no match, moves no rating, and feeds no missions.
+   * Practice records no match and moves no rating; the only tasks it feeds are
+   * the wall's own `practice_returns` kind, from the day's return total.
    */
   /**
    * A duel walked out on mid-match — socket died or the player quit with a
@@ -2044,18 +2158,34 @@ class GameDatabase {
     if (streak >= 30) grantWall('wall_30');
     if (streak >= 90) grantWall('wall_90');
     if (streak >= 200) grantWall('wall_200');
+    if (streak >= 500) grantWall('wall_500');
 
     // The day's RETURNS are banked whatever the XP came to — the curve is
     // measured against how much has been played today, so a session that paid
     // nothing (the cap was already spent, or the marginal value rounded to
     // zero) still has to advance it, or the next session would be paid as
     // though those returns had not happened.
+    //
+    // Banked as `returns`, the COUNT, and not `earned`, the run. The XP above
+    // was computed against `returnsBefore + returns`, and for one release this
+    // line added `earned` instead — so the stored day total fell short of what
+    // the curve had already been paid against, and the next session restarted
+    // partway down the curve. Three returns and a miss, repeated, banked three
+    // per visit against a curve that had counted every one of them: the
+    // session-splitting exploit this counter exists to close, back by the
+    // width of one variable name.
     if (earned > 0) {
       this.stmt(
           `INSERT INTO daily_practice (playerId, dayKey, xpAwarded, returns) VALUES (?, ?, 0, ?)
            ON CONFLICT(playerId, dayKey) DO UPDATE SET returns = returns + excluded.returns`
         )
-        .run(playerId, dayKey, earned);
+        .run(playerId, dayKey, returns);
+      // The wall's one daily task reads the total just banked. Unwrapped, like
+      // every other write in this method: a practice report carries no
+      // idempotency key (a replay already double-counts the row above), and
+      // the task holds a MAXIMUM of the day, so a crash between the two leaves
+      // it one session behind and the next session heals it.
+      this.advancePracticeMissions(playerId, returnsAfter, now);
     }
 
     if (earnedXp > 0 || newAchievements.length > 0) {
@@ -2285,11 +2415,46 @@ class GameDatabase {
       .run(playerId, tier, missionId, now.toISOString(), playerId, tier);
   }
 
-  /** Rerolls already spent today, per tier. */
-  private rerollsUsed(playerId: string, dayKey: string): { regular: number; elite: number } {
-    const row = this.stmt(`SELECT regularUsed, eliteUsed FROM daily_rerolls WHERE playerId = ? AND dayKey = ?`)
-      .get(playerId, dayKey) as { regularUsed: number; eliteUsed: number } | undefined;
-    return { regular: row?.regularUsed ?? 0, elite: row?.eliteUsed ?? 0 };
+  /** Rerolls already spent today, per tier — the paid ones and the free re-deals. */
+  private rerollsUsed(
+    playerId: string,
+    dayKey: string
+  ): { regular: number; elite: number; regularFree: number; eliteFree: number } {
+    const row = this.stmt(
+        `SELECT regularUsed, eliteUsed, regularFree, eliteFree FROM daily_rerolls WHERE playerId = ? AND dayKey = ?`
+      )
+      .get(playerId, dayKey) as
+      | { regularUsed: number; eliteUsed: number; regularFree: number | null; eliteFree: number | null }
+      | undefined;
+    return {
+      regular: row?.regularUsed ?? 0,
+      elite: row?.eliteUsed ?? 0,
+      regularFree: row?.regularFree ?? 0,
+      eliteFree: row?.eliteFree ?? 0,
+    };
+  }
+
+  /** Spend one of the day's free re-deals for a tier. */
+  private chargeFreeRedeal(playerId: string, dayKey: string, elite: boolean): void {
+    this.stmt(
+        `INSERT INTO daily_rerolls (playerId, dayKey, regularFree, eliteFree) VALUES (?, ?, ?, ?)
+         ON CONFLICT(playerId, dayKey) DO UPDATE SET
+           regularFree = regularFree + excluded.regularFree,
+           eliteFree = eliteFree + excluded.eliteFree`
+      )
+      .run(playerId, dayKey, elite ? 0 : 1, elite ? 1 : 0);
+  }
+
+  /**
+   * Blank a slot for the rest of the day. Deliberately blanked rather than
+   * DELETEd: ensureSlots treats "no rows for today" as "not dealt yet", so
+   * removing the last row outright would deal the player a whole fresh day.
+   * getMissions drops a slot it cannot resolve, so the list simply gets
+   * shorter and is whole again at the UTC reset.
+   */
+  private retireSlot(playerId: string, dayKey: string, slot: number): void {
+    this.stmt(`UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?`)
+      .run(RETIRED_SLOT, playerId, dayKey, slot);
   }
 
   /** Elite missions this player has EVER completed, with what they unlocked. */
@@ -2328,12 +2493,14 @@ class GameDatabase {
       .filter(Boolean) as DailyMission[];
   }
 
-  /** Rerolls left today, per tier. */
-  public rerollsRemaining(playerId: string, now: Date = new Date()): { regular: number; elite: number } {
+  /** Rerolls left today, per tier: the paid allowance and the free re-deals. */
+  public rerollsRemaining(playerId: string, now: Date = new Date()): RerollsRemaining {
     const used = this.rerollsUsed(playerId, missionDayKey(now));
     return {
       regular: Math.max(0, REROLLS_REGULAR - used.regular),
       elite: Math.max(0, REROLLS_ELITE - used.elite),
+      regularFree: Math.max(0, FREE_REDEALS_REGULAR - used.regularFree),
+      eliteFree: Math.max(0, FREE_REDEALS_ELITE - used.eliteFree),
     };
   }
 
@@ -2438,7 +2605,7 @@ class GameDatabase {
   }
 
   /** Advance every mission this match touches. Called from recordMatch only. */
-  private advanceMissions(playerId: string, payload: MatchEndPayload, now: Date): void {
+  private advanceMissions(playerId: string, payload: MatchEndPayload, now: Date, ctx: MissionContext = {}): void {
     const dayKey = missionDayKey(now);
     const rows = this.missionRows(playerId, dayKey);
     const upsert = this.stmt(
@@ -2452,7 +2619,29 @@ class GameDatabase {
       const def = findMission(missionId);
       if (!def) continue;
       const current = rows.get(def.id)?.progress ?? 0;
-      const next = applyMatchToProgress(def, current, payload);
+      const next = applyMatchToProgress(def, current, payload, ctx);
+      if (next !== current) upsert.run(playerId, dayKey, def.id, next);
+    }
+  }
+
+  /**
+   * Advance the wall's own task type from the day's return total. Called from
+   * recordPractice only, and it moves nothing but `practice_returns` tasks:
+   * a session is not a match, and every other task is about matches.
+   */
+  private advancePracticeMissions(playerId: string, dayReturns: number, now: Date): void {
+    const dayKey = missionDayKey(now);
+    const rows = this.missionRows(playerId, dayKey);
+    const upsert = this.stmt(
+      `INSERT INTO daily_missions (playerId, dayKey, missionId, progress)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(playerId, dayKey, missionId) DO UPDATE SET progress = excluded.progress`
+    );
+    for (const { missionId } of this.ensureSlots(playerId, dayKey, now)) {
+      const def = findMission(missionId);
+      if (!def) continue;
+      const current = rows.get(def.id)?.progress ?? 0;
+      const next = applyPracticeToProgress(def, current, dayReturns);
       if (next !== current) upsert.run(playerId, dayKey, def.id, next);
     }
   }
@@ -2559,15 +2748,34 @@ class GameDatabase {
     profile.lastActive = now.toISOString();
     this.upsertProfile(profile);
 
-    // Finishing a mission hands you another one, free and without limit. The
-    // daily allowances exist for missions you did NOT want; completing one is
-    // the opposite of that, so it must not cost an allowance — nor is it
-    // capped, since every free reroll had to be earned by finishing something.
-    // The pool is finite, so an unusually productive day can run it dry; the
-    // claimed mission then simply stays in its slot.
-    const newMissionId = mine
-      ? this.fillSlot(playerId, today, mine.slot, def.tier, slots, now) ?? undefined
-      : undefined;
+    // Finishing a mission hands you another one, free — but not without limit.
+    // The paid allowances exist for missions you did NOT want, and completing
+    // one is the opposite of that, so a claim never spends one of those. It
+    // used to deal without any cap on exactly that reasoning, and the measured
+    // consequence was the largest XP source in the game: a one-match task (a
+    // shutout, a rally, a single win) claimed and re-dealt EVERY match paid a
+    // strong player 13,500-29,000 task XP a day at sixty matches, and cycled
+    // the whole elite pool — six permanent themes — in one afternoon. So a
+    // claim deals a replacement FREE_REDEALS_* times a day per tier and then
+    // clears the slot until the UTC reset: the list simply gets shorter, which
+    // is what "done for today" looks like, and the hand is whole again
+    // tomorrow. Charged only when something was actually dealt — a pool with
+    // nothing left has retired the slot already, and spending the allowance on
+    // nothing would be a second way to lose it.
+    let newMissionId: string | undefined;
+    if (mine) {
+      const isElite = def.tier === 'elite';
+      const used = this.rerollsUsed(playerId, today);
+      const freeLeft = isElite
+        ? FREE_REDEALS_ELITE - used.eliteFree
+        : FREE_REDEALS_REGULAR - used.regularFree;
+      if (freeLeft > 0) {
+        newMissionId = this.fillSlot(playerId, today, mine.slot, def.tier, slots, now) ?? undefined;
+        if (newMissionId) this.chargeFreeRedeal(playerId, today, isElite);
+      } else {
+        this.retireSlot(playerId, today, mine.slot);
+      }
+    }
 
     return {
       ok: true,
@@ -2619,10 +2827,13 @@ class GameDatabase {
       totalPointsScored: p.totalPointsScored,
       totalAces: p.totalAces,
       multiplayerWins: p.multiplayerWins || 0,
+      // A count, not a rating: the apex asks for it, so a viewer may read it.
+      rankedDuels: p.rankedDuels || 0,
       eliteUnlocks: this.eliteUnlocks(p.id),
       // The point of the whole feature: a viewer renders this card in the
       // OWNER's cosmetic, so the owner's choice has to leave the server.
       cosmetic: p.cosmetic,
+      title: p.title,
       dailyStreak: p.dailyStreak,
       tier: p.tier,
       // A position, not a rating. It is the one rank number that is already
@@ -2666,6 +2877,7 @@ class GameDatabase {
       rankSigma: BOT_SIGMA,
       // Bots are pre-placed so they carry a real tier on the leaderboard.
       rankedGames: bot.rankedGames ?? PLACEMENT_GAMES,
+      rankedDuels: bot.rankedDuels ?? 0,
       matchesPlayed: bot.matchesPlayed || 0,
       matchesWon: bot.matchesWon || 0,
       matchesLost: bot.matchesLost || 0,
@@ -2687,7 +2899,7 @@ class GameDatabase {
       achievements: bot.achievements || [],
       createdAt: now,
       lastActive: now,
-      tier: tierFor(botMu, bot.rankedGames ?? PLACEMENT_GAMES, BOT_SIGMA),
+      tier: tierFor(botMu, bot.rankedGames ?? PLACEMENT_GAMES, BOT_SIGMA, bot.rankedDuels ?? 0),
       recoveryCode: this.newRecoveryCode(),
       initialized: true,
       initializedAt: now,
@@ -2951,8 +3163,12 @@ class GameDatabase {
       profile.rankMu = nextRank.mu;
       profile.rankSigma = nextRank.sigma;
       profile.rankedGames += 1;
+      // The duels apart from the games: what the apex is gated on. Counted
+      // only when the match rated, so a Casual duel or one on party rules is
+      // a duel played and not a duel that tested the rating.
+      if (isPvp) profile.rankedDuels += 1;
     }
-    profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma);
+    profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma, profile.rankedDuels);
     // And the position with it, for the same reason the line above exists: this
     // object was loaded BEFORE the match was applied and is handed straight
     // back as MatchEndResult.profile, which the client installs verbatim and
@@ -3132,6 +3348,8 @@ class GameDatabase {
     if (profile.matchesPlayed >= 10) unlock('veteran_10');
     if (profile.matchesPlayed >= 50) unlock('veteran_50');
     if (profile.matchesPlayed >= 200) unlock('veteran_200');
+    if (profile.matchesPlayed >= 500) unlock('veteran_500');
+    if (profile.matchesPlayed >= 1000) unlock('veteran_1000');
     if (profile.level >= 5) unlock('level_5');
 
     // Rally. Measured on the profile's banked best, not this match's rally,
@@ -3147,6 +3365,8 @@ class GameDatabase {
     if (profile.highestRally >= 36) unlock('rally_50');
     if (profile.highestRally >= 72) unlock('rally_100');
     if (profile.highestRally >= 108) unlock('rally_150');
+    if (profile.highestRally >= 144) unlock('rally_200');
+    if (profile.highestRally >= 216) unlock('rally_300');
 
     // Ladder. The rungs fire in order so a single result can climb a chain
     // it genuinely satisfies, and each one opens the next.
@@ -3159,48 +3379,71 @@ class GameDatabase {
     if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
     if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
     if (profile.cyberWins >= 10) unlock('cyber_10');
+    if (profile.cyberWins >= 25) unlock('cyber_25');
     if (isWin && solo && difficulty === 'chaos') unlock('ai_chaos');
+    if (shutOut && solo && difficulty === 'chaos') unlock('chaos_shutout');
     if (profile.chaosWins >= 10) unlock('chaos_10');
+    if (profile.chaosWins >= 25) unlock('chaos_25');
+    if (profile.chaosWins >= 50) unlock('chaos_50');
 
     // Duel
     if (pvp) unlock('first_duel');
     if (isWin && pvp) unlock('multiplayer_champ');
     if (shutOut && pvp) unlock('duel_shutout');
     if (profile.multiplayerWins >= 10) unlock('duel_10');
+    if (profile.multiplayerWins >= 25) unlock('duel_25');
     if (profile.multiplayerWins >= 50) unlock('duel_50');
+    if (profile.multiplayerWins >= 100) unlock('duel_100');
 
     // Craft
     if (profile.totalAces >= 1) unlock('first_ace');
     if (profile.totalAces >= 5) unlock('ace_sniper');
     if (profile.totalAces >= 25) unlock('ace_25');
     if (profile.totalAces >= 100) unlock('ace_100');
+    if (profile.totalAces >= 250) unlock('ace_250');
     if (profile.totalPointsScored >= 100) unlock('points_100');
     if (profile.totalPointsScored >= 500) unlock('points_500');
     if (profile.totalPointsScored >= 2000) unlock('points_2000');
+    if (profile.totalPointsScored >= 5000) unlock('points_5000');
+    if (profile.totalPointsScored >= 10000) unlock('points_10000');
 
     // Ascent — the ranked ladder, concealed until a first duel has happened.
+    // Keyed on the DERIVED tier rather than on rankMu, because the apex is no
+    // longer a rating threshold alone: it asks for OVERLORD_MIN_DUELS ranked
+    // duels, and a trophy reading the mu would fire while the badge still said
+    // Legend. One rule for all seven rungs, so none can drift from the badge —
+    // `profile.tier` was re-derived above, after this match's rating moved.
+    const holdsTier = (t: Tier): boolean => TIER_ORDER.indexOf(profile.tier) >= TIER_ORDER.indexOf(t);
     if (placed) unlock('placed');
-    if (placed && profile.rankMu >= 22) unlock('tier_vanguard');
-    if (placed && profile.rankMu >= 25) unlock('tier_ace');
-    if (placed && profile.rankMu >= 28) unlock('master_tier');
-    if (placed && profile.rankMu >= 31) unlock('tier_grandmaster');
-    if (placed && profile.rankMu >= 34) unlock('legend_tier');
-    if (placed && profile.rankMu >= 37) unlock('tier_overlord');
+    if (holdsTier('vanguard')) unlock('tier_vanguard');
+    if (holdsTier('ace')) unlock('tier_ace');
+    if (holdsTier('master')) unlock('master_tier');
+    if (holdsTier('grandmaster')) unlock('tier_grandmaster');
+    if (holdsTier('legend')) unlock('legend_tier');
+    if (holdsTier('overlord')) unlock('tier_overlord');
+    if (profile.rankedDuels >= OVERLORD_MIN_DUELS) unlock('duels_25');
+    if (profile.rankedDuels >= 100) unlock('duels_100');
 
     // Dominion — winning, and winning without giving anything back.
     if (profile.bestWinStreak >= 3) unlock('streak_3');
     if (profile.bestWinStreak >= 5) unlock('streak_5');
     if (profile.bestWinStreak >= 10) unlock('streak_10');
+    if (profile.bestWinStreak >= 20) unlock('streak_20');
+    if (profile.bestWinStreak >= 30) unlock('streak_30');
     if (profile.shutoutsWon >= 5) unlock('shutout_5');
     if (profile.shutoutsWon >= 15) unlock('shutout_15');
+    if (profile.shutoutsWon >= 50) unlock('shutout_50');
 
     // Devotion — the long haul, concealed until level 5.
     if (profile.level >= 10) unlock('level_10');
     if (profile.level >= 25) unlock('level_25');
     if (profile.level >= 50) unlock('level_50');
+    if (profile.level >= 75) unlock('level_75');
+    if (profile.level >= 100) unlock('level_100');
     if (profile.dailyStreak >= 3) unlock('daily_3');
     if (profile.dailyStreak >= 7) unlock('streak_7');
     if (profile.dailyStreak >= 30) unlock('daily_30');
+    if (profile.dailyStreak >= 100) unlock('daily_100');
 
     // Daily mission progress rides the same server-verified match record, so
     // it can never be reported independently of an actual game — and it is
@@ -3262,7 +3505,9 @@ class GameDatabase {
       // very same match advanced it a second time. Same transaction as the
       // payout and the stamp: a match is either paid, counted and marked, or
       // none of the three.
-      this.advanceMissions(payload.playerId, payload, now);
+      // `winStreak` was bumped above for this match, so a win_streak task reads
+      // the run the player is on now, loss included.
+      this.advanceMissions(payload.playerId, payload, now, { winStreak: profile.winStreak });
       // The fatigue tally rides the same transaction and the same idempotency
       // as everything else here: this line is only reached when the matchKey
       // is unstamped, so a replayed match no more double-counts a day's games
@@ -3282,6 +3527,9 @@ class GameDatabase {
       // would report — and then keep reporting — a match's worth of stale
       // mission progress.
       result.missions = this.getMissions(payload.playerId, now);
+      // Nothing here spends an allowance; this rides along so the client's
+      // free-re-deal note is never a fetch behind the list beside it.
+      result.rerolls = this.rerollsRemaining(payload.playerId, now);
       this.upsertProfile(profile);
       this.insertMatch(matchRecord); // carries its own per-player retention trim
       // Same transaction as the payout: a match is either paid and marked, or
@@ -3334,6 +3582,7 @@ class GameDatabase {
       ...stored,
       profile: this.readProfile(playerId)!,
       missions: this.getMissions(playerId, now),
+      rerolls: this.rerollsRemaining(playerId, now),
       alreadyRecorded: true,
     };
   }
