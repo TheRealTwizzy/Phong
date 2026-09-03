@@ -59,8 +59,14 @@ directions.** First it was the base anchor, which froze the early game: every pl
 was `anchor + AI_ADAPT_BAND` — right for three rungs, and at five it hands Elite, Cyber and
 Chaos one identical ceiling, so farming the Master-tier rung would reach Legend as fast as
 farming the hardest thing in the game. The values now sit 0.1 under a tier floor: rookie
-`START_MU`, pro 30.9, elite 33.9, cyber and chaos 36.9. **Legend is the solo ceiling; Cyber
-Overlord (37) is only ever reached through PvP.**
+`START_MU`, pro 30.9, elite AND cyber 33.9, chaos 36.9. **Legend is the solo ceiling, Chaos alone
+reaches it, and Cyber Overlord is only ever reached through PvP** — and because a solo cap 0.1
+under 37 is one even duel away from the apex (measured: Legend by solo match 41-49, the cap by
+73-84, Overlord off the second duel), the apex also asks for `OVERLORD_MIN_DUELS` (25) ranked
+duels. `tierFor` takes the count as a REQUIRED fourth argument so a caller cannot forget it,
+`duelsShortOf` is the one predicate the UI asks, `players.rankedDuels` is counted only for a
+result that is PvP and `ranksThisMatch`, and tier trophies read the DERIVED tier so
+`tier_overlord` cannot fire while the badge says Legend.
 
 **Adaptation is asymmetric on purpose** (`AI_ADAPT_STRENGTH` 0.6 up, `AI_ADAPT_DOWN_STRENGTH`
 0.85 down, `:114`/`:126`), and it has been wrong in BOTH directions, so read the numbers before

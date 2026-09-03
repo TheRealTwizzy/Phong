@@ -158,15 +158,26 @@ export function effectiveAiMu(difficulty: AIDifficulty, playerMu: number): numbe
  * μ — a cap that rose with the player would chase them upward without bound.
  * Rookie's cap is START_MU exactly, so farming the one rung open from the
  * first match moves nothing from a standing start. Legend is the solo
- * ceiling: Overlord (37) is only ever reached through PvP, which is also what
- * keeps the self-reported-solo trade-off (CLAUDE.md §5) bounded.
+ * ceiling, and CHAOS is the only rung that reaches it: Cyber tops out at
+ * Grandmaster, so the last tier a solo player can hold sits behind the last
+ * rung of the ladder rather than the second-to-last. Cyber shared Chaos's
+ * 36.9 for a while, which made the Chaos gate — ten Cyber wins at
+ * Grandmaster — decorative for the badge: everything Chaos could do for it,
+ * Cyber already had.
+ *
+ * Overlord (37) is only ever reached through PvP, which is also what keeps
+ * the self-reported-solo trade-off (CLAUDE.md §5) bounded. But a cap 0.1
+ * under a floor puts the tier above it ONE dominant duel away — measured, a
+ * solo-farmed 36.9 crossed 37 off a single even duel at performance 1.02, or
+ * two of any kind — so the apex is also gated on OVERLORD_MIN_DUELS ranked
+ * duels in `tierFor`. That is the half of "through PvP" a cap can never say.
  */
 export const SOLO_MU_CAPS: Record<AIDifficulty, number> = {
   rookie: START_MU, // 25 — farming the open rung from a standing start moves nothing
   pro: 30.9, //   under the Grandmaster floor (31): Pro farming tops out at Master
   elite: 33.9, // under the Legend floor (34): Elite farming tops out at Grandmaster
-  cyber: 36.9, // under the Overlord floor (37): tops out at Legend
-  chaos: 36.9, // same — the apex stays a PvP achievement
+  cyber: 33.9, // same — Cyber (anchor 33) tops out at Grandmaster; only Chaos reaches Legend
+  chaos: 36.9, // under the Overlord floor (37): the apex stays a PvP achievement
 };
 
 export const soloMuCap = (difficulty: AIDifficulty): number => SOLO_MU_CAPS[difficulty];
@@ -405,15 +416,41 @@ export const PLACEMENT_GAMES = 5;
 export const PLACEMENT_SIGMA = 4.0;
 
 /**
- * How far the top of the ladder is numbered. Cyber Overlord is a rating
- * threshold like every other rung — reaching it is still rankMu >= 37 and
- * nothing else — but it is the one rung with no rung above it, so it reads as
- * a POSITION rather than a word: #1 through #100, counting down.
+ * Ranked DUELS the apex demands on top of its mu floor.
+ *
+ * Every SOLO_MU_CAPS value sits 0.1 under a tier floor by design, so whichever
+ * rung a solo player farms to, the tier above its cap is one dominant duel
+ * away: a solo-farmed 36.9 became Cyber Overlord off two duels, one of them a
+ * shutout. The apex is the one rung that is supposed to mean "tested against
+ * people", and a count of ranked duels is the only thing that says so
+ * directly — a lower cap only moves the same one-duel gap down a tier. Solo
+ * play still reaches Legend, which is Chaos's own band.
+ *
+ * A COUNT, deliberately, and not a spread of days: two partners can play
+ * twenty-five in a sitting, and the owner took that trade over a second
+ * clock. Still one player's own record — see LADDER_TOP_N for why the tier
+ * never reads anybody else's.
+ */
+export const OVERLORD_MIN_DUELS = 25;
+
+/**
+ * What a tier asks for beyond its floor. Only the apex asks for anything, but
+ * it is a table and `tierFor` walks it, so a second requirement is an entry
+ * here and not a second mechanism.
+ */
+const TIER_MIN_DUELS: Partial<Record<Tier, number>> = { overlord: OVERLORD_MIN_DUELS };
+
+/**
+ * How far the top of the ladder is numbered. Cyber Overlord is a threshold on
+ * the player's OWN record like every other rung — rankMu >= 37, and now
+ * OVERLORD_MIN_DUELS ranked duels — but it is the one rung with no rung above
+ * it, so it reads as a POSITION rather than a word: #1 through #100, counting
+ * down.
  *
  * Deliberately not the definition of the tier. Making the headcount decide who
  * is an Overlord would put every other player's activity inside `tierFor`,
- * which is a pure function of one player's own rating today — and on a server
- * with fewer than a hundred ranked players it would promote everyone placed.
+ * which is a pure function of one player's own record — and on a server with
+ * fewer than a hundred ranked players it would promote everyone placed.
  */
 export const LADDER_TOP_N = 100;
 
@@ -421,13 +458,50 @@ export function isPlaced(rankedGames: number, rankSigma: number): boolean {
   return rankedGames >= PLACEMENT_GAMES && rankSigma <= PLACEMENT_SIGMA;
 }
 
-export function tierFor(rankMu: number, rankedGames: number, rankSigma: number): Tier {
-  if (!isPlaced(rankedGames, rankSigma)) return 'unranked';
+/** The tier the rating alone would earn: the mu-floor walk and nothing else. */
+function ratingTier(rankMu: number): Tier {
   let tier: Tier = 'rookie';
   for (const t of TIER_FLOORS) {
     if (rankMu >= t.mu) tier = t.tier;
   }
   return tier;
+}
+
+/**
+ * The tier a player is SHOWN.
+ *
+ * `rankedDuels` is required rather than defaulted on purpose: a default of 0
+ * would compile at every call site that forgot it and quietly demote every
+ * Overlord the server holds to Legend, with nothing red anywhere.
+ */
+export function tierFor(rankMu: number, rankedGames: number, rankSigma: number, rankedDuels: number): Tier {
+  if (!isPlaced(rankedGames, rankSigma)) return 'unranked';
+  let tier = ratingTier(rankMu);
+  // Walk down while the rung asks for more duels than have been played. A
+  // held-back apex reads as Legend, which is the tier the rating has actually
+  // been tested to.
+  while (tier !== 'rookie' && (TIER_MIN_DUELS[tier] ?? 0) > rankedDuels) {
+    tier = TIER_ORDER[TIER_ORDER.indexOf(tier) - 1];
+  }
+  return tier;
+}
+
+/**
+ * The tier a rating has earned but the duel count is holding back, and how far
+ * short it is — or null when nothing is held. The ONE predicate the UI asks,
+ * so TIER_FLOORS stays private and the hint can never disagree with the badge.
+ */
+export function duelsShortOf(
+  rankMu: number,
+  rankedGames: number,
+  rankSigma: number,
+  rankedDuels: number
+): { tier: Tier; need: number; have: number } | null {
+  if (!isPlaced(rankedGames, rankSigma)) return null;
+  const earned = ratingTier(rankMu);
+  const need = TIER_MIN_DUELS[earned] ?? 0;
+  if (rankedDuels >= need) return null;
+  return { tier: earned, need, have: rankedDuels };
 }
 
 /** Progress through the current tier, 0..1 — for a badge progress ring. */

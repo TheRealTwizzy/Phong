@@ -1,6 +1,8 @@
 // Browser E2E for app-wide cosmetics, against a running server:
 //  1. The picker lists ONLY what the player owns — a locked cosmetic is not
 //     dimmed, it is absent from the DOM.
+//  1b. Titles, the second permanent reward type, obey the same rule: a fresh
+//     account's title picker holds the None chip and nothing else.
 //  2. Equipping repaints the whole shell, not just the court, and survives a
 //     reload (the choice lives on the profile now, not the device).
 //  2b. ...with ONE exception, and it is deliberate: the two progression meters
@@ -10,6 +12,8 @@
 //     gold — retro-crt, which this suite equips, being one of them.
 //  3. The server refuses a locked cosmetic posted straight at the API, because
 //     the picker that hides it is the client.
+//  3b. ...and a locked title (403), an unknown one (400), while null — no title
+//     — is always legal, since a title is the optional one of the three.
 //  4. Opening somebody else's profile renders that card in THEIR cosmetic while
 //     the page behind it stays in the viewer's — and closing it leaves the
 //     viewer's look untouched.
@@ -107,6 +111,22 @@ const body = await owner.textContent('body');
 if (/void.?runner/i.test(body || '')) fail('a locked cosmetic is named somewhere on the page');
 ok(`picker lists the ${FREE.length} owned cosmetics and no trace of the locked ones`);
 
+// ---- 1b. Titles obey the same rule, and a fresh account owns none --------
+// A title is the second permanent reward type and it shares the picker's
+// contract: owned only, absent not dimmed, plus a None chip that is the one
+// thing a new account can select. tests/titles.test.ts holds the route and
+// the store; what only a browser can say is that the picker RENDERS that way.
+const titleChips = await owner.$$eval('[id^="title-btn-"]', (els) => els.map((e) => e.id));
+if (titleChips.join() !== 'title-btn-none') {
+  fail(`a fresh account's title picker offers ${JSON.stringify(titleChips)}; expected only the None chip`);
+}
+const noneEquipped = await owner.getAttribute('#title-btn-none', 'data-equipped');
+if (noneEquipped !== 'true') fail(`None is not the equipped title on a fresh account (${noneEquipped})`);
+const ownedCount = await owner.textContent('#title-owned-count');
+if (!/\b0\b/.test(ownedCount || '')) fail(`title count reads "${ownedCount}", expected 0 unlocked`);
+if (/wallbreaker|cold steel/i.test(body || '')) fail('a locked title is named somewhere on the page');
+ok('the title picker lists no titles on a fresh account and only None is equipped');
+
 // ---- 2. Equipping repaints the shell, and it sticks ---------------------
 const before = await cssVar(owner, '#app-root-container', '--color-accent');
 // Sampled here so leg 2b can compare it across the same equip. The capsule is
@@ -167,6 +187,30 @@ if (refusal.status !== 403 || refusal.body?.error !== 'COSMETIC_LOCKED') {
 const stillEquipped = await cssVar(owner, '#app-root-container', '--color-accent');
 if (stillEquipped !== after) fail('a refused equip changed the equipped cosmetic anyway');
 ok('the API refuses a locked cosmetic with 403 COSMETIC_LOCKED');
+
+// ---- 3b. ...and a locked title, while null is always legal ---------------
+const putTitle = (title) =>
+  owner.evaluate(async (t) => {
+    const res = await fetch('/api/profile/me', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: t }),
+    });
+    return { status: res.status, body: await res.json() };
+  }, title);
+const lockedTitle = await putTitle('sniper');
+if (lockedTitle.status !== 403 || lockedTitle.body?.error !== 'TITLE_LOCKED') {
+  fail(`locked title accepted by the API: ${lockedTitle.status} ${JSON.stringify(lockedTitle.body)}`);
+}
+const unknownTitle = await putTitle('not-a-title');
+if (unknownTitle.status !== 400 || unknownTitle.body?.error !== 'TITLE_UNKNOWN') {
+  fail(`unknown title not refused as such: ${unknownTitle.status} ${JSON.stringify(unknownTitle.body)}`);
+}
+const clearTitle = await putTitle(null);
+if (clearTitle.status !== 200 || clearTitle.body?.title !== undefined) {
+  fail(`clearing a title should be a 200 with no title on the profile: ${clearTitle.status} ${JSON.stringify(clearTitle.body).slice(0, 120)}`);
+}
+ok('the API refuses a locked title with 403 TITLE_LOCKED, an unknown one with 400, and clears on null');
 
 // Boards refuse rows of zeros, so the owner has to have played something
 // before a viewer can reach them through the leaderboard.

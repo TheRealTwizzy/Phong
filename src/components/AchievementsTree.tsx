@@ -29,6 +29,15 @@ import {
 // and `MatchHistoryList`: the branch a player is looking at is TREE state, so
 // it belongs to the tree rather than to whichever header is above it.
 
+/**
+ * How many rungs of indentation a row may draw. The ladder branch runs eleven
+ * deep now (Rookie to fifty Chaos wins), and at 24px a rung the deepest rows
+ * would spend 240px of a 390px phone on rails alone. Rows deeper than this
+ * share the indent of the fourth rung; the elbow into the row above is kept,
+ * so every child still visibly hangs off its parent.
+ */
+const RAIL_DEPTH_MAX = 4;
+
 const ICON_MAP: Record<string, React.ReactNode> = {
   zap: <Zap className="w-5 h-5 text-xp" />,
   activity: <Zap className="w-5 h-5 text-win" />,
@@ -242,7 +251,7 @@ export const AchievementsTree: React.FC<AchievementsTreeProps> = ({
                   the elbow drawn into the parent above it. */}
               {depth > 0 && (
                 <div className="flex shrink-0" aria-hidden="true">
-                  {Array.from({ length: depth - 1 }).map((_, i) => (
+                  {Array.from({ length: Math.min(depth, RAIL_DEPTH_MAX) - 1 }).map((_, i) => (
                     <div key={i} className="w-4 border-l border-line-strong ml-2" />
                   ))}
                   <div className="w-4 ml-2 relative">

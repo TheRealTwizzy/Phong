@@ -76,6 +76,12 @@ describe('achievement reward shape', () => {
     // the band it lands in or it feeds back into itself.
     expect(byId('level_5').xpReward).toBeLessThan(levelBand(5) * 0.4);
     expect(byId('level_10').xpReward).toBeLessThan(levelBand(10) * 0.4);
+    // The deep milestones too — the rule is about every rung that celebrates a
+    // level, not the two that happened to exist when it was written.
+    expect(byId('level_25').xpReward).toBeLessThan(levelBand(25) * 0.4);
+    expect(byId('level_50').xpReward).toBeLessThan(levelBand(50) * 0.4);
+    expect(byId('level_75').xpReward).toBeLessThan(levelBand(75) * 0.4);
+    expect(byId('level_100').xpReward).toBeLessThan(levelBand(100) * 0.4);
   });
 
   it('still pays rarer things more than common ones', () => {
@@ -88,14 +94,18 @@ describe('achievement reward shape', () => {
   it('keeps the catalogue worth a sane number of levels in total', () => {
     const total = ALL_ACHIEVEMENTS.reduce((sum, a) => sum + a.xpReward, 0);
     const { level } = levelFromXp(total);
-    // The tree spans a whole playing career across eight branches — 200
-    // matches, Cyber Overlord, a 150-hit rally, level 50 — so it is worth more
-    // in total than the old flat list, spread far thinner per match by the
-    // band cap. The ceiling is what stops the catalogue quietly becoming the
-    // main way to level: earning ALL of it must still be a career, not a
-    // shortcut past one.
+    // The tree spans a whole playing career across eight branches — 1,000
+    // matches, Cyber Overlord, a 216-return rally, level 100, a hundred-day
+    // streak — so it is worth more in total than the old flat list, spread far
+    // thinner per match by the band cap. The ceiling is what stops the
+    // catalogue quietly becoming the main way to level: earning ALL of it must
+    // still be a career, not a shortcut past one. It was 28 when the deepest
+    // rung was level 50 and 200 matches; a tree that runs to level 100 sums
+    // higher by construction, since every child pays more than its parent, and
+    // the per-match `0.6 x band` budget — which is unchanged — is what bounds
+    // any single windfall, not this total.
     expect(level).toBeGreaterThanOrEqual(12);
-    expect(level).toBeLessThanOrEqual(28);
+    expect(level).toBeLessThanOrEqual(40);
   });
 });
 
@@ -402,7 +412,7 @@ describe('level and rank gates', () => {
     // one of these said "without conceding a point", which is true and
     // incomplete: at first-to-3 the match caps at 3, so a player winning 3-0
     // against Cyber over and over moved no counter and was told nothing.
-    for (const id of ['shutout', 'cyber_shutout', 'duel_shutout', 'shutout_5', 'shutout_15']) {
+    for (const id of ['shutout', 'cyber_shutout', 'chaos_shutout', 'duel_shutout', 'shutout_5', 'shutout_15', 'shutout_50']) {
       const a = achievementById(id)!;
       expect(a, `${id} is missing from the catalogue`).toBeTruthy();
       expect(

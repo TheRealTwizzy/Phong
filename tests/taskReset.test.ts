@@ -3,7 +3,14 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
-import { REGULAR_SLOTS, ELITE_SLOTS, REROLLS_REGULAR, REROLLS_ELITE } from '../src/game/missions';
+import {
+  REGULAR_SLOTS,
+  ELITE_SLOTS,
+  REROLLS_REGULAR,
+  REROLLS_ELITE,
+  FREE_REDEALS_REGULAR,
+  FREE_REDEALS_ELITE,
+} from '../src/game/missions';
 
 // The one-shot tasks_reset_v1 migration. Hands dealt under the old rules carry
 // state the new ones cannot repair on their own — five slots where there
@@ -71,7 +78,12 @@ describe('resetting everybody active tasks, once', () => {
     }
 
     // Allowances back — they were spent on a hand that has been taken away.
-    expect(mod.db.rerollsRemaining(PLAYER)).toEqual({ regular: REROLLS_REGULAR, elite: REROLLS_ELITE });
+    expect(mod.db.rerollsRemaining(PLAYER)).toEqual({
+      regular: REROLLS_REGULAR,
+      elite: REROLLS_ELITE,
+      regularFree: FREE_REDEALS_REGULAR,
+      eliteFree: FREE_REDEALS_ELITE,
+    });
 
     // Nothing permanent lost: the XP those claims paid, and the match record.
     const profile = mod.db.getProfile(PLAYER);

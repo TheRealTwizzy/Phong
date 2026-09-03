@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { LanguageCode, PublicProfile } from '../types';
 import { t } from '../i18n/translations';
 import { COSMETICS, cosmeticVars, normalizeCosmeticId } from '../game/cosmetics';
+import { TITLES } from '../game/titles';
 import { AvatarImage } from './AvatarImage';
 import { MatchHistoryList } from './MatchHistoryList';
 import { TierBadge } from './TierBadge';
@@ -152,6 +153,17 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
                   ladderPosition={profile.ladderPosition}
                 />
                 <span className="text-2xs text-accent">LV{profile.level}</span>
+                {/* Guarded on the catalogue: an older bundle may meet a title a
+                    newer server has since shipped, and a chip with no name is
+                    worse than none. */}
+                {profile.title && TITLES[profile.title] && (
+                  <span
+                    id="public-title-chip"
+                    className="rounded-chip border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-2xs text-accent"
+                  >
+                    {t(TITLES[profile.title].nameKey, language)}
+                  </span>
+                )}
               </span>
               <span className="text-2xs font-normal tracking-normal text-ink-dim">
                 {t('member_since', language)} {memberSince}

@@ -81,7 +81,7 @@ function seedLadder(device: Device, mu: number, sigma: number): void {
     const changed = sql
       .prepare(
         `UPDATE players
-            SET rankMu = ?, rankSigma = ?, rankedGames = 5, mmrMu = ?, mmrSigma = ?
+            SET rankMu = ?, rankSigma = ?, rankedGames = 5, rankedDuels = 30, mmrMu = ?, mmrSigma = ?
           WHERE id = ?`
       )
       .run(mu, sigma, mu, sigma, device.id).changes;
@@ -111,7 +111,7 @@ function seedSplit(
     const changed = sql
       .prepare(
         `UPDATE players
-            SET rankMu = ?, rankSigma = ?, rankedGames = 5, mmrMu = ?, mmrSigma = ?
+            SET rankMu = ?, rankSigma = ?, rankedGames = 5, rankedDuels = 30, mmrMu = ?, mmrSigma = ?
           WHERE id = ?`
       )
       .run(r.rankMu, r.rankSigma, r.mmrMu, r.mmrSigma, device.id).changes;

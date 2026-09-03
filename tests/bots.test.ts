@@ -66,7 +66,8 @@ describe('the bot roster as data', () => {
   });
 
   it('spans the ladder but leaves the summit to a human', () => {
-    const tiers = BOT_ROSTER.map((b) => tierFor(b.mu, b.matchesPlayed, 1.0));
+    // A roster row's whole career is duels, so the duel count is its matches.
+    const tiers = BOT_ROSTER.map((b) => tierFor(b.mu, b.matchesPlayed, 1.0, b.matchesPlayed));
     expect(new Set(tiers).size).toBeGreaterThanOrEqual(5);
     // The top rung is the board's most motivating slot. A bot parked there
     // makes it decorative, so nothing in the roster may reach it.

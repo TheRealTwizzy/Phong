@@ -3,8 +3,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
-import type { CosmeticId, MatchEndPayload, PlayerProfile } from '../src/types';
+import type { CosmeticId, MatchEndPayload, PlayerProfile, TitleId } from '../src/types';
 import { COSMETICS, isCosmeticUnlocked } from '../src/game/cosmetics';
+import { TITLES, isTitleUnlocked } from '../src/game/titles';
+import { hasUnlock } from '../src/achievements';
 import {
   MISSION_POOL,
   ELITE_POOL,
@@ -13,8 +15,14 @@ import {
   ELITE_SLOTS,
   REROLLS_REGULAR,
   REROLLS_ELITE,
+  FREE_REDEALS_REGULAR,
+  FREE_REDEALS_ELITE,
   RECENT_DEAL_MEMORY,
   applyMatchToProgress,
+  applyPracticeToProgress,
+  dealOrder,
+  dealablePool,
+  missionRequires,
   findMission,
   missionDayKey,
   msUntilMissionReset,
@@ -54,6 +62,30 @@ const init = (id: string, username: string) => {
 };
 
 const byId = (id: string, playerId: string) => db.getMissions(playerId).find((m) => m.id === id)!;
+
+/**
+ * Put a named task into one of today's slots by hand, so a test can be sure
+ * the hand holds something the play it is about to do will move. Needed since
+ * the pool grew to forty: a dealt hand may hold nothing a plain solo win
+ * touches — the wall, a duel, a Chaos win — and an assertion that "a match
+ * moved something" then depends on which day the suite happens to run. Skipped
+ * when the task is already held, since two slots holding one task would render
+ * it twice.
+ */
+const dealInto = (playerId: string, day: Date, slot: number, missionId: string) => {
+  if (db.getMissions(playerId, day).some((m) => m.id === missionId)) return;
+  const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+  try {
+    const changed = raw
+      .prepare('UPDATE daily_mission_slots SET missionId = ? WHERE playerId = ? AND dayKey = ? AND slot = ?')
+      .run(missionId, playerId, missionDayKey(day), slot).changes;
+    // A silent no-op would leave the test asserting against the hand it hoped
+    // for rather than the one it has.
+    expect(changed, `no slot ${slot} to deal ${missionId} into`).toBe(1);
+  } finally {
+    raw.close();
+  }
+};
 
 describe('mission definitions', () => {
   it('keys the day in UTC, not local time', () => {
@@ -104,11 +136,16 @@ describe('server-owned mission state', () => {
 
   it('advances progress only from a recorded match', () => {
     init('m_prog', 'MissionProg');
-    const held = () => db.getMissions('m_prog');
+    const day = new Date('2026-08-20T12:00:00Z');
+    // A hand from a forty-task pool may hold nothing a plain solo win moves —
+    // the wall, a duel, a Chaos win — so one task the match is sure to move is
+    // put in the hand by hand rather than hoped for.
+    db.getMissions('m_prog', day);
+    dealInto('m_prog', day, 0, 'mission_games');
+    const held = () => db.getMissions('m_prog', day);
     expect(held().every((m) => m.current === 0)).toBe(true);
-    db.recordMatch(match('m_prog', { playerScore: 4, bestStreak: 6 }));
-    // Whatever hand was dealt, a recorded win moves something in it.
-    expect(held().some((m) => m.current > 0)).toBe(true);
+    db.recordMatch(match('m_prog', { playerScore: 4, bestStreak: 6 }), {}, day);
+    expect(held().find((m) => m.id === 'mission_games')!.current).toBe(1);
   });
 
   it('advances each mission by its own rule', () => {
@@ -129,6 +166,33 @@ describe('server-owned mission state', () => {
     expect(
       applyMatchToProgress(forType('multiplayer'), 0, { ...soloWin, mode: 'multiplayer' })
     ).toBe(1);
+
+    // The five kinds added with the progression-depth release, each read off
+    // the scoreline or a counter the match cannot forge for itself.
+    const closeWin = { ...soloWin, playerScore: 5, opponentScore: 4 };
+    expect(applyMatchToProgress(forType('close_wins'), 0, closeWin)).toBe(1);
+    expect(applyMatchToProgress(forType('close_wins'), 0, { ...soloWin, playerScore: 5, opponentScore: 3 })).toBe(0);
+    // Losing by one is not a close WIN.
+    expect(applyMatchToProgress(forType('close_wins'), 0, { ...closeWin, playerScore: 4, opponentScore: 5, isWinner: false })).toBe(0);
+    // Dominant: at most one point conceded, and at shutout length — a 3-0 is a
+    // whole first-to-3 match and still not a match dominated.
+    expect(applyMatchToProgress(forType('dominant_wins'), 0, { ...soloWin, playerScore: 5, opponentScore: 1 })).toBe(1);
+    expect(applyMatchToProgress(forType('dominant_wins'), 0, { ...soloWin, playerScore: 5, opponentScore: 2 })).toBe(0);
+    expect(applyMatchToProgress(forType('dominant_wins'), 0, { ...soloWin, playerScore: 3, opponentScore: 0 })).toBe(0);
+    // Long: read off the winner's own score, since the payload has no length.
+    expect(applyMatchToProgress(forType('long_wins'), 0, { ...soloWin, playerScore: 10, opponentScore: 4 })).toBe(1);
+    expect(applyMatchToProgress(forType('long_wins'), 0, { ...soloWin, playerScore: 5, opponentScore: 0 })).toBe(0);
+    // Win streak: the pooled counter the server hands in, held as a maximum.
+    expect(applyMatchToProgress(forType('win_streak'), 0, soloWin, { winStreak: 2 })).toBe(2);
+    expect(applyMatchToProgress(forType('win_streak'), 2, soloWin, { winStreak: 1 })).toBe(2);
+    expect(applyMatchToProgress(forType('win_streak'), 0, soloWin, { winStreak: 99 })).toBe(forType('win_streak').target);
+    expect(applyMatchToProgress(forType('win_streak'), 0, soloWin)).toBe(0);
+    // The wall's task never moves on a match, and its own rule is a maximum of
+    // the day's returns.
+    expect(applyMatchToProgress(forType('practice_returns'), 0, soloWin)).toBe(0);
+    expect(applyPracticeToProgress(forType('practice_returns'), 0, 120)).toBe(Math.min(120, forType('practice_returns').target));
+    expect(applyPracticeToProgress(forType('practice_returns'), 50, 20)).toBe(50);
+    expect(applyPracticeToProgress(forType('games_played'), 2, 500)).toBe(2);
   });
 
   it('never completes a rally task on the run carried into the match', () => {
@@ -242,6 +306,8 @@ describe('server-owned mission state', () => {
     // The fixed clock goes to recordMatch too — recording on the wall clock
     // while querying a fixed day made this test date-dependent (it failed the
     // moment a session crossed UTC midnight).
+    db.getMissions('m_day', today);
+    dealInto('m_day', today, 0, 'mission_games');
     db.recordMatch(match('m_day'), {}, today);
     expect(db.getMissions('m_day', today).some((m) => m.current > 0)).toBe(true);
     const next = db.getMissions('m_day', tomorrow);
@@ -282,16 +348,25 @@ describe('Practice Wall XP', () => {
     expect(db.recordPractice('p_drill', { bestStreak: 500, earnedStreak: 500 }).earnedXp).toBe(0);
   });
 
-  it('counts no match, moves no rating, and feeds no missions', () => {
+  it("counts no match, moves no rating, and feeds only the wall's own tasks", () => {
     init('p_drill2', 'Driller2');
+    const day = new Date('2026-08-21T12:00:00Z');
+    db.getMissions('p_drill2', day);
+    dealInto('p_drill2', day, 0, 'mission_wall_100');
+    dealInto('p_drill2', day, 1, 'mission_games');
     const before = db.getProfile('p_drill2');
-    db.recordPractice('p_drill2', { bestStreak: 30, earnedStreak: 30 });
+    db.recordPractice('p_drill2', { bestStreak: 30, earnedStreak: 30, earnedReturns: 60 }, day);
     const after = db.getProfile('p_drill2');
     expect(after.xp).toBeGreaterThan(before.xp);
     expect(after.matchesPlayed).toBe(before.matchesPlayed);
     expect(after.mmrMu).toBe(before.mmrMu);
     expect(after.rankMu).toBe(before.rankMu);
-    expect(db.getMissions('p_drill2').every((m) => m.current === 0)).toBe(true);
+    // Every task about MATCHES stays where it was: a session is not a match.
+    const held = db.getMissions('p_drill2', day);
+    expect(held.filter((m) => m.type !== 'practice_returns').every((m) => m.current === 0)).toBe(true);
+    // The wall's own kind reads the DAY's returns, as a total across sessions
+    // and never a run — so splitting a session buys nothing here either.
+    expect(held.find((m) => m.id === 'mission_wall_100')!.current).toBe(60);
     // What a session DOES leave is a history-only row, so the Practice Wall
     // has a timeline like every other mode — unranked, no scores, the peak on
     // the rally column, and a synthetic opponent that is never a tap target.
@@ -301,6 +376,24 @@ describe('Practice Wall XP', () => {
     expect(history[0].ranked).toBe(0);
     expect(history[0].maxRally).toBe(30);
     expect(history[0].player2Id).toBe('wall');
+    db.recordPractice('p_drill2', { bestStreak: 10, earnedStreak: 10, earnedReturns: 50 }, day);
+    expect(db.getMissions('p_drill2', day).find((m) => m.id === 'mission_wall_100')!.current).toBe(100);
+  });
+
+  it("banks the day's returns as a COUNT, so the next session is paid from where the last left off", () => {
+    // For one release the day total was advanced by the RUN rather than the
+    // count, while the XP had been computed against the count — so the stored
+    // total fell short of what the curve had already been paid against and the
+    // next session restarted partway down it. Three returns and a miss,
+    // repeated, banked three per visit: the session-splitting exploit this
+    // counter exists to close, back by the width of one variable name.
+    init('p_count', 'DrillCount');
+    const day = new Date('2026-08-21T12:00:00Z');
+    const first = db.recordPractice('p_count', { bestStreak: 5, earnedStreak: 5, earnedReturns: 60 }, day);
+    expect(first.earnedXp).toBe(practiceDayXp(60));
+    const second = db.recordPractice('p_count', { bestStreak: 5, earnedStreak: 5, earnedReturns: 40 }, day);
+    // From 60 to 100 on the day's curve — not from 5 to 45.
+    expect(second.earnedXp).toBe(practiceDayXp(100) - practiceDayXp(60));
   });
 
   it('records no session row when no ball was returned', () => {
@@ -335,6 +428,8 @@ describe('rerolls', () => {
     expect(db.rerollsRemaining('r_fresh', today)).toEqual({
       regular: REROLLS_REGULAR,
       elite: REROLLS_ELITE,
+      regularFree: FREE_REDEALS_REGULAR,
+      eliteFree: FREE_REDEALS_ELITE,
     });
   });
 
@@ -359,12 +454,16 @@ describe('rerolls', () => {
     expect(db.rerollsRemaining('r_tier', today)).toEqual({
       regular: REROLLS_REGULAR - 1,
       elite: REROLLS_ELITE,
+      regularFree: FREE_REDEALS_REGULAR,
+      eliteFree: FREE_REDEALS_ELITE,
     });
 
     db.rerollMission('r_tier', heldElite('r_tier')[0].id, today);
     expect(db.rerollsRemaining('r_tier', today)).toEqual({
       regular: REROLLS_REGULAR - 1,
       elite: REROLLS_ELITE - 1,
+      regularFree: FREE_REDEALS_REGULAR,
+      eliteFree: FREE_REDEALS_ELITE,
     });
   });
 
@@ -411,13 +510,21 @@ describe('rerolls', () => {
       db.rerollMission('r_reset', heldRegular('r_reset')[0].id, today);
     }
     db.rerollMission('r_reset', heldElite('r_reset')[0].id, today);
-    expect(db.rerollsRemaining('r_reset', today)).toEqual({ regular: 0, elite: 0 });
+    // The paid allowance is gone; the free re-deals are a separate pocket.
+    expect(db.rerollsRemaining('r_reset', today)).toEqual({
+      regular: 0,
+      elite: 0,
+      regularFree: FREE_REDEALS_REGULAR,
+      eliteFree: FREE_REDEALS_ELITE,
+    });
 
     // Tomorrow the allowance is whole again — and no more than whole, so an
     // unused day does not carry over into a double allowance.
     expect(db.rerollsRemaining('r_reset', tomorrow)).toEqual({
       regular: REROLLS_REGULAR,
       elite: REROLLS_ELITE,
+      regularFree: FREE_REDEALS_REGULAR,
+      eliteFree: FREE_REDEALS_ELITE,
     });
   });
 
@@ -449,21 +556,38 @@ describe('rerolls', () => {
 
 describe('a completed mission deals a free replacement', () => {
   const today = new Date('2026-08-21T12:00:00Z');
+  const tomorrow = new Date('2026-08-22T12:00:00Z');
   const held = (id: string) => db.getMissions(id, today);
 
-  /** Drive one mission all the way to its target with real recorded matches. */
+  /**
+   * Drive one mission all the way to its target with real recorded matches —
+   * or, for the wall's own kind, a real practice session. Type-aware, so it
+   * can finish every kind the pool holds: a task it cannot drive would make
+   * the guard below go red rather than the assertions vacuous.
+   */
   const finish = (playerId: string, missionId: string) => {
     const def = findMission(missionId)!;
     for (let i = 0; i < 80; i++) {
       const m = held(playerId).find((x) => x.id === missionId);
       if (!m || m.current >= m.target) break;
+      if (def.type === 'practice_returns') {
+        db.recordPractice(
+          playerId,
+          { bestStreak: def.target, earnedStreak: def.target, earnedReturns: def.target },
+          today
+        );
+        continue;
+      }
+      const playerScore = def.type === 'long_wins' ? 10 : 5;
+      const opponentScore =
+        def.type === 'shutouts' ? 0 : def.type === 'close_wins' ? playerScore - 1 : def.type === 'dominant_wins' ? 1 : 2;
       db.recordMatch(
         match(playerId, {
           // A duel mission can say so through its type or its mode field.
           mode: def.type === 'multiplayer' || def.mode === 'multiplayer' ? 'multiplayer' : 'solo',
           difficulty: def.difficulty || 'pro',
-          playerScore: 5,
-          opponentScore: def.type === 'shutouts' ? 0 : 2,
+          playerScore,
+          opponentScore,
           // Built HERE, which is the only thing a rally task counts.
           bestStreak: Math.max(def.type === 'rally' ? def.target : 9, 9),
           earnedStreak: Math.max(def.type === 'rally' ? def.target : 9, 9),
@@ -478,7 +602,7 @@ describe('a completed mission deals a free replacement', () => {
     // Guard the guard: a helper that silently stops completing would make
     // every assertion below vacuous, which is exactly how the elite tests
     // once passed without testing anything.
-    expect(done && done.current >= done.target).toBe(true);
+    expect(done && done.current >= done.target, `${missionId} never completed`).toBe(true);
   };
 
   it('replaces the claimed mission with a fresh one in the same slot', () => {
@@ -501,7 +625,7 @@ describe('a completed mission deals a free replacement', () => {
     expect(dealt.current).toBeLessThan(dealt.target);
   });
 
-  it('costs neither allowance', () => {
+  it('costs no PAID reroll, and one of the free re-deals', () => {
     init('ar_free', 'AutoFree');
     const victim = held('ar_free').find((m) => m.tier === 'regular')!;
     finish('ar_free', victim.id);
@@ -509,29 +633,49 @@ describe('a completed mission deals a free replacement', () => {
     expect(db.rerollsRemaining('ar_free', today)).toEqual({
       regular: REROLLS_REGULAR,
       elite: REROLLS_ELITE,
+      regularFree: FREE_REDEALS_REGULAR - 1,
+      eliteFree: FREE_REDEALS_ELITE,
     });
   });
 
-  it('keeps dealing them past the point the paid allowance would have run out', () => {
-    // The free reroll is unlimited on purpose: every one of them had to be
-    // earned by finishing something, so there is nothing to ration.
+  it('deals a free replacement FREE_REDEALS_REGULAR times a day, then clears the slot', () => {
+    // The free re-deal used to be unlimited, on the reasoning that every one
+    // of them had been earned by finishing something. Measured, that made the
+    // daily list the largest XP source in the game — a one-match task claimed
+    // and re-dealt every match paid 13,500 to 29,000 task XP a day at sixty
+    // matches — so a claim now deals a fixed number of times and then the slot
+    // is cleared until the reset. The paid allowance is a separate pocket and
+    // is never touched by any of this.
     init('ar_many', 'AutoMany');
-    let dealt = 0;
-    for (let round = 0; round < REROLLS_REGULAR + 2; round++) {
-      const target = db
-        .getMissions('ar_many', today)
-        .find((m) => m.tier === 'regular' && !m.claimed);
-      if (!target) break;
+    for (let round = 0; round < FREE_REDEALS_REGULAR; round++) {
+      const target = db.getMissions('ar_many', today).find((m) => m.tier === 'regular' && !m.claimed)!;
       finish('ar_many', target.id);
       const res = db.claimMission('ar_many', target.id, today);
       expect(res.ok).toBe(true);
-      if (res.newMissionId) dealt++;
+      expect(res.newMissionId, `round ${round} dealt nothing`).toBeTruthy();
     }
-    expect(dealt).toBeGreaterThan(REROLLS_REGULAR);
+    expect(db.rerollsRemaining('ar_many', today).regularFree).toBe(0);
     expect(db.rerollsRemaining('ar_many', today).regular).toBe(REROLLS_REGULAR);
+
+    // The next claim still PAYS — the reward is the player's — and clears its
+    // slot rather than dealing into it.
+    const last = db.getMissions('ar_many', today).find((m) => m.tier === 'regular' && !m.claimed)!;
+    finish('ar_many', last.id);
+    const res = db.claimMission('ar_many', last.id, today);
+    expect(res.ok).toBe(true);
+    expect(res.earnedXp).toBe(findMission(last.id)!.xpReward);
+    expect(res.newMissionId).toBeUndefined();
+    const after = db.getMissions('ar_many', today);
+    expect(after.filter((m) => m.tier === 'regular')).toHaveLength(REGULAR_SLOTS - 1);
+    expect(after.some((m) => m.id === last.id)).toBe(false);
+    // A re-read does not resurrect it — the sweep skips a cleared slot — and
+    // the hand is whole again, with the allowance, at the UTC reset.
+    expect(db.getMissions('ar_many', today).filter((m) => m.tier === 'regular')).toHaveLength(REGULAR_SLOTS - 1);
+    expect(db.getMissions('ar_many', tomorrow).filter((m) => m.tier === 'regular')).toHaveLength(REGULAR_SLOTS);
+    expect(db.rerollsRemaining('ar_many', tomorrow).regularFree).toBe(FREE_REDEALS_REGULAR);
   });
 
-  it('deals an elite replacement for an elite, without touching the elite allowance', () => {
+  it('deals an elite replacement for an elite once a day, without touching the paid elite allowance', () => {
     init('ar_elite', 'AutoElite');
     const elite = held('ar_elite').find((m) => m.tier === 'elite')!;
     finish('ar_elite', elite.id);
@@ -540,8 +684,20 @@ describe('a completed mission deals a free replacement', () => {
     expect(res.newMissionId).toBeTruthy();
     expect(findMission(res.newMissionId!)!.tier).toBe('elite');
     expect(db.rerollsRemaining('ar_elite', today).elite).toBe(REROLLS_ELITE);
+    expect(db.rerollsRemaining('ar_elite', today).eliteFree).toBe(FREE_REDEALS_ELITE - 1);
     // The hand keeps its shape: still exactly one elite slot.
     expect(held('ar_elite').filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS);
+
+    // The second elite claim of the day clears the slot. Two elite claims a
+    // day is what makes the elite pool a calendar rather than an afternoon:
+    // sixteen elites with a permanent reward each used to fall in one day.
+    const second = held('ar_elite').find((m) => m.tier === 'elite')!;
+    finish('ar_elite', second.id);
+    const again = db.claimMission('ar_elite', second.id, today);
+    expect(again.ok).toBe(true);
+    expect(again.newMissionId).toBeUndefined();
+    expect(held('ar_elite').filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS - 1);
+    expect(db.getMissions('ar_elite', tomorrow).filter((m) => m.tier === 'elite')).toHaveLength(ELITE_SLOTS);
   });
 
   it('never deals something held, or dealt in the last few rolls', () => {
@@ -549,73 +705,87 @@ describe('a completed mission deals a free replacement', () => {
     // RECENT_DEAL_MEMORY other deals have gone by. One-and-done meant a
     // productive player used the pool up, and a claim then had nothing to hand
     // back — which is what left a finished task sitting in its slot.
+    //
+    // Driven through BOTH doors a deal has — the free re-deal a claim triggers,
+    // FREE_REDEALS_REGULAR times, and then the paid reroll of an unfinished
+    // task, REROLLS_REGULAR times — because a claim alone can no longer deal
+    // enough in one day to walk past the window: three held plus three free is
+    // six, and the window is six.
     init('ar_dupes', 'AutoDupes');
     const dealt = db
       .getMissions('ar_dupes', today)
       .filter((m) => m.tier === 'regular')
       .map((m) => m.id);
-
-    for (let round = 0; round < 10; round++) {
-      const target = db
-        .getMissions('ar_dupes', today)
-        .find((m) => m.tier === 'regular' && !m.claimed);
-      if (!target) break;
-      finish('ar_dupes', target.id);
-      const res = db.claimMission('ar_dupes', target.id, today);
+    const check = (newId: string | undefined) => {
       const hand = db.getMissions('ar_dupes', today).map((m) => m.id);
       // Never the same task twice on the list at once.
       expect(new Set(hand).size).toBe(hand.length);
-      expect(res.newMissionId).toBeTruthy();
+      expect(newId).toBeTruthy();
       // Never one of the last few dealt, and never one already held.
-      expect(dealt.slice(-RECENT_DEAL_MEMORY)).not.toContain(res.newMissionId);
-      expect(hand.filter((id) => id === res.newMissionId)).toHaveLength(1);
-      // ...and it arrives clean. Past the first few rounds these ARE re-deals
-      // of tasks completed and claimed earlier, which without the reset would
-      // come straight back finished and already marked claimed.
+      expect(dealt.slice(-RECENT_DEAL_MEMORY)).not.toContain(newId);
+      expect(hand.filter((id) => id === newId)).toHaveLength(1);
+      dealt.push(newId!);
+    };
+
+    for (let round = 0; round < FREE_REDEALS_REGULAR; round++) {
+      const target = db.getMissions('ar_dupes', today).find((m) => m.tier === 'regular' && !m.claimed)!;
+      finish('ar_dupes', target.id);
+      const res = db.claimMission('ar_dupes', target.id, today);
+      check(res.newMissionId);
+      // ...and it arrives clean.
       const fresh = res.missions!.find((m) => m.id === res.newMissionId)!;
       expect(fresh.current).toBe(0);
       expect(fresh.claimed).toBe(false);
-      dealt.push(res.newMissionId!);
     }
-    // Ten claims out of a twelve-task pool: only a repeating pool gets here.
+    for (let round = 0; round < REROLLS_REGULAR; round++) {
+      const target = db.getMissions('ar_dupes', today).find((m) => m.tier === 'regular' && m.current < m.target)!;
+      const res = db.rerollMission('ar_dupes', target.id, today);
+      expect(res.ok).toBe(true);
+      check(res.newMissionId);
+    }
+    // Eleven deals against three held plus a window of six: only a deal that
+    // walked PAST the window gets here without repeating something inside it.
     expect(dealt.length).toBeGreaterThan(REGULAR_SLOTS + RECENT_DEAL_MEMORY);
-    expect(new Set(dealt).size).toBeLessThan(dealt.length);
   });
 
-  it('deals a repeat back at zero, never carrying what it held before', () => {
+  it('deals a task back at zero, never carrying what it held before', () => {
     // Reported: rerolling into "Point Machine" arrived at 21/25. Progress is
     // stored per task for the day, so a task dealt back into a slot used to
-    // bring whatever it collected the last time it was held — and since tasks
-    // now repeat, every repeat would arrive already finished and claimed.
-    // A task in a slot has always just started.
+    // bring whatever it collected the last time it was held. A task in a slot
+    // has always just started.
+    //
+    // With a forty-task pool and a capped free re-deal, no task comes round
+    // twice in one day any more, so the repeat is STAGED: the next deal is
+    // predicted from the same order the server uses, a progress row is planted
+    // for it, and the deal has to arrive at zero regardless. Remove the DELETE
+    // in dealMission and this reads 21.
     init('ar_fresh', 'FreshStart');
-    const seen = new Set(
-      db.getMissions('ar_fresh', today).filter((m) => m.tier === 'regular').map((m) => m.id)
+    const dayKey = missionDayKey(today);
+    const victim = db.getMissions('ar_fresh', today).find((m) => m.tier === 'regular')!;
+    // Finished BEFORE predicting: the matches themselves earn achievements,
+    // which widen the dealable pool, which changes the order.
+    finish('ar_fresh', victim.id);
+    const held = new Set(db.getMissions('ar_fresh', today).map((m) => m.id));
+    const earned = db.getProfile('ar_fresh').achievements;
+    const order = dealOrder(
+      dealablePool(MISSION_POOL, (u) => hasUnlock(earned, u.kind, u.value)),
+      'ar_fresh',
+      dayKey,
+      'regular'
     );
-    let repeats = 0;
+    const predicted = order.find((id) => !held.has(id))!;
+    expect(predicted).toBeTruthy();
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    raw
+      .prepare(`INSERT INTO daily_missions (playerId, dayKey, missionId, progress) VALUES (?, ?, ?, 21)`)
+      .run('ar_fresh', dayKey, predicted);
+    raw.close();
 
-    for (let round = 0; round < 12; round++) {
-      const target = db
-        .getMissions('ar_fresh', today)
-        .find((m) => m.tier === 'regular' && !m.claimed);
-      if (!target) break;
-      finish('ar_fresh', target.id);
-      const res = db.claimMission('ar_fresh', target.id, today);
-      if (!res.ok || !res.newMissionId) break;
-
-      const dealt = res.missions!.find((m) => m.id === res.newMissionId)!;
-      if (seen.has(res.newMissionId)) {
-        // A task coming round again — completed and claimed earlier today.
-        repeats += 1;
-        expect(dealt.current).toBe(0);
-        expect(dealt.claimed).toBe(false);
-      }
-      seen.add(res.newMissionId);
-    }
-
-    // Twelve claims against a twelve-task pool: repeats are certain, and it is
-    // the repeats that carry the risk.
-    expect(repeats).toBeGreaterThan(0);
+    const res = db.claimMission('ar_fresh', victim.id, today);
+    expect(res.newMissionId).toBe(predicted);
+    const dealt = res.missions!.find((m) => m.id === predicted)!;
+    expect(dealt.current).toBe(0);
+    expect(dealt.claimed).toBe(false);
   });
 
   it('sweeps away a task that was claimed but left in its slot', () => {
@@ -698,45 +868,71 @@ describe('a completed mission deals a free replacement', () => {
   });
 });
 
+/**
+ * Plays enough of everything to satisfy any elite in the pool, so a test never
+ * depends on which one the hand happened to deal: duel wins, Cyber and Chaos
+ * clean sheets, a 10-9 (a close win AND a long one), a long rally, aces, and
+ * one session on the wall. If this ever stops completing, the tests using it
+ * must fail rather than quietly skip — hence the guard at the end.
+ */
+const completeEliteAt = (id: string, now: Date) => {
+  const elite = db.getMissions(id, now).find((m) => m.tier === 'elite')!;
+  db.recordPractice(id, { bestStreak: 1000, earnedStreak: 1000, earnedReturns: 1000 }, now);
+  for (let i = 0; i < 40; i++) {
+    db.recordMatch(
+      match(id, {
+        mode: 'multiplayer', playerScore: 5, opponentScore: 0, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
+      }),
+      {},
+      now
+    );
+    db.recordMatch(
+      match(id, {
+        mode: 'solo', difficulty: 'cyber', playerScore: 5, opponentScore: 0,
+        bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
+      }),
+      {},
+      now
+    );
+    db.recordMatch(
+      match(id, {
+        mode: 'solo', difficulty: 'chaos', playerScore: 5, opponentScore: 0,
+        bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
+      }),
+      {},
+      now
+    );
+    db.recordMatch(
+      match(id, {
+        mode: 'solo', difficulty: 'pro', playerScore: 10, opponentScore: 9,
+        bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
+      }),
+      {},
+      now
+    );
+  }
+  const after = db.getMissions(id, now).find((m) => m.id === elite.id)!;
+  expect(after.current, `${elite.id} never completed`).toBeGreaterThanOrEqual(after.target);
+  return elite;
+};
+
 describe('elite missions are permanent unlocks', () => {
   const today = new Date('2026-08-21T12:00:00Z');
   const tomorrow = new Date('2026-08-22T12:00:00Z');
-
-  // Plays enough of everything to satisfy any elite in the pool, so the test
-  // never depends on which one the hand happened to deal.
-  const completeElite = (id: string, now: Date) => {
-    const elite = db.getMissions(id, now).find((m) => m.tier === 'elite')!;
-    for (let i = 0; i < 40; i++) {
-      db.recordMatch(
-        match(id, {
-          mode: 'multiplayer', playerScore: 5, opponentScore: 0, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
-        }),
-        {},
-        now
-      );
-      db.recordMatch(
-        match(id, {
-          mode: 'solo', difficulty: 'cyber', playerScore: 5, opponentScore: 0,
-          bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
-        }),
-        {},
-        now
-      );
-    }
-    const after = db.getMissions(id, now).find((m) => m.id === elite.id)!;
-    // The point of the helper: if this ever stops completing, the tests below
-    // must fail rather than quietly skip.
-    expect(after.current).toBeGreaterThanOrEqual(after.target);
-    return elite;
-  };
+  const completeElite = completeEliteAt;
 
   it('every elite mission carries an unlock, and no regular one does', () => {
     for (const m of ELITE_POOL) expect(m.unlocks).toBeTruthy();
     for (const m of MISSION_POOL) expect(m.unlocks).toBeFalsy();
     // Each elite grants a DIFFERENT unlock, or completing one would silently
-    // consume another's reward.
-    const unlocks = ELITE_POOL.map((m) => m.unlocks);
+    // consume another's reward. And every unlock names something real, in one
+    // of the two catalogues — an id in neither would bank a string that opens
+    // nothing, and the claim would still report it as a reward.
+    const unlocks = ELITE_POOL.map((m) => m.unlocks!);
     expect(new Set(unlocks).size).toBe(unlocks.length);
+    for (const id of unlocks) {
+      expect(id in COSMETICS || id in TITLES, `${id} is neither a theme nor a title`).toBe(true);
+    }
   });
 
   it('banks the unlock on first completion and keeps it across days', () => {
@@ -785,7 +981,7 @@ describe('permanent unlocks reach the themes', () => {
   const base = (over: Partial<PlayerProfile> = {}): PlayerProfile =>
     ({
       id: 'x', username: 'x', level: 1, xp: 0, xpNext: 250,
-      mmrMu: 25, mmrSigma: 8.33, rankMu: 25, rankSigma: 8.33, rankedGames: 0,
+      mmrMu: 25, mmrSigma: 8.33, rankMu: 25, rankSigma: 8.33, rankedGames: 0, rankedDuels: 0,
       matchesPlayed: 0, matchesWon: 0, matchesLost: 0, highestRally: 0,
       totalPointsScored: 0, totalAces: 0, multiplayerWins: 0, dailyStreak: 0,
       tier: 'unranked', achievements: [], eliteUnlocks: [],
@@ -794,15 +990,25 @@ describe('permanent unlocks reach the themes', () => {
       ...over,
     }) as PlayerProfile;
 
-  it('gates every elite theme behind its own mission', () => {
+  it('gates every elite reward behind its own mission', () => {
     for (const mission of ELITE_POOL) {
-      const themeId = mission.unlocks as CosmeticId;
-      expect(COSMETICS[themeId]).toBeTruthy();
-      expect(isCosmeticUnlocked(themeId, base())).toBe(false);
-      expect(isCosmeticUnlocked(themeId, base({ eliteUnlocks: [mission.unlocks!] }))).toBe(true);
-      // Owning one elite unlock must not open another's theme.
+      const id = mission.unlocks!;
+      // Owning one elite unlock must not open another's reward.
       const other = ELITE_POOL.find((m) => m.id !== mission.id)!;
-      expect(isCosmeticUnlocked(themeId, base({ eliteUnlocks: [other.unlocks!] }))).toBe(false);
+      if (id in COSMETICS) {
+        const themeId = id as CosmeticId;
+        expect(isCosmeticUnlocked(themeId, base())).toBe(false);
+        expect(isCosmeticUnlocked(themeId, base({ eliteUnlocks: [id] }))).toBe(true);
+        expect(isCosmeticUnlocked(themeId, base({ eliteUnlocks: [other.unlocks!] }))).toBe(false);
+      } else {
+        // A title — the second reward type. tests/titles.test.ts owns the
+        // catalogue; here only that the mission's string opens exactly it.
+        const titleId = id as TitleId;
+        expect(TITLES[titleId], `${mission.id} unlocks '${id}', which is neither a theme nor a title`).toBeTruthy();
+        expect(isTitleUnlocked(titleId, base())).toBe(false);
+        expect(isTitleUnlocked(titleId, base({ eliteUnlocks: [id] }))).toBe(true);
+        expect(isTitleUnlocked(titleId, base({ eliteUnlocks: [other.unlocks!] }))).toBe(false);
+      }
     }
   });
 
@@ -827,29 +1033,14 @@ describe('permanent unlocks reach the themes', () => {
   it('surfaces banked unlocks on the profile the client actually reads', () => {
     init('t_profile', 'ThemeProfile');
     expect(db.getProfile('t_profile').eliteUnlocks).toEqual([]);
-    const elite = db.getMissions('t_profile', new Date('2026-08-21T12:00:00Z'))
-      .find((m) => m.tier === 'elite')!;
-    for (let i = 0; i < 40; i++) {
-      db.recordMatch(
-        match('t_profile', {
-          mode: 'multiplayer', playerScore: 5, opponentScore: 0, bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
-        }),
-        {},
-        new Date('2026-08-21T12:00:00Z')
-      );
-      db.recordMatch(
-        match('t_profile', {
-          mode: 'solo', difficulty: 'cyber', playerScore: 5, opponentScore: 0,
-          bestStreak: 45, endStreak: 0, earnedStreak: 45, aces: 9,
-        }),
-        {},
-        new Date('2026-08-21T12:00:00Z')
-      );
-    }
-    db.claimMission('t_profile', elite.id, new Date('2026-08-21T12:00:00Z'));
+    const day = new Date('2026-08-21T12:00:00Z');
+    const elite = completeEliteAt('t_profile', day);
+    db.claimMission('t_profile', elite.id, day);
     const profile = db.getProfile('t_profile');
     expect(profile.eliteUnlocks).toContain(elite.unlocks);
-    expect(isCosmeticUnlocked(elite.unlocks as CosmeticId, profile)).toBe(true);
+    const id = elite.unlocks!;
+    const opened = id in COSMETICS ? isCosmeticUnlocked(id as CosmeticId, profile) : isTitleUnlocked(id as TitleId, profile);
+    expect(opened).toBe(true);
   });
 });
 
@@ -997,12 +1188,20 @@ describe('a dealt task is one the player can actually play', () => {
     // Deliberately swept across many days rather than one: the hand is dealt
     // from a seeded shuffle of (playerId, dayKey), so a single day proves
     // nothing about a pool that still contains the task.
+    // Asked through missionRequires rather than off the difficulty field, so a
+    // task that says what it needs some OTHER way — a duel through its mode, a
+    // first-to-10 through its type — is caught too. Rookie is a base unlock
+    // and is legitimately dealt.
     for (let d = 1; d <= 28; d++) {
       const day = new Date(Date.UTC(2026, 8, d, 12));
       for (const m of db.getMissions('m_lock', day)) {
         const def = findMission(m.id)!;
-        expect(def.difficulty, `${def.id} needs ${def.difficulty} and was dealt to a new player`)
-          .toBeUndefined();
+        for (const need of missionRequires(def)) {
+          expect(
+            hasUnlock([], need.kind, need.value),
+            `${def.id} needs ${need.kind}:${need.value} and was dealt to a new player`
+          ).toBe(true);
+        }
       }
     }
   });

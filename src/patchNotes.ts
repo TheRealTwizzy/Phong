@@ -35,6 +35,19 @@ export interface PatchNote {
 export const PATCH_NOTES: PatchNote[] = [
   {
     version: APP_VERSION,
+    date: '2026-09-03',
+    lines: [
+      'Cyber Overlord now takes 25 ranked duels as well as the rating. Until then you hold Legend, and your profile counts the way there.',
+      'The Cyber AI now tops out at Grandmaster. Only Chaos carries a solo player as far as Legend.',
+      'A finished daily task deals a fresh one for free three times a day, and an elite task once. After that the slot rests until tomorrow.',
+      '28 new daily tasks and 10 new elite tasks, with five new kinds: close wins, dominant wins, long matches, win streaks and wall returns.',
+      '22 new trophies deepen every branch \u2014 1,000 matches, 10,000 points, 50 Chaos wins, 100 duel wins, level 100 and more.',
+      'Titles are a second kind of permanent reward: earn one from an elite task or a deep trophy and wear it beside your name.',
+      'Five new looks for the whole app \u2014 four from elite tasks, one for reaching Cyber Overlord.',
+    ],
+  },
+  {
+    version: '1.0.6',
     date: '2026-09-02',
     lines: [
       'Watching someone play the computer? When their match ends you can take its chair yourself.',
