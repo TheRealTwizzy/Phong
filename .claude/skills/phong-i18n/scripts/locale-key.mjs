@@ -53,7 +53,11 @@ function parse(text) {
       return;
     }
     if (!current) return;
-    const key = line.match(/^ {4}([A-Za-z0-9_]+):/);
+    // Quoted keys too: the cosmetic and title names are `'cosmetic_moss-court':`
+    // because a hyphen needs the quotes, and a parser that skipped them left
+    // every one of those out of the parity audit — and read a `t('titles')`
+    // call as asking for a key that did not exist.
+    const key = line.match(/^ {4}'?([A-Za-z0-9_-]+)'?:/);
     if (key) current.entries.push({ key: key[1], line: i });
   });
   for (const l of LOCALES) if (!blocks[l]) throw new Error(`could not parse locale block: ${l}`);
