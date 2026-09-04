@@ -305,6 +305,17 @@ describe('moving an account', () => {
     db.recordMatch({ ...win(from), mode: 'solo', difficulty: 'rookie', matchKey: 'move:solo:1' } as never);
     db.recordAbandon(from); // daily_abandons
     db.recordPractice(from, { bestStreak: 4, earnedStreak: 4, endStreak: 4 }); // daily_practice
+    // competitive_exposure: written per participant per eligible match. Its
+    // OTHER identity-bearing column, `oppId`, is not covered by this list and
+    // is asserted separately — the list can only see `playerId`.
+    db.recordExposure({
+      playerId: from,
+      oppId: 'dev_aaaaaaaaaaaaaaaa39',
+      matchKey: 'move:exposure:1',
+      at: new Date(),
+      oppIsBot: false,
+      oppBand: 'ace',
+    });
     // The two tables nothing above reaches deterministically (mission
     // progress only advances for tasks the dealt hand happens to hold, and an
     // elite completion needs a finished elite task) get their rows by hand.

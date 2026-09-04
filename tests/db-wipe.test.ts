@@ -176,6 +176,41 @@ describe('a wipe takes device_links with it', () => {
   });
 });
 
+describe('a wipe takes competitive exposure with it', () => {
+  it('leaves no anti-farm history naming accounts that no longer exist', async () => {
+    // The wipe's DROP list is hand-written and nothing adds a table to it, so
+    // this is the same assertion device_links needed and for the same reason:
+    // an exposure row names two accounts, and after a wipe both are gone
+    // while the row would go on counting toward a ladder for whoever is
+    // minted onto those ids next.
+    const me = 'dev_cccccccccccccccc11';
+    const you = 'dev_cccccccccccccccc12';
+    db.getProfile(me);
+    db.initializeProfile(me, 'Exposed');
+    db.recordExposure({
+      playerId: me, oppId: you, matchKey: 'wipe:exposure:1',
+      at: new Date(), oppIsBot: false, oppBand: 'ace',
+    });
+    expect(
+      db.exposureCounts({
+        playerId: me, oppId: you, matchKey: 'wipe:exposure:2',
+        at: new Date(), oppBand: 'ace', humanVsBot: true,
+      }).priorPairCount
+    ).toBe(1);
+
+    db.setMeta('wipe_v4', '');
+    vi.resetModules();
+    const { db: booted } = await import('../server/db');
+
+    expect(
+      booted.exposureCounts({
+        playerId: me, oppId: you, matchKey: 'wipe:exposure:2',
+        at: new Date(), oppBand: 'ace', humanVsBot: true,
+      }).priorPairCount
+    ).toBe(0);
+  });
+});
+
 describe('manual db:reset script', () => {
   it('refuses without --yes and deletes the database files with it', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-reset-script-'));

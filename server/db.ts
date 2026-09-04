@@ -28,6 +28,7 @@ import {
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
 import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
+import type { ExposureCounts } from '../src/playbotRating';
 
 /**
  * The most points a single match can legitimately put on either side: the
@@ -244,6 +245,25 @@ const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY, WIPE_V4_KEY];
 const RECORDED_MATCH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 /**
+ * The rolling window §2.3's same-pair count and §2.4's bot-rank-band count
+ * are measured over. Not the daily counters, which are a UTC CALENDAR day.
+ */
+const EXPOSURE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long an exposure row is kept.
+ *
+ * The horizon is set by the ROLLING windows plus a safety margin, so a row
+ * cannot be swept immediately before a boundary-sensitive pair or band
+ * lookup. The UTC-day counters query only the CURRENT calendar day, so every
+ * row they read is necessarily younger than 24 hours and fits inside this
+ * with room to spare -- that is a consequence, not the derivation. If any
+ * future counter looks at PRIOR days, this has to be revisited before it
+ * ships.
+ */
+const EXPOSURE_TTL_MS = 48 * 60 * 60 * 1000;
+
+/**
  * A daily-task slot whose tier has nothing fresh left to deal today. Matches
  * no mission id, so getMissions drops it and advanceMissions skips it, while
  * the row itself stays put so ensureSlots still knows the day was dealt.
@@ -333,6 +353,11 @@ export function isBotAccount(id: string | null | undefined): boolean {
 
 export const PLAYER_KEYED_TABLES = [
   'avatars',
+  // competitive_exposure carries a SECOND identity-bearing column, `oppId`,
+  // which this list cannot see: membership here moves and deletes the rows
+  // where the account is `playerId`, and the opponent-side rows are handled
+  // explicitly beside it.
+  'competitive_exposure',
   'player_mode_stats',
   'daily_missions',
   'daily_mission_slots',
@@ -885,6 +910,53 @@ class GameDatabase {
         botId TEXT PRIMARY KEY,
         createdAt TEXT NOT NULL
       );
+
+      -- WHAT THE THREE ANTI-FARMING LADDERS COUNT. One row per PARTICIPANT
+      -- per eligible match, never one row per match: all four counters are
+      -- then single-column-prefix index scans on one table, and each seat
+      -- reads its own history without a self-join.
+      --
+      -- Deliberately not counted from matches, which insertMatch trims to
+      -- the newest 500 rows per player: a bot playing continuously exceeds
+      -- 500 a day, so the window would silently lose rows for exactly the
+      -- accounts the safeguard is for.
+      --
+      -- at is the MATCH's decided-at, supplied once by the vouching room
+      -- and identical on both seats' rows, so the two read the same window
+      -- and can never be at different points on the same ladder.
+      --
+      -- oppBand is the opponent's tier at MATCH START, on EVERY row and
+      -- every pair kind. There is no sentinel -- not NULL, not '', not
+      -- 'human' -- because a column meaning "the opponent's start tier" on
+      -- some rows and "which kind of thing this was" on others is a column
+      -- that gets read wrong the first time a second query wants it, and
+      -- oppIsBot already answers the kind question. Only §2.4's human-vs-bot
+      -- band saturation consumes it today; the meaning is uniform anyway.
+      --
+      -- duelCredited is the LIVE half of the ranked-duel credit decision,
+      -- for today's allowance only. The durable copy is matches.rankedDuelCredited:
+      -- this table is pruned at 48h, so it is not a reconstruction source.
+      CREATE TABLE IF NOT EXISTS competitive_exposure (
+        playerId     TEXT NOT NULL,
+        oppId        TEXT NOT NULL,
+        matchKey     TEXT NOT NULL,
+        at           TEXT NOT NULL,
+        day          TEXT NOT NULL,
+        oppIsBot     INTEGER NOT NULL,
+        oppBand      TEXT NOT NULL,
+        duelCredited INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, matchKey)
+      );
+      CREATE INDEX IF NOT EXISTS idx_exposure_pair
+        ON competitive_exposure (playerId, oppId, at);
+      CREATE INDEX IF NOT EXISTS idx_exposure_band
+        ON competitive_exposure (playerId, oppIsBot, oppBand, at);
+      CREATE INDEX IF NOT EXISTS idx_exposure_day
+        ON competitive_exposure (playerId, oppIsBot, day);
+      -- The sweep, which runs on every recorded match and must find nothing
+      -- rather than scan the table -- the reason recorded_matches has one.
+      CREATE INDEX IF NOT EXISTS idx_exposure_at
+        ON competitive_exposure (at);
     `);
   }
 
@@ -916,6 +988,11 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DROP TABLE IF EXISTS daily_solo');
       this.sql.exec('DROP TABLE IF EXISTS recorded_matches');
+      // Rows keyed on BOTH a playerId and an oppId, so a survivor points at
+      // two accounts that no longer exist -- the device_links mistake, whose
+      // whole lesson was that this list is hand-written and a new table is
+      // not added to it by anything.
+      this.sql.exec('DROP TABLE IF EXISTS competitive_exposure');
       this.sql.exec('DROP TABLE IF EXISTS released_devices');
       // Added with the multi-browser rework and missed here at the time. A
       // surviving device_links row points at a playerId that no longer exists,
@@ -3710,6 +3787,108 @@ class GameDatabase {
     // growing for the life of the database.
     const cutoff = new Date(now.getTime() - RECORDED_MATCH_TTL_MS).toISOString();
     this.stmt('DELETE FROM recorded_matches WHERE recordedAt < ?').run(cutoff);
+  }
+
+  // ---- Competitive exposure ----------------------------------------------
+  //
+  // What the three anti-farming ladders count. Reading and writing only; the
+  // policy that turns these counts into weights is src/playbotRating.ts, and
+  // the decision about whether a match writes a row at all belongs to
+  // recordMatch's own eligibility predicate.
+
+  /** One participant's account of one completed, competitively eligible match. */
+  public recordExposure(row: {
+    playerId: string;
+    oppId: string;
+    matchKey: string;
+    /** The MATCH's decided-at. Identical on both seats' rows -- see below. */
+    at: Date;
+    oppIsBot: boolean;
+    /** The opponent's tier at MATCH START, never re-derived at record time. */
+    oppBand: string;
+  }): void {
+    const at = row.at.toISOString();
+    // ON CONFLICT DO NOTHING, so a replayed matchKey advances nothing: the
+    // primary key is what makes the unit one completed match rather than one
+    // point, one rally or one round.
+    this.stmt(
+        `INSERT INTO competitive_exposure
+           (playerId, oppId, matchKey, at, day, oppIsBot, oppBand, duelCredited)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+         ON CONFLICT(playerId, matchKey) DO NOTHING`
+      )
+      .run(row.playerId, row.oppId, row.matchKey, at, at.slice(0, 10), row.oppIsBot ? 1 : 0, row.oppBand);
+    this.pruneExposure(row.at);
+  }
+
+  /**
+   * Sweep rows past the retention horizon.
+   *
+   * Measured from the MATCH's own decided-at rather than the wall clock: a
+   * match parked on a device and replayed days later carries an old anchor,
+   * and pruning relative to the clock could take out rows its own window is
+   * about to read. Relative to its anchor the sweep can only ever delete
+   * less, which is the safe direction.
+   */
+  public pruneExposure(now: Date): void {
+    const cutoff = new Date(now.getTime() - EXPOSURE_TTL_MS).toISOString();
+    this.stmt('DELETE FROM competitive_exposure WHERE at < ?').run(cutoff);
+  }
+
+  /**
+   * The PRIOR counts this participant's match is judged on -- never including
+   * the match being recorded.
+   *
+   * The row for the current match is inserted BEFORE this runs, which is what
+   * lets both seats read the same window from the same anchor; the `matchKey`
+   * exclusion is the only thing keeping that honest. The rolling windows are
+   * therefore `at <= anchor` and deliberately not `at < anchor`: with the
+   * strict comparison the exclusion would be redundant, so a test that
+   * removed it would still pass and the guard would rot unnoticed.
+   *
+   * `humanVsBot` is false for every participant §2.4 and §2.5 do not apply to
+   * -- a bot in any match, and a human facing a human -- and those two
+   * queries are then not asked at all. Their `oppIsBot = 1` filter reads as
+   * "my bot matches" for a human and would read as "all my matches" for a
+   * bot, so the guard is what keeps them the human's ladders.
+   */
+  public exposureCounts(q: {
+    playerId: string;
+    oppId: string;
+    matchKey: string;
+    /** The match's decided-at. Both seats pass the same value. */
+    at: Date;
+    oppBand: string;
+    humanVsBot: boolean;
+  }): ExposureCounts {
+    const at = q.at.toISOString();
+    const since = new Date(q.at.getTime() - EXPOSURE_WINDOW_MS).toISOString();
+    const priorPairCount = (
+      this.stmt(
+          `SELECT COUNT(*) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppId = ? AND at >= ? AND at <= ? AND matchKey <> ?`
+        )
+        .get(q.playerId, q.oppId, since, at, q.matchKey) as { n: number }
+    ).n;
+    if (!q.humanVsBot) {
+      return { priorPairCount, priorBotBandCount: 0, priorBotDailyCount: 0 };
+    }
+    const priorBotBandCount = (
+      this.stmt(
+          `SELECT COUNT(*) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppIsBot = 1 AND oppBand = ?
+              AND at >= ? AND at <= ? AND matchKey <> ?`
+        )
+        .get(q.playerId, q.oppBand, since, at, q.matchKey) as { n: number }
+    ).n;
+    const priorBotDailyCount = (
+      this.stmt(
+          `SELECT COUNT(*) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppIsBot = 1 AND day = ? AND matchKey <> ?`
+        )
+        .get(q.playerId, at.slice(0, 10), q.matchKey) as { n: number }
+    ).n;
+    return { priorPairCount, priorBotBandCount, priorBotDailyCount };
   }
 
   // ---- Device sessions ---------------------------------------------------
