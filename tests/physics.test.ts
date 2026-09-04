@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AIDifficulty, BallState } from '../src/types';
+import { effectiveAiMu } from '../src/rating';
 import {
   BASE_BALL_SPEED,
   MAX_BALL_SPEED,
@@ -884,5 +885,53 @@ describe('keyboard paddles move per SECOND, in every component that has one', ()
     for (const line of uses) expect(line).toMatch(/KEY_PADDLE_SPEED \* dt/);
     // And the per-second constant is declared, rather than a bare literal.
     expect(src).toMatch(/const KEY_PADDLE_SPEED = [\d.]+ \* 60;/);
+  });
+});
+
+
+describe('a play-bot brings its own competence, and solo does not notice', () => {
+  // Step 17 deferred this: a bot's competence is an intrinsic TRAIT, so
+  // OpponentAI has to be able to take one instead of deriving it from the
+  // difficulty ladder. The whole risk in that change is the solo path, which
+  // must be byte-identical — so that is asserted first and over the whole grid.
+
+  const RUNGS: AIDifficulty[] = ['rookie', 'pro', 'elite', 'cyber', 'chaos'];
+  const PLAYER_MU = [8, 15, 20, 25, 30, 36, 42];
+
+  it('derives competence exactly as it always did when nothing is overridden', () => {
+    for (const rung of RUNGS) {
+      for (const mu of PLAYER_MU) {
+        const ai = new OpponentAI(rung, mu);
+        expect({ rung, mu, c: ai.competence() }).toEqual({
+          rung,
+          mu,
+          c: competenceForMu(effectiveAiMu(rung, mu)),
+        });
+      }
+    }
+  });
+
+  it('takes the override instead, and stops adapting to the opponent', () => {
+    // The separation at the physics boundary. A solo rung slides toward the
+    // player; a bot must not, or its strength would chase its own results.
+    for (const mu of PLAYER_MU) {
+      const bot = new OpponentAI('pro', mu, { competence: 0.42, style: { volatility: 0, aggression: 0.3 } });
+      expect(bot.competence()).toBe(0.42);
+    }
+    // ...and the same rung WITHOUT the override does adapt, so the fixture is
+    // measuring the override rather than a rung that happens to be flat.
+    const solo = PLAYER_MU.map((mu) => new OpponentAI('pro', mu).competence());
+    expect(new Set(solo).size).toBeGreaterThan(1);
+  });
+
+  it('plays a bot at its own strength, whatever the opponent is rated', () => {
+    // setPlayerSkill is what a duel would call as the opponent's rating moves.
+    // For a bot it must change nothing.
+    const bot = new OpponentAI('pro', 25, { competence: 0.6, style: { volatility: 0, aggression: 0.5 } });
+    const before = bot.competence();
+    bot.setPlayerSkill(45);
+    expect(bot.competence()).toBe(before);
+    bot.setPlayerSkill(5);
+    expect(bot.competence()).toBe(before);
   });
 });

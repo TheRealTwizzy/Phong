@@ -610,7 +610,7 @@ export function competenceForMu(mu: number): number {
   return MAX_AI_COMPETENCE;
 }
 
-interface AIStyle {
+export interface AIStyle {
   /** How far competence swings between rallies — Chaos is erratic by design. */
   volatility: number;
   /** How hard it plays for the corners rather than safely centring the return. */
@@ -819,9 +819,25 @@ export class OpponentAI {
   private spinRead: number = 1;
   private params: AIParams = paramsForCompetence(competenceForMu(AI_RATINGS.pro.mu));
 
-  constructor(difficulty: AIDifficulty = 'pro', playerMu: number = START_MU) {
+  /**
+   * A PLAY-BOT's own competence and style, in place of the difficulty ladder's.
+   *
+   * Solo derives competence from the PLAYER's mu so the rung adapts to them
+   * (`effectiveAiMu`). A play-bot must not: its competence is an intrinsic
+   * trait, so its strength cannot chase its own results and its rating stays a
+   * measurement of something. Absent — which is every solo match — nothing
+   * below changes at all.
+   */
+  private override: { competence: number; style: AIStyle } | null = null;
+
+  constructor(
+    difficulty: AIDifficulty = 'pro',
+    playerMu: number = START_MU,
+    override: { competence: number; style: AIStyle } | null = null
+  ) {
     this.difficulty = difficulty;
     this.playerMu = playerMu;
+    this.override = override;
   }
 
   public setDifficulty(diff: AIDifficulty) {
@@ -844,7 +860,7 @@ export class OpponentAI {
 
   /** Its competence right now, for serve timing and aim. */
   public competence(): number {
-    return competenceForMu(this.effectiveMu());
+    return this.override ? this.override.competence : competenceForMu(this.effectiveMu());
   }
 
   public reset() {
@@ -857,8 +873,8 @@ export class OpponentAI {
 
   /** Decide how this particular ball gets read, once, as it crosses the net. */
   private beginRally(oppBall: BallState) {
-    const style = AI_STYLES[this.difficulty];
-    const base = competenceForMu(this.effectiveMu());
+    const style = this.override ? this.override.style : AI_STYLES[this.difficulty];
+    const base = this.competence();
     const c = clamp(
       base + (Math.random() - 0.5) * 2 * style.volatility,
       MIN_AI_COMPETENCE,
