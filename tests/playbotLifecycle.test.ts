@@ -96,7 +96,16 @@ describe('a deploy costs nobody a rated match', () => {
     // `room.inPlay`, which only a crossing sets. Without this the fixture
     // could be asserting that a match nobody had started charges no abandon,
     // which is true of the empty case and says nothing.
-    const live = await fetch(`${r.base}/api/room/${host.roomId}`).then((x) => x.json());
+    //
+    // The id is VALIDATED before it reaches the URL. It arrives on a relay
+    // message, so CodeQL reads it as a user-provided value flowing into a
+    // request — correctly, as a shape: nothing here knows it came from a
+    // server this test started. The guard is also a real assertion, since a
+    // room code is four characters from an unambiguous alphabet and anything
+    // else means the handshake went wrong rather than the fetch.
+    const roomId = host.roomId ?? '';
+    if (!/^[A-Z0-9]{4}$/.test(roomId)) throw new Error(`not a room code: ${roomId}`);
+    const live = await fetch(`${r.base}/api/room/${roomId}`).then((x) => x.json());
     expect(live.inPlay).toBe(true);
 
     await r.terminate();
