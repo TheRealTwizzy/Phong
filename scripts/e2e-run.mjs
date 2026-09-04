@@ -64,6 +64,8 @@ const SUITES = [
   { name: 'report', ownsServer: false },
   { name: 'eject', ownsServer: true },
   { name: 'load', ownsServer: false, needsBrowser: false },
+  // Pure computation: it needs no server, so it 'owns' one by starting none.
+  { name: 'bot-sim', ownsServer: true, needsBrowser: false },
   { name: 'build-id', ownsServer: true, needsBrowser: false },
 ];
 

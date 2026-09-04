@@ -25,6 +25,7 @@ import {
   validateUsername,
   usernameLockExpiry,
   DELETED_PLAYER_ID,
+  isBotId,
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
 import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
@@ -59,6 +60,7 @@ import {
   SOLO_UPDATE,
   soloMuCap,
   PVP_UPDATE,
+  CROSS_KIND_K_SCALE,
   PLACEMENT_UPDATE,
   PLACEMENT_SIGMA,
   soloCountsForRank,
@@ -2978,6 +2980,13 @@ class GameDatabase {
     // rating decides both how much the rating moves and how much XP is paid,
     // so difficulty scaling is implicit — there is no per-difficulty table.
     const isPvp = payload.mode === 'multiplayer';
+    // A duel between a human and a play-bot, in either direction. Both sides
+    // of such a match move at a reduced weight — see CROSS_KIND_K_SCALE.
+    // Read off the two IDS rather than off any flag a client could set: the
+    // `bot-` prefix is minted by insertBot and a client cannot claim one,
+    // because the reporter's id comes from the verified device cookie.
+    const crossKind = isPvp && isBotId(payload.playerId) !== isBotId(payload.opponentId);
+    const kindScale = crossKind ? CROSS_KIND_K_SCALE : 1;
     // A client on an older bundle can still name a retired difficulty.
     const difficulty = normalizeDifficulty(payload.difficulty);
     const myMmr: Rating = { mu: profile.mmrMu, sigma: profile.mmrSigma };
@@ -3080,7 +3089,7 @@ class GameDatabase {
         myMmr,
         oppRating,
         isWin,
-        isPvp ? { ...PVP_UPDATE, performance } : soloOpts
+        isPvp ? { ...PVP_UPDATE, k: PVP_UPDATE.k * kindScale, performance } : soloOpts
       );
       profile.mmrMu = nextMmr.mu;
       profile.mmrSigma = nextMmr.sigma;
@@ -3129,7 +3138,7 @@ class GameDatabase {
       const placing = profile.rankedGames < PLACEMENT_GAMES;
       const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
       const rankOpts = isPvp
-        ? { ...placementOpts, performance }
+        ? { ...placementOpts, k: placementOpts.k * kindScale, performance }
         : {
             // Lighter on mu than a duel — beating an AI says less than beating
             // a person — and held under the same ceiling every solo result is,

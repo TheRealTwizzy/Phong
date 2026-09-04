@@ -275,6 +275,25 @@ export const PLACEMENT_UPDATE: UpdateOptions = {
 };
 
 /**
+ * How much of a rating step a match against the OTHER KIND is worth.
+ *
+ * A play-bot is a real opponent on a real court under the same rules, so a
+ * match against one is evidence — but weaker evidence than a match between two
+ * of the same kind, because a bot's strength is a fixed property of the bot
+ * rather than something that had to be earned against the field. So a
+ * human-vs-bot result moves roughly half as far, and it does so for BOTH
+ * sides: the human's ladder and the bot's move at the same reduced weight.
+ * Two humans move each other fully; two bots move each other fully.
+ *
+ * Applied to `k` and deliberately NOT to `sigmaScale`. The step is what a
+ * result is WORTH; sigma is how much was LEARNED, and a bot match is a real
+ * observation of how somebody plays. Scaling sigma too would slow placement
+ * against bots specifically, which is the trap PLACEMENT_SIGMA_SCALE was added
+ * to close from the other side — a player reaching "5/5" and still Unranked.
+ */
+export const CROSS_KIND_K_SCALE = 0.45;
+
+/**
  * How far a match moved the visible ladder, as the number of arrows to draw.
  *
  * The overlay used to draw ONE arrow at any magnitude, so a first placement

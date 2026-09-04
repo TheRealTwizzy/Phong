@@ -49,6 +49,26 @@ export function isLinkableId(id: string | null | undefined): boolean {
   return typeof id === 'string' && /^(dev_|bot-)/.test(id);
 }
 
+/** The prefix every bot id carries, and the only thing that marks one. */
+export const BOT_ID_PREFIX = 'bot-';
+
+/**
+ * Is this a play-bot?
+ *
+ * The `bot-` prefix is already load-bearing in a dozen places — the leaderboard
+ * filter, the ladder-position gate, `insertBot`'s own guard, the guest reaper —
+ * and every one of them spells it inline. This is the shared reading, so a
+ * rule that has to hold on both sides of the wire (the rating weight a
+ * human-vs-bot match carries) cannot be spelled two ways.
+ *
+ * Deliberately here rather than in `server/`: `src/rating.ts` is shared
+ * client and server, and the client has to be able to say why a match moved
+ * the ladder less than it expected.
+ */
+export function isBotId(id: string | null | undefined): boolean {
+  return typeof id === 'string' && id.startsWith(BOT_ID_PREFIX);
+}
+
 // What a deleted account leaves behind in somebody ELSE's match history.
 //
 // Every seat files its own match row, so a duel writes two and the opponent's
