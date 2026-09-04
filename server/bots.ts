@@ -1,76 +1,96 @@
-import { PLACEMENT_GAMES } from '../src/rating';
+import { START_MU, START_SIGMA } from '../src/rating';
 
-// The pace-setters on the leaderboard.
+// The play-bot roster.
 //
-// A launched deployment has no players, and the boards deliberately refuse
-// rows of zeros — so the first person to open the leaderboard saw an empty
-// list, and the second saw themselves alone at rank 1. Neither tells you what
-// the ladder is or what climbing it would look like.
+// These are PLAYERS. Each one holds a real account, opens a table, plays real
+// matches against humans and against other bots, and climbs the same ladder
+// under the same gates. That reverses what this file used to be, and the old
+// version is worth stating because the reversal is deliberate rather than
+// drift: it was eight static rows with hand-written careers, seeded pre-placed
+// so an empty leaderboard had a scale beside it, and its header said in as
+// many words that the roster was "NOT a fake player base".
 //
-// This roster is NOT a fake player base. Every row is labelled BOT in the UI,
-// carries `rank: null` so it never occupies a human's rank number, and is
-// hidden entirely by the humans-only toggle. That is the whole reason the
-// leaderboard was built with a null-rank lane: bot rows are a scale drawn
-// beside the ladder, not competitors on it.
+// A scale drawn beside the ladder is exactly what a fake career is, and it has
+// two problems the moment bots start playing. A bot handed a tier has not
+// earned one, so the board would show some bots that placed and some that were
+// simply given a rung — on the same screen, indistinguishable. And a fabricated
+// win rate rots: one edit and a Legend has a losing record.
 //
-// Note this reverses the launch decision to seed nothing (see the comment in
-// tests/leaderboard.test.ts). It is one call in server.ts and one meta flag,
-// so it reverts cleanly.
+// So every bot now starts where every person starts: mu 25, sigma 25/3,
+// ZERO ranked games, and therefore Unranked, reading `0/5` exactly as a new
+// human does. Nothing is asserted about where a bot belongs; the ladder finds
+// out. What differs between bots is their STRENGTH, which is fixed for the
+// account's lifetime and derived from its id (`trueSkillForBot` in
+// server/botPlayers.ts) rather than stored here — so it survives a restart,
+// cannot drift from the account it describes, and needs no hand-authored
+// column that a later edit could contradict.
+//
+// The consequence for a fresh deployment is that the board opens EMPTY-ish and
+// fills within minutes of real play rather than being pre-populated. That is
+// the honest version of the same thing, and it is why the roster no longer
+// carries a single number to keep consistent.
 
 export interface BotSeed {
   /** Must start with `bot-`; that prefix is what every bot check keys on. */
   id: string;
   username: string;
-  /** Rating anchor. Drives the visible tier through `tierFor`. */
-  mu: number;
-  xp: number;
-  matchesPlayed: number;
-  matchesWon: number;
-  highestRally: number;
-  totalPointsScored: number;
 }
 
 /**
- * Eight rungs from Rookie to Legend.
+ * Sixteen accounts.
  *
- * The apex is deliberately vacant: nothing here reaches Cyber Overlord (μ37),
- * so the top of the ladder belongs to whoever actually earns it. A bot parked
- * at the summit would make the board's most motivating slot decorative.
+ * Enough that the strength spread (`trueSkillForBot`) has bots in most tier
+ * bands once they have placed, and few enough that a room browser reads as
+ * lived-in rather than papered over. How many are actually SEATED is a
+ * separate, smaller number — `PLAY_BOTS` — because a seated bot is a live
+ * socket and an unseated row is just an account.
  *
- * Every column moves with μ — win rate, level and best rally all rise
- * together — because a Legend with a losing record reads as furniture the
- * moment anyone looks twice. `tests/bots.test.ts` pins that monotonicity
- * rather than trusting the table to stay hand-consistent.
- *
- * `rankedGames` tracks `matchesPlayed`: the elo board renders it next to the
- * tier, and "5 ranked" beside 231 matches would contradict itself on screen.
+ * Names are deliberately synthetic. Every one occupies the same unique,
+ * case-insensitive username index a person's does, so a roster name is a name
+ * no human can ever have — short or desirable handles are somebody else's.
  */
 export const BOT_ROSTER: BotSeed[] = [
-  { id: 'bot-ladder-01', username: 'CircuitPup',  mu: 17,   xp: 2900,  matchesPlayed: 24,  matchesWon: 8,   highestRally: 9,  totalPointsScored: 104 },
-  { id: 'bot-ladder-02', username: 'StaticDrift', mu: 20,   xp: 4900,  matchesPlayed: 41,  matchesWon: 18,  highestRally: 13, totalPointsScored: 182 },
-  { id: 'bot-ladder-03', username: 'HaloJet',     mu: 23,   xp: 7600,  matchesPlayed: 63,  matchesWon: 32,  highestRally: 17, totalPointsScored: 284 },
-  { id: 'bot-ladder-04', username: 'NovaTrace',   mu: 25.5, xp: 10600, matchesPlayed: 88,  matchesWon: 48,  highestRally: 21, totalPointsScored: 398 },
-  { id: 'bot-ladder-05', username: 'IronEcho',    mu: 27,   xp: 13400, matchesPlayed: 112, matchesWon: 64,  highestRally: 25, totalPointsScored: 509 },
-  { id: 'bot-ladder-06', username: 'VoltHalcyon', mu: 29,   xp: 17600, matchesPlayed: 147, matchesWon: 89,  highestRally: 30, totalPointsScored: 668 },
-  { id: 'bot-ladder-07', username: 'ZeroKelvin',  mu: 32,   xp: 22300, matchesPlayed: 186, matchesWon: 119, highestRally: 36, totalPointsScored: 848 },
-  { id: 'bot-ladder-08', username: 'ObsidianArc', mu: 35,   xp: 27700, matchesPlayed: 231, matchesWon: 158, highestRally: 43, totalPointsScored: 1056 },
+  { id: 'bot-ladder-01', username: 'CircuitPup' },
+  { id: 'bot-ladder-02', username: 'StaticDrift' },
+  { id: 'bot-ladder-03', username: 'HaloJet' },
+  { id: 'bot-ladder-04', username: 'NovaTrace' },
+  { id: 'bot-ladder-05', username: 'IronEcho' },
+  { id: 'bot-ladder-06', username: 'VoltHalcyon' },
+  { id: 'bot-ladder-07', username: 'ZeroKelvin' },
+  { id: 'bot-ladder-08', username: 'ObsidianArc' },
+  { id: 'bot-ladder-09', username: 'PixelMarrow' },
+  { id: 'bot-ladder-10', username: 'DriftCanon' },
+  { id: 'bot-ladder-11', username: 'AmberRelay' },
+  { id: 'bot-ladder-12', username: 'HollowSignal' },
+  { id: 'bot-ladder-13', username: 'TinCathedral' },
+  { id: 'bot-ladder-14', username: 'GlassFurnace' },
+  { id: 'bot-ladder-15', username: 'SlowThunder' },
+  { id: 'bot-ladder-16', username: 'PaleLantern' },
 ];
 
-/** A roster row as `insertBot` wants it — losses and wins kept consistent. */
+/**
+ * A roster row as `insertBot` wants it: a brand-new account.
+ *
+ * Every field that a career would fill is left at zero, and the rating is the
+ * one every human opens on. `rankedGames: 0` is what makes `tierFor` answer
+ * `unranked` — the counter the profile screen prints is then the promise being
+ * kept rather than a number that was handed over.
+ */
 export function botProfileFields(bot: BotSeed) {
   return {
     id: bot.id,
     username: bot.username,
-    mu: bot.mu,
-    xp: bot.xp,
-    matchesPlayed: bot.matchesPlayed,
-    matchesWon: bot.matchesWon,
-    matchesLost: bot.matchesPlayed - bot.matchesWon,
-    highestRally: bot.highestRally,
-    totalPointsScored: bot.totalPointsScored,
-    multiplayerWins: bot.matchesWon,
-    rankedGames: Math.max(PLACEMENT_GAMES, bot.matchesPlayed),
-    // A roster row is a career of duels, so the apex gate reads it as one.
-    rankedDuels: bot.matchesPlayed,
+    mu: START_MU,
+    rankSigma: START_SIGMA,
+    mmrSigma: START_SIGMA,
+    xp: 0,
+    matchesPlayed: 0,
+    matchesWon: 0,
+    matchesLost: 0,
+    highestRally: 0,
+    totalPointsScored: 0,
+    multiplayerWins: 0,
+    rankedGames: 0,
+    rankedDuels: 0,
   };
 }

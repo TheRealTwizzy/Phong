@@ -35,6 +35,14 @@ export interface PatchNote {
 export const PATCH_NOTES: PatchNote[] = [
   {
     version: APP_VERSION,
+    date: '2026-09-04',
+    lines: [
+      'Leaderboard bots no longer carry a made-up record. They start unranked like anyone else and appear once they have actually played.',
+      'Matches against a bot count for tasks, trophies and your rank \u2014 they just move your rating about half as far as a match against a person.',
+    ],
+  },
+  {
+    version: '1.1.0',
     date: '2026-09-03',
     lines: [
       'Cyber Overlord now takes 25 ranked duels as well as the rating. Until then you hold Legend, and your profile counts the way there.',

@@ -61,6 +61,8 @@ import {
   soloMuCap,
   PVP_UPDATE,
   CROSS_KIND_K_SCALE,
+  START_MU,
+  START_SIGMA,
   PLACEMENT_UPDATE,
   PLACEMENT_SIGMA,
   soloCountsForRank,
@@ -2874,10 +2876,19 @@ class GameDatabase {
       xp: bot.xp || 0,
       xpNext,
       mmrMu: botMu,
-      mmrSigma: BOT_SIGMA,
+      // Overridable, and that matters: the play-bot roster seeds a BRAND NEW
+      // account (START_SIGMA, zero ranked games), while a test that wants a
+      // pre-placed scale marker on the board still passes BOT_SIGMA and gets
+      // the confident rating it is asking for. A fixed sigma here would have
+      // made every bot look certain about a rating it had never played for.
+      mmrSigma: bot.mmrSigma ?? BOT_SIGMA,
       rankMu: botMu,
-      rankSigma: BOT_SIGMA,
-      // Bots are pre-placed so they carry a real tier on the leaderboard.
+      rankSigma: bot.rankSigma ?? BOT_SIGMA,
+      // The play-bot roster passes 0 here, which is what makes a fresh bot
+      // read `0/5 Unranked` exactly as a new human does — it has to place like
+      // anybody else. The PLACEMENT_GAMES default is kept for a caller that
+      // deliberately wants a pre-placed row (a fixture standing in for an
+      // established account), and is no longer what the shipped roster gets.
       rankedGames: bot.rankedGames ?? PLACEMENT_GAMES,
       rankedDuels: bot.rankedDuels ?? 0,
       matchesPlayed: bot.matchesPlayed || 0,
@@ -2948,23 +2959,64 @@ class GameDatabase {
     return rows.map((r) => r.id);
   }
 
-  public seedBotRoster(roster: BotSeed[]): { inserted: number; skipped: string[] } {
-    const KEY = 'bot_roster_v1';
-    if (this.getMeta(KEY)) return { inserted: 0, skipped: [] };
+  public seedBotRoster(roster: BotSeed[]): { inserted: number; reset: number; skipped: string[] } {
+    // Keyed on `play_bots_v1`, NOT the old `bot_roster_v1`, and that is what
+    // makes this run on a deployment that already has bots. Those rows were
+    // seeded pre-placed with hand-written careers, back when the roster was a
+    // scale drawn beside the ladder rather than players on it. Left alone they
+    // would sit on the board beside bots that earned their rung, on the same
+    // screen and indistinguishable — some given a tier, some who placed for
+    // it. So this resets every existing bot to a brand-new account before
+    // adding the rest of the roster.
+    //
+    // One-shot and flagged, like every other migration here: re-running is a
+    // no-op, so a restart cannot resurrect a bot an operator deleted on
+    // purpose, and cannot wipe the ladder a bot has since played its way to.
+    const KEY = 'play_bots_v1';
+    if (this.getMeta(KEY)) return { inserted: 0, reset: 0, skipped: [] };
+
     let inserted = 0;
+    let reset = 0;
     const skipped: string[] = [];
+
+    // Existing rows first. A career this account did not play is worse than no
+    // career: `tierFor` would hand it a rung, and the whole point is that a
+    // bot's rating is what the ladder discovered rather than what it was given.
+    try {
+      reset = this.stmt(
+        `UPDATE players
+            SET rankMu = ?, rankSigma = ?, mmrMu = ?, mmrSigma = ?,
+                rankedGames = 0, rankedDuels = 0, xp = 0, level = 1,
+                matchesPlayed = 0, matchesWon = 0, matchesLost = 0,
+                highestRally = 0, totalPointsScored = 0, multiplayerWins = 0,
+                winStreak = 0, bestWinStreak = 0, shutoutsWon = 0
+          WHERE id LIKE 'bot-%'`
+      ).run(START_MU, START_SIGMA, START_MU, START_SIGMA).changes as number;
+    } catch (e: any) {
+      // A reset that fails must not stop the roster landing, for the same
+      // reason a colliding name does not: this is a garnish, not the boot.
+      skipped.push(`reset (${e?.message || 'failed'})`);
+    }
+
     for (const bot of roster) {
       try {
         this.insertBot(botProfileFields(bot));
         inserted++;
       } catch (e: any) {
+        // A roster name a human already holds violates the unique username
+        // index. That is per-bot recoverable and must never take the boot down
+        // with it — and on an EXISTING database every already-seeded bot lands
+        // here too, which is correct: it was just reset above, and re-inserting
+        // would only overwrite it with the same values.
         skipped.push(`${bot.username} (${e?.message || 'insert failed'})`);
       }
     }
+
     this.setMeta(KEY, new Date().toISOString());
-    if (inserted) console.log(`bot_roster_v1: seeded ${inserted} bot(s) onto the leaderboard`);
-    if (skipped.length) console.log(`bot_roster_v1: skipped ${skipped.length} — ${skipped.join(', ')}`);
-    return { inserted, skipped };
+    if (reset) console.log(`play_bots_v1: reset ${reset} existing bot account(s) to unplaced`);
+    if (inserted) console.log(`play_bots_v1: seeded ${inserted} play-bot(s)`);
+    if (skipped.length) console.log(`play_bots_v1: skipped ${skipped.length} — ${skipped.join(', ')}`);
+    return { inserted, reset, skipped };
   }
 
   public recordMatch(
@@ -4131,6 +4183,19 @@ class GameDatabase {
     // is needed. The output is identical — humanRank only ever counted
     // non-bots, so removing rows that never incremented it changes nothing.
     const botClause = includeBots ? '' : " AND p.id NOT LIKE 'bot-%'";
+    // Bots obey the progress filter like everybody else now, and that changed
+    // WITH the roster. It used to read `(${'$'}{progress} OR p.id LIKE 'bot-%')`,
+    // exempting them — which was right while a roster row was a hand-written
+    // career seeded pre-placed to give an empty board a scale, and became
+    // wrong the moment a play-bot started at zero and earned its row. A bot
+    // that has played nothing IS a row of zeros, and this board's own rule is
+    // that a row of zeros is not last place, it is not on the board.
+    //
+    // The honest cost, taken knowingly: a fresh deployment's board is empty
+    // again until somebody plays, where the old roster filled it on the first
+    // boot. That filling was fiction, and the real answer to an empty board is
+    // now the population actually playing on it — which it does within minutes
+    // of `PLAY_BOTS` being set.
     // LIMIT in the SQL, not just in the loop. Without it every eligible row
     // was materialized as p.* and run through rowToProfile (which JSON.parses
     // the achievements column) before the loop threw all but `take` away —
@@ -4140,7 +4205,7 @@ class GameDatabase {
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
-            AND (${progress} OR p.id LIKE 'bot-%')${botClause}
+            AND ${progress}${botClause}
           ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
           LIMIT ?`
       )

@@ -93,6 +93,12 @@ describe('the play-bot population', () => {
     expect(open.length).toBeLessThanOrEqual(3);
   }, 30_000);
 
+  // Bots PLAYING a match to a recorded result is asserted in
+  // `scripts/e2e-bots.mjs`, not here. It takes about a minute of wall clock —
+  // two bots have to rally out a first-to-5 — and this file is in the FAST
+  // layer, which the whole repo runs on every change. A minute is what the
+  // separate e2e job is for.
+
   it('puts its tables only in the ungated rooms', async () => {
     // What this holds is the POLICY — BOT_TABLE_VENUES — and not the gate.
     // Worth saying plainly, because the tempting comment here ("this catches

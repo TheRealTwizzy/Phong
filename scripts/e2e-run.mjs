@@ -66,6 +66,9 @@ const SUITES = [
   { name: 'load', ownsServer: false, needsBrowser: false },
   // Pure computation: it needs no server, so it 'owns' one by starting none.
   { name: 'bot-sim', ownsServer: true, needsBrowser: false },
+  // Owns its server: the shared one boots without PLAY_BOTS, and the
+  // population is off unless asked for.
+  { name: 'bots', ownsServer: true, needsBrowser: false },
   { name: 'build-id', ownsServer: true, needsBrowser: false },
 ];
 

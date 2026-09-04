@@ -159,11 +159,19 @@ describe('a board only lists players with progress on what it measures', () => {
     expect(on('rally')).toBe(false);
   });
 
-  it('keeps the curated bot roster on the boards regardless', () => {
-    // Bots are inserted deliberately — a display roster, not idle players.
-    for (const sort of BOARDS) {
-      const bots = db.getLeaderboard(sort, 100, true).filter((e) => e.isBot);
-      expect(bots.length).toBe(4);
+  it('keeps a bot that has played off the boards it has not touched', () => {
+    // Bots used to be EXEMPT from the progress filter — the clause read
+    // `(progress OR id LIKE 'bot-%')` — because a roster row was a
+    // hand-written career seeded pre-placed to give an empty board a scale.
+    // A play-bot starts at zero and earns its row, so a bot with nothing
+    // played is genuinely a row of zeros, and this board's own rule is that a
+    // row of zeros is not last place, it is not on the board.
+    for (const sort of ['elo', 'level', 'rally', 'wins'] as const) {
+      const shown = db.getLeaderboard(sort, 100, true).filter((e) => e.isBot);
+      // This suite's own bots carry xp and mu but no rally and no wins, so
+      // they qualify for exactly the two boards their record has touched.
+      if (sort === 'rally' || sort === 'wins') expect(shown.length, sort).toBe(0);
+      else expect(shown.length, sort).toBeGreaterThan(0);
     }
   });
 });

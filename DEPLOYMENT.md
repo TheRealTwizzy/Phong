@@ -12,6 +12,29 @@ Measured on a 4-core / 16GB Linux box against `NODE_ENV=production node dist/ser
 
 The script was broken for a while and this note used to say so. It is repaired, exports `runLoadTest()`, and is now covered by a registered smoke suite (`scripts/e2e-load.mjs`, two rooms and three seconds) so the next protocol change that breaks it breaks a build instead of a claim in a document.
 
+**Play-bots** (`PLAY_BOTS=N`, off unless set) seat N simulated players who open tables in
+the room browser, play real matches against each other and against humans, and climb the
+same ladder under the same gates. They are accounts, not fixtures: each starts at `0/5
+Unranked` and earns its tier, and a match against one moves both sides' rating at
+`CROSS_KIND_K_SCALE` (0.45) rather than the full step. The population is a garnish — it
+never takes the server down, and a deployment whose database holds no bot accounts
+simply runs none and says so at boot.
+
+What it costs, measured with `node scripts/bot-sim.mjs` on the same 4-core box:
+
+| | 200 concurrent bot matches |
+|---|---|
+| Physics at 60Hz | **0.23% of one core** (~200ns per match-tick) |
+| Their paddle streams' JSON | **0.39% of one core** |
+
+Neither binds, which is why `PLAY_BOTS` is small for reasons of taste rather than
+capacity. The one thing that *does* bind is `findPair`, which is O(n²) and is called once
+per pair the queue sweep makes: a 200-long queue blocks the event loop for 3ms, a 500-long
+one for 30ms, and a 1000-long one for **110ms** — synchronously, on the loop relaying
+`paddle_move` for every live match. That is why bots pair among themselves in their own
+pool instead of joining the shared matchmaking queue, and why the ceiling to watch is
+queue occupancy rather than bot count.
+
 > **One-time player wipes (`wipe_v1` … `wipe_v4`)**: each clears ALL existing player data on the volume once — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). Each runs exactly once, flagged in the DB `meta` table; later deploys never wipe. A database that has already been stamped with all four — which is every deployment past the rally-streak rework — sees none of them. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.
 
 **Pick your path by what already runs on the box:**

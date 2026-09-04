@@ -75,6 +75,18 @@ const NO_EVENTS: BotMatchEvents = {
   finished: false,
 };
 
+/** What one half's own step produced, at its edges. */
+export interface BotHalfStep {
+  /** The serve clock ran out this tick; the caller launches the ball. */
+  served: boolean;
+  /** This half returned the ball. */
+  returned: boolean;
+  /** The ball left over the net, in THIS half's frame, untransformed. */
+  crossed: { x: number; vx: number; vy: number; spin: number; speedMultiplier: number } | null;
+  /** The ball went past this half's baseline: the other side scores. */
+  missed: boolean;
+}
+
 /**
  * One bot's half-court.
  *
@@ -121,6 +133,112 @@ export class BotHalf {
   receive(ball: BallState): void {
     this.ball = ball;
     this.serveIn = null;
+  }
+
+  /**
+   * Advance this half by `dt`, and say what happened at its edges.
+   *
+   * The caller decides what a crossing MEANS. Two of them do: `BotMatch` hands
+   * the ball straight to the other half through the same transform the relay
+   * uses, and the live driver puts it on the wire as `ball_cross_net` and lets
+   * the relay do it. Both must agree about the physics, so the physics lives
+   * here once rather than being written out twice — that split is exactly the
+   * drift CLAUDE.md records between the relay and the P2P replica.
+   *
+   * `crossed` is the ball in THIS half's own frame, untransformed, because
+   * that is what `ball_cross_net` carries and what the relay expects.
+   */
+  step(dt: number, paddleWidth: number): BotHalfStep {
+    const out: BotHalfStep = { served: false, returned: false, crossed: null, missed: false };
+
+    if (this.serveIn !== null) {
+      this.serveIn -= dt;
+      if (this.serveIn <= 0) {
+        this.serveIn = null;
+        out.served = true;
+      }
+    }
+
+    const b = this.ball;
+    // The AI tracks whatever is on its half. `update` handles a null or a ball
+    // travelling away from it by drifting back toward centre, which is the
+    // behaviour a bot waiting for a serve should have.
+    this.ai.update(b && b.active && b.vy > 0 ? b : null, dt, paddleWidth, this.rules);
+    if (!b || !b.active) return out;
+
+    // Substepped for the same reason the client substeps: a fast ball can
+    // otherwise tunnel through the paddle between two frames.
+    const steps = physicsSubsteps(Math.hypot(b.vx, b.vy), dt, b.radius);
+    const sdt = dt / steps;
+
+    for (let i = 0; i < steps; i++) {
+      b.x += b.vx * sdt;
+      b.y += b.vy * sdt;
+
+      // Side walls, under the match's own speed band and spin rules.
+      if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
+        const atLeft = b.x - b.radius <= 0;
+        b.x = atLeft ? b.radius : 1 - b.radius;
+        const bounced = bounceOffWall(b.vx, b.vy, b.spin ?? 0, atLeft, this.rules);
+        b.vx = bounced.vx;
+        b.vy = bounced.vy;
+        b.spin = bounced.spin;
+      }
+
+      const hit = checkPaddleCollision(
+        b,
+        this.paddleX,
+        paddleWidth,
+        this.ai.paddleVx,
+        this.ai.aimBias(),
+        this.rules
+      );
+      if (hit.hit && hit.angle !== undefined && hit.speed !== undefined) {
+        const speed = clampBallSpeed(hit.speed, this.rules);
+        b.vy = -Math.abs(speed * Math.cos(hit.angle));
+        b.vx = speed * Math.sin(hit.angle);
+        b.spin = hit.spin ?? 0;
+        b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
+        out.returned = true;
+      }
+
+      if (b.y <= 0) {
+        b.active = false;
+        out.crossed = { x: b.x, vx: b.vx, vy: b.vy, spin: b.spin ?? 0, speedMultiplier: 1 };
+        this.ball = null;
+        break;
+      }
+
+      if (b.y >= MISS_Y) {
+        b.active = false;
+        this.ball = null;
+        out.missed = true;
+        break;
+      }
+    }
+
+    return out;
+  }
+
+  /** Launch the ball this half is holding, aimed away from `opponentPaddleX`. */
+  serve(opponentPaddleX: number, radius: number): void {
+    // `aiServeAim` wants the opponent's paddle in the OPPONENT's coordinates
+    // and mirrors it itself, which is exactly what the other half holds.
+    const aim = aiServeAim(this.ai.competence(), opponentPaddleX);
+    const v = serveVelocity(aim, this.rules);
+    this.ball = {
+      // Out of the middle of its own paddle, the same rule a human serve
+      // obeys — not out of a hardcoded centre.
+      x: Math.max(0.02, Math.min(0.98, this.paddleX)),
+      y: SERVE_Y,
+      // serveVelocity returns vy NEGATIVE (up-screen, toward the net), which
+      // is the direction a serve leaves in for the half that hit it.
+      vx: v.vx,
+      vy: v.vy,
+      spin: 0,
+      radius,
+      active: true,
+    };
   }
 }
 
@@ -227,132 +345,58 @@ export class BotMatch {
     this.halves[seat].beginServe(this.pressure(seat));
   }
 
-  /** Advance the match by `dt` seconds. */
+  /**
+   * Advance the match by `dt` seconds.
+   *
+   * A local harness: it owns BOTH halves and hands the ball across itself,
+   * through the same `transformBallForOpponent` the relay applies to a human
+   * crossing. The live driver instead runs ONE half per bot and puts the
+   * crossing on the wire — same `BotHalf.step`, different courier.
+   */
   tick(dt: number): BotMatchEvents {
     if (this.matchOver) return NO_EVENTS;
     const ev: BotMatchEvents = { ...NO_EVENTS };
 
-    // --- serve ------------------------------------------------------------
     for (const seat of [0, 1] as const) {
       const half = this.halves[seat];
-      if (half.serveIn === null) continue;
-      half.serveIn -= dt;
-      if (half.serveIn > 0) continue;
-      half.serveIn = null;
-      // Aim away from where the opponent is standing. `aiServeAim` wants the
-      // opponent's paddle in the OPPONENT's coordinates, which is exactly what
-      // the other half holds, and mirrors it itself.
-      const aim = aiServeAim(half.ai.competence(), this.halves[this.other(seat)].paddleX);
-      const v = serveVelocity(aim, this.rules);
-      half.ball = {
-        // Out of the middle of its own paddle, the same rule a human serve
-        // obeys — not out of a hardcoded centre.
-        x: Math.max(0.02, Math.min(0.98, half.paddleX)),
-        y: SERVE_Y,
-        // serveVelocity returns vy NEGATIVE (up-screen, toward the net), which
-        // is the direction a serve leaves in for the half that hit it.
-        vx: v.vx,
-        vy: v.vy,
-        spin: 0,
-        radius: this.radius,
-        active: true,
-      };
-    }
+      const other = this.other(seat);
+      const step = half.step(dt, this.paddleWidth);
 
-    // --- ball -------------------------------------------------------------
-    for (const seat of [0, 1] as const) {
-      const half = this.halves[seat];
-      const b = half.ball;
+      if (step.served) half.serve(this.halves[other].paddleX, this.radius);
 
-      // The AI tracks whatever is on its half. `update` handles a null or a
-      // ball travelling away from it by drifting back toward centre, which is
-      // the behaviour a bot waiting for a serve should have.
-      half.ai.update(b && b.active && b.vy > 0 ? b : null, dt, this.paddleWidth, this.rules);
-
-      if (!b || !b.active) continue;
-
-      this.rallySeconds += dt;
-
-      // Substepped for the same reason the client substeps: a fast ball can
-      // otherwise tunnel through the paddle between two frames.
-      const steps = physicsSubsteps(Math.hypot(b.vx, b.vy), dt, b.radius);
-      const sdt = dt / steps;
-
-      for (let i = 0; i < steps; i++) {
-        b.x += b.vx * sdt;
-        b.y += b.vy * sdt;
-
-        // Side walls, under the match's own speed band and spin rules.
-        if (b.x - b.radius <= 0 || b.x + b.radius >= 1) {
-          const atLeft = b.x - b.radius <= 0;
-          b.x = atLeft ? b.radius : 1 - b.radius;
-          const bounced = bounceOffWall(b.vx, b.vy, b.spin ?? 0, atLeft, this.rules);
-          b.vx = bounced.vx;
-          b.vy = bounced.vy;
-          b.spin = bounced.spin;
-        }
-
-        // Its own paddle.
-        const hit = checkPaddleCollision(
-          b,
-          half.paddleX,
-          this.paddleWidth,
-          half.ai.paddleVx,
-          half.ai.aimBias(),
-          this.rules
-        );
-        if (hit.hit && hit.angle !== undefined && hit.speed !== undefined) {
-          const speed = clampBallSpeed(hit.speed, this.rules);
-          b.vy = -Math.abs(speed * Math.cos(hit.angle));
-          b.vx = speed * Math.sin(hit.angle);
-          b.spin = hit.spin ?? 0;
-          b.y = PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius;
-          ev.returnedBy = seat;
-          this.rallyReturns += 1;
-          this.streaks[seat] += 1;
-          this.bestStreaks[seat] = Math.max(this.bestStreaks[seat], this.streaks[seat]);
-          this.bestRally = Math.max(this.bestRally, this.rallyReturns);
-        }
-
-        // Over the net, into the other half.
-        if (b.y <= 0) {
-          b.active = false;
-          const t = transformBallForOpponent({
-            x: b.x,
-            vx: b.vx,
-            vy: b.vy,
-            spin: b.spin ?? 0,
-            speedMultiplier: 1,
-          });
-          const to = this.other(seat);
-          this.halves[to].receive({
-            x: t.x,
-            y: 0.02,
-            vx: t.vx,
-            vy: t.vy,
-            spin: t.spin,
-            radius: b.radius,
-            active: true,
-          });
-          half.ball = null;
-          ev.crossedTo = to;
-          break;
-        }
-
-        // Missed it: the point goes to the other side.
-        if (b.y >= MISS_Y) {
-          b.active = false;
-          half.ball = null;
-          // The seat that MISSED loses its run; the other seat's keeps going.
-          // A streak breaks only when its own owner fails to return — the
-          // opponent missing is a point you won, not a run you lost.
-          this.streaks[seat] = 0;
-          this.awardPoint(this.other(seat), ev);
-          break;
-        }
+      if (step.returned) {
+        ev.returnedBy = seat;
+        this.rallyReturns += 1;
+        this.streaks[seat] += 1;
+        this.bestStreaks[seat] = Math.max(this.bestStreaks[seat], this.streaks[seat]);
+        this.bestRally = Math.max(this.bestRally, this.rallyReturns);
       }
 
-      if (ev.scoredBy !== null || ev.crossedTo !== null) break;
+      if (half.ball || step.crossed || step.missed) this.rallySeconds += dt;
+
+      if (step.crossed) {
+        const t = transformBallForOpponent(step.crossed);
+        this.halves[other].receive({
+          x: t.x,
+          y: 0.02,
+          vx: t.vx,
+          vy: t.vy,
+          spin: t.spin,
+          radius: this.radius,
+          active: true,
+        });
+        ev.crossedTo = other;
+        break;
+      }
+
+      if (step.missed) {
+        // The seat that MISSED loses its run; the other seat's keeps going.
+        // A streak breaks only when its own owner fails to return — the
+        // opponent missing is a point you won, not a run you lost.
+        this.streaks[seat] = 0;
+        this.awardPoint(other, ev);
+        break;
+      }
     }
 
     // A rally that will not end frees the seat rather than holding it forever.

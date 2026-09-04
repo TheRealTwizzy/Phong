@@ -2,18 +2,20 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { BOT_ROSTER } from '../server/bots';
+import { BOT_ROSTER, botProfileFields } from '../server/bots';
 import { validateUsername } from '../src/profileRules';
-import { levelFromXp, tierFor } from '../src/rating';
+import { PLACEMENT_GAMES, START_MU, START_SIGMA } from '../src/rating';
 
-// The leaderboard's pace-setters.
+// The play-bot roster.
 //
-// A launched deployment has no players and the boards refuse rows of zeros,
-// so the first person to open the leaderboard met an empty list. The roster
-// answers that — but a hand-written table of fake careers rots quietly: one
-// edit and a Legend has a losing record, or a bot sits at the summit that
-// nobody can ever displace. Those are the properties pinned here, not the
-// numbers themselves, so the table can be retuned freely.
+// It used to be a table of hand-written CAREERS — pre-placed rows that gave an
+// empty leaderboard a scale — and what this suite pinned was that the fiction
+// stayed self-consistent: every column rising with the rating, so a Legend
+// never had a losing record. That whole class of assertion is gone, because
+// the fiction is gone. A play-bot starts where a person starts and earns its
+// row, so there is no fabricated number left to keep consistent.
+//
+// What is pinned now is the opposite property: that NOTHING is handed over.
 
 const dirs: string[] = [];
 /** A database nobody else has touched — DATA_DIR is read at module load. */
@@ -28,9 +30,7 @@ afterAll(() => {
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 });
 
-const winRate = (b: (typeof BOT_ROSTER)[number]) => b.matchesWon / b.matchesPlayed;
-
-describe('the bot roster as data', () => {
+describe('the play-bot roster as data', () => {
   it('uses bot- ids and real, unique, claimable usernames', () => {
     const ids = BOT_ROSTER.map((b) => b.id);
     expect(ids.every((id) => id.startsWith('bot-'))).toBe(true);
@@ -46,33 +46,40 @@ describe('the bot roster as data', () => {
     expect(new Set(lower).size).toBe(lower.length);
   });
 
-  it('reads as a ladder: every column rises with the rating', () => {
-    for (let i = 1; i < BOT_ROSTER.length; i++) {
-      const prev = BOT_ROSTER[i - 1];
-      const cur = BOT_ROSTER[i];
-      const where = `${prev.username} -> ${cur.username}`;
-      expect(cur.mu, where).toBeGreaterThan(prev.mu);
-      expect(winRate(cur), where).toBeGreaterThan(winRate(prev));
-      expect(levelFromXp(cur.xp).level, where).toBeGreaterThan(levelFromXp(prev.xp).level);
-      expect(cur.highestRally, where).toBeGreaterThan(prev.highestRally);
+  it('hands a bot nothing it has not played for', () => {
+    // The rule the old roster broke by existing. A seeded bot is a brand-new
+    // account: opening rating, no ranked games, and a career of zeros. Its
+    // STRENGTH is fixed and hidden (trueSkillForBot); its RATING is what the
+    // ladder discovers, which is the whole reason it starts unplaced.
+    for (const bot of BOT_ROSTER) {
+      const f = botProfileFields(bot) as Record<string, number | string>;
+      expect(f.mu, bot.username).toBe(START_MU);
+      expect(f.rankSigma, bot.username).toBe(START_SIGMA);
+      expect(f.rankedGames, bot.username).toBe(0);
+      expect(f.rankedDuels, bot.username).toBe(0);
+      for (const column of [
+        'xp', 'matchesPlayed', 'matchesWon', 'matchesLost',
+        'highestRally', 'totalPointsScored', 'multiplayerWins',
+      ]) {
+        expect(f[column], `${bot.username}.${column}`).toBe(0);
+      }
     }
   });
 
-  it('cannot claim more wins than matches', () => {
-    for (const b of BOT_ROSTER) {
-      expect(b.matchesWon, b.username).toBeLessThanOrEqual(b.matchesPlayed);
-      expect(b.matchesWon, b.username).toBeGreaterThan(0);
+  it('carries no career column that could contradict itself', () => {
+    // The old table needed four columns kept in step by hand and a test to
+    // notice when they drifted. A seed with nothing in it cannot drift, and
+    // this is what stops one being added back without the reasoning above
+    // being read again.
+    for (const bot of BOT_ROSTER) {
+      expect(Object.keys(bot).sort(), bot.username).toEqual(['id', 'username']);
     }
   });
 
-  it('spans the ladder but leaves the summit to a human', () => {
-    // A roster row's whole career is duels, so the duel count is its matches.
-    const tiers = BOT_ROSTER.map((b) => tierFor(b.mu, b.matchesPlayed, 1.0, b.matchesPlayed));
-    expect(new Set(tiers).size).toBeGreaterThanOrEqual(5);
-    // The top rung is the board's most motivating slot. A bot parked there
-    // makes it decorative, so nothing in the roster may reach it.
-    expect(tiers).not.toContain('overlord');
-    expect(tiers).not.toContain('unranked');
+  it('is big enough to spread across the ladder once it has placed', () => {
+    // The strength spread needs bots in most tier bands to look like a
+    // population rather than a handful of outliers.
+    expect(BOT_ROSTER.length).toBeGreaterThanOrEqual(12);
   });
 });
 
@@ -98,15 +105,83 @@ describe('seeding', () => {
       playerScore: 5, opponentScore: 2, bestStreak: 6, endStreak: 0, earnedStreak: 6, mode: 'multiplayer', isWinner: true,
     } as any);
 
+    // A freshly seeded bot has played nothing, and a row of zeros is not last
+    // place — it is not on the board. That is the human rule, applied to bots
+    // now that a bot earns its row instead of being handed one.
+    expect(db.getLeaderboard('elo', 50, true).some((e) => e.isBot)).toBe(false);
+
+    // It appears once it has actually played.
+    db.recordMatch({
+      playerId: BOT_ROSTER[0].id, username: BOT_ROSTER[0].username,
+      opponentId: BOT_ROSTER[1].id, opponentName: BOT_ROSTER[1].username,
+      playerScore: 5, opponentScore: 2, bestStreak: 4, endStreak: 4, earnedStreak: 4,
+      mode: 'multiplayer', isWinner: true, matchKey: 'bot-board-1',
+    } as any);
+
     const withBots = db.getLeaderboard('elo', 50, true);
     const bots = withBots.filter((e) => e.isBot);
-    expect(bots.length).toBe(BOT_ROSTER.length);
+    expect(bots.length).toBeGreaterThan(0);
     expect(bots.every((b) => b.rank === null)).toBe(true);
+    // And still UNRANKED after one game: placement is five, so a bot climbs
+    // out of Unranked exactly the way a person does rather than on arrival.
+    expect(bots.every((b) => b.tier === 'unranked')).toBe(true);
+    expect(bots.every((b) => b.rankedGames < PLACEMENT_GAMES)).toBe(true);
 
     const human = withBots.find((e) => e.id === 'dev_111111111111111111');
     const humanOnly = db.getLeaderboard('elo', 50, false);
     expect(humanOnly.some((e) => e.isBot)).toBe(false);
     expect(human?.rank).toBe(humanOnly.find((e) => e.id === 'dev_111111111111111111')?.rank);
+  });
+
+  it('resets bots that an older build seeded with a career', async () => {
+    // The migration this key exists for. A deployment that already ran
+    // `bot_roster_v1` holds pre-placed rows with hand-written careers — a mu, a
+    // win record, a real tier — none of which those accounts played for. Left
+    // alone they would sit on the board beside bots that earned their rung, on
+    // the same screen and indistinguishable.
+    const db = await freshDb();
+    db.insertBot({
+      id: 'bot-ladder-01', username: 'CircuitPup',
+      mu: 35, xp: 27700, matchesPlayed: 231, matchesWon: 158,
+      highestRally: 43, totalPointsScored: 1056, rankedDuels: 231,
+    });
+    const legacy = db.getProfile('bot-ladder-01');
+    expect(legacy.tier).not.toBe('unranked');
+    expect(legacy.matchesPlayed).toBe(231);
+
+    const result = db.seedBotRoster(BOT_ROSTER);
+    expect(result.reset).toBeGreaterThan(0);
+
+    const after = db.getProfile('bot-ladder-01');
+    expect(after.tier).toBe('unranked');
+    expect(after.rankedGames).toBe(0);
+    expect(after.matchesPlayed).toBe(0);
+    expect(after.xp).toBe(0);
+    expect(after.rankMu).toBe(START_MU);
+    expect(after.rankSigma).toBe(START_SIGMA);
+    // Its NAME survives — the account is the same account, it has simply
+    // stopped claiming a career it never had.
+    expect(after.username).toBe('CircuitPup');
+  });
+
+  it('never wipes a ladder a bot has since played its way to', async () => {
+    // The flag is what makes the reset safe to ship: it runs once. A second
+    // boot must not take back the rating a bot has earned since, which would
+    // make every restart a silent demotion for the whole population.
+    const db = await freshDb();
+    db.seedBotRoster(BOT_ROSTER);
+    db.recordMatch({
+      playerId: 'bot-ladder-01', username: 'CircuitPup',
+      opponentId: 'bot-ladder-02', opponentName: 'StaticDrift',
+      playerScore: 5, opponentScore: 2, bestStreak: 4, endStreak: 4, earnedStreak: 4,
+      mode: 'multiplayer', isWinner: true, matchKey: 'bot-earned-1',
+    } as any);
+    const earned = db.getProfile('bot-ladder-01');
+    expect(earned.rankedGames).toBe(1);
+
+    const second = db.seedBotRoster(BOT_ROSTER);
+    expect(second.reset).toBe(0);
+    expect(db.getProfile('bot-ladder-01').rankedGames).toBe(1);
   });
 
   it('skips a name a human already holds instead of failing the boot', async () => {
@@ -121,8 +196,10 @@ describe('seeding', () => {
     expect(result.inserted).toBe(BOT_ROSTER.length - 1);
     expect(result.skipped.length).toBe(1);
     expect(result.skipped[0]).toContain(taken);
-    // The human keeps the name, and the rest of the ladder still landed.
-    expect(db.getLeaderboard('elo', 50, true).filter((e) => e.isBot).length)
-      .toBe(BOT_ROSTER.length - 1);
+    // The human keeps the name, and the rest of the roster still landed — as
+    // ACCOUNTS. They are not on the board yet because they have played
+    // nothing, which is the rule now, so the count is taken from the rows.
+    expect(db.botIds(100).length).toBe(BOT_ROSTER.length - 1);
+    expect(db.botIds(100)).not.toContain(BOT_ROSTER[2].id);
   });
 });

@@ -112,17 +112,53 @@ export class BotSocket extends EventEmitter {
    */
   send(data: string | Buffer): void {
     if (this.readyState !== WS_OPEN) return;
+    let msg: unknown;
     try {
-      this.onServerMessage(JSON.parse(typeof data === 'string' ? data : data.toString()));
+      msg = JSON.parse(typeof data === 'string' ? data : data.toString());
     } catch {
-      // Deliberately silent: see above.
+      // A frame that will not parse is dropped rather than thrown: this is the
+      // relay talking to itself, so a throw would surface inside somebody
+      // else's `broadcast` and take an unrelated match down with it.
+      return;
     }
+    // DEFERRED, and this is load-bearing rather than tidy.
+    //
+    // A real socket can never be re-entrant: a client's reply always arrives
+    // on a later tick, because it has to cross a wire. An in-process socket
+    // that called straight through would let a bot's response run INSIDE the
+    // relay's own handler for the message that prompted it — so the guest's
+    // `player_ready` would be processed halfway through the relay's own
+    // `join_room`, against a room only partly set up. That is not a bug the
+    // relay could reasonably be expected to survive, and it is not one a phone
+    // can ever cause.
+    //
+    // Measured, not theorised: without this the lobby handshake deadlocks —
+    // two bots sit at one table, readied, and the match never starts.
+    setImmediate(() => {
+      if (this.readyState !== WS_OPEN) return;
+      try {
+        this.onServerMessage(msg);
+      } catch (e) {
+        console.warn('[bots] handler threw:', (e as Error)?.message);
+      }
+    });
   }
 
-  /** The bot sending to the relay, as if a frame had arrived. */
+  /**
+   * The bot sending to the relay, as if a frame had arrived.
+   *
+   * Deferred for the same reason `send` is, from the other direction: a bot
+   * reacting to one relay message often sends the next, and delivering that
+   * synchronously would re-enter the relay's message handler from inside
+   * itself.
+   */
   receive(msg: unknown): void {
     if (this.readyState !== WS_OPEN) return;
-    this.emit('message', Buffer.from(JSON.stringify(msg)));
+    const frame = Buffer.from(JSON.stringify(msg));
+    setImmediate(() => {
+      if (this.readyState !== WS_OPEN) return;
+      this.emit('message', frame);
+    });
   }
 
   close(code?: number, reason?: string): void {
