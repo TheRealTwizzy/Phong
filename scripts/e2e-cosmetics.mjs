@@ -124,7 +124,20 @@ const noneEquipped = await owner.getAttribute('#title-btn-none', 'data-equipped'
 if (noneEquipped !== 'true') fail(`None is not the equipped title on a fresh account (${noneEquipped})`);
 const ownedCount = await owner.textContent('#title-owned-count');
 if (!/\b0\b/.test(ownedCount || '')) fail(`title count reads "${ownedCount}", expected 0 unlocked`);
-if (/wallbreaker|cold steel/i.test(body || '')) fail('a locked title is named somewhere on the page');
+// Scoped to the PROFILE CARD, not the whole document, and that is a fix
+// rather than a loosening. `body` includes the menu behind this modal, and the
+// daily-task grid on it legitimately renders task NAMES — one of which is
+// "Wallbreaker", the elite Practice Wall task that also happens to unlock the
+// title of the same name. Measured over 400 fresh accounts, that task is dealt
+// to 10.5% of them, so this assertion failed about one CI run in ten at random,
+// for a reason that had nothing to do with titles. (The other name checked
+// here, "Cold Steel", is 0% — its task needs the Cyber unlock a fresh account
+// lacks — which is why the flake looked rarer than it was.)
+//
+// The claim being made is that a locked title is not OFFERED, and the card is
+// where the offer lives.
+const titleCard = (await owner.textContent('#profile-modal-container')) || '';
+if (/wallbreaker|cold steel/i.test(titleCard)) fail('a locked title is named in the profile card');
 ok('the title picker lists no titles on a fresh account and only None is equipped');
 
 // ---- 2. Equipping repaints the shell, and it sticks ---------------------

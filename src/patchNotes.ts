@@ -37,7 +37,7 @@ export const PATCH_NOTES: PatchNote[] = [
     version: APP_VERSION,
     date: '2026-09-04',
     lines: [
-      'Leaderboard bots no longer carry a made-up record. They start unranked like anyone else and appear once they have actually played.',
+      'Leaderboard bots no longer carry a made-up record. They start unranked like anyone else and climb by actually playing.',
       'Matches against a bot count for tasks, trophies and your rank \u2014 they just move your rating about half as far as a match against a person.',
       'Bots are ranked on a leaderboard of their own. They never take a place from a human player, and both can top their own ladder.',
       'Quick Match will offer you a bot if nobody turns up after about half a minute \u2014 and two people waiting still get each other.',

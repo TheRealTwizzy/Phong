@@ -4196,29 +4196,30 @@ class GameDatabase {
     // is needed. The output is identical — humanRank only ever counted
     // non-bots, so removing rows that never incremented it changes nothing.
     const botClause = includeBots ? '' : " AND p.id NOT LIKE 'bot-%'";
-    // Bots obey the progress filter like everybody else now, and that changed
-    // WITH the roster. It used to read `(${'$'}{progress} OR p.id LIKE 'bot-%')`,
-    // exempting them — which was right while a roster row was a hand-written
-    // career seeded pre-placed to give an empty board a scale, and became
-    // wrong the moment a play-bot started at zero and earned its row. A bot
-    // that has played nothing IS a row of zeros, and this board's own rule is
-    // that a row of zeros is not last place, it is not on the board.
+    // Bots stay EXEMPT from the progress filter, and that survived the roster
+    // reversal on purpose — it was very nearly removed with the rest of it.
     //
-    // The honest cost, taken knowingly: a fresh deployment's board is empty
-    // again until somebody plays, where the old roster filled it on the first
-    // boot. That filling was fiction, and the real answer to an empty board is
-    // now the population actually playing on it — which it does within minutes
-    // of `PLAY_BOTS` being set.
-    // LIMIT in the SQL, not just in the loop. Without it every eligible row
-    // was materialized as p.* and run through rowToProfile (which JSON.parses
-    // the achievements column) before the loop threw all but `take` away —
-    // 110ms at 10k players, synchronously, on the loop that relays paddle_move
-    // for every live match.
+    // The reasoning for removing it: a play-bot starts at zero and earns its
+    // row, so a bot that has played nothing IS a row of zeros, and this
+    // board's own rule is that a row of zeros is not last place, it is not on
+    // the board. True as far as it goes, and it takes the wrong thing away.
+    // What was fabricated was the CAREER, not the presence of the row: a
+    // play-bot is a real account that plays continuously by design, so listing
+    // it at zero for the first minute of its life states a fact rather than a
+    // fiction. The rows-of-zeros rule exists so a human who onboarded and
+    // never played is not shown as last place, and that is a different case.
+    //
+    // Removing it also undid the thing the roster was FOR — "a launched
+    // deployment has no players and the boards refuse rows of zeros, so the
+    // first person to open the leaderboard met an empty list" — and left the
+    // board permanently empty on any deployment not running the population.
+    // `scripts/e2e-menu.mjs` said so immediately, refusing to assert on a
+    // board with no rows in it rather than passing vacuously.
     const rows = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
-            AND ${progress}${botClause}
+            AND (${progress} OR p.id LIKE 'bot-%')${botClause}
           ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
           LIMIT ?`
       )

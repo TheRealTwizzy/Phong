@@ -105,25 +105,16 @@ describe('seeding', () => {
       playerScore: 5, opponentScore: 2, bestStreak: 6, endStreak: 0, earnedStreak: 6, mode: 'multiplayer', isWinner: true,
     } as any);
 
-    // A freshly seeded bot has played nothing, and a row of zeros is not last
-    // place — it is not on the board. That is the human rule, applied to bots
-    // now that a bot earns its row instead of being handed one.
-    expect(db.getLeaderboard('elo', 50, true).some((e) => e.isBot)).toBe(false);
-
-    // It appears once it has actually played.
-    db.recordMatch({
-      playerId: BOT_ROSTER[0].id, username: BOT_ROSTER[0].username,
-      opponentId: BOT_ROSTER[1].id, opponentName: BOT_ROSTER[1].username,
-      playerScore: 5, opponentScore: 2, bestStreak: 4, endStreak: 4, earnedStreak: 4,
-      mode: 'multiplayer', isWinner: true, matchKey: 'bot-board-1',
-    } as any);
-
+    // A freshly seeded bot is on the board from the first boot, with nothing
+    // played — bots keep their exemption from the rows-of-zeros filter, which
+    // is what stops a launched deployment opening on an empty list. What it
+    // no longer carries is a fabricated CAREER to go with the row.
     const withBots = db.getLeaderboard('elo', 50, true);
     const bots = withBots.filter((e) => e.isBot);
-    expect(bots.length).toBeGreaterThan(0);
+    expect(bots.length).toBe(BOT_ROSTER.length);
     expect(bots.every((b) => b.rank === null)).toBe(true);
-    // And still UNRANKED after one game: placement is five, so a bot climbs
-    // out of Unranked exactly the way a person does rather than on arrival.
+    // And every one is UNRANKED with nothing played: a bot climbs out of
+    // Unranked exactly the way a person does rather than on arrival.
     expect(bots.every((b) => b.tier === 'unranked')).toBe(true);
     expect(bots.every((b) => b.rankedGames < PLACEMENT_GAMES)).toBe(true);
 
@@ -196,10 +187,8 @@ describe('seeding', () => {
     expect(result.inserted).toBe(BOT_ROSTER.length - 1);
     expect(result.skipped.length).toBe(1);
     expect(result.skipped[0]).toContain(taken);
-    // The human keeps the name, and the rest of the roster still landed — as
-    // ACCOUNTS. They are not on the board yet because they have played
-    // nothing, which is the rule now, so the count is taken from the rows.
-    expect(db.botIds(100).length).toBe(BOT_ROSTER.length - 1);
-    expect(db.botIds(100)).not.toContain(BOT_ROSTER[2].id);
+    // The human keeps the name, and the rest of the roster still landed.
+    expect(db.getLeaderboard('elo', 50, true).filter((e) => e.isBot).length)
+      .toBe(BOT_ROSTER.length - 1);
   });
 });
