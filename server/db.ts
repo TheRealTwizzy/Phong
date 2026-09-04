@@ -29,6 +29,11 @@ import {
 } from '../src/profileRules';
 import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
 import {
+  normalizeTraits,
+  TRAIT_KEYS,
+  type PlaybotTraits,
+} from './playbotTraits';
+import {
   BOT_DUEL_CREDITS_PER_DAY,
   pairKindFor,
   participantWeights,
@@ -963,9 +968,29 @@ class GameDatabase {
       -- naming the column playerId would force this table into a list it must
       -- not be in, and a sign-in would start carrying roster rows onto a
       -- human's new device.
+      --
+      -- The trait columns are what one bot IS, as opposed to what its results
+      -- have made of it. Seeded at creation from the id and NEVER written
+      -- again: a controller may choose which existing bots play and where, and
+      -- may not assign a rank, clamp one toward a target, or retune competence
+      -- to manufacture a ladder distribution. Nullable with defaults, so a
+      -- roster row from before traits existed reads as an ordinary bot.
+      --
+      -- Separate columns rather than a JSON blob because the population
+      -- controller filters on them, and a blob would make every such question
+      -- a scan plus a parse.
       CREATE TABLE IF NOT EXISTS bot_accounts (
         botId TEXT PRIMARY KEY,
-        createdAt TEXT NOT NULL
+        createdAt TEXT NOT NULL,
+        skill REAL,
+        volatility REAL,
+        aggression REAL,
+        spinRead REAL,
+        rankedBias REAL,
+        queueAppetite REAL,
+        hostAppetite REAL,
+        joinAppetite REAL,
+        rematchAppetite REAL
       );
 
       -- WHAT THE THREE ANTI-FARMING LADDERS COUNT. One row per PARTICIPANT
@@ -1155,6 +1180,19 @@ class GameDatabase {
     // nullable for the same reason `ranked` is: a row from before the column
     // carries no honest answer, and each is filled once by its own one-shot
     // backfill from the column it used to be indistinguishable from.
+    // bot_accounts grew its trait columns when a roster stopped being eight
+    // identical opponents. All nullable, so an existing row reads as the
+    // unremarkable default rather than as an extreme.
+    const botCols = this.sql
+      .prepare('PRAGMA table_info(bot_accounts)')
+      .all() as unknown as Array<{ name: string }>;
+    if (botCols.length) {
+      for (const key of TRAIT_KEYS) {
+        if (!botCols.some((c) => c.name === key)) {
+          this.sql.exec(`ALTER TABLE bot_accounts ADD COLUMN ${key} REAL`);
+        }
+      }
+    }
     if (matchCols.length && !matchCols.some((c) => c.name === 'advancedLadder')) {
       this.sql.exec('ALTER TABLE matches ADD COLUMN advancedLadder INTEGER');
     }
@@ -3171,7 +3209,13 @@ class GameDatabase {
    * automatically since the wipe_v1 fresh launch.
    */
   public insertBot(
-    bot: Partial<PlayerProfile> & { id: string; username: string; mu?: number }
+    bot: Partial<PlayerProfile> & {
+      id: string;
+      username: string;
+      mu?: number;
+      /** Seeded at creation and never written again — see server/playbotTraits.ts. */
+      traits?: Partial<PlaybotTraits>;
+    }
   ): PlayerProfile {
     if (!bot.id.startsWith('bot-')) {
       throw new Error('Bot ids must start with "bot-"');
@@ -3227,8 +3271,13 @@ class GameDatabase {
     // calls a bot with no row behind it, invisibly, since bot_accounts is the
     // sole classifier. Row, then table, then cache; never the other order.
     this.upsertProfile(full);
-    this.stmt('INSERT OR IGNORE INTO bot_accounts (botId, createdAt) VALUES (?, ?)')
-      .run(bot.id, now);
+    const traits = normalizeTraits(bot.traits);
+    this.stmt(
+        `INSERT OR IGNORE INTO bot_accounts
+           (botId, createdAt, ${TRAIT_KEYS.join(', ')})
+         VALUES (?, ?, ${TRAIT_KEYS.map(() => '?').join(', ')})`
+      )
+      .run(bot.id, now, ...TRAIT_KEYS.map((k) => traits[k]));
     botAccountIds.add(bot.id);
     return this.readProfile(bot.id)!;
   }
@@ -4097,6 +4146,22 @@ class GameDatabase {
   public pruneExposure(now: Date): void {
     const cutoff = new Date(now.getTime() - EXPOSURE_TTL_MS).toISOString();
     this.stmt('DELETE FROM competitive_exposure WHERE at < ?').run(cutoff);
+  }
+
+  /**
+   * How this bot plays. Defaults for an id the roster does not name, so a
+   * caller never has to branch on whether a row exists.
+   *
+   * There is deliberately no setter beside this. Traits are seeded at creation
+   * and never written again (§4.13): a controller selects which existing bots
+   * play and where, and the curve is the population it already has — if a band
+   * is thin and no bot suits it, the answer is seeding more bots, not retuning
+   * one that is already playing.
+   */
+  public botTraits(botId: string): PlaybotTraits {
+    const row = this.stmt(`SELECT ${TRAIT_KEYS.join(', ')} FROM bot_accounts WHERE botId = ?`)
+      .get(botId) as Partial<PlaybotTraits> | undefined;
+    return normalizeTraits(row ?? null);
   }
 
   /**

@@ -69,6 +69,13 @@ const FLOORS = {
   // Pairing rules, pure for the same reason room.ts is: who the queue puts
   // together is worth arguing about in a test rather than on a live server.
   'server/matchmaking.ts': { statements: 95, branches: 92 },
+  // What one play-bot IS: nine traits, their bands, and a deterministic seed
+  // from the id. Floored at the top for the reason src/playbotRating.ts is —
+  // pure arithmetic over literal tables, so an unexercised branch is a trait
+  // band nobody has checked, and a bot's strength is not somewhere to find
+  // that out. The seeder is also the one place the population curve is
+  // decided, and it is decided ONCE, at creation.
+  'server/playbotTraits.ts': { statements: 100, branches: 100 },
   'server/db.ts': { statements: 90, branches: 88 },
   // The cookie and session layer — the one file where a regression is somebody
   // losing their account. The STATEMENT number is low and honest about why:

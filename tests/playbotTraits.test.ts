@@ -1,0 +1,287 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { DatabaseSync } from 'node:sqlite';
+import type { MatchEndPayload } from '../src/types';
+import { MAX_SPIN_READ, MIN_AI_COMPETENCE } from '../src/game/physics';
+import {
+  DEFAULT_TRAITS,
+  normalizeTraits,
+  seedTraits,
+  styleFor,
+  TRAIT_KEYS,
+  type PlaybotTraits,
+} from '../server/playbotTraits';
+
+// What a play-bot IS, kept apart from what its results have made of it.
+//
+// The five proofs below are all one claim in different clothes: skill is
+// INTRINSIC CAPABILITY and never a target rank. Creation seeds the curve;
+// results alone move a bot on the ladder; and nothing in between may retune a
+// bot that is already playing because a controller would like more accounts in
+// some band.
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-playbot-traits-'));
+process.env.DATA_DIR = TMP;
+const DB_FILE = path.join(TMP, 'phong.db');
+
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+let db: typeof import('../server/db').db;
+
+beforeAll(async () => {
+  ({ db } = await import('../server/db'));
+});
+
+afterAll(() => {
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+let seq = 0;
+const newBot = (traits?: Partial<PlaybotTraits>) => {
+  seq += 1;
+  const id = `bot-trait-${seq}`;
+  db.insertBot({ id, username: `TraitBot${seq}`, mu: 25, traits });
+  return id;
+};
+
+describe('seeding', () => {
+  it('is deterministic from the id, so a rebuilt roster plays the same', () => {
+    // A bot a player recognises plays the way they remember, without the seed
+    // being stored twice.
+    expect(seedTraits('bot-alpha')).toEqual(seedTraits('bot-alpha'));
+    expect(seedTraits('bot-alpha')).not.toEqual(seedTraits('bot-beta'));
+  });
+
+  it('keeps every trait inside its band', () => {
+    for (let i = 0; i < 200; i += 1) {
+      const t = seedTraits(`bot-band-${i}`);
+      expect(t.skill).toBeGreaterThanOrEqual(MIN_AI_COMPETENCE);
+      expect(t.skill).toBeLessThanOrEqual(1);
+      expect(t.spinRead).toBeLessThanOrEqual(MAX_SPIN_READ);
+      for (const key of TRAIT_KEYS) {
+        expect({ key, ok: Number.isFinite(t[key]) }).toEqual({ key, ok: true });
+      }
+    }
+  });
+
+  it('spreads a population rather than clustering it', () => {
+    // The curve is established at creation, so a seeder that returned nearly
+    // the same bot every time would leave the ladder with one rung on it.
+    const skills = Array.from({ length: 200 }, (_, i) => seedTraits(`bot-spread-${i}`).skill);
+    const min = Math.min(...skills);
+    const max = Math.max(...skills);
+    expect(max - min).toBeGreaterThan(0.5);
+    const distinct = new Set(skills.map((s) => s.toFixed(3)));
+    expect(distinct.size).toBeGreaterThan(150);
+  });
+
+  it('is written by CREATION and by nothing else, anywhere in the server', () => {
+    // The rule §4.13 turns on, and the trait module alone cannot hold it: the
+    // module has no writer because the DATABASE owns the write, so a test that
+    // only reads playbotTraits.ts passes while a `setBotSkill` sits in db.ts.
+    // Measured — adding one reddened nothing until this existed.
+    //
+    // So: no UPDATE against bot_accounts anywhere in the server. That covers
+    // both ways the rule is broken — a controller retuning a live bot's
+    // competence, and (the step-14 case) a hand-written rewrite sweeping the
+    // roster into an account move.
+    const files = ['db.ts', 'playbotTraits.ts', 'bots.ts', 'matchmaking.ts', 'room.ts', 'auth.ts']
+      .map((f) => path.join(process.cwd(), 'server', f))
+      .concat(path.join(process.cwd(), 'server.ts'))
+      .filter((f) => fs.existsSync(f));
+    expect(files.length).toBeGreaterThan(5);
+    for (const file of files) {
+      const code = fs
+        .readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '')
+        .replace(/^\s*--.*$/gm, '');
+      expect({ file: path.basename(file), updates: /UPDATE\s+bot_accounts/i.test(code) }).toEqual({
+        file: path.basename(file),
+        updates: false,
+      });
+    }
+
+    // ...and the one INSERT that carries traits is insertBot's. The backfill
+    // inserts an id and a timestamp only, so a claimed legacy row reads as the
+    // unremarkable default rather than as an extreme.
+    const dbSrc = fs.readFileSync(path.join(process.cwd(), 'server', 'db.ts'), 'utf8');
+    const carriers = dbSrc.split('INSERT OR IGNORE INTO bot_accounts').slice(1);
+    expect(carriers.length).toBeGreaterThan(0);
+    expect(carriers.filter((c) => c.slice(0, 200).includes('TRAIT_KEYS'))).toHaveLength(1);
+  });
+
+  it('has no function that takes a target rank, a band or a demand signal', () => {
+    // The ABSENCE is the design (§4.13). A controller may choose which
+    // existing bots play and where; it may not assign a rank, clamp one toward
+    // a target, or retune competence to manufacture a ladder distribution — so
+    // there must be nothing here for it to call.
+    const src = fs.readFileSync(path.join(process.cwd(), 'server', 'playbotTraits.ts'), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    for (const name of ['targetRank', 'towardTier', 'retune', 'steer', 'demand', 'setSkill']) {
+      expect({ name, present: code.includes(name) }).toEqual({ name, present: false });
+    }
+    // And the only exported function that PRODUCES traits takes one argument:
+    // an id. Nothing else can reach in.
+    expect(seedTraits.length).toBe(1);
+  });
+});
+
+describe('normalizing', () => {
+  it('falls back to an unremarkable default for anything missing or junk', () => {
+    expect(normalizeTraits(null)).toEqual(DEFAULT_TRAITS);
+    expect(normalizeTraits({})).toEqual(DEFAULT_TRAITS);
+    expect(normalizeTraits({ skill: Number.NaN }).skill).toBe(DEFAULT_TRAITS.skill);
+    expect(normalizeTraits({ skill: 'fast' as unknown as number }).skill).toBe(DEFAULT_TRAITS.skill);
+  });
+
+  it('clamps rather than refusing', () => {
+    expect(normalizeTraits({ skill: 9 }).skill).toBe(1);
+    expect(normalizeTraits({ skill: -9 }).skill).toBe(MIN_AI_COMPETENCE);
+    expect(normalizeTraits({ spinRead: 9 }).spinRead).toBe(MAX_SPIN_READ);
+  });
+
+  it('never lets skill fall below the competence floor', () => {
+    // A bot that cannot return a ball is not an opponent, it is a walkover —
+    // and the ladder would rate it as one, handing free rating to anybody it
+    // was paired with.
+    expect(normalizeTraits({ skill: 0 }).skill).toBe(MIN_AI_COMPETENCE);
+  });
+});
+
+describe('traits are persistent', () => {
+  it('survive a round trip through the database', () => {
+    const traits = seedTraits('bot-roundtrip');
+    const id = newBot(traits);
+    const read = db.botTraits(id);
+    for (const key of TRAIT_KEYS) {
+      expect({ key, v: Number(read[key].toFixed(9)) }).toEqual({
+        key,
+        v: Number(traits[key].toFixed(9)),
+      });
+    }
+  });
+
+  it('survive a restart', async () => {
+    const traits = seedTraits('bot-restart');
+    const id = newBot(traits);
+    const before = db.botTraits(id);
+    const { db: booted } = await import('../server/db');
+    expect(booted.botTraits(id)).toEqual(before);
+  });
+
+  it('survive the matches the bot plays', () => {
+    // The proof that results move the RATING and not the bot. Ten matches,
+    // won and lost, and the traits are the ones it was created with.
+    const id = newBot(seedTraits('bot-plays'));
+    const before = db.botTraits(id);
+    const ratingBefore = db.getProfile(id).rankMu;
+    for (let i = 0; i < 10; i += 1) {
+      seq += 1;
+      db.recordMatch(
+        {
+          playerId: id, username: `TraitBot`, playerScore: 5, opponentScore: 2,
+          bestStreak: 3, endStreak: 0, earnedStreak: 3, mode: 'multiplayer',
+          isWinner: i % 2 === 0, matchKey: `trait:match:${seq}`,
+        } as MatchEndPayload,
+        { opponentRating: { mu: 25, sigma: 3 }, opponentRankRating: { mu: 25, sigma: 3 } } as never
+      );
+    }
+    expect(db.getProfile(id).rankMu).not.toBe(ratingBefore);
+    expect(db.botTraits(id)).toEqual(before);
+  });
+
+  it('are absent from the profile a client can see', () => {
+    // Traits are how a bot plays, not part of its public record. A client that
+    // could read them could predict every rally it is about to be served.
+    const id = newBot(seedTraits('bot-private'));
+    const shape = JSON.stringify(db.getPublicProfile(id) ?? {});
+    for (const key of TRAIT_KEYS) {
+      expect({ key, leaked: shape.includes(key) }).toEqual({ key, leaked: false });
+    }
+  });
+});
+
+describe('rank is earned, never seeded', () => {
+  it('lets a bot seeded high fall below its estimate on results alone', () => {
+    // insertBot's `mu` is a starting ESTIMATE, not a rank and not a floor.
+    const id = newBot(seedTraits('bot-falls'));
+    const raw = new DatabaseSync(DB_FILE);
+    try {
+      raw.prepare('UPDATE players SET rankMu = 25, mmrMu = 25, rankSigma = 4, mmrSigma = 4, rankedGames = 10 WHERE id = ?').run(id);
+    } finally {
+      raw.close();
+    }
+    for (let i = 0; i < 12; i += 1) {
+      seq += 1;
+      db.recordMatch(
+        {
+          playerId: id, username: 'Faller', playerScore: 1, opponentScore: 5,
+          bestStreak: 1, endStreak: 0, earnedStreak: 1, mode: 'multiplayer',
+          isWinner: false, matchKey: `trait:fall:${seq}`,
+        } as MatchEndPayload,
+        { opponentRating: { mu: 25, sigma: 3 }, opponentRankRating: { mu: 25, sigma: 3 } } as never
+      );
+    }
+    expect(db.getProfile(id).rankMu).toBeLessThan(25);
+  });
+
+  it('lets a bot seeded low climb past it', () => {
+    const id = newBot(seedTraits('bot-climbs'));
+    const raw = new DatabaseSync(DB_FILE);
+    try {
+      raw.prepare('UPDATE players SET rankMu = 20, mmrMu = 20, rankSigma = 4, mmrSigma = 4, rankedGames = 10 WHERE id = ?').run(id);
+    } finally {
+      raw.close();
+    }
+    for (let i = 0; i < 12; i += 1) {
+      seq += 1;
+      db.recordMatch(
+        {
+          playerId: id, username: 'Climber', playerScore: 5, opponentScore: 1,
+          bestStreak: 5, endStreak: 0, earnedStreak: 5, mode: 'multiplayer',
+          isWinner: true, matchKey: `trait:climb:${seq}`,
+        } as MatchEndPayload,
+        { opponentRating: { mu: 28, sigma: 3 }, opponentRankRating: { mu: 28, sigma: 3 } } as never
+      );
+    }
+    expect(db.getProfile(id).rankMu).toBeGreaterThan(20);
+  });
+
+  it('leaves two bots at EQUAL earned rank playing differently', () => {
+    // The separation, from the other side: rank is what results made, style is
+    // what the bot is, and two accounts that have converged on one rating still
+    // play nothing alike. A design that derived style from rank would make this
+    // impossible by construction.
+    const calm = newBot({ ...seedTraits('bot-calm'), skill: 0.5, volatility: 0.0, aggression: 0.05 });
+    const wild = newBot({ ...seedTraits('bot-wild'), skill: 0.5, volatility: 0.11, aggression: 0.95 });
+    const raw = new DatabaseSync(DB_FILE);
+    try {
+      for (const id of [calm, wild]) {
+        raw.prepare('UPDATE players SET rankMu = 26, mmrMu = 26 WHERE id = ?').run(id);
+      }
+    } finally {
+      raw.close();
+    }
+    expect(db.getProfile(calm).rankMu).toBe(db.getProfile(wild).rankMu);
+    expect(db.botTraits(calm).skill).toBe(db.botTraits(wild).skill);
+    expect(styleFor(db.botTraits(calm))).not.toEqual(styleFor(db.botTraits(wild)));
+  });
+
+  it('takes competence from the TRAIT and not from the rating', () => {
+    // The reversal from the solo AI, and the one that matters most: solo
+    // derives competence from the player's mu so the ladder adapts. A bot must
+    // not, or its strength would chase its own results and the rating would
+    // stop measuring anything.
+    //
+    // Asserted as an absence, because the read path is the driver's (step 20)
+    // and this is what it may not do: nothing in the trait module consults a
+    // rating at all.
+    const src = fs.readFileSync(path.join(process.cwd(), 'server', 'playbotTraits.ts'), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    for (const name of ['rankMu', 'mmrMu', 'competenceForMu', 'effectiveAiMu', 'tierFor']) {
+      expect({ name, present: code.includes(name) }).toEqual({ name, present: false });
+    }
+  });
+});
