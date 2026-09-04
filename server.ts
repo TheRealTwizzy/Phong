@@ -4,7 +4,7 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { DATA_DIR, db, RecordMatchContext } from './server/db';
+import { DATA_DIR, db, isBotAccount, RecordMatchContext } from './server/db';
 import { BOT_ROSTER } from './server/bots';
 import {
   clearSessionCookie,
@@ -530,6 +530,11 @@ function queueCandidate(entry: QueueEntry): Candidate | null {
     sigma: rating.sigma,
     joinedAt: entry.joinedAt,
     rttMs: entry.rttMs,
+    // From bot_accounts (D26), never from the id. This is the one call site
+    // `Candidate.isBot` being REQUIRED exists to catch: optional, it would
+    // default to false here and every play-bot would pair as a human, which
+    // is precisely the type-blind matcher §4.12 replaces.
+    isBot: isBotAccount(entry.deviceId),
   };
 }
 
