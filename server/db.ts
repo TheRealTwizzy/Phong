@@ -539,8 +539,27 @@ interface PlayerRow {
  * 'overlord' while the board refuses to list it, and numbering a row nobody
  * can see it beside is how the badge and the Ranks page come to disagree.
  */
+/**
+ * Whether this row is given a ladder position at all — ELIGIBILITY, and not
+ * the same question as who is counted above it (see `ladderPosition`).
+ *
+ * There is deliberately NO bot clause here. A play-bot is a persistent
+ * participant with a real record that beats people and climbs past them, so
+ * "cannot have a number" was never the right meaning for bot identity: what a
+ * bot must not do is occupy or shift the ordinal a HUMAN sees, and that is a
+ * property of the lane it is counted in rather than of whether it has one.
+ * Removing the clause is §4.9's change; RE-SPELLING it against `bot_accounts`
+ * — which is what step 5 left in place — keeps every bot numberless and is the
+ * contradiction that section was written to resolve.
+ *
+ * The other two clauses stay and are load-bearing. The tier gate is the board's
+ * own membership test rather than just a rating, or a row the board refuses to
+ * print still gets a number — an uninitialized profile is placed and rated like
+ * any other row, takes 'overlord' from `tierFor`, and would be handed #1 for a
+ * ladder it does not appear on.
+ */
 function onLadder(p: PlayerProfile): boolean {
-  return p.tier === 'overlord' && Boolean(p.initializedAt) && !isBotAccount(p.id);
+  return p.tier === 'overlord' && Boolean(p.initializedAt);
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
@@ -4743,11 +4762,24 @@ class GameDatabase {
    * compile-time values, so the text stays constant.
    */
   private ladderPosition(id: string, rankMu: number): number | null {
+    // THE COUNTED SET, which is the other half of §4.9 and the reason the two
+    // clauses cannot be collapsed into one.
+    //
+    // A HUMAN's position counts qualified non-bot players above them, so bots
+    // never occupy or shift the ordinal a person is shown — the number is
+    // identical with bots absent, present, shown or hidden. A BOT's counts
+    // qualified players of ALL kinds, because it really is behind the people
+    // above it.
+    //
+    // The accepted consequence (D15): a bot and a human can display the same
+    // number. They are counted in different lanes, so a collision is intended
+    // rather than a bug.
+    const subjectIsBot = isBotAccount(id);
     const row = this.stmt(
         `SELECT COUNT(*) AS above
            FROM players p
           WHERE p.initializedAt IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)
+            ${subjectIsBot ? '' : 'AND NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)'}
             AND p.id <> ?
             AND p.rankedGames >= ${PLACEMENT_GAMES}
             AND p.rankSigma <= ${PLACEMENT_SIGMA}

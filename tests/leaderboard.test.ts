@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { DatabaseSync } from 'node:sqlite';
 import type { MatchEndPayload } from '../src/types';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-board-test-'));
@@ -165,5 +166,136 @@ describe('a board only lists players with progress on what it measures', () => {
       const bots = db.getLeaderboard(sort, 100, true).filter((e) => e.isBot);
       expect(bots.length).toBe(4);
     }
+  });
+});
+
+describe('a qualified bot has a ladder position, in its own lane', () => {
+  // §4.9 / D15, and there are TWO clauses in TWO functions doing two different
+  // jobs. Conflating them is exactly how this section contradicted itself, so
+  // the halves are asserted apart:
+  //
+  //   onLadder(p)                ELIGIBILITY — does this row get a number at all
+  //   ladderPosition(id, rankMu) THE COUNTED SET — who is counted above it
+  //
+  // Doing only the second leaves every bot with no number; doing only the
+  // first counts bots into humans' numbers. Both are needed and neither test
+  // passes on the other's change.
+
+  const apex = (id: string, name: string, mu: number) => {
+    db.insertBot({ id, username: name, mu, rankedGames: 40, rankedDuels: 40 });
+  };
+
+  /**
+   * A human at the apex. Written straight to the row because there is no API
+   * for it: the apex needs a rating, a settled sigma, five ranked games and
+   * OVERLORD_MIN_DUELS duels, and playing 25 of them per fixture would make
+   * this suite about `recordMatch` rather than about the lanes.
+   */
+  const humanApex = (id: string, name: string, mu: number) => {
+    db.getProfile(id);
+    expect(db.initializeProfile(id, name).ok).toBe(true);
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    try {
+      raw
+        .prepare(
+          'UPDATE players SET rankMu = ?, rankSigma = 1, rankedGames = 40, rankedDuels = 40 WHERE id = ?'
+        )
+        .run(mu, id);
+    } finally {
+      raw.close();
+    }
+  };
+
+  it('ELIGIBILITY: a qualified bot receives a non-null position', () => {
+    // The assertion that fails if `onLadder`'s bot clause is RE-SPELLED as
+    // `!isBotAccount(p.id)` rather than removed — which is the whole §4.9
+    // contradiction, caught directly. Step 5 deliberately left it re-spelled.
+    apex('bot-ladder-01', 'LadderBotOne', 41);
+    const profile = db.getProfile('bot-ladder-01');
+    expect(profile.tier).toBe('overlord');
+    expect(profile.ladderPosition).toBeGreaterThanOrEqual(1);
+  });
+
+  it('THE LANES: a bot counts everybody above it, a human counts only humans', () => {
+    // Two apex bots and one apex human, all qualified. The human's number
+    // ignores the bots; the LOWER bot's counts the higher bot AND the human.
+    // Ratings chosen so the ORDER is unambiguous and no other fixture in this
+    // suite can sit between them: the earlier humans play real matches and
+    // their mu is whatever those produced.
+    apex('bot-lane-hi', 'LaneBotHigh', 70);
+    humanApex('dev_lane_human_001', 'LaneHuman', 60);
+    apex('bot-lane-lo', 'LaneBotLow', 55);
+
+    const human = db.getProfile('dev_lane_human_001');
+    const lo = db.getProfile('bot-lane-lo');
+    expect(human.tier).toBe('overlord');
+    expect(lo.tier).toBe('overlord');
+    // The human is counted against humans alone. Both bots outrank it on mu
+    // and neither may push it down.
+    expect(human.ladderPosition).toBe(1);
+    // The lower bot is counted against EVERYBODY: the higher bot and the
+    // human are both above it.
+    expect(lo.ladderPosition).toBe(3);
+  });
+
+  it('HUMAN INVARIANCE: adding a bot moves no human’s number, at all', () => {
+    // Measured over EVERY human rather than spot-checked, because the failure
+    // this guards is one row shifting by one.
+    const humansNow = (): Record<string, number | undefined> => {
+      const out: Record<string, number | undefined> = {};
+      for (const entry of db.getLeaderboard('elo', 100, false)) {
+        out[entry.id] = db.getProfile(entry.id).ladderPosition;
+      }
+      return out;
+    };
+    const before = humansNow();
+    // ABOVE the apex human on purpose. Bots below them could not shift the
+    // number whatever the counted set did, so a fixture built that way passes
+    // even when every lane is wrong — measured, it did.
+    apex('bot-invariant-01', 'InvariantBot', 80);
+    apex('bot-invariant-02', 'InvariantBot2', 75);
+    expect(Object.values(before).some((n) => n !== undefined)).toBe(true);
+    expect(humansNow()).toEqual(before);
+  });
+
+  it('ELIGIBILITY is the BOARD’s membership test, not merely a rating', () => {
+    // The other half of `onLadder`, which the bot change must not weaken. A
+    // row the board refuses to print must not still get a number: an
+    // uninitialized profile is placed and rated like any other row, takes
+    // 'overlord' from `tierFor`, and would be handed #1 for a ladder it does
+    // not appear on. And a placed human short of the apex has no position at
+    // all — the top rung is the only one that reads as one.
+    const placed = db.getProfile('dev_888888888888888888');
+    expect(placed.tier).not.toBe('overlord');
+    expect(placed.ladderPosition).toBeUndefined();
+
+    // The uninitialized row has to be APEX-RATED, or the tier gate catches it
+    // and the initializedAt clause is never exercised — measured, removing
+    // that clause reddened nothing until this fixture was rated.
+    db.getProfile('dev_never_onboarded_01');
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'));
+    try {
+      raw
+        .prepare(
+          'UPDATE players SET rankMu = 90, rankSigma = 1, rankedGames = 40, rankedDuels = 40 WHERE id = ?'
+        )
+        .run('dev_never_onboarded_01');
+    } finally {
+      raw.close();
+    }
+    const fresh = db.getProfile('dev_never_onboarded_01');
+    expect(fresh.initialized).toBe(false);
+    expect(fresh.tier).toBe('overlord');
+    expect(fresh.ladderPosition).toBeUndefined();
+  });
+
+  it('D15’s accepted consequence: a bot and a human may show the SAME number', () => {
+    // Different lanes, so a collision is intended behaviour rather than a bug
+    // — pinned here so a later "fix" that silently renumbers one lane goes red.
+    const human = db.getProfile('dev_lane_human_001');
+    apex('bot-collide-01', 'CollideBot', 99);
+    const bot = db.getProfile('bot-collide-01');
+    expect(bot.ladderPosition).toBe(1);
+    expect(human.ladderPosition).toBe(1);
   });
 });
