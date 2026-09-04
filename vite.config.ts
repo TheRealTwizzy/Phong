@@ -35,6 +35,13 @@ const FLOORS = {
   // injects downstream of it (measured — it scrolls a `touch-action: none`
   // element), so the browser layer can prove the wiring and never the rules.
   'src/gestures.ts': { statements: 95, branches: 95 },
+  // The play-bot weight tables and the three saturation ladders. Every number
+  // in here is a product decision with a rating consequence, and the whole
+  // module is pure arithmetic over four literal tables — so there is no honest
+  // reason for a branch in it to go unexercised, and an unexercised one is a
+  // ladder rung nobody has checked. Floored at the top because the cost of
+  // holding it there is one `it.each` row.
+  'src/playbotRating.ts': { statements: 100, branches: 100 },
   'src/game/physics.ts': { statements: 90, branches: 88 },
   'src/game/cosmetics.ts': { statements: 95, branches: 95 },
   // Forty lines of arithmetic that the contrast and distinctness floors both
