@@ -467,7 +467,7 @@ interface PlayerRow {
  * can see it beside is how the badge and the Ranks page come to disagree.
  */
 function onLadder(p: PlayerProfile): boolean {
-  return p.tier === 'overlord' && Boolean(p.initializedAt) && !p.id.startsWith('bot-');
+  return p.tier === 'overlord' && Boolean(p.initializedAt) && !isBotAccount(p.id);
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
@@ -2939,7 +2939,7 @@ class GameDatabase {
       achievements: p.achievements,
       hasAvatar: p.hasAvatar,
       avatarVersion: p.avatarVersion,
-      isBot: p.id.startsWith('bot-') || undefined,
+      isBot: isBotAccount(p.id) || undefined,
     };
   }
 
@@ -4004,7 +4004,7 @@ class GameDatabase {
             AND xp = 0
             AND rankedGames = 0
             AND lastActive < ?
-            AND id NOT LIKE 'bot-%'
+            AND NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = id)
             AND id NOT IN (SELECT deviceId FROM device_links)
             AND id NOT IN (SELECT playerId FROM device_links)
             AND id NOT IN (SELECT deviceId FROM released_devices)
@@ -4098,6 +4098,16 @@ class GameDatabase {
   /** Hard ceiling on one board query — a bound, not the public page size. */
   private static readonly MAX_BOARD_ROWS = 1000;
 
+  /**
+   * "this row is not a bot", in SQL, correlated on the authoritative table.
+   *
+   * Assumes the players table is aliased `p`, which every call site here does.
+   * A shared fragment rather than seven copies because the whole point of D26
+   * is that one thing answers this question.
+   */
+  private static readonly NOT_A_BOT =
+    'NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)';
+
   private static readonly LADDER_TIEBREAK = 'p.id ASC';
 
   /**
@@ -4140,7 +4150,7 @@ class GameDatabase {
         `SELECT COUNT(*) AS above
            FROM players p
           WHERE p.initializedAt IS NOT NULL
-            AND p.id NOT LIKE 'bot-%'
+            AND NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)
             AND p.id <> ?
             AND p.rankedGames >= ${PLACEMENT_GAMES}
             AND p.rankSigma <= ${PLACEMENT_SIGMA}
@@ -4205,7 +4215,7 @@ class GameDatabase {
     // is emitted too, so `take` bounds the result either way and no over-fetch
     // is needed. The output is identical — humanRank only ever counted
     // non-bots, so removing rows that never incremented it changes nothing.
-    const botClause = includeBots ? '' : " AND p.id NOT LIKE 'bot-%'";
+    const botClause = includeBots ? '' : ` AND ${GameDatabase.NOT_A_BOT}`;
     // LIMIT in the SQL, not just in the loop. Without it every eligible row
     // was materialized as p.* and run through rowToProfile (which JSON.parses
     // the achievements column) before the loop threw all but `take` away —
@@ -4215,7 +4225,7 @@ class GameDatabase {
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
-            AND (${progress} OR p.id LIKE 'bot-%')${botClause}
+            AND (${progress} OR EXISTS (SELECT 1 FROM bot_accounts b2 WHERE b2.botId = p.id))${botClause}
           ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
           LIMIT ?`
       )
@@ -4227,7 +4237,7 @@ class GameDatabase {
     let humanRank = 0;
     for (const row of rows) {
       if (out.length >= take) break;
-      const isBot = row.id.startsWith('bot-');
+      const isBot = isBotAccount(row.id);
       if (isBot && !includeBots) continue;
       if (!isBot) humanRank++;
       const p = rowToProfile(row);
@@ -4343,7 +4353,7 @@ class GameDatabase {
     // the initialized non-bot count actually distinguishes "empty" from
     // "populated".
     const human = this.stmt(
-      "SELECT COUNT(*) AS n FROM players WHERE initializedAt IS NOT NULL AND id NOT LIKE 'bot-%'"
+      `SELECT COUNT(*) AS n FROM players p WHERE p.initializedAt IS NOT NULL AND ${GameDatabase.NOT_A_BOT}`
     ).get() as { n: number };
     return { file: path.resolve(DB_FILE), bytes, players: row.n, humans: human.n };
   }

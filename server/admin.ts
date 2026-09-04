@@ -52,7 +52,10 @@ const PLAYER_COLUMNS =
 
 /** Everyone except the curated bot roster, which is not a support concern. */
 const humans = (): PlayerRow[] =>
-  all<PlayerRow>(`SELECT ${PLAYER_COLUMNS} FROM players`).filter((p) => !p.id.startsWith('bot-'));
+  all<PlayerRow>(
+    `SELECT ${PLAYER_COLUMNS} FROM players p
+      WHERE NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)`
+  );
 
 const seconds = (a: string, b: string): number => Math.abs((+new Date(a) - +new Date(b)) / 1000);
 

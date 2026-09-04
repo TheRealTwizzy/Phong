@@ -211,3 +211,120 @@ describe('bot_accounts is NOT a player-keyed table', () => {
     expect(cols).not.toContain('playerId');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The migration: every functional prefix read moves to bot_accounts, and the
+// behaviour of each is UNCHANGED. Step 5 swaps the classifier; §4.9's actual
+// behaviour change (a qualified bot receiving its own ladder position) is
+// step 24's, so anything that moves here must produce the same answer it did.
+// ---------------------------------------------------------------------------
+
+describe('no functional bot- prefix read survives', () => {
+  // The shape tests/legal.test.ts already uses to hold a claim against the
+  // code. Three exemptions, each carrying its reason (§4.10):
+  //   insertBot's naming guard  — constrains what may be WRITTEN, not what IS
+  //   bot_accounts_backfill_v1  — migrates the legacy convention into the table
+  //   isLinkableId              — identifier/profile-shape test, never a
+  //                               classifier; it already returns TRUE for bots
+  // Anything else fails, which is the point: the exemptions are three named
+  // reasons, not a category that can be argued into.
+  const EXEMPT: Array<{ file: string; contains: string; why: string }> = [
+    { file: 'server/db.ts', contains: "if (!bot.id.startsWith('bot-'))", why: 'insertBot naming guard' },
+    { file: 'server/db.ts', contains: "throw new Error('Bot ids must start", why: 'insertBot naming guard' },
+    { file: 'server/db.ts', contains: "SELECT id, ? FROM players WHERE id LIKE 'bot-%'", why: 'bot_accounts_backfill_v1' },
+    { file: 'src/profileRules.ts', contains: '/^(dev_|bot-)/', why: 'isLinkableId profile-shape test' },
+  ];
+  // Roster DATA rather than a functional read: every seed id literally starts
+  // with the prefix because insertBot's guard demands it.
+  const DATA_FILES = ['server/bots.ts'];
+
+  it('finds none outside the three named exemptions', async () => {
+    const fsp = await import('node:fs');
+    const pathm = await import('node:path');
+    const root = pathm.resolve(__dirname, '..');
+
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const e of fsp.readdirSync(dir, { withFileTypes: true })) {
+        const full = pathm.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (e.name === 'node_modules' || e.name === 'dist') continue;
+          walk(full, out);
+        } else if (/\.tsx?$/.test(e.name)) out.push(full);
+      }
+      return out;
+    };
+
+    const files = [
+      ...walk(pathm.join(root, 'server')),
+      ...walk(pathm.join(root, 'src')),
+      pathm.join(root, 'server.ts'),
+    ];
+
+    const offenders: string[] = [];
+    for (const full of files) {
+      const rel = pathm.relative(root, full).replace(/\\/g, '/');
+      if (DATA_FILES.includes(rel)) continue;
+      const src = fsp.readFileSync(full, 'utf8');
+      // Strip block and line comments — these files discuss the prefix at
+      // length and prose is not a use, the same reason legal.test.ts strips
+      // them before counting req.ip.
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n');
+      code.forEach((line, i) => {
+        const bare = line.replace(/\/\/.*$/, '');
+        if (!/bot-/.test(bare)) return;
+        // 'human-bot' / 'bot-bot' are PairKind literals naming a pairing,
+        // not id prefixes — the only two strings here that contain "bot-"
+        // without being about an id at all.
+        if (/'(human-bot|bot-bot)'/.test(bare)) return;
+        if (!/'bot-|"bot-|\/\^\(dev_\|bot-|bot-%/.test(bare)) return;
+        if (EXEMPT.some((x) => x.file === rel && bare.includes(x.contains))) return;
+        offenders.push(`${rel}:${i + 1}  ${bare.trim()}`);
+      });
+    }
+    expect(offenders, `functional bot- prefix reads outside the exemptions:\n${offenders.join('\n')}`)
+      .toEqual([]);
+  });
+});
+
+describe('the migration preserves behaviour exactly', () => {
+  it('the leaderboard still hides bots by default and shows them on request', () => {
+    const withoutBots = db.getLeaderboard('elo', 50, false);
+    const withBots = db.getLeaderboard('elo', 50, true);
+    expect(withoutBots.every((e) => !e.isBot)).toBe(true);
+    expect(withBots.some((e) => e.isBot)).toBe(true);
+    // isBot is server-derived from bot_accounts now, not from the id.
+    for (const e of withBots) expect(e.isBot === true).toBe(isBotAccount(e.id));
+  });
+
+  it('a bot is still exempt from the progress filter — it reaches the board with no progress', () => {
+    // db.ts:4116. A human with zero progress on the sorted metric is not on
+    // the board at all; a bot is, which is what the exemption buys and what a
+    // careless re-spelling would silently remove.
+    // rankedGames: 0 is what makes this discriminating. insertBot DEFAULTS it
+    // to PLACEMENT_GAMES, so a bot left at the default has progress on the elo
+    // metric and reaches the board whether the exemption exists or not — the
+    // first version of this test asserted exactly that and passed with the
+    // exemption deleted, which is the vacuous-test failure this repo already
+    // has a scar from. Caught by the mutation check, not by review.
+    db.insertBot({ id: 'bot-noprogress-01', username: 'NoProgressBot', mu: 25, xp: 0, rankedGames: 0 });
+    const human = 'dev_222222222222222222';
+    db.getProfile(human);
+    db.initializeProfile(human, 'NoProgressHuman');
+
+    const board = db.getLeaderboard('elo', 100, true);
+    // The bot is on it with nothing earned...
+    expect(board.some((e) => e.id === 'bot-noprogress-01')).toBe(true);
+    // ...and the equivalently empty HUMAN is not, which is what the exemption
+    // actually buys and what its removal would take away.
+    expect(board.some((e) => e.id === human)).toBe(false);
+  });
+
+  it('readProfile derives isBot from bot_accounts, not from the id', () => {
+    const bot = db.getPublicProfile('bot-authority-01');
+    expect(bot?.isBot).toBe(true);
+    // The prefixed impostor with no row is a HUMAN, badge and all.
+    const impostor = db.getPublicProfile('bot-impostor-01');
+    expect(impostor).toBeTruthy();
+    expect(impostor?.isBot).toBeUndefined();
+  });
+});
