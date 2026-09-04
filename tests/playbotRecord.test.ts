@@ -323,3 +323,229 @@ describe('placement still completes against bots', () => {
     expect(wins.rankSigma).toBeCloseTo(losses.rankSigma, 10);
   });
 });
+
+describe('the hard caps', () => {
+  // Prior exposure is SEEDED rather than played, because the fixtures need
+  // twelve, thirty-two and seventy-five prior matches and the thing under test
+  // is what `recordMatch` does with a count, not how the count got there.
+  // `recordExposure` is the store's own writer and is pinned by
+  // tests/exposure.test.ts.
+
+  const HOUR = 3600_000;
+  const BANDS = ['ace', 'master', 'grandmaster', 'legend'];
+
+  /** `n` prior rows against one opponent — drives the SAME-PAIR ladder. */
+  const seedPair = (me: string, opp: string, n: number, oppIsBot: boolean) => {
+    for (let i = 0; i < n; i += 1) {
+      seq += 1;
+      db.recordExposure({
+        playerId: me,
+        oppId: opp,
+        matchKey: `cap:pair:${seq}`,
+        at: new Date(ANCHOR.getTime() - (i + 1) * 60_000),
+        oppIsBot,
+        oppBand: 'ace',
+      });
+    }
+  };
+
+  /** `n` prior rows against DISTINCT bots, all in `band` — the RANK-BAND ladder. */
+  const seedBand = (me: string, n: number, band: string) => {
+    for (let i = 0; i < n; i += 1) {
+      seq += 1;
+      db.recordExposure({
+        playerId: me,
+        oppId: `dev_cap_band_opp_${seq}`,
+        matchKey: `cap:band:${seq}`,
+        at: new Date(ANCHOR.getTime() - (i + 1) * 60_000),
+        oppIsBot: true,
+        oppBand: band,
+      });
+    }
+  };
+
+  /**
+   * `n` prior bot matches today against distinct bots, SPREAD across bands —
+   * the DAILY ladder. Spread deliberately: seventy-five rows in one band would
+   * trip the rank-band cap at thirty-three and report `band`, so the fixture
+   * would be testing the wrong ladder while looking right.
+   */
+  const seedDaily = (me: string, n: number) => {
+    for (let i = 0; i < n; i += 1) {
+      seq += 1;
+      db.recordExposure({
+        playerId: me,
+        oppId: `dev_cap_daily_opp_${seq}`,
+        matchKey: `cap:daily:${seq}`,
+        at: new Date(ANCHOR.getTime() - (i + 1) * 60_000),
+        oppIsBot: true,
+        oppBand: BANDS[i % BANDS.length],
+      });
+    }
+  };
+
+  /** Everything a capped participant must be able to say about its own match. */
+  const outcome = (me: string, oppId: string, band = 'ace') => {
+    seedRating(me);
+    const before = db.getProfile(me);
+    seq += 1;
+    const key = `cap:play:${seq}`;
+    const result = db.recordMatch({ ...duel(me), matchKey: key } as MatchEndPayload, {
+      opponentId: oppId,
+      opponentBand: band,
+      decidedAt: ANCHOR,
+      opponentRating: { mu: 25, sigma: 3 },
+      opponentRankRating: { mu: 25, sigma: 3 },
+    } as never);
+    const after = db.getProfile(me);
+    const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+    let row: { ranked: number } | undefined;
+    try {
+      // `matches` has no matchKey column — every seat files its own row and
+      // the newest one for this player is the match just recorded.
+      row = raw
+        .prepare('SELECT ranked FROM matches WHERE player1Id = ? ORDER BY rowid DESC LIMIT 1')
+        .get(me) as { ranked: number } | undefined;
+    } finally {
+      raw.close();
+    }
+    return {
+      rankMu: after.rankMu - before.rankMu,
+      rankSigma: before.rankSigma - after.rankSigma,
+      mmrMu: after.mmrMu - before.mmrMu,
+      mmrSigma: before.mmrSigma - after.mmrSigma,
+      rankedGames: after.rankedGames - before.rankedGames,
+      rankedDuels: after.rankedDuels - before.rankedDuels,
+      earnedXp: result.earnedXp,
+      historyRanked: row?.ranked,
+    };
+  };
+
+  /** Nothing moved, everything was still paid, and history tells the truth. */
+  const expectCapped = (o: ReturnType<typeof outcome>) => {
+    expect({
+      rankMu: o.rankMu,
+      rankSigma: o.rankSigma,
+      mmrMu: o.mmrMu,
+      mmrSigma: o.mmrSigma,
+      rankedGames: o.rankedGames,
+      rankedDuels: o.rankedDuels,
+    }).toEqual({
+      rankMu: 0, rankSigma: 0, mmrMu: 0, mmrSigma: 0, rankedGames: 0, rankedDuels: 0,
+    });
+    // Anti-exploit, not punishment: once repeated play stops being valid
+    // competitive evidence, continuing to apply LOSSES would be a one-way
+    // drain — measured at −0.1223 mu a match at σ2.0, a full tier band every
+    // 25 matches, with no floor. Both directions are zeroed instead.
+    expect(o.earnedXp).toBeGreaterThan(0);
+    // And the match keeps its REAL classification: it was played under ranked
+    // conditions, and History's Ranked filter is about that rather than about
+    // whether the ladder happened to move.
+    expect(o.historyRanked).toBe(1);
+  };
+
+  it('zeroes BOTH seats on the 13th match of a bot-involved pair', () => {
+    const me = human();
+    const theBot = bot();
+    seedPair(me, theBot, 12, true);
+    seedPair(theBot, me, 12, false);
+    expectCapped(outcome(me, theBot));
+    // The same-pair ladder is the one that applies to both participants
+    // whatever the pair kind, so the bot is capped by its own count.
+    expectCapped(outcome(theBot, me));
+  });
+
+  it('zeroes BOTH seats on the 25th match of a human pair', () => {
+    const a = human();
+    const b = human();
+    seedPair(a, b, 24, false);
+    seedPair(b, a, 24, false);
+    expectCapped(outcome(a, b));
+    expectCapped(outcome(b, a));
+    // ...and the 24th still rates, so the fixture is sitting on the boundary
+    // rather than somewhere past it.
+    const c = human();
+    const d = human();
+    seedPair(c, d, 23, false);
+    expect(outcome(c, d).rankMu).toBeGreaterThan(0);
+  });
+
+  it('zeroes the HUMAN only on the 33rd match against one bot rank band', () => {
+    const me = human();
+    const theBot = bot();
+    seedBand(me, 32, 'master');
+    expectCapped(outcome(me, theBot, 'master'));
+    // The bot keeps its ×1.00 progression and its own counters: §2.4 is the
+    // human's ladder alone, so the bot in the same match still moves.
+    expect(outcome(theBot, me, 'master').rankMu).toBeGreaterThan(0);
+    // And band 32 still rates — the boundary, not somewhere past it.
+    const other = human();
+    seedBand(other, 31, 'master');
+    expect(outcome(other, bot(), 'master').rankMu).toBeGreaterThan(0);
+  });
+
+  it('zeroes the HUMAN only on the 76th bot match of a UTC day', () => {
+    const me = human();
+    const theBot = bot();
+    seedDaily(me, 75);
+    expectCapped(outcome(me, theBot));
+    expect(outcome(theBot, me).rankMu).toBeGreaterThan(0);
+    const other = human();
+    seedDaily(other, 74);
+    expect(outcome(other, bot()).rankMu).toBeGreaterThan(0);
+  });
+
+  it('never subjects a BOT to the two human-only ladders', () => {
+    // The discriminating fixture, and the first version of this was VACUOUS —
+    // it asserted "the bot still moves" about a bot with no band history at
+    // all, so removing the human-only guard reddened nothing. The bot has to
+    // be over the threshold itself, which means its prior rows must be
+    // bot-vs-bot: the band and daily queries filter on `oppIsBot = 1`, so a
+    // bot's matches against HUMANS are invisible to them either way.
+    //
+    // Two guards have to be defeated for this to move, and they are NOT
+    // duplicates — which is why mutating either alone leaves this green and
+    // that is the right answer rather than a gap. `participantWeights`
+    // returning before the two ladders is the POLICY. `recordAndCountExposure`
+    // not asking the two queries at all unless `!selfIsBot && oppIsBot` is a
+    // COST guard, and §5 names its consequence: at bot-vs-bot scale a bot seat
+    // has to cost one read rather than four, on the same single-threaded loop
+    // that relays paddle_move for every human match. Removing it changes no
+    // behaviour and triples the query cost of the most common match in the
+    // game — a performance regression, not a correctness one, so a test is the
+    // wrong instrument for it.
+    const overBand = bot();
+    seedBand(overBand, 32, 'master');
+    expect(outcome(overBand, bot(), 'master').rankMu).toBeGreaterThan(0);
+
+    const overDaily = bot();
+    seedDaily(overDaily, 75);
+    expect(outcome(overDaily, bot()).rankMu).toBeGreaterThan(0);
+
+    // ...and a HUMAN with the identical history is capped by both, so the
+    // difference really is who was playing and not the fixture.
+    const humanBand = human();
+    seedBand(humanBand, 32, 'master');
+    expectCapped(outcome(humanBand, bot(), 'master'));
+    const humanDaily = human();
+    seedDaily(humanDaily, 75);
+    expectCapped(outcome(humanDaily, bot()));
+  });
+
+  it('reports which ladder fired, so a failing test names one', () => {
+    // The pair ladder is checked first, so a participant over several
+    // thresholds at once is attributed to the most specific one.
+    const me = human();
+    const theBot = bot();
+    seedPair(me, theBot, 12, true);
+    seedDaily(me, 75);
+    seedRating(me);
+    const before = db.getProfile(me);
+    seq += 1;
+    db.recordMatch({ ...duel(me), matchKey: `cap:order:${seq}` } as MatchEndPayload, {
+      opponentId: theBot, opponentBand: 'ace', decidedAt: ANCHOR,
+      opponentRating: { mu: 25, sigma: 3 }, opponentRankRating: { mu: 25, sigma: 3 },
+    } as never);
+    expect(db.getProfile(me).rankMu).toBe(before.rankMu);
+  });
+});

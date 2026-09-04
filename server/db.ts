@@ -687,8 +687,12 @@ class GameDatabase {
         mode TEXT NOT NULL,
         difficulty TEXT,
         timestamp TEXT NOT NULL,
-        -- 1 = this match actually moved the visible ladder (ranksThisMatch at
-        -- record time), 0 = it did not. Rows from before the column existed
+        -- 1 = this match was PLAYED under ranked conditions (ranksThisMatch at
+        -- record time), 0 = it was not. It used to say "actually moved the
+        -- visible ladder", which was the same thing until an anti-farming
+        -- ladder could zero an update: a hard-capped match keeps its real
+        -- classification here and moves nothing, which is what History's
+        -- Ranked filter is about. Rows from before the column existed
         -- were classified once by ranked_backfill_v1 from mode + difficulty
         -- (rules assumed stock — see backfillMatchRanked); a NULL still reads
         -- as un-ranked everywhere, as the safety net for any straggler.
