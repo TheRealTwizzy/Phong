@@ -697,7 +697,17 @@ class GameDatabase {
         -- were classified once by ranked_backfill_v1 from mode + difficulty
         -- (rules assumed stock — see backfillMatchRanked); a NULL still reads
         -- as un-ranked everywhere, as the safety net for any straggler.
-        ranked INTEGER
+        ranked INTEGER,
+        -- 1 = this match ACTUALLY MOVED the visible ladder. The same question as
+        -- ranked until an anti-farming ladder could zero an update; filled on
+        -- legacy rows by advanced_ladder_backfill_v1, which copies ranked.
+        advancedLadder INTEGER,
+        -- 1 = this match credited a rankedDuel. A THIRD question, and the one
+        -- backfillRankedDuels recounts from: §2.7's daily allowance means a
+        -- human's 6th bot duel of a day advanced the ladder and credited
+        -- nothing, so a recount over advancedLadder over-counts by exactly the
+        -- capped duels -- permanently, since the recount applies MAX.
+        rankedDuelCredited INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
       CREATE INDEX IF NOT EXISTS idx_matches_p2 ON matches(player2Id);
@@ -1132,6 +1142,20 @@ class GameDatabase {
     if (matchCols.length && !matchCols.some((c) => c.name === 'ranked')) {
       this.sql.exec('ALTER TABLE matches ADD COLUMN ranked INTEGER');
     }
+    // ...and whether it MOVED that ladder, which stopped being the same
+    // question the moment an anti-farming ladder could zero an update. Both
+    // nullable for the same reason `ranked` is: a row from before the column
+    // carries no honest answer, and each is filled once by its own one-shot
+    // backfill from the column it used to be indistinguishable from.
+    if (matchCols.length && !matchCols.some((c) => c.name === 'advancedLadder')) {
+      this.sql.exec('ALTER TABLE matches ADD COLUMN advancedLadder INTEGER');
+    }
+    // ...and whether it credited a rankedDuel, which is a THIRD question. The
+    // daily allowance (§2.7) breaks the last equivalence: a human's 6th bot
+    // duel of a day is ranked = 1 and advancedLadder = 1 and credited nothing.
+    if (matchCols.length && !matchCols.some((c) => c.name === 'rankedDuelCredited')) {
+      this.sql.exec('ALTER TABLE matches ADD COLUMN rankedDuelCredited INTEGER');
+    }
 
     addColumn('recoveryCode', 'recoveryCode TEXT');
     // TrueSkill-style ratings replaced the old fixed-delta ELO.
@@ -1211,6 +1235,12 @@ class GameDatabase {
     this.backfillMatchRanked();
     this.relabelChaosMatches();
     this.recountShutouts();
+    // Strictly ordered: each copies the column the one before it filled.
+    // backfillMatchRanked classifies `ranked`; advanced_ladder copies that;
+    // ranked_duel_credited copies advancedLadder for duels only; and the
+    // recount reads that last column.
+    this.backfillAdvancedLadder();
+    this.backfillRankedDuelCredited();
     // After backfillMatchRanked, which classifies legacy rows' `ranked` — a
     // duel judged before that reads NULL and is not counted.
     this.backfillRankedDuels();
@@ -1405,6 +1435,57 @@ class GameDatabase {
    * before that column existed — judged first, a legacy duel reads NULL and is
    * missed. `player1Id` alone, since each seat files its own row.
    */
+  /**
+   * One-shot: legacy rows advanced the ladder exactly when they were ranked.
+   *
+   * Before an anti-farming ladder could zero an update the two questions had
+   * one answer, so the copy is exact for history and the new behaviour applies
+   * only forward. Runs AFTER ranked_backfill_v1, which is what classifies a
+   * legacy row into `ranked` in the first place -- a row judged before that
+   * reads NULL, and NULL stays NULL here, since it cannot be reconstructed
+   * honestly and already reads as un-ranked everywhere.
+   */
+  private backfillAdvancedLadder(): void {
+    const KEY = 'advanced_ladder_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        'UPDATE matches SET advancedLadder = ranked WHERE advancedLadder IS NULL'
+      )
+      .run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`advanced_ladder_backfill_v1: classified ${rows.changes} match row(s)`);
+    }
+  }
+
+  /**
+   * One-shot: legacy rows credited a rankedDuel exactly when they advanced the
+   * ladder AND were duels.
+   *
+   * §2.7's daily allowance is what breaks that equivalence, and it applies
+   * only forward -- every row predating it credited whenever it advanced. The
+   * `mode = 'multiplayer'` clause is load-bearing rather than an optimisation:
+   * a SOLO match can advance the visible ladder (at an earned difficulty) and
+   * never credited a duel, so copying unconditionally would invent one for
+   * every earned-rung solo match in history -- and backfillRankedDuels reads
+   * this column with MAX, so the invented credits would be permanent.
+   *
+   * Runs after advanced_ladder_backfill_v1, whose answer it copies.
+   */
+  private backfillRankedDuelCredited(): void {
+    const KEY = 'ranked_duel_credited_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `UPDATE matches SET rankedDuelCredited = advancedLadder
+          WHERE rankedDuelCredited IS NULL AND mode = 'multiplayer'`
+      )
+      .run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`ranked_duel_credited_backfill_v1: classified ${rows.changes} duel row(s)`);
+    }
+  }
+
   private backfillRankedDuels(): void {
     const KEY = 'ranked_duels_backfill_v1';
     if (this.getMeta(KEY)) return;
@@ -1413,7 +1494,12 @@ class GameDatabase {
            SELECT COUNT(*) FROM matches m
             WHERE m.player1Id = players.id
               AND m.mode = 'multiplayer'
-              AND m.ranked = 1))`
+              -- rankedDuelCredited, never ranked and never advancedLadder:
+              -- a human's 6th bot duel of a UTC day is ranked AND advanced the
+              -- ladder and credited nothing, so either of the other two
+              -- over-counts by exactly the capped duels -- and this is a MAX,
+              -- so the over-count would be permanent.
+              AND m.rankedDuelCredited = 1))`
       )
       .run();
     this.setMeta(KEY, new Date().toISOString());
@@ -1620,8 +1706,9 @@ class GameDatabase {
   private insertMatch(m: MatchRecord): void {
     this.stmt(
         `INSERT INTO matches (id, player1Id, player1Name, player2Id, player2Name, winnerId, winnerName,
-           scoreP1, scoreP2, maxRally, mode, difficulty, timestamp, ranked)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           scoreP1, scoreP2, maxRally, mode, difficulty, timestamp, ranked,
+           advancedLadder, rankedDuelCredited)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         m.id,
@@ -1637,7 +1724,9 @@ class GameDatabase {
         m.mode,
         m.difficulty ?? null,
         m.timestamp,
-        m.ranked ?? null
+        m.ranked ?? null,
+        m.advancedLadder ?? null,
+        m.rankedDuelCredited ?? null
       );
     // Keep the newest 500 rows PER PLAYER — history is "an accurate timeline
     // of every match played on this profile", and the global cap this
@@ -3392,6 +3481,9 @@ class GameDatabase {
       // hard-capped match keeps its real classification in History, pays its
       // normal XP, and moves nothing.
       const advancesLadder = competitivelyEligible && !w.hardCapped;
+      // Decided inside the ladder block below and read by the match row, so
+      // the history column and the counter are one boolean rather than two.
+      let duelCredited = false;
 
       // A hard cap zeroes BOTH estimators — the two must not diverge because
       // of bot participation — so it gates this block as well as the ladder.
@@ -3487,7 +3579,8 @@ class GameDatabase {
           !creditIsCapped ||
           this.botDuelCreditsToday(profile.id, context.decidedAt ?? now, matchKey) <
             BOT_DUEL_CREDITS_PER_DAY;
-        if (isPvp && creditAllowed) {
+        duelCredited = isPvp && creditAllowed;
+        if (duelCredited) {
           profile.rankedDuels += 1;
           // Stamped after the allowance is read, per §4.5's ordering. The
           // read's own `matchKey <> ?` exclusion is what actually stops a
@@ -3809,6 +3902,13 @@ class GameDatabase {
         // merely "the rules sat in the ranked bands". A stock-rules Rookie solo
         // stores 0, because it rated nothing, whatever its rules were.
         ranked: ranksThisMatch ? 1 : 0,
+        advancedLadder: advancesLadder ? 1 : 0,
+        // The SAME boolean the counter was incremented on, never a second
+        // derivation: the live twin (competitive_exposure.duelCredited) and
+        // this are two copies of one decision, pruned on different schedules,
+        // so a recalculation here would surface its disagreement long after
+        // the match.
+        rankedDuelCredited: duelCredited ? 1 : 0,
       };
 
       const result: MatchEndResult = {
