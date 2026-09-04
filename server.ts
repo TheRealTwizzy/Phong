@@ -4400,7 +4400,18 @@ async function startServer() {
         if (!ids.length) {
           console.warn('[bots] PLAY_BOTS is set but this database holds no bot accounts');
         } else {
-          botPlayers = startBotPlayers({ wss, botIds: ids });
+          botPlayers = startBotPlayers({
+            wss,
+            botIds: ids,
+            // The one thing the population needs the database for, injected
+            // rather than imported so `server/botPlayers.ts` stays testable
+            // without one. A bot opens its table in the hardest RATED room it
+            // may enter, which is what lets it place and climb at all.
+            profileFor: (id) => {
+              const p = db.getProfile(id);
+              return { level: p.level, tier: p.tier };
+            },
+          });
           console.log(`[bots] ${ids.length} play-bot(s) seated`);
         }
       }

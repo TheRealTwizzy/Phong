@@ -38,6 +38,15 @@ afterAll(async () => {
 });
 
 /** The open tables in a room, as the lobby browser sees them. */
+/**
+ * Where an unplaced bot opens its table.
+ *
+ * `beginner`, not `casual`, and that is the whole point: casual carries
+ * `ranked: false`, so a bot playing there would never earn a `rankedGames` and
+ * would sit at 0/5 Unranked forever. See `botVenue`.
+ */
+const BOT_ROOM = 'beginner';
+
 async function tables(venueRoomId: string, on: Relay = relay): Promise<any[]> {
   const res = await fetch(`${on.base}/api/rooms/${venueRoomId}/tables`);
   // A room with `listable: false` is a 404 rather than an empty list, and the
@@ -57,7 +66,7 @@ describe('the play-bot population', () => {
     // racing it.
     let open: any[] = [];
     for (let i = 0; i < 40 && open.length === 0; i++) {
-      open = await tables('casual');
+      open = await tables(BOT_ROOM);
       if (open.length === 0) await sleep(250);
     }
     expect(open.length).toBeGreaterThan(0);
@@ -71,11 +80,11 @@ describe('the play-bot population', () => {
     // an identical server with PLAY_BOTS unset shows an empty room. Without
     // this, a suite that silently stopped seating bots would still be green if
     // anything else in the boot path ever opened a table.
-    expect(await tables('casual', control)).toEqual([]);
+    expect(await tables(BOT_ROOM, control)).toEqual([]);
   }, 30_000);
 
   it('lists them as real, joinable, one-player tables', async () => {
-    const open = await tables('casual');
+    const open = await tables(BOT_ROOM);
     expect(open.length).toBeGreaterThan(0);
     for (const t of open) {
       // A bot alone at a table is one occupant and a free seat — that is the
@@ -87,7 +96,7 @@ describe('the play-bot population', () => {
   }, 30_000);
 
   it('never opens more tables than the cap allows', async () => {
-    const open = await tables('casual');
+    const open = await tables(BOT_ROOM);
     // Three bots were asked for, so three is the ceiling here whatever
     // MAX_HOSTED_TABLES is — the cap is a minimum of the two.
     expect(open.length).toBeLessThanOrEqual(3);
@@ -99,8 +108,8 @@ describe('the play-bot population', () => {
   // layer, which the whole repo runs on every change. A minute is what the
   // separate e2e job is for.
 
-  it('puts its tables only in the ungated rooms', async () => {
-    // What this holds is the POLICY — BOT_TABLE_VENUES — and not the gate.
+  it('puts its tables only in the room its tier has actually opened', async () => {
+    // What this holds is the POLICY — `botVenue` — and not the gate.
     // Worth saying plainly, because the tempting comment here ("this catches
     // an exemption to roomEntryVerdict") would be false: the bots never
     // attempt a bracketed room, so the relay's refusal is never exercised and
@@ -110,8 +119,10 @@ describe('the play-bot population', () => {
     //
     // The gate itself is held where it can actually be exercised, over every
     // tier and a spread of levels, in tests/venues.test.ts.
-    for (const room of ['beginner', 'intermediate', 'advanced']) {
-      expect(await tables(room)).toEqual([]);
+    // Casual is the one an unplaced bot would land in if `botVenue` fell back,
+    // and the harder brackets are the ones its tier does not open yet.
+    for (const room of ['casual', 'intermediate', 'advanced', 'elite', 'pro']) {
+      expect(await tables(room), room).toEqual([]);
     }
   }, 30_000);
 });

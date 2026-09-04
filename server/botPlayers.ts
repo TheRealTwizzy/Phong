@@ -35,7 +35,14 @@ import { BotSocket, botUpgradeRequest } from './botSocket';
 import { BotHalf } from './botMatch';
 import { ballRadiusFor, paddleWidthFor, playerPressure } from '../src/game/physics';
 import { DEFAULT_MATCH_RULES, DEFAULT_WINNING_SCORE } from '../src/matchRules';
-import type { AIDifficulty, MatchRules, WSClientMessage, WSServerMessage } from '../src/types';
+import { roomEntryVerdict, roomsOf } from '../src/venues';
+import type {
+  AIDifficulty,
+  MatchRules,
+  PlayerProfile,
+  WSClientMessage,
+  WSServerMessage,
+} from '../src/types';
 
 /**
  * How many bots hold a table in a room's browser at once.
@@ -46,8 +53,44 @@ import type { AIDifficulty, MatchRules, WSClientMessage, WSServerMessage } from 
  */
 export const MAX_HOSTED_TABLES = 4;
 
-/** The rooms a bot may open a table in. Ungated, so an unplaced bot qualifies. */
-export const BOT_TABLE_VENUES = ['casual'] as const;
+/**
+ * Where a bot opens its table: the HARDEST rated room it may actually enter.
+ *
+ * Casual was the obvious first answer and it is quietly wrong, in a way that
+ * makes three of the owner's rules unreachable. `casual` carries
+ * `ranked: false`, so `roomCountsForRank` refuses it the visible ladder — a
+ * bot playing there earns XP and hidden MMR and never a single `rankedGames`.
+ * It would therefore sit at `0/5 Unranked` **forever**, never place, never
+ * climb, and never reach the apex it is supposed to be driven toward. The
+ * board would show a population that plays constantly and is permanently
+ * unranked, which is worse than the fabricated careers this replaced.
+ *
+ * Hardest-first, and the bracket gate does the rest with no special casing:
+ * an unplaced bot is below every floor, so every room with a `tierMin` refuses
+ * it and it lands in `beginner` — whose ceiling deliberately never excludes an
+ * unplaced player. As it places and climbs, harder rooms start accepting it
+ * and it moves up on its own, which populates those browsers too. Casual is
+ * the floor of the search rather than its answer: a bot that somehow fits
+ * nowhere still gets a table rather than none.
+ *
+ * Pure over the bot's own profile, so the module stays free of the database —
+ * `server.ts` injects the lookup, the same split `server/room.ts` keeps.
+ */
+export function botVenue(profile: Pick<PlayerProfile, 'level' | 'tier'> | null): string {
+  // A NULL profile is read as a brand-new account, and that substitution is
+  // load-bearing rather than defensive. `roomEntryVerdict` answers OK for a
+  // null profile on purpose — "nothing to judge yet; the relay re-checks on
+  // seat" — so passing one straight through makes a bot pass EVERY gate, and
+  // hardest-first then lands an unknown bot in `pro`, the Legend-only room.
+  // Absent has to mean unplaced here, which is the safe direction and the one
+  // the relay would enforce a moment later anyway.
+  const judged = profile ?? { level: 1, tier: 'unranked' as const };
+  const rated = roomsOf('pvp').filter((r) => r.ranked !== false);
+  for (let i = rated.length - 1; i >= 0; i--) {
+    if (roomEntryVerdict(rated[i], judged).ok) return rated[i].id;
+  }
+  return 'casual';
+}
 
 /** How often the population is looked at. Nothing here is latency-sensitive. */
 export const SCHEDULER_TICK_MS = 5_000;
@@ -119,6 +162,12 @@ export interface BotPlayersDeps {
   botIds: string[];
   maxHostedTables?: number;
   maxPlayingMatches?: number;
+  /**
+   * This bot's level and tier, for `botVenue`. Injected so the module needs no
+   * database; absent means "unplaced", which is the safe reading — it lands
+   * the bot in the lowest bracket rather than one it has not earned.
+   */
+  profileFor?: (botId: string) => Pick<PlayerProfile, 'level' | 'tier'> | null;
   tickMs?: number;
   /** Injected in tests; defaults to the real timer. */
   now?: () => number;
@@ -422,7 +471,9 @@ export function startBotPlayers(deps: BotPlayersDeps): BotPlayers {
         playerId: bot.id,
         // Listed, or the table is invisible and the whole point is missed.
         visibility: 'public',
-        venueRoomId: BOT_TABLE_VENUES[0],
+        // Re-asked every time, so a bot that has placed since its last table
+        // opens the next one in the harder room it now qualifies for.
+        venueRoomId: botVenue(deps.profileFor?.(bot.id) ?? null),
       } as WSClientMessage);
       short--;
     }

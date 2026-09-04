@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { difficultyForSkill, trueSkillForBot } from '../server/botPlayers';
+import { botVenue, difficultyForSkill, trueSkillForBot } from '../server/botPlayers';
 import { DIFFICULTY_ORDER } from '../src/achievements';
+import { roomById, roomEntryVerdict } from '../src/venues';
 import { PLACEMENT_GAMES, PLACEMENT_SIGMA, START_MU, START_SIGMA, tierFor } from '../src/rating';
 
 // A play-bot's strength is a property of the ACCOUNT, fixed for its lifetime,
@@ -78,5 +79,42 @@ describe('a play-bot’s true skill', () => {
     // promise being kept rather than the first of two conditions.
     expect(tierFor(START_MU, PLACEMENT_GAMES - 1, PLACEMENT_SIGMA, 0)).toBe('unranked');
     expect(tierFor(START_MU, PLACEMENT_GAMES, PLACEMENT_SIGMA, 0)).not.toBe('unranked');
+  });
+});
+
+describe('where a play-bot opens its table', () => {
+  it('never picks a room that refuses the ladder', () => {
+    // The bug this exists for. `casual` carries `ranked: false`, so a bot
+    // playing there earns XP and hidden MMR and never one `rankedGames` — it
+    // would sit at 0/5 Unranked forever, never place, and never climb. A
+    // population that plays constantly and is permanently unranked is worse
+    // than the fabricated careers this whole change replaced.
+    for (const tier of ['unranked', 'rookie', 'contender', 'ace', 'master', 'legend'] as const) {
+      for (const level of [1, 5, 12, 20, 30]) {
+        expect(botVenue({ level, tier }), `${tier}/${level}`).not.toBe('casual');
+      }
+    }
+  });
+
+  it('puts an unplaced bot in the lowest bracket', () => {
+    // An unplaced player is below every floor, and a ceiling deliberately
+    // never excludes one — so the gate lands them here with no special casing.
+    expect(botVenue({ level: 1, tier: 'unranked' })).toBe('beginner');
+    expect(botVenue(null)).toBe('beginner');
+  });
+
+  it('moves a bot up as it climbs, without ever skipping the gate', () => {
+    // Whatever it picks, `roomEntryVerdict` must actually admit it — this is
+    // the assertion that catches a room being chosen by name rather than by
+    // the same predicate the relay enforces at three doors.
+    const seen = new Set<string>();
+    for (const tier of ['unranked', 'contender', 'ace', 'master', 'grandmaster', 'legend'] as const) {
+      const room = botVenue({ level: 30, tier });
+      seen.add(room);
+      expect(roomEntryVerdict(roomById(room), { level: 30, tier }).ok, `${tier} -> ${room}`).toBe(true);
+    }
+    // And it is not one room for everybody: a population that all piles into
+    // `beginner` leaves every other browser empty.
+    expect(seen.size).toBeGreaterThan(1);
   });
 });

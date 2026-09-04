@@ -81,11 +81,14 @@ async function botRows() {
   return (body.leaderboard ?? []).filter((e) => e.isBot);
 }
 
-// A DELTA, never an absolute. The roster is seeded with a career, so "this bot
-// has played matches" is true the instant the database exists and would pass
-// without a single ball being struck.
+// A DELTA, never an absolute, and the baseline is deliberately allowed to be
+// EMPTY. A freshly seeded bot has played nothing, and a bot that has played
+// nothing is a row of zeros — which this board excludes, exactly as it
+// excludes a freshly onboarded human. So "no bots listed yet" is the correct
+// starting state, not a failure; what is asserted is that they APPEAR, having
+// played. Requiring rows up front is what the old pre-placed roster made look
+// reasonable, and it would have passed without a ball being struck.
 const before = new Map((await botRows()).map((r) => [r.id, r.matchesPlayed]));
-if (before.size === 0) fail('no bot rows on the board at all');
 
 let moved = [];
 for (let i = 0; i < 150 && moved.length < 2; i++) {
@@ -106,6 +109,23 @@ ok(`${moved.length} bots completed and recorded a match`);
 const winners = moved.filter((r) => r.matchesWon > 0);
 if (winners.length === 0) fail('a match was recorded but nobody won it');
 ok('the result named a winner');
+
+// The match COUNTED for the ladder, which is a different claim and the one
+// that was silently false for a while: bots opened their tables in `casual`,
+// which carries `ranked: false`, so every match they played earned XP and
+// hidden MMR and never one `rankedGames`. They would have played forever and
+// stayed 0/5 Unranked — a population that never places, never climbs and can
+// never reach the apex it is supposed to be driven toward. Nothing about the
+// match itself looks wrong when that happens, which is why this is asserted
+// separately from "a match was recorded".
+const placing = moved.filter((r) => r.rankedGames > 0);
+if (placing.length === 0) {
+  fail(
+    'bots played a match that did not count for rank — check botVenue: a room ' +
+    'with `ranked: false` leaves them permanently unplaced'
+  );
+}
+ok(`${placing.length} bots are placing (rankedGames > 0)`);
 
 // Nothing threw on the way. A bot handler that throws is caught and logged
 // rather than taking the relay down, which is right — and would otherwise make
