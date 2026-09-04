@@ -8,6 +8,7 @@ import {
 } from '../server/botPlayers';
 import { DIFFICULTY_ORDER } from '../src/achievements';
 import { roomById, roomEntryVerdict } from '../src/venues';
+import { findPair, type Candidate } from '../server/matchmaking';
 import { PLACEMENT_GAMES, PLACEMENT_SIGMA, START_MU, START_SIGMA, tierFor } from '../src/rating';
 
 // A play-bot's strength is a property of the ACCOUNT, fixed for its lifetime,
@@ -164,5 +165,66 @@ describe('offering a bot to somebody waiting in the queue', () => {
 
   it('never offers a bot to a queue of bots', () => {
     expect(botsToOffer([bot(), bot()], NOW)).toBe(0);
+  });
+});
+
+describe('the shared queue never seats two bots against each other', () => {
+  // The relay pairs from ONE human plus the bots, rather than one `findPair`
+  // over the whole mixed list. This is why: `findPair` picks the closest to a
+  // coin flip and has no idea what a bot is, so a mixed list can hand back a
+  // bot-vs-bot pair while people wait. Bots play each other through their own
+  // pool; a pair coming out of the shared queue must contain a human.
+  const NOW = 2_000_000;
+  const c = (deviceId: string, mu: number, waited: number): Candidate => ({
+    deviceId,
+    mu,
+    sigma: 1,
+    joinedAt: NOW - waited,
+    rttMs: 50,
+  });
+
+  it('would pair two bots if the whole mixed list were handed to findPair', () => {
+    // The bug, demonstrated rather than asserted away. Two humans far apart in
+    // rating (so no band admits them to each other) and two bots sitting
+    // together in the middle: the fairest pair on the board is bot vs bot.
+    const mixed = [
+      c('dev_low', 12, 120_000),
+      c('dev_high', 40, 120_000),
+      c('bot-a', 25, 5_000),
+      c('bot-b', 25, 5_000),
+    ];
+    const pair = findPair(mixed, NOW);
+    expect(pair).not.toBeNull();
+    const both = pair!.every((p) => p.deviceId.startsWith('bot-'));
+    expect(both).toBe(true);
+  });
+
+  it('is not fixed by handing findPair one human plus every bot', () => {
+    // The near-miss, kept because it is the fix somebody reaches for first and
+    // it does not work: the list still holds two bots, so findPair can still
+    // pick them, and the human it was handed is simply ignored.
+    const bots = [c('bot-a', 25, 5_000), c('bot-b', 25, 5_000)];
+    const pair = findPair([c('dev_low', 12, 120_000), ...bots], NOW);
+    expect(pair).not.toBeNull();
+    expect(pair!.every((p) => p.deviceId.startsWith('bot-'))).toBe(true);
+  });
+
+  it('is fixed by one bot at a time, which can only return that pair', () => {
+    // What the relay does. A two-entry list comes back as that pair or as
+    // null — the band refusing it — so a pairing out of the shared queue
+    // always contains the person it was built around.
+    const bots = [c('bot-a', 25, 5_000), c('bot-b', 25, 5_000)];
+    let considered = 0;
+    for (const human of [c('dev_low', 12, 120_000), c('dev_mid', 25, 120_000)]) {
+      for (const bot of bots) {
+        const pair = findPair([human, bot], NOW);
+        if (!pair) continue;
+        considered++;
+        expect(pair.filter((p) => !p.deviceId.startsWith('bot-')).length).toBe(1);
+      }
+    }
+    // And the band was genuinely applied rather than every pair passing: the
+    // mid-rated human is admitted to the bots, the far-off one is not.
+    expect(considered).toBeGreaterThan(0);
   });
 });

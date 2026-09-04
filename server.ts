@@ -701,8 +701,54 @@ function sweepQueue(now: number): void {
   };
   // Drain every human-human pair the band allows before any bot is considered.
   while (seat(humansOnly)) { /* keep going */ }
-  // Then whatever is left, which is where a lone human meets a bot.
-  while (seat(candidates)) { /* keep going */ }
+
+  // Then each remaining human against ONE bot at a time.
+  //
+  // The shape matters and the obvious two shapes are both wrong. A single
+  // `findPair` over the whole mixed list pairs the closest to a coin flip and
+  // has no idea what a bot is, so with two humans outside each other's band
+  // and two bots queued behind them it returns the two BOTS — the fairest
+  // match on the board — and leaves both people waiting. Handing it one human
+  // plus ALL the bots does not fix that: the list still holds two bots, so it
+  // can still pick them. Only a list with exactly one bot in it can be relied
+  // on to produce a pair containing the human.
+  //
+  // So the bot is chosen here, by the same rule `findPair` uses — closest to a
+  // coin flip — over the bots the band actually admits. Bots play each other
+  // through their own pool; a pairing out of the shared queue always has a
+  // person in it.
+  //
+  // Longest-waited human first, so the queue drains in the order it filled.
+  for (;;) {
+    const waiting = candidates
+      .filter((c) => !isBotId(c.deviceId))
+      .sort((x, y) => x.joinedAt - y.joinedAt);
+    const bots = candidates.filter((c) => isBotId(c.deviceId));
+    if (!waiting.length || !bots.length) break;
+
+    let seated = false;
+    for (const human of waiting) {
+      let best: Candidate | null = null;
+      let bestGap = Infinity;
+      for (const bot of bots) {
+        // A two-entry list can only come back as that pair, or as null when
+        // the band refuses it — which is the band being applied, not skipped.
+        if (!findPair([human, bot], now)) continue;
+        const gap = Math.abs(
+          winProbability({ mu: human.mu, sigma: human.sigma }, { mu: bot.mu, sigma: bot.sigma }) - 0.5
+        );
+        if (gap < bestGap) {
+          best = bot;
+          bestGap = gap;
+        }
+      }
+      if (best && seat([human, best])) {
+        seated = true;
+        break;
+      }
+    }
+    if (!seated) break;
+  }
 
   // Nobody left to play? Offer a bot — but only to somebody who has genuinely
   // waited. The queue's band is a promise with an expiry: a coin flip for
