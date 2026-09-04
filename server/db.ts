@@ -305,6 +305,32 @@ export interface ReportRow {
   readAt: string | null;
 }
 
+/**
+ * Every id in `bot_accounts`, held in memory because this is a hot path --
+ * every recordMatch and every leaderboard row asks it.
+ *
+ * The TABLE is the authority and this is only a cache, so after any COMMITTED
+ * mutation the two must be equal. That is not automatic: a cache written
+ * before its INSERT lands leaves an id the cache calls a bot and the table has
+ * never heard of, and because this is the sole classifier nothing downstream
+ * can notice. So every write here happens AFTER the row is committed, never
+ * before -- see `insertBot`, and `tests/botIdentity.test.ts` for the reachable
+ * form of that failure (a roster name a human already holds throws, and the
+ * skipped bot must not be cached).
+ */
+const botAccountIds = new Set<string>();
+
+/**
+ * Is this account a bot? The one question, answered in one place.
+ *
+ * Deliberately NOT `id.startsWith('bot-')`. The prefix survives as a naming
+ * convention that `insertBot` enforces on what may be WRITTEN; it decides
+ * nothing about what an account IS.
+ */
+export function isBotAccount(id: string | null | undefined): boolean {
+  return typeof id === 'string' && botAccountIds.has(id);
+}
+
 export const PLAYER_KEYED_TABLES = [
   'avatars',
   'player_mode_stats',
@@ -841,6 +867,24 @@ class GameDatabase {
       -- The support CLI reads newest-first and filters on unread; both are
       -- this index.
       CREATE INDEX IF NOT EXISTS idx_reports_created ON reports (createdAt DESC);
+
+      -- WHAT MAKES AN ACCOUNT A BOT. The bot- id prefix is a naming
+      -- convention and nothing else: a row here is the authority, and every
+      -- functional check asks isBotAccount rather than the id.
+      --
+      -- The column is botId and emphatically NOT playerId, which is
+      -- load-bearing rather than cosmetic. tests/identity.test.ts walks the
+      -- LIVE schema for any table carrying a playerId column and requires it
+      -- in PLAYER_KEYED_TABLES -- whose move test then populates every listed
+      -- table and asserts it arrives on the new device. A bot has no browser,
+      -- so it is never moved between devices and never deleted by a player;
+      -- naming the column playerId would force this table into a list it must
+      -- not be in, and a sign-in would start carrying roster rows onto a
+      -- human's new device.
+      CREATE TABLE IF NOT EXISTS bot_accounts (
+        botId TEXT PRIMARY KEY,
+        createdAt TEXT NOT NULL
+      );
     `);
   }
 
@@ -888,6 +932,11 @@ class GameDatabase {
       // And reports, for the reason device_links is here: a surviving row
       // points at a playerId that no longer exists.
       this.sql.exec('DROP TABLE IF EXISTS reports');
+      // The roster is re-seeded onto every fresh database, so the table goes
+      // with the players it describes. The in-memory cache is cleared below,
+      // outside the transaction, because a cache emptied here and a ROLLBACK
+      // afterwards would leave every bot reading as a human.
+      this.sql.exec('DROP TABLE IF EXISTS bot_accounts');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -895,6 +944,8 @@ class GameDatabase {
       throw e;
     }
     this.ensureBaseSchema();
+    // After the COMMIT, for the reason the drop above states.
+    this.reloadBotAccounts();
     // EVERY wipe flag is re-stamped, earlier and later alike. Stamping only
     // the keys up to this one used to be enough with two of them, but each
     // wipe clears `meta`: with three keys, a wipe that forgot to re-stamp a
@@ -1039,6 +1090,12 @@ class GameDatabase {
     // After backfillMatchRanked, which classifies legacy rows' `ranked` — a
     // duel judged before that reads NULL and is not counted.
     this.backfillRankedDuels();
+    // Migrates the old prefix convention into the authoritative table, then
+    // fills the cache from it. Both must run before anything asks
+    // isBotAccount, or the first boot after this change reads every bot as a
+    // human — which would put the whole roster on the human ladder.
+    this.claimPrefixedBots();
+    this.reloadBotAccounts();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -1239,6 +1296,43 @@ class GameDatabase {
     if (rows.changes) {
       console.log(`ranked_duels_backfill_v1: counted ranked duels for ${rows.changes} player(s)`);
     }
+  }
+
+  /**
+   * The ONE legitimate reading of the `bot-` prefix left in the codebase: a
+   * one-time migration of the old convention into the authoritative table.
+   *
+   * Before this, the prefix WAS the classifier, so every existing roster row
+   * is a bot by the only definition that existed when it was written. After
+   * it, the prefix decides nothing and a prefixed id inserted later is an
+   * ordinary account — which `tests/botIdentity.test.ts` asserts directly,
+   * because that is the whole of what D26 changes.
+   */
+  private claimPrefixedBots(): void {
+    const KEY = 'bot_accounts_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `INSERT OR IGNORE INTO bot_accounts (botId, createdAt)
+         SELECT id, ? FROM players WHERE id LIKE 'bot-%'`
+      )
+      .run(new Date().toISOString());
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`bot_accounts_backfill_v1: claimed ${rows.changes} roster bot(s)`);
+    }
+  }
+
+  /**
+   * Rebuild the cache from the table. The cache is derived state, so this has
+   * to reproduce the table exactly — a restart that changed who is a bot
+   * would move accounts between the two ladder lanes with nothing to see.
+   */
+  public reloadBotAccounts(): void {
+    const rows = this.stmt('SELECT botId FROM bot_accounts').all() as unknown as Array<{
+      botId: string;
+    }>;
+    botAccountIds.clear();
+    for (const r of rows) botAccountIds.add(r.botId);
   }
 
   /**
@@ -2906,7 +3000,15 @@ class GameDatabase {
       usernameChangedAt: now,
       hasAvatar: false,
     };
+    // The players row FIRST. `upsertProfile` throws on a username a human
+    // already holds (the unique index), and seedBotRoster catches that per
+    // bot — so anything cached before this line would leave an id the cache
+    // calls a bot with no row behind it, invisibly, since bot_accounts is the
+    // sole classifier. Row, then table, then cache; never the other order.
     this.upsertProfile(full);
+    this.stmt('INSERT OR IGNORE INTO bot_accounts (botId, createdAt) VALUES (?, ?)')
+      .run(bot.id, now);
+    botAccountIds.add(bot.id);
     return this.readProfile(bot.id)!;
   }
 
