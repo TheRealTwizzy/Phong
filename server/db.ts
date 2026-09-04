@@ -28,7 +28,12 @@ import {
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
 import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
-import type { ExposureCounts } from '../src/playbotRating';
+import {
+  pairKindFor,
+  participantWeights,
+  type ExposureCounts,
+  type ParticipantWeights,
+} from '../src/playbotRating';
 
 /**
  * The most points a single match can legitimately put on either side: the
@@ -3333,36 +3338,75 @@ class GameDatabase {
     // and silently drops that last one; the alias exists to say the reuse is
     // deliberate rather than incidental.
     const competitivelyEligible = ranksThisMatch;
-    // Whether the visible ladder actually MOVED, which is not the same
-    // question once an anti-farming ladder can zero the update: a hard-capped
-    // match keeps its real ranked classification in history and moves nothing.
-    // Presently a synonym; the weights that separate them come with them.
-    const advancesLadder = competitivelyEligible;
-
     this.sql.exec('BEGIN');
     try {
-      // One row per participant per eligible match, written BEFORE anything is
-      // counted or applied — the ordering §4.5 makes normative. The counts that
-      // read it exclude this `matchKey` explicitly, so the current match can
-      // never be prior evidence about itself.
-      if (competitivelyEligible && context.opponentId) {
-        this.recordExposure({
-          playerId: profile.id,
-          oppId: context.opponentId,
-          matchKey,
-          at: context.decidedAt ?? now,
-          // DERIVED from the trusted id, never carried on a payload.
-          oppIsBot: isBotAccount(context.opponentId),
-          oppBand: context.opponentBand ?? 'unranked',
-        });
-      }
+      // ONE trusted-pairing object, or null. Every bot-identity lookup and the
+      // only `pairKindFor` call live inside this branch, so with no trusted
+      // `context.opponentId` nothing is consulted and nothing can be
+      // misclassified — solo and unvouched payloads keep the repository's
+      // existing behaviour untouched.
+      //
+      // `selfIsBot` is computed INSIDE, not above, and that placement is the
+      // whole point: hoisted for readability it runs on every solo match and
+      // every unvouched payload, and reaching `pairKindFor` with a defaulted
+      // `oppIsBot` would let a bot's own solo result classify as `human-bot` —
+      // a wrong answer that happens to weight ×1.00 today and stops being
+      // harmless the moment any rule keys on the kind.
+      //
+      // One object, built once, read by both the weights and (later) the
+      // credit decision, so the two cannot disagree about who played whom.
+      const pairing = context.opponentId
+        ? (() => {
+            const selfIsBot = isBotAccount(profile.id);
+            const oppIsBot = isBotAccount(context.opponentId!);
+            return {
+              selfIsBot,
+              oppIsBot,
+              kind: pairKindFor(selfIsBot, oppIsBot),
+              // Exposure COUNTING is gated on eligibility. The opponent-type
+              // WEIGHT below is not: it is a fact about who was played, so it
+              // applies to every estimator that legitimately updates.
+              counts: competitivelyEligible
+                ? this.recordAndCountExposure(profile.id, context, matchKey, now)
+                : null,
+            };
+          })()
+        : null;
 
-      if (ranked) {
+      const w: ParticipantWeights = pairing
+        ? participantWeights({
+            kind: pairing.kind,
+            selfIsBot: pairing.selfIsBot,
+            won: isWin,
+            counts: pairing.counts,
+          })
+        : { mu: 1, sigma: 1, hardCapped: false, cappedBy: null };
+
+      // Whether the visible ladder actually MOVED, which is not the same
+      // question as whether the match was played under ranked conditions: a
+      // hard-capped match keeps its real classification in History, pays its
+      // normal XP, and moves nothing.
+      const advancesLadder = competitivelyEligible && !w.hardCapped;
+
+      // A hard cap zeroes BOTH estimators — the two must not diverge because
+      // of bot participation — so it gates this block as well as the ladder.
+      if (ranked && !w.hardCapped) {
         const nextMmr = updateRating(
           myMmr,
           oppRating,
           isWin,
-          isPvp ? { ...PVP_UPDATE, performance } : soloOpts
+          // The weights ride the PvP branch alone. A solo match has no trusted
+          // opponent, so `w` is ×1.00 there anyway; keeping `soloOpts`
+          // untouched is what makes §2.10's "SoloAI is excluded by
+          // construction" structural rather than a consequence.
+          isPvp
+            ? {
+                ...PVP_UPDATE,
+                performance,
+                k: PVP_UPDATE.k * w.mu,
+                sigmaScale: PVP_UPDATE.sigmaScale * w.sigma,
+              }
+            : soloOpts
         );
         profile.mmrMu = nextMmr.mu;
         profile.mmrSigma = nextMmr.sigma;
@@ -3378,7 +3422,14 @@ class GameDatabase {
         const placing = profile.rankedGames < PLACEMENT_GAMES;
         const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
         const rankOpts = isPvp
-          ? { ...placementOpts, performance }
+          ? {
+              ...placementOpts,
+              performance,
+              // Same weights as the hidden update above: the two estimators
+              // must not diverge because of bot participation (§2.1).
+              k: placementOpts.k * w.mu,
+              sigmaScale: placementOpts.sigmaScale * w.sigma,
+            }
           : {
               // Lighter on mu than a duel — beating an AI says less than beating
               // a person — and held under the same ceiling every solo result is,
@@ -3908,6 +3959,40 @@ class GameDatabase {
   public pruneExposure(now: Date): void {
     const cutoff = new Date(now.getTime() - EXPOSURE_TTL_MS).toISOString();
     this.stmt('DELETE FROM competitive_exposure WHERE at < ?').run(cutoff);
+  }
+
+  /**
+   * §4.5 steps 2 and 3, in that order: write this participant's row, then read
+   * what came BEFORE it.
+   *
+   * Insert-first is what lets both seats read the same window from the same
+   * anchor; the `matchKey` exclusion inside `exposureCounts` is what keeps it
+   * honest. Split into two public methods so each half is testable on its own,
+   * and paired here so no caller can get the order wrong.
+   */
+  private recordAndCountExposure(
+    playerId: string,
+    context: RecordMatchContext,
+    matchKey: string,
+    now: Date
+  ): ExposureCounts {
+    const oppId = context.opponentId!;
+    const at = context.decidedAt ?? now;
+    // DERIVED from the trusted id, never carried on a payload or the wire.
+    const oppIsBot = isBotAccount(oppId);
+    const oppBand = context.opponentBand ?? 'unranked';
+    this.recordExposure({ playerId, oppId, matchKey, at, oppIsBot, oppBand });
+    return this.exposureCounts({
+      playerId,
+      oppId,
+      matchKey,
+      at,
+      oppBand,
+      // §2.4 and §2.5 are the HUMAN's alone, and only against a bot. A bot
+      // keeps its ×1.00 progression and its own counters, subject only to the
+      // same-pair band — so those two queries are not even asked for it.
+      humanVsBot: !isBotAccount(playerId) && oppIsBot,
+    });
   }
 
   /**
