@@ -736,3 +736,139 @@ describe('the daily bot-derived rankedDuels credit cap', () => {
     expect(after.tier).not.toBe('overlord');
   });
 });
+
+describe('SoloAI is excluded by construction', () => {
+  // §2.10. A solo match has no opponent ACCOUNT, so no exposure row can form
+  // and no pair can be classified — the exclusion is structural rather than a
+  // rule anybody has to remember. What this pins is that it STAYS structural:
+  // repeated solo play can never be blocked, zeroed or qualification-suppressed
+  // by a system built for opponents that do not exist here.
+
+  const soloMatch = (me: string, difficulty: string, at: Date) => {
+    seq += 1;
+    return db.recordMatch(
+      {
+        ...duel(me, { mode: 'solo', difficulty } as Partial<MatchEndPayload>),
+        matchKey: `solo:${seq}`,
+      } as MatchEndPayload,
+      // No opponentId, no opponentBand, no decidedAt: a solo caller has none
+      // of them, which is exactly why nothing here can classify a pair.
+      { decidedAt: at } as never
+    );
+  };
+
+  it('writes no exposure row over fifty consecutive matches at an earned rung', () => {
+    const me = human();
+    for (let i = 0; i < 50; i += 1) {
+      seedRating(me, { rankMu: 26, mmrMu: 26 });
+      soloMatch(me, 'pro', new Date(ANCHOR.getTime() + i * 60_000));
+    }
+    const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      expect(
+        (
+          raw
+            .prepare('SELECT COUNT(*) AS n FROM competitive_exposure WHERE playerId = ? OR oppId = ?')
+            .get(me, me) as { n: number }
+        ).n
+      ).toBe(0);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('moves the fiftieth match exactly as much as the first', () => {
+    // The whole of "never blocked or zeroed", as a number. Any ladder reaching
+    // solo would show here as decay: the 50th would move less than the 1st, or
+    // nothing at all.
+    const me = human();
+    const at = (i: number) => new Date(ANCHOR.getTime() + i * 60_000);
+    seedRating(me, { rankMu: 26, mmrMu: 26 });
+    const first = db.getProfile(me).rankMu;
+    soloMatch(me, 'pro', at(0));
+    const firstDelta = db.getProfile(me).rankMu - first;
+    expect(firstDelta).toBeGreaterThan(0);
+
+    for (let i = 1; i < 49; i += 1) {
+      seedRating(me, { rankMu: 26, mmrMu: 26 });
+      soloMatch(me, 'pro', at(i));
+    }
+    seedRating(me, { rankMu: 26, mmrMu: 26 });
+    const before = db.getProfile(me).rankMu;
+    soloMatch(me, 'pro', at(49));
+    expect(db.getProfile(me).rankMu - before).toBeCloseTo(firstDelta, 10);
+  });
+
+  it('never lets a weight reach the solo branch, structurally', () => {
+    // ASSERTED BY READING THE SOURCE, because at runtime there is nothing to
+    // see: a solo caller supplies no trusted opponent, so `w` is the literal
+    // ×1.00 fallback and applying it to the solo branch changes no number
+    // today. Measured — halving the solo `k` reddens none of the cases above,
+    // because they re-seed before every match and compare two matches under
+    // the same mutation.
+    //
+    // The guard is still real, and it is what makes §2.10 structural rather
+    // than incidental: the moment any caller supplies an opponent for a match
+    // recorded as `solo` — a machine match at a table is the shape that
+    // invites it — `w` stops being ×1.00 and a solo result would start being
+    // weighted for having been played against a bot, which is exactly what
+    // §2.10 says can never happen.
+    //
+    // Same idiom as the trusted-opponent branch above, and the same reasoning:
+    // a test that cannot fail is worse than no test, so it reads the one thing
+    // that can.
+    const src = fs.readFileSync(path.join(process.cwd(), 'server', 'db.ts'), 'utf8');
+    const body = src.slice(src.indexOf('  public recordMatch('));
+    const recordMatch = body.slice(0, body.indexOf('\n  }\n'));
+
+    const opts = recordMatch.indexOf('const rankOpts = isPvp');
+    expect(opts).toBeGreaterThan(-1);
+    const soloArm = recordMatch.slice(recordMatch.indexOf(': {', opts), recordMatch.indexOf('};', opts));
+    // The PvP arm above it carries both weights; the solo arm carries neither.
+    const pvpArm = recordMatch.slice(opts, recordMatch.indexOf(': {', opts));
+    expect(pvpArm).toContain('w.mu');
+    expect(pvpArm).toContain('w.sigma');
+    expect(soloArm).not.toContain('w.mu');
+    expect(soloArm).not.toContain('w.sigma');
+    // ...and the ceiling that IS allowed to bound it is still there.
+    expect(soloArm).toContain('soloMuCap(difficulty)');
+  });
+
+  it('credits no rankedDuels, however many are played', () => {
+    // A solo match is not a duel, so it never spends or is refused the daily
+    // allowance — `duelCredited` is `isPvp && creditAllowed` and the first
+    // clause settles it.
+    const me = human();
+    seedRating(me, { rankMu: 26, mmrMu: 26 });
+    const before = db.getProfile(me).rankedDuels;
+    for (let i = 0; i < 10; i += 1) soloMatch(me, 'pro', new Date(ANCHOR.getTime() + i * 60_000));
+    expect(db.getProfile(me).rankedDuels).toBe(before);
+  });
+
+  it('still stops at the rung ceiling, which is the ONE thing that may bound it', () => {
+    // SOLO_MU_CAPS is untouched by any of this: farming a rung converges on it
+    // and stops. Asserted here so a future anti-farming change cannot quietly
+    // stand in for the cap, or remove it.
+    const me = human();
+    // Pro's ceiling is 30.9. From just under it a win climbs and stops there.
+    seedRating(me, { rankMu: 30.8, mmrMu: 30.8 });
+    soloMatch(me, 'pro', ANCHOR);
+    const capped = db.getProfile(me).rankMu;
+    expect(capped).toBeGreaterThan(30.8);
+    expect(capped).toBeLessThanOrEqual(30.9);
+    // Above it the rung says nothing in either direction — a win moves 0 and
+    // so does a loss, which is what `outgrown` means.
+    seedRating(me, { rankMu: 34, mmrMu: 34 });
+    soloMatch(me, 'pro', ANCHOR);
+    expect(db.getProfile(me).rankMu).toBe(34);
+    seedRating(me, { rankMu: 34, mmrMu: 34 });
+    db.recordMatch(
+      {
+        ...duel(me, { mode: 'solo', difficulty: 'pro', isWinner: false } as Partial<MatchEndPayload>),
+        matchKey: `solo:outgrown:${(seq += 1)}`,
+      } as MatchEndPayload,
+      { decidedAt: ANCHOR } as never
+    );
+    expect(db.getProfile(me).rankMu).toBe(34);
+  });
+});
