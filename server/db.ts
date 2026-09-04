@@ -4369,6 +4369,16 @@ class GameDatabase {
         this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(newDeviceId);
         this.stmt(`UPDATE ${table} SET playerId = ? WHERE playerId = ?`).run(newDeviceId, fromId);
       }
+      // The SECOND identity-bearing column, which PLAYER_KEYED_TABLES cannot
+      // see: an exposure row names both participants, so the loop above has
+      // carried only the rows where this account was the player. Missed, the
+      // pair reads brand new from the OPPONENT's side and the same-pair
+      // anti-farm ladder restarts at match #1 — a free reset for anyone
+      // willing to sign in on a second browser. There is no collision to
+      // clear first, since the key is (playerId, matchKey) and this touches
+      // neither.
+      this.stmt('UPDATE competitive_exposure SET oppId = ? WHERE oppId = ?')
+        .run(newDeviceId, fromId);
       // Everything already pointed at the account follows it, and both ends of
       // the move are members from here on.
       this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
@@ -4444,6 +4454,13 @@ class GameDatabase {
       for (const table of PLAYER_KEYED_TABLES) {
         this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(playerId);
       }
+      // The opponent side, invisible to the loop above for the same reason
+      // moveAccount has to rewrite it by hand. Deleted rather than scrubbed:
+      // it UNDER-counts a survivor's pair history, which errs toward leniency
+      // and self-heals inside the 48h prune window — the safe direction, and
+      // unlike `matches` there is no second player's record of the game here
+      // to preserve, since each seat files its own row.
+      this.stmt('DELETE FROM competitive_exposure WHERE oppId = ?').run(playerId);
       this.stmt('DELETE FROM players WHERE id = ?').run(playerId);
       // Both directions, and every browser: the rows naming this account, and
       // any naming one of the browsers that belonged to it.

@@ -191,6 +191,49 @@ describe('bot_accounts_backfill_v1', () => {
 });
 
 describe('bot_accounts is NOT a player-keyed table', () => {
+  it('is untouched by an account move — a roster row belongs to no browser', () => {
+    // The list-membership test below catches a name added to
+    // PLAYER_KEYED_TABLES; this catches the other way in, a hand-written
+    // UPDATE beside the loop of the kind competitive_exposure legitimately
+    // needs for its second identity column. A bot has no browser to be moved
+    // to, so the right answer for this table is that a move does not see it
+    // at all — and if one ever did, roster rows would arrive on a human's new
+    // device and that human would start reading as a bot everywhere.
+    // The MOVING account has to carry a bot_accounts row of its own, or the
+    // mutation this exists to catch matches no rows and the test passes in
+    // both states — the same vacuity as asserting a bot with no band history
+    // is exempt from the band ladder. Written directly rather than through
+    // insertBot, which enforces the naming convention on what may be written.
+    const from = 'dev_botmove_aaaaaaaa01';
+    const to = 'dev_botmove_aaaaaaaa02';
+    db.getProfile(from);
+    expect(db.initializeProfile(from, 'BotMover').ok).toBe(true);
+    raw((h) =>
+      h
+        .prepare('INSERT OR IGNORE INTO bot_accounts (botId, createdAt) VALUES (?, ?)')
+        .run(from, new Date().toISOString())
+    );
+    db.reloadBotAccounts();
+    expect(isBotAccount(from)).toBe(true);
+    const ids = () =>
+      raw((h) =>
+        (h.prepare('SELECT botId FROM bot_accounts ORDER BY botId').all() as unknown as Array<{
+          botId: string;
+        }>).map((r) => r.botId)
+      );
+    const before = ids();
+    expect(before.length).toBeGreaterThan(0);
+
+    const code = db.getProfile(from).recoveryCode!;
+    expect(db.signInWithCode(code, to)).not.toBeNull();
+
+    // The roster is exactly as it was, and the row did NOT follow the account
+    // to its new device: bot_accounts names the roster, never a browser.
+    expect(ids()).toEqual(before);
+    for (const id of before) expect(isBotAccount(id)).toBe(true);
+    expect(isBotAccount(to)).toBe(false);
+  });
+
   it('is absent from PLAYER_KEYED_TABLES, and carries no playerId column', () => {
     // A bot has no browser, so it is never moved between devices and never
     // deleted by a player. PLAYER_KEYED_TABLES is walked by moveAccount and
