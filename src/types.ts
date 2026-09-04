@@ -571,6 +571,18 @@ export interface LeaderboardEntry {
   // Rank among HUMAN players only — bots never shift a human's number.
   // Bot rows (isBot) carry rank: null.
   rank: number | null;
+  /**
+   * A bot's rank among BOTS, and null for a human.
+   *
+   * Two ladders on one board. Play-bots compete for the top of their own the
+   * way people compete for the top of theirs, and either may wear Cyber
+   * Overlord — `tierFor` is a pure function of a rating and has never asked
+   * whose it is. What must never happen is a bot taking a human's NUMBER, so
+   * this is a separate field rather than a value in `rank`: a human's `#7` is
+   * byte-identical whether bot rows are interleaved or hidden, which
+   * `tests/leaderboard.test.ts` has pinned since bots existed.
+   */
+  botRank?: number | null;
   isBot?: boolean;
   id: string;
   username: string;

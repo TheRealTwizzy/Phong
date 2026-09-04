@@ -106,11 +106,15 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
 
   // Gold, silver and bronze are the content here, not chrome — a medal that
   // took the shell's accent would stop reading as a medal.
-  const renderRankBadge = (rank: number | null) => {
+  // A bot's number is drawn in the bot colour, never in the human ramp. The
+  // two ladders are separate — a bot's `#3` and a human's `#3` are different
+  // claims — so the number alone would read as one list with the bots mixed
+  // in. The BOT chip beside the name says it a second way.
+  const renderRankBadge = (rank: number | null, botRank?: number | null) => {
     if (rank === null) {
       return (
-        <div className="w-8 h-8 rounded-full bg-rank-steady/15 border border-rank-steady/40 flex items-center justify-center text-rank-steady text-2xs">
-          {t('board_bot', language)}
+        <div className="w-8 h-8 rounded-full bg-rank-steady/15 border border-rank-steady/40 flex items-center justify-center text-rank-steady text-2xs tnum">
+          {botRank ? `#${botRank}` : t('board_bot', language)}
         </div>
       );
     }
@@ -228,7 +232,7 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
                 className="flex w-full items-center justify-between gap-2 p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100"
               >
                 <div className="flex min-w-0 items-center gap-3">
-                  {renderRankBadge(entry.rank)}
+                  {renderRankBadge(entry.rank, entry.botRank)}
                   <AvatarImage
                     playerId={entry.id}
                     hasAvatar={Boolean(entry.avatarVersion)}

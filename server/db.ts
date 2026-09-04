@@ -440,12 +440,20 @@ interface PlayerRow {
 /**
  * Whether this profile is a row the ranked board would print AND sits on the
  * one rung that renders a position. Both halves matter: `tierFor` is a pure
- * function of a rating, so an uninitialized profile or a bot can hold
- * 'overlord' while the board refuses to list it, and numbering a row nobody
- * can see it beside is how the badge and the Ranks page come to disagree.
+ * function of a rating, so an uninitialized profile can hold 'overlord' while
+ * the board refuses to list it, and numbering a row nobody can see it beside
+ * is how the badge and the Ranks page come to disagree.
+ *
+ * A BOT passes this now, and is numbered against other bots rather than
+ * against people — `ladderPosition` takes the kind and counts its own. That
+ * is the same two-ladder rule `getLeaderboard` applies, said here so the badge
+ * and the board cannot disagree: a bot excluded here but numbered there would
+ * be exactly the disagreement this comment already warns about, one level up.
+ * A bot with nothing played is still absent, because the progress filter
+ * catches it the way it catches a freshly onboarded human.
  */
 function onLadder(p: PlayerProfile): boolean {
-  return p.tier === 'overlord' && Boolean(p.initializedAt) && !p.id.startsWith('bot-');
+  return p.tier === 'overlord' && Boolean(p.initializedAt);
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
@@ -4113,11 +4121,16 @@ class GameDatabase {
    * compile-time values, so the text stays constant.
    */
   private ladderPosition(id: string, rankMu: number): number | null {
+    // Counted against its OWN KIND. Bots race bots and people race people, so
+    // a bot climbing never moves a human's number and a human climbing never
+    // moves a bot's — the same rule `getLeaderboard`'s two dense counters
+    // apply, and the reason both may hold Cyber Overlord at once.
+    const kind = id.startsWith('bot-') ? "AND p.id LIKE 'bot-%'" : "AND p.id NOT LIKE 'bot-%'";
     const row = this.stmt(
         `SELECT COUNT(*) AS above
            FROM players p
           WHERE p.initializedAt IS NOT NULL
-            AND p.id NOT LIKE 'bot-%'
+            ${kind}
             AND p.id <> ?
             AND p.rankedGames >= ${PLACEMENT_GAMES}
             AND p.rankSigma <= ${PLACEMENT_SIGMA}
@@ -4215,15 +4228,23 @@ class GameDatabase {
     // whether bot rows are interleaved into the view or not.
     const out: LeaderboardEntry[] = [];
     let humanRank = 0;
+    // Bots are numbered too, on their own ladder. Two dense counters over ONE
+    // ordered scan, so neither can shift the other: a human's number counts
+    // humans and a bot's counts bots, and interleaving or hiding the bot rows
+    // changes neither. That is what lets a person and a play-bot both hold
+    // Cyber Overlord without either taking the other's place.
+    let botRank = 0;
     for (const row of rows) {
       if (out.length >= take) break;
       const isBot = row.id.startsWith('bot-');
       if (isBot && !includeBots) continue;
-      if (!isBot) humanRank++;
+      if (isBot) botRank++;
+      else humanRank++;
       const p = rowToProfile(row);
       const winRate = p.matchesPlayed > 0 ? Math.round((p.matchesWon / p.matchesPlayed) * 100) : 0;
       out.push({
         rank: isBot ? null : humanRank,
+        botRank: isBot ? botRank : null,
         isBot: isBot || undefined,
         id: p.id,
         username: p.username,

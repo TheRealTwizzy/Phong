@@ -66,8 +66,12 @@ beforeAll(async () => {
   // Bots are pre-placed and rated, so a count that forgets them puts the whole
   // curated roster above every human. Two of them sit ABOVE the apex on
   // purpose, which is the case that would be invisible with a weaker fixture.
-  db.insertBot({ id: 'bot-apex-1', username: 'BotApexOne', xp: 9000, mu: 41 });
-  db.insertBot({ id: 'bot-apex-2', username: 'BotApexTwo', xp: 9000, mu: 39 });
+  // `rankedDuels` is explicit because a bot obeys the apex duel gate like
+  // anybody: at mu 41 with none played, `tierFor` walks it down to Legend.
+  // That is the gate working, and it used to be invisible here because the
+  // roster seeded a fabricated career that happened to satisfy it.
+  db.insertBot({ id: 'bot-apex-1', username: 'BotApexOne', xp: 9000, mu: 41, rankedDuels: 40 });
+  db.insertBot({ id: 'bot-apex-2', username: 'BotApexTwo', xp: 9000, mu: 39, rankedDuels: 40 });
 
   seat('dev_overlord_aaaaaaaaa', 'ApexAlpha', 42);
   seat('dev_overlord_bbbbbbbbb', 'ApexBravo', 40);
@@ -100,6 +104,37 @@ beforeAll(async () => {
 
 afterAll(() => {
   fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+// Placed BEFORE the top-N suite below, deliberately: that one seeds past
+// LADDER_TOP_N to prove position 101 is no position, which pushes every human
+// here off the ladder. A later block reading absolute positions would see
+// `undefined` and look like this feature was broken.
+describe('a play-bot races other play-bots, never the people', () => {
+  it('numbers a bot against bots and leaves every human number alone', () => {
+    // Two ladders. `tierFor` is a pure function of a rating and has never
+    // asked whose it is, so a bot at the apex holds Cyber Overlord like
+    // anybody — what must never happen is a bot taking a human's NUMBER.
+    const humansBefore = [
+      db.getProfile('dev_overlord_aaaaaaaaa').ladderPosition,
+      db.getProfile('dev_overlord_bbbbbbbbb').ladderPosition,
+      db.getProfile('dev_overlord_ccccccccc').ladderPosition,
+    ];
+    expect(humansBefore).toEqual([1, 2, 3]);
+
+    // These two bots sit at mu 41 and 39 — ABOVE two of those humans — and
+    // still do not displace one. They are numbered among themselves instead.
+    const top = db.getProfile('bot-apex-1');
+    const second = db.getProfile('bot-apex-2');
+    expect(top.tier).toBe('overlord');
+    expect(top.ladderPosition).toBe(1);
+    expect(second.ladderPosition).toBe(2);
+
+    // And a bot and a human hold the SAME placement at once, which is the
+    // whole point: #1 of the people and #1 of the machines are two answers to
+    // two questions, not a contradiction.
+    expect(db.getProfile('dev_overlord_aaaaaaaaa').ladderPosition).toBe(1);
+  });
 });
 
 describe('the ladder position the top rung renders', () => {

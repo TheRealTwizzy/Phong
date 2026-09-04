@@ -73,6 +73,23 @@ describe('leaderboard bot filtering', () => {
     }
   });
 
+  it('numbers bots on their own ladder, never on a human\'s', () => {
+    const board = db.getLeaderboard('elo', 50, true);
+    const bots = board.filter((e) => e.isBot);
+    const humans = board.filter((e) => !e.isBot);
+
+    // Two ladders on one board. A bot carries no human rank and a human
+    // carries no bot rank, so neither can be read as standing on the other's.
+    expect(bots.every((b) => b.rank === null)).toBe(true);
+    expect(humans.every((h) => h.botRank === null)).toBe(true);
+
+    // Each is dense and starts at 1: a bot competes for the top of its own
+    // ladder the way a person competes for the top of theirs, which is what
+    // lets both hold Cyber Overlord without either taking the other's place.
+    expect(bots.map((b) => b.botRank)).toEqual(bots.map((_, i) => i + 1));
+    expect(humans.map((h) => h.rank)).toEqual(humans.map((_, i) => i + 1));
+  });
+
   it('human ranks are identical whether bots are shown or hidden', () => {
     const hidden = db.getLeaderboard('elo', 50, false);
     const shown = db.getLeaderboard('elo', 50, true);
