@@ -518,6 +518,28 @@ export function checkPaddleCollision(
 export const MAX_AI_COMPETENCE = 0.81;
 
 /**
+ * The ceiling a PLAY-BOT may play at, above the solo ladder's.
+ *
+ * `MAX_AI_COMPETENCE` is a statement about the five DIFFICULTIES: it is their
+ * top knot, their clamp, and the denominator their lapse and serve skill are
+ * normalised by, and it came DOWN to 0.81 because an adapted Cyber returning
+ * 93% made the top rung a lottery on the AI's own error. None of that
+ * reasoning is about a bot, which is not a rung of anybody's ladder and has to
+ * be able to hold its own against a Cyber Overlord for the population to reach
+ * the top of the board at all.
+ *
+ * So the ceiling is a PARAMETER wherever those five sites read it, defaulting
+ * to the solo value — which is what keeps solo byte-identical, and what
+ * `tests/physics.test.ts` asserts over the whole rung-by-rating grid.
+ *
+ * `tests/physics.test.ts`'s standing rule — no DIFFICULTY may ever return ≥93%
+ * of balls — stays scoped to the five difficulties. It is not widened to bots,
+ * which get their own bound: the rule exists because a rung a player cannot
+ * beat is a broken rung, and a bot is an opponent rather than a setting.
+ */
+export const BOT_MAX_COMPETENCE = 0.95;
+
+/**
  * The other end of the same range, and it exists for the same reason the top
  * one does: the curve has to keep the rungs apart everywhere they can land.
  *
@@ -649,7 +671,7 @@ interface AIParams {
 // what the original expression gives at the ceiling (0.14 × (1 − 0.78) ≈
 // 0.03): even Chaos stands a rally out roughly one time in thirty-three,
 // which is part of why the ceiling is not a wall.
-function lapseForCompetence(c: number): number {
+export function lapseForCompetence(c: number, ceiling: number = MAX_AI_COMPETENCE): number {
   // The floor rose with the aggression rework. Aggression used to be paid for
   // in accuracy — it was added to targetX, so a rung played for the corners by
   // standing off-centre and missing more. Moving it to the ball leaving made
@@ -658,7 +680,7 @@ function lapseForCompetence(c: number): number {
   // difference is given back here rather than by capping competence, because
   // competence is what ORDERS the rungs and lapses are what make any of them
   // beatable.
-  return lerp(0.078, 0.048, clamp(c / MAX_AI_COMPETENCE, 0, 1));
+  return lerp(0.078, 0.048, clamp(c / ceiling, 0, 1));
 }
 
 // Calibrated by simulating rallies through the real checkPaddleCollision above.
@@ -694,7 +716,7 @@ function lapseForCompetence(c: number): number {
  */
 const MAX_CONTACT_ERROR = 0.085 * Math.pow(MIN_AI_COMPETENCE, -0.7);
 
-function paramsForCompetence(c: number): AIParams {
+function paramsForCompetence(c: number, ceiling: number = MAX_AI_COMPETENCE): AIParams {
   return {
     reactionTime: lerp(0.34, 0.05, c),
     maxSpeed: lerp(0.6, 1.7, c),
@@ -705,7 +727,7 @@ function paramsForCompetence(c: number): AIParams {
     readError: lerp(0.3, 0.05, c),
     // Chance it resolves a wall bounce instead of chasing the unreflected line.
     bounceSkill: clamp((c - 0.1) / 0.6, 0, 1),
-    lapseChance: lapseForCompetence(c),
+    lapseChance: lapseForCompetence(c, ceiling),
     jitter: lerp(0.05, 0.008, c),
     // How much of the ball's curve it accounts for. A weak AI reads a spinning
     // ball as if it were travelling straight and arrives where the ball would
@@ -755,8 +777,12 @@ export function playerPressure(state: MatchPressure): number {
  * brisk, and gets brisker still while the player is winning — the pressure
  * term is what makes a comeback feel like the opponent is bearing down.
  */
-export function aiServeDelay(competence: number, pressure = 0.5): number {
-  const skill = clamp(competence / MAX_AI_COMPETENCE, 0, 1);
+export function aiServeDelay(
+  competence: number,
+  pressure = 0.5,
+  ceiling: number = MAX_AI_COMPETENCE
+): number {
+  const skill = clamp(competence / ceiling, 0, 1);
   const base = lerp(AI_SERVE_DELAY_MAX, AI_SERVE_DELAY_MIN, skill);
   const urgency = (clamp(pressure, 0, 1) - 0.5) * 0.18;
   const jitter = (Math.random() - 0.5) * 0.12;
@@ -776,8 +802,12 @@ export function aiServeDelay(competence: number, pressure = 0.5): number {
  * every match, taken against a paddle still sitting at its starting 0.5, was
  * predictably to one side. A centred player draws a coin flip instead.
  */
-export function aiServeAim(competence: number, playerPaddleX: number): ServeAim {
-  const skill = clamp(competence / MAX_AI_COMPETENCE, 0, 1);
+export function aiServeAim(
+  competence: number,
+  playerPaddleX: number,
+  ceiling: number = MAX_AI_COMPETENCE
+): ServeAim {
+  const skill = clamp(competence / ceiling, 0, 1);
   // Where the player stands, seen from the AI's own half.
   const playerInAiCoords = 1 - clamp(playerPaddleX, 0, 1);
   // Serve to the side the player has left open — or either, if they are
@@ -829,6 +859,7 @@ export class OpponentAI {
    * below changes at all.
    */
   private override: { competence: number; style: AIStyle } | null = null;
+  private rallyCompetence: number = 0;
 
   constructor(
     difficulty: AIDifficulty = 'pro',
@@ -863,6 +894,23 @@ export class OpponentAI {
     return this.override ? this.override.competence : competenceForMu(this.effectiveMu());
   }
 
+  /**
+   * The top this AI may play at.
+   *
+   * A play-bot's is BOT_MAX_COMPETENCE and a difficulty's is the solo ladder's,
+   * which is what keeps every solo number identical: the five sites that read
+   * a ceiling all take it from here, and for a rung it is the constant they
+   * always had.
+   */
+  /** The competence rolled for the rally in progress, after the clamp. */
+  public lastRallyCompetence(): number {
+    return this.rallyCompetence;
+  }
+
+  public ceiling(): number {
+    return this.override ? BOT_MAX_COMPETENCE : MAX_AI_COMPETENCE;
+  }
+
   public reset() {
     this.paddleX = 0.5;
     this.targetX = 0.5;
@@ -875,13 +923,21 @@ export class OpponentAI {
   private beginRally(oppBall: BallState) {
     const style = this.override ? this.override.style : AI_STYLES[this.difficulty];
     const base = this.competence();
+    // The ceiling a PLAY-BOT plays under is its own; the five difficulties
+    // keep theirs. Both the volatility clamp and the lapse normaliser read it,
+    // so a bot above 0.81 is not silently pulled back to a rung's limit.
     const c = clamp(
       base + (Math.random() - 0.5) * 2 * style.volatility,
       MIN_AI_COMPETENCE,
-      MAX_AI_COMPETENCE
+      this.ceiling()
     );
-    const p = paramsForCompetence(c);
+    const p = paramsForCompetence(c, this.ceiling());
     this.params = p;
+    // Kept so the CLAMP is observable. Everything it feeds is private and its
+    // only other consequence is a return rate, which no fixture can attribute
+    // to one ceiling — measured, reverting the clamp to the solo constant
+    // reddened nothing at all.
+    this.rallyCompetence = c;
 
     this.rallyActive = true;
     this.entryY = oppBall.y;

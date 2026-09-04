@@ -26,6 +26,7 @@ import type { BallState, MatchRules, RoomMatchConfig, WSServerMessage } from '..
 import type { ServeAim } from '../src/game/physics';
 import {
   BALL_BASE_RADIUS,
+  BOT_MAX_COMPETENCE,
   MAX_BALL_SPEED,
   OpponentAI,
   PADDLE_WIDTH_RATIO,
@@ -60,8 +61,12 @@ const PADDLE_SEND_EPSILON = 0.004;
  * the opponent instead of away from them — which changes who wins and nothing
  * a match-level test can see.
  */
-export function serveAimFor(competence: number, oppPaddleInThisFrame: number): ServeAim {
-  return aiServeAim(competence, 1 - oppPaddleInThisFrame);
+export function serveAimFor(
+  competence: number,
+  oppPaddleInThisFrame: number,
+  ceiling: number = BOT_MAX_COMPETENCE
+): ServeAim {
+  return aiServeAim(competence, 1 - oppPaddleInThisFrame, ceiling);
 }
 
 export interface PlaybotDriverOptions {
@@ -345,7 +350,11 @@ export class PlaybotDriver {
           playerScore: this.scores[this.seat ?? 0],
           opponentScore: this.scores[this.seat === 0 ? 1 : 0],
           maxRally: 0,
-        })
+        }),
+        // Its OWN ceiling: normalised by the solo ladder's, a bot above 0.81
+        // would saturate at skill 1 and every strong bot would serve
+        // identically — the same collapse the top three rungs had.
+        this.ai.ceiling()
       );
     } else {
       this.phase = 'waiting';
@@ -377,7 +386,7 @@ export class PlaybotDriver {
   }
 
   private serve(): void {
-    const aim = serveAimFor(this.ai.competence(), this.oppPaddleX);
+    const aim = serveAimFor(this.ai.competence(), this.oppPaddleX, this.ai.ceiling());
     const v = serveVelocity(aim, this.rules);
     this.ball = {
       x: this.ai.paddleX,
