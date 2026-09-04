@@ -144,7 +144,15 @@ export interface Relay {
  * `label` only names the temp directory, so a stranded one says which suite
  * left it.
  */
-export async function startRelay(label: string): Promise<Relay> {
+export async function startRelay(
+  label: string,
+  /**
+   * Extra environment for the server process. Used by suites that need a
+   * feature this deployment only runs when asked — the play-bot population is
+   * off unless PLAY_BOTS names a count, so its suite has to switch it on.
+   */
+  extraEnv: Record<string, string> = {}
+): Promise<Relay> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), `phong-${label}-`));
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
@@ -154,7 +162,7 @@ export async function startRelay(label: string): Promise<Relay> {
     cwd: path.resolve(__dirname, '..', '..'),
     // production skips the Vite middleware, which is all this needs and much
     // faster to boot; the API and the relay are the same either way.
-    env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, NODE_ENV: 'production' },
+    env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, NODE_ENV: 'production', ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
     // Its own process group, so it can be killed as a whole. `npx tsx` is a
     // TREE — a shell, npx, then the server — and signalling only the process

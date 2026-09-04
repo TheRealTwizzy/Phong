@@ -20,6 +20,8 @@ import {
   setSessionCookie,
   sessionIdentity,
 } from './server/auth';
+import { botIdForSocket } from './server/botSocket';
+import { startBotPlayers, type BotPlayers } from './server/botPlayers';
 import { buildId } from './server/build';
 import { hasUnlock, playableDifficulty } from './src/achievements';
 import {
@@ -113,6 +115,8 @@ const rooms = new Map<string, Room>();
  * the server did.
  */
 let shuttingDown = false;
+/** The play-bot population, when this deployment runs one. */
+let botPlayers: BotPlayers | null = null;
 
 /**
  * The ranked queue: everybody currently looking for a game.
@@ -2705,7 +2709,22 @@ async function startServer() {
     // on the spot, without taking the graceful SIGTERM path.
     ws.on('error', (err) => console.warn('[ws] socket error:', (err as Error)?.message));
 
-    const cookieDeviceId = deviceIdFromCookieHeader(upgradeReq.headers.cookie);
+    // A play-bot, seated by this process itself. Read from a registry that
+    // only `BotSocket`'s constructor writes, never from anything on the wire —
+    // so unlike a cookie there is no claim here to verify and nothing for a
+    // remote client to forge. A socket that arrived over the network cannot be
+    // in that registry, because nothing handling network input adds to it.
+    //
+    // It is NOT a bypass of the session rule below, it is the absence of a
+    // question: that rule asks whether a BROWSER still holds an account it was
+    // handed, and a bot has no browser and was handed nothing. The account is
+    // the bot. Note the shape of the alternative that was rejected — minting
+    // the bot a device cookie — which cannot work at all: verifyToken and
+    // verifySessionToken both require /^dev_[0-9a-f]{18}$/ and a bot id is
+    // `bot-` by definition, so it would have meant widening the shape check on
+    // the guard that closed the account-transfer exploit.
+    const botDeviceId = botIdForSocket(ws);
+    const cookieDeviceId = botDeviceId ?? deviceIdFromCookieHeader(upgradeReq.headers.cookie);
 
     // A duel is the relay's own record-keeping: it writes a finished match
     // onto both seats' profiles. So the same rule the REST routes hold to
@@ -2713,8 +2732,12 @@ async function startServer() {
     // device, or a session displaced by a newer load, does not get a court.
     // Without this the exploit simply moved: barred from recording a solo
     // match, an evicted device could still play (and be recorded for) a duel.
+    //
+    // A bot skips it and skips `liveSockets` with it: there is no second
+    // session that could displace a bot, so registering one would only give
+    // `closeDisplacedSockets` something to iterate that can never match.
     let cookieSessionId: string | null = null;
-    if (cookieDeviceId) {
+    if (cookieDeviceId && !botDeviceId) {
       const session = resolveSession(cookieDeviceId, upgradeReq.headers.cookie);
       if (session.status !== 'active') {
         ws.send(JSON.stringify({ type: 'session_invalid', status: session.status, build: buildId() }));
@@ -4363,6 +4386,30 @@ async function startServer() {
       console.error('[db] could not describe the datastore:', e?.message);
     }
 
+    // The play-bot population, if this deployment runs one.
+    //
+    // OFF unless PLAY_BOTS names a count, and started here rather than beside
+    // `wss` because a bot opens a connection immediately and there is nothing
+    // to connect to until the listener is up. Seeded from the roster already
+    // in the database — this never creates accounts, so a deployment that has
+    // not seeded bots simply runs none and says so.
+    try {
+      const want = Math.max(0, Math.floor(Number(process.env.PLAY_BOTS) || 0));
+      if (want > 0) {
+        const ids = db.botIds(want);
+        if (!ids.length) {
+          console.warn('[bots] PLAY_BOTS is set but this database holds no bot accounts');
+        } else {
+          botPlayers = startBotPlayers({ wss, botIds: ids });
+          console.log(`[bots] ${ids.length} play-bot(s) seated`);
+        }
+      }
+    } catch (e: any) {
+      // A population that will not start must never take the server with it:
+      // bots are a garnish and every real player on the box outranks them.
+      console.error('[bots] could not start the play-bot population:', e?.message);
+    }
+
     // And the same courtesy for backups, for the same reason one line up: the
     // day you find out the schedule was never armed must not be the day you
     // need a restore. Printed at boot because that is the one moment somebody
@@ -4397,6 +4444,10 @@ async function startServer() {
     if (shuttingDown) return;
     // Before a single socket is closed: every close below runs vacateSeat.
     shuttingDown = true;
+    // Bots go first and go quietly. `shuttingDown` is already set, so their
+    // closes fall through to persistDuelStreaks exactly as a phone's do and
+    // nobody is charged an abandon for a deploy.
+    try { botPlayers?.stop(); } catch { /* never block a shutdown on a garnish */ }
     console.log(`${signal} received, shutting down`);
     for (const client of wss.clients) {
       client.close(1001, 'Server restarting');

@@ -2930,6 +2930,24 @@ class GameDatabase {
    * it: the collision is skipped and named in the log, the rest of the roster
    * still lands, and the flag is still stamped so this does not retry forever.
    */
+  /**
+   * The bot accounts this database holds, oldest first, up to `limit`.
+   *
+   * Ordered by creation so a deployment that raises PLAY_BOTS keeps the bots
+   * it already had rather than reshuffling which accounts are live — a bot's
+   * rating is earned, so which rows are playing is not an arbitrary choice.
+   * Initialized only: an uninitialized row takes no seat of any kind.
+   */
+  public botIds(limit: number): string[] {
+    const rows = this.stmt(
+      `SELECT id FROM players
+        WHERE id LIKE 'bot-%' AND initializedAt IS NOT NULL
+        ORDER BY createdAt ASC, id ASC
+        LIMIT ?`
+    ).all(Math.max(0, Math.floor(limit))) as unknown as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
   public seedBotRoster(roster: BotSeed[]): { inserted: number; skipped: string[] } {
     const KEY = 'bot_roster_v1';
     if (this.getMeta(KEY)) return { inserted: 0, skipped: [] };
