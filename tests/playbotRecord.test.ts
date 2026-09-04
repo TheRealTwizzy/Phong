@@ -872,3 +872,115 @@ describe('SoloAI is excluded by construction', () => {
     expect(db.getProfile(me).rankMu).toBe(34);
   });
 });
+
+describe('XP is untouched by bot participation', () => {
+  // §2.8. Human-vs-human, human-vs-bot and bot-vs-bot all keep the
+  // repository's existing XP behaviour for both participants, INCLUDING at a
+  // hard cap. Bots earn persistent XP so they level, satisfy XP/level gates
+  // and unlock content like any account.
+  //
+  // The ×0.70 lives in the same function as the payout, which is why this is
+  // asserted rather than assumed: never apply it to XP, and never reduce
+  // bot-vs-bot XP for being bots.
+
+  /**
+   * What the match REPORTED and what it BANKED, which are two numbers.
+   *
+   * Asserting the returned `earnedXp` alone proves nothing about the profile:
+   * measured, a mutation that subtracted the weight from `profile.xp` after
+   * the fact left the reported figure untouched and reddened neither. What the
+   * overlay says and what the account got have to be the same number.
+   */
+  const xpFor = (me: string, opp: string): { reported: number; banked: number } => {
+    seedRating(me);
+    const before = db.getProfile(me).xp;
+    seq += 1;
+    const result = db.recordMatch(
+      { ...duel(me), matchKey: `xp:${seq}` } as MatchEndPayload,
+      {
+        opponentId: opp,
+        opponentBand: 'ace',
+        decidedAt: ANCHOR,
+        opponentRating: { mu: 25, sigma: 3 },
+        opponentRankRating: { mu: 25, sigma: 3 },
+      } as never
+    );
+    return { reported: result.earnedXp, banked: db.getProfile(me).xp - before };
+  };
+
+  it('pays the same for every pair kind, from identical inputs', () => {
+    const humanVsHuman = xpFor(human(), human());
+    const humanVsBot = xpFor(human(), bot());
+    const botVsHuman = xpFor(bot(), human());
+    const botVsBot = xpFor(bot(), bot());
+    expect(humanVsHuman.reported).toBeGreaterThan(0);
+    for (const [name, got] of [
+      ['human-bot', humanVsBot], ['bot-human', botVsHuman], ['bot-bot', botVsBot],
+    ] as const) {
+      expect({ name, ...got }).toEqual({ name, reported: humanVsHuman.reported, banked: humanVsHuman.banked });
+    }
+    // `banked` is deliberately NOT compared to `reported` within a fixture:
+    // achievements pay their own XP into the same profile, so the two differ
+    // by whatever this match unlocked. What must hold is that both are the
+    // SAME across pair kinds — which is what catches a weight applied to the
+    // profile after the reported figure was computed.
+  });
+
+  it('pays it at a hard cap too, where the rating moves nothing', () => {
+    // The trade this whole system is built on: repeated play stops being
+    // competitive evidence and never stops being play.
+    const me = human();
+    const theBot = bot();
+    for (let i = 0; i < 12; i += 1) {
+      seq += 1;
+      db.recordExposure({
+        playerId: me, oppId: theBot, matchKey: `xp:cap:${seq}`,
+        at: new Date(ANCHOR.getTime() - (i + 1) * 60_000), oppIsBot: true, oppBand: 'ace',
+      });
+    }
+    const capped = xpFor(me, theBot);
+    expect(capped).toEqual(xpFor(human(), human()));
+  });
+
+  it('is paid before a weight exists at all, which is stronger than a test', () => {
+    // The real guarantee is LEXICAL: `recordMatch` pays XP well above the
+    // point where `pairing` and `w` are declared, so no opponent-type weight
+    // can reach it without somebody moving code. Worth asserting, because it
+    // is the reason §2.8 needed no production change — and because the obvious
+    // mutations (scaling `earnedXp` by `w.mu` at the payout) do not compile,
+    // which makes them useless as checks and easy to mistake for passing ones.
+    const src = fs.readFileSync(path.join(process.cwd(), 'server', 'db.ts'), 'utf8');
+    const body = src.slice(src.indexOf('  public recordMatch('));
+    const recordMatch = body.slice(0, body.indexOf('\n  }\n'));
+    const paid = recordMatch.indexOf('profile.xp += earnedXp;');
+    const weighed = recordMatch.indexOf('const pairing = context.opponentId');
+    expect(paid).toBeGreaterThan(-1);
+    expect(weighed).toBeGreaterThan(-1);
+    expect(paid).toBeLessThan(weighed);
+  });
+
+  it('levels a bot, and opens the gates its level opens', () => {
+    // A bot is an ordinary account on this axis: XP accumulates, the level
+    // follows, and anything gated on a level opens for it.
+    const theBot = bot();
+    const opponent = bot();
+    const before = db.getProfile(theBot);
+    expect(before.level).toBe(1);
+    for (let i = 0; i < 12; i += 1) {
+      seq += 1;
+      db.recordMatch(
+        { ...duel(theBot), matchKey: `xp:level:${seq}` } as MatchEndPayload,
+        {
+          opponentId: opponent, opponentBand: 'ace', decidedAt: new Date(ANCHOR.getTime() + i * 60_000),
+          opponentRating: { mu: 25, sigma: 3 }, opponentRankRating: { mu: 25, sigma: 3 },
+        } as never
+      );
+    }
+    const after = db.getProfile(theBot);
+    expect(after.xp).toBeGreaterThan(before.xp);
+    expect(after.level).toBeGreaterThan(1);
+    // ...and the level-gated achievement really fired, rather than the number
+    // moving with nothing reading it.
+    expect(after.achievements).toContain('first_win');
+  });
+});
