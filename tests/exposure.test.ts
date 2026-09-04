@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
+import type { MatchEndPayload } from '../src/types';
 import {
   BOT_BAND_SATURATION,
   BOT_DAILY_SATURATION,
@@ -488,5 +489,181 @@ describe('a prior count and the match number it indexes', () => {
     expect(
       participantWeights({ kind: 'human-bot', selfIsBot: false, won: true, counts }).mu
     ).toBeCloseTo(HUMAN_VS_BOT_BASE * 0.9, 10);
+  });
+});
+
+describe('what writes an exposure row', () => {
+  // §2.9: a match that was not eligible to move competitive rating consumes
+  // no pair, band or daily count. Eligibility is EXACTLY the repository's
+  // existing `ranksThisMatch` — the whole expression, reused rather than
+  // re-derived — so every exclusion it already makes is inherited unchanged.
+  //
+  // The near-copy this rule exists to prevent is `ranked && venueRates &&
+  // !forceUnrankedLadder`: it reads as equivalent and silently drops the SOLO
+  // arm, so a Rookie match and a rung the player has outgrown would both start
+  // writing rows. Mutation check: substitute it and the two solo cases redden
+  // while every other case here stays green.
+
+  let seat = 0;
+  const nextSeat = () => {
+    seat += 1;
+    const id = `dev_eligible_${seat}`;
+    db.getProfile(id);
+    const r = db.initializeProfile(id, `Eligible${seat}`);
+    if (!r.ok) throw new Error(`init failed: ${r.code}`);
+    return id;
+  };
+
+  const duel = (playerId: string, over: Partial<MatchEndPayload> = {}): MatchEndPayload => ({
+    playerId,
+    username: 'Eligible',
+    playerScore: 5,
+    opponentScore: 2,
+    bestStreak: 6,
+    endStreak: 0,
+    earnedStreak: 6,
+    mode: 'multiplayer',
+    isWinner: true,
+    ...over,
+  } as MatchEndPayload);
+
+  /** Record one match with a trusted opponent, and say whether a row appeared. */
+  const wroteRow = (
+    payload: MatchEndPayload,
+    context: Record<string, unknown> = {}
+  ): boolean => {
+    const matchKey = nextKey();
+    db.recordMatch({ ...payload, matchKey } as MatchEndPayload, {
+      opponentId: 'dev_eligible_opponent',
+      opponentBand: 'ace',
+      decidedAt: ANCHOR,
+      ...context,
+    } as never);
+    return rawRows(matchKey) > 0;
+  };
+
+  it('writes one for an ordinary ranked duel', () => {
+    // The positive control. Without it every assertion below passes against an
+    // implementation that never writes a row at all.
+    expect(wroteRow(duel(nextSeat()))).toBe(true);
+  });
+
+  it('writes none for a Casual duel — the venue rates nothing', () => {
+    expect(wroteRow(duel(nextSeat()), { venueRoomId: 'casual' })).toBe(false);
+  });
+
+  it('writes none for rules outside the ranked band', () => {
+    expect(
+      wroteRow(duel(nextSeat(), { rules: { paddleScale: 1.6 } } as Partial<MatchEndPayload>))
+    ).toBe(false);
+  });
+
+  it('writes none with the opponent sonar on', () => {
+    expect(
+      wroteRow(duel(nextSeat(), { rules: { opponentSonar: true } } as Partial<MatchEndPayload>))
+    ).toBe(false);
+  });
+
+  it('writes none for a forgiven abandon', () => {
+    expect(wroteRow(duel(nextSeat()), { forceUnranked: true })).toBe(false);
+  });
+
+  it('writes none for a watched machine match', () => {
+    expect(wroteRow(duel(nextSeat()), { forceUnrankedLadder: true })).toBe(false);
+  });
+
+  it('writes none for a Rookie solo match', () => {
+    // Rookie is open from the first match, so placing against it would be a
+    // formality. It feeds hidden MMR and nothing else.
+    expect(
+      wroteRow(duel(nextSeat(), { mode: 'solo', difficulty: 'rookie' } as Partial<MatchEndPayload>))
+    ).toBe(false);
+  });
+
+  it('writes none for a rung the player has outgrown', () => {
+    // Above a rung's ceiling that rung moves nothing in either direction, so
+    // it does not rate — and a match that does not rate is not evidence about
+    // anything either.
+    const me = nextSeat();
+    const raw = new DatabaseSync(DB_FILE);
+    try {
+      // Past Pro's SOLO_MU_CAPS ceiling of 30.9.
+      raw.prepare('UPDATE players SET rankMu = ? WHERE id = ?').run(34, me);
+    } finally {
+      raw.close();
+    }
+    expect(
+      wroteRow(duel(me, { mode: 'solo', difficulty: 'pro' } as Partial<MatchEndPayload>))
+    ).toBe(false);
+    // ...and the control: the same rung, below its ceiling, does write one.
+    expect(
+      wroteRow(duel(nextSeat(), { mode: 'solo', difficulty: 'pro' } as Partial<MatchEndPayload>))
+    ).toBe(true);
+  });
+
+  it('writes none without a trusted opponent id, payload or no payload', () => {
+    // §4.4: the pair comes from the ROOM, never from the payload. A client
+    // sending a fresh opponent id every match would otherwise never leave
+    // band 1 — and an unvouched multiplayer payload is already forceUnranked
+    // with a device-scoped key, so there is no rating here to protect.
+    //
+    // The second half is the assertion that took two goes. Written with no
+    // payload field at all it proved only that the CONTEXT field is required,
+    // so falling back to `payload.opponentId` passed it — which is the whole
+    // exploit. `MatchEndPayload.opponentId` exists and is client-supplied, so
+    // the fixture has to send one and watch it be ignored.
+    const bare = nextKey();
+    db.recordMatch({ ...duel(nextSeat()), matchKey: bare } as MatchEndPayload, {
+      opponentBand: 'ace', decidedAt: ANCHOR,
+    } as never);
+    expect(rawRows(bare)).toBe(0);
+
+    const forged = nextKey();
+    db.recordMatch(
+      { ...duel(nextSeat()), matchKey: forged, opponentId: 'dev_forged_opponent' } as MatchEndPayload,
+      { opponentBand: 'ace', decidedAt: ANCHOR } as never
+    );
+    expect(rawRows(forged)).toBe(0);
+  });
+
+  it('takes the pair from the context when the payload names somebody else', () => {
+    // The sharper half of the same rule: with a trusted opponent present, a
+    // payload naming a DIFFERENT one changes nothing — otherwise the count is
+    // keyed on a value the farming client chooses.
+    const me = nextSeat();
+    const trusted = 'dev_trusted_opponent';
+    const key = nextKey();
+    db.recordMatch(
+      { ...duel(me), matchKey: key, opponentId: 'dev_forged_opponent_2' } as MatchEndPayload,
+      { opponentId: trusted, opponentBand: 'ace', decidedAt: ANCHOR } as never
+    );
+    expect(countsFor({ playerId: me, oppId: trusted, at: ANCHOR }).priorPairCount).toBe(1);
+    expect(
+      countsFor({ playerId: me, oppId: 'dev_forged_opponent_2', at: ANCHOR }).priorPairCount
+    ).toBe(0);
+  });
+
+  it('consumes no count from any of them', () => {
+    // The row is the mechanism; the count is what it is for. One eligible
+    // match against this opponent, then one of every exclusion — and the pair
+    // still reads a single prior match.
+    const me = nextSeat();
+    const opp = 'dev_eligible_ineligible_opp';
+    const eligible = (over: Partial<MatchEndPayload>, ctx: Record<string, unknown> = {}) => {
+      db.recordMatch({ ...duel(me, over), matchKey: nextKey() } as MatchEndPayload, {
+        opponentId: opp, opponentBand: 'ace', decidedAt: ANCHOR, ...ctx,
+      } as never);
+    };
+    eligible({});
+    eligible({}, { venueRoomId: 'casual' });
+    eligible({ rules: { paddleScale: 1.6 } } as Partial<MatchEndPayload>);
+    eligible({ rules: { opponentSonar: true } } as Partial<MatchEndPayload>);
+    eligible({}, { forceUnranked: true });
+    eligible({}, { forceUnrankedLadder: true });
+    eligible({ mode: 'solo', difficulty: 'rookie' } as Partial<MatchEndPayload>);
+
+    expect(
+      countsFor({ playerId: me, oppId: opp, at: ANCHOR, oppBand: 'ace' }).priorPairCount
+    ).toBe(1);
   });
 });

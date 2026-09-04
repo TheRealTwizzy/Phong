@@ -159,6 +159,43 @@ export interface RecordMatchContext {
    * a way for a losing player to keep their rating.
    */
   forceUnrankedLadder?: boolean;
+  /**
+   * The OPPONENT's account id, for the anti-farming exposure store.
+   *
+   * Supplied only by server code holding a live room, the rule `venueRoomId`
+   * and `forceUnranked` above already obey. `MatchEndPayload.opponentId` is
+   * client-supplied and is deliberately not used: keyed on it, a farming
+   * client sends a fresh id every match and never leaves band 1.
+   *
+   * Absent means no pair classification is performed AT ALL — not a defaulted
+   * one. That costs nothing, because an unvouched `multiplayer` payload is
+   * already `forceUnranked` with a device-scoped key, so it moves no rating
+   * for anti-farming to protect. Solo never sets it.
+   *
+   * There is deliberately no `opponentIsBot` beside it, here or on the wire:
+   * a boolean that travels is a boolean that can be wrong, and here wrong
+   * means a client claiming a human opponent to escape the reduced stakes, or
+   * a bot one to dodge a human pair's wider thresholds. It is derived from
+   * this id at the moment of use.
+   */
+  opponentId?: string;
+  /**
+   * The opponent's tier at MATCH START, from the room's own `duelStartRatings`
+   * cache — never re-derived at record time, where the opponent's rating has
+   * already moved (the relay writes seat 0 first) and `tierFor`'s other inputs
+   * have moved with it. Caching the derived string is also what stops the two
+   * seats disagreeing about the band.
+   */
+  opponentBand?: string;
+  /**
+   * The MATCH's decided-at, supplied once for both seats.
+   *
+   * Both exposure rows carry the identical anchor, so the two seats read the
+   * same rolling window and can never sit at different points on the same
+   * ladder. A per-seat `new Date()` is within milliseconds of it in the
+   * ordinary case and comes apart at exactly the boundary worth farming.
+   */
+  decidedAt?: Date;
 }
 
 // Overridable so production can point at a persistent volume (e.g. /data on
@@ -3254,16 +3291,6 @@ class GameDatabase {
       // the player would chase them upward without bound.
       cap: soloMuCap(difficulty),
     };
-    if (ranked) {
-      const nextMmr = updateRating(
-        myMmr,
-        oppRating,
-        isWin,
-        isPvp ? { ...PVP_UPDATE, performance } : soloOpts
-      );
-      profile.mmrMu = nextMmr.mu;
-      profile.mmrSigma = nextMmr.sigma;
-    }
 
     // The visible ladder moves on a duel, and on a solo match at a difficulty
     // the player had to EARN. Rookie is the tutorial rung — placing against it
@@ -3297,383 +3324,429 @@ class GameDatabase {
       venueRates &&
       !context.forceUnrankedLadder &&
       (isPvp || (soloCountsForRank(difficulty) && !soloOutgrown));
-    // Sampled before the update so the overlay can say which way the ladder
-    // went. Only the DIRECTION ever leaves the server — the mu itself is not
-    // something the client renders (see src/components/ui/RankBadge.tsx).
-    const rankMuBefore = profile.rankMu;
-    if (ranksThisMatch) {
-      // While still unplaced, a ranked match sheds uncertainty faster — the
-      // whole point of placement matches, and what makes the profile screen's
-      // "N/PLACEMENT_GAMES" the truth rather than the first of two conditions.
-      const placing = profile.rankedGames < PLACEMENT_GAMES;
-      const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
-      const rankOpts = isPvp
-        ? { ...placementOpts, performance }
-        : {
-            // Lighter on mu than a duel — beating an AI says less than beating
-            // a person — and held under the same ceiling every solo result is,
-            // so farming a rung converges on it and stops.
-            k: SOLO_UPDATE.k,
-            cap: soloMuCap(difficulty),
-            // Sigma converges at the SAME rate as a duel's, deliberately:
-            // placement counts observations, not opponents. Shrinking it
-            // slower would land a solo player on "5/5" and still unranked —
-            // the exact trap placement was just fixed for.
-            sigmaScale: placementOpts.sigmaScale,
-          };
-      // The ladder rates against the LADDER. `oppRating` above is the hidden
-      // estimator: it predicts the match and moves the hidden pair, and the
-      // two genuinely diverge — a solo match moves mmrMu and never rankMu, and
-      // SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other — so using
-      // it here measured the standardised margin across two different scales.
-      // Absent (a solo match, or a caller with no room to sample from) falls
-      // back to an even ladder match against ourselves, the same shape
-      // `oppRating`'s own fallback takes, and never to the hidden pair, which
-      // is the bug.
-      const oppRankRating: Rating = isPvp
-        ? opponentRankRating || { mu: profile.rankMu, sigma: profile.rankSigma }
-        : oppRating;
-      const nextRank = updateRating(
-        { mu: profile.rankMu, sigma: profile.rankSigma },
-        oppRankRating,
-        isWin,
-        rankOpts
-      );
-      profile.rankMu = nextRank.mu;
-      profile.rankSigma = nextRank.sigma;
-      profile.rankedGames += 1;
-      // The duels apart from the games: what the apex is gated on. Counted
-      // only when the match rated, so a Casual duel or one on party rules is
-      // a duel played and not a duel that tested the rating.
-      if (isPvp) profile.rankedDuels += 1;
-    }
-    profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma, profile.rankedDuels);
-    // And the position with it, for the same reason the line above exists: this
-    // object was loaded BEFORE the match was applied and is handed straight
-    // back as MatchEndResult.profile, which the client installs verbatim and
-    // the relay pushes as `match_recorded`. Left to readProfile alone it would
-    // be the pre-match number — and the win that carries somebody into the top
-    // 100 is the exact moment anyone is looking at it.
-    profile.ladderPosition = onLadder(profile)
-      ? this.ladderPosition(profile.id, profile.rankMu) ?? undefined
-      : undefined;
-    // 'none' is both "did not rate" and "rated and did not move" — from the
-    // player's side those are the same fact, and the overlay says so with one
-    // glyph rather than distinguishing a difference nobody can act on.
-    // Direction and size come off ONE delta sharing one epsilon, so they cannot
-    // disagree about whether anything happened — an arrow with no direction, or
-    // a direction with no arrows, is not a state either field can reach alone.
-    const rankDelta = ranksThisMatch ? profile.rankMu - rankMuBefore : 0;
-    const rankDirection: RankDirection =
-      rankDelta > RANK_MOVE_EPSILON ? 'up' : rankDelta < -RANK_MOVE_EPSILON ? 'down' : 'none';
-    const rankMagnitude: RankMagnitude = rankMoveSize(rankDelta);
-
-    // 3. Update Match Statistics
-    profile.matchesPlayed += 1;
-    if (isWin) {
-      profile.matchesWon += 1;
-    } else {
-      profile.matchesLost += 1;
-    }
-    profile.totalPointsScored += payload.playerScore;
-    // Aces were a stored column nothing ever incremented, so `ace_sniper` was
-    // unobtainable. Self-reported like every other solo stat, and bounded by
-    // the achievements being once-only.
-    profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
-    if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
-    // The same result, kept per mode as well as pooled — written down in the
-    // transaction below rather than here. It is the one write in this function
-    // with no ceiling of its own: mission progress caps at its target and the
-    // profile is upserted whole, but matchesPlayed and the rest only ever add,
-    // so a bump that landed while the match went unstamped would be counted
-    // again by the retry, and again by the one after that.
-    const modeDelta = {
-      played: 1,
-      won: isWin,
-      pointsScored: payload.playerScore,
-      aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
-      bestStreak: payload.bestStreak,
-      endStreak,
-      // How long ago this match ended, by the reporting device's own clock —
-      // the gap between the whistle and the moment this attempt went out. A
-      // result that queued through a replay therefore says so and does not
-      // land back on top of a newer one. Absent (an older client, or a payload
-      // the relay built itself) means "just now".
-      ageMs: resultAgeMs(payload),
-      // This browser's own chain position, for the writes the age cannot
-      // order — see the note beside `stamp` in bumpModeStats.
-      chainId: payload.chainId,
-      runSeq: payload.runSeq,
-    };
-    // Streaks, shutouts and per-difficulty wins are derived here and only
-    // here, from the result the server just accepted — a client can report a
-    // match, never a total.
-    profile.winStreak = isWin ? profile.winStreak + 1 : 0;
-    if (profile.winStreak > profile.bestWinStreak) profile.bestWinStreak = profile.winStreak;
-    // One definition, shared with the daily tasks and quoted by the copy —
-    // this was three identical expressions with the 5-point floor written
-    // down nowhere a player could read it. Declared here and reused by the
-    // achievement triggers below rather than computed a second time.
-    const shutOut = isShutout({
-      isWinner: isWin,
-      playerScore: payload.playerScore,
-      opponentScore: payload.opponentScore,
-    });
-    // ------------------------------------------------------------------
-    // Counters that gate a PERMANENT unlock only advance on ranked-legal
-    // rules.
-    //
-    // `ranked` gated the two rating updates and nothing else, so a match on
-    // `paddleScale: 1.6` + `ballScale: 1.8` + `ballSpeedMax: 1.0` — correctly
-    // refused a rating, and correctly paid XP, which is the documented trade —
-    // still moved every one of these. That bought `rally_150` (900 XP),
-    // `perpetual-blue` and `quantum-gold` off a 160% paddle; the whole shutout
-    // chain and `flawless-white` off a clean sheet nobody had to earn; and,
-    // worst of the three because it is the game's own pacing, the Elite and
-    // Cyber unlocks — `ai_pro_10` then `ai_elite_10` — so the ladder CLAUDE.md
-    // §7 calls "walked, not jumped" could be walked on a 160% paddle.
-    //
-    // XP is not on this list and must not join it: paying for unranked play is
-    // the deliberate trade, and levels never regress. What a permanent unlock
-    // is, though, is the reward ITSELF, and handing one over for a feat the
-    // rules performed is the same mistake as rating the match would have been.
-    //
-    // The line is drawn at counters a permanent unlock reads, not at every
-    // career stat: `aces` and `totalPointsScored` keep counting on any rules,
-    // because they answer "how much have you played" and freezing them would
-    // make a profile under-report matches the player really did play.
-    if (ranked) {
-      if (shutOut) profile.shutoutsWon += 1;
-      if (isWin && payload.mode === 'solo') {
-        if (difficulty === 'rookie') profile.rookieWins += 1;
-        else if (difficulty === 'pro') profile.proWins += 1;
-        else if (difficulty === 'elite') profile.eliteWins += 1;
-        else if (difficulty === 'cyber') profile.cyberWins += 1;
-        else if (difficulty === 'chaos') profile.chaosWins += 1;
-      }
-      // The career best rally STREAK — this player's own consecutive returns,
-      // never the opponent's, and never a whole point's worth of both.
-      if (payload.bestStreak > profile.highestRally) {
-        profile.highestRally = payload.bestStreak;
-      }
-    }
-    profile.lastActive = new Date().toISOString();
-
-    // 4. Check & Unlock Achievements
-    const newAchievements: Achievement[] = [];
-    // Achievements that mean "you beat something" are worth what that something
-    // was actually worth. The AI adapts to the player, so a flat reward would
-    // pay a mu-40 player the same for a Cyber win they take often as a mu-25
-    // player for one they take rarely. Same multiplier the match XP uses, so
-    // there is still no per-difficulty table anywhere.
-    const achievementMultiplier = surpriseMultiplier(winProb, isWin);
-    let achievementBudget = achievementXpCap(profile.level);
-    // Tree rule, strictly: a child cannot be earned before its parent, and the
-    // parent is never granted implicitly. Auto-granting ancestors seemed
-    // helpful until the data showed it handing out `ai_rookie` for beating
-    // Pro — a difficulty the player had never beaten. Where one result really
-    // does satisfy a whole chain (a 50-hit rally is also a 25 and a 10), the
-    // triggers below fire in order and each rung opens the next.
-    // Gates are measured against the profile as it stands when the batch
-    // lands — after this match's own XP and tier update, the same instant the
-    // achievement budget is measured at.
-    const progress = { level: profile.level, tier: profile.tier };
-    const unlock = (achId: string) => {
-      if (!isUnlockable(achId, profile.achievements, progress)) return;
-      grant(achId);
-    };
-
-    const grant = (achId: string) => {
-      if (!profile.achievements.includes(achId)) {
-        profile.achievements.push(achId);
-        const meta = achievementById(achId);
-        if (meta) {
-          const scaled = meta.scaled
-            ? Math.max(1, Math.round(meta.xpReward * achievementMultiplier))
-            : meta.xpReward;
-          // Never hand over most of a level — see the cap's note in rating.ts.
-          // The budget is for everything this match unlocks, so several
-          // achievements landing together cannot stack into a free level. It
-          // is measured against the level the player is on as the batch lands,
-          // which is after this match's own XP has been applied.
-          const awardedXp = Math.max(0, Math.min(scaled, achievementBudget));
-          achievementBudget -= awardedXp;
-          newAchievements.push({ ...meta, unlockedAt: new Date().toISOString(), awardedXp });
-          profile.xp += awardedXp;
-        }
-      }
-    };
-
-    // Achievement triggers
-    const solo = payload.mode === 'solo';
-    const pvp = payload.mode === 'multiplayer';
-    const placed = isPlaced(profile.rankedGames, profile.rankSigma);
-
-    // Foundation
-    // Finishing a match at all. This used to read `payload.maxRally >= 1`,
-    // which under the shared counter was true of anyone who had touched the
-    // ball once. A streak is one player's own returns now, so a player who
-    // never returns a single ball has a best streak of zero — and first_serve
-    // is what opens `mode:multiplayer`, so keying it on that would have left
-    // them unable to reach a duel at all.
-    unlock('first_serve');
-    if (isWin) unlock('first_win');
-    // Keyed on the COUNTER, not on the match in hand, so a clean sheet earned
-    // before the counter existed still opens the Dominion branch on the next
-    // match played. Same shape as `shutout_5`/`shutout_15` below, and the same
-    // reason the rally rungs read `profile.highestRally`: a feat performed
-    // before its gate could open is banked, not lost.
-    if (profile.shutoutsWon >= 1) unlock('shutout');
-    if (profile.matchesPlayed >= 10) unlock('veteran_10');
-    if (profile.matchesPlayed >= 50) unlock('veteran_50');
-    if (profile.matchesPlayed >= 200) unlock('veteran_200');
-    if (profile.matchesPlayed >= 500) unlock('veteran_500');
-    if (profile.matchesPlayed >= 1000) unlock('veteran_1000');
-    if (profile.level >= 5) unlock('level_5');
-
-    // Rally. Measured on the profile's banked best, not this match's rally,
-    // so a feat performed before a gate opened is not lost — the rung lands
-    // on the first match after the gate is met.
-    // Rescaled by 0.72 with the counting change: a rally number is one
-    // player's own consecutive returns now rather than a whole point's worth
-    // of both players', which measures about 0.72x the old figure across the
-    // ladder and both winning scores. These rungs are therefore as far away as
-    // they always were.
-    if (profile.highestRally >= 7) unlock('rally_10');
-    if (profile.highestRally >= 18) unlock('rally_25');
-    if (profile.highestRally >= 36) unlock('rally_50');
-    if (profile.highestRally >= 72) unlock('rally_100');
-    if (profile.highestRally >= 108) unlock('rally_150');
-    if (profile.highestRally >= 144) unlock('rally_200');
-    if (profile.highestRally >= 216) unlock('rally_300');
-
-    // Ladder. The rungs fire in order so a single result can climb a chain
-    // it genuinely satisfies, and each one opens the next.
-    if (isWin && solo && difficulty === 'rookie') unlock('ai_rookie');
-    if (profile.rookieWins >= 10) unlock('ai_rookie_10');
-    if (isWin && solo && difficulty === 'pro') unlock('ai_pro');
-    if (profile.proWins >= 10) unlock('ai_pro_10');
-    if (isWin && solo && difficulty === 'elite') unlock('ai_elite');
-    if (profile.eliteWins >= 10) unlock('ai_elite_10');
-    if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
-    if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
-    if (profile.cyberWins >= 10) unlock('cyber_10');
-    if (profile.cyberWins >= 25) unlock('cyber_25');
-    if (isWin && solo && difficulty === 'chaos') unlock('ai_chaos');
-    if (shutOut && solo && difficulty === 'chaos') unlock('chaos_shutout');
-    if (profile.chaosWins >= 10) unlock('chaos_10');
-    if (profile.chaosWins >= 25) unlock('chaos_25');
-    if (profile.chaosWins >= 50) unlock('chaos_50');
-
-    // Duel
-    if (pvp) unlock('first_duel');
-    if (isWin && pvp) unlock('multiplayer_champ');
-    if (shutOut && pvp) unlock('duel_shutout');
-    if (profile.multiplayerWins >= 10) unlock('duel_10');
-    if (profile.multiplayerWins >= 25) unlock('duel_25');
-    if (profile.multiplayerWins >= 50) unlock('duel_50');
-    if (profile.multiplayerWins >= 100) unlock('duel_100');
-
-    // Craft
-    if (profile.totalAces >= 1) unlock('first_ace');
-    if (profile.totalAces >= 5) unlock('ace_sniper');
-    if (profile.totalAces >= 25) unlock('ace_25');
-    if (profile.totalAces >= 100) unlock('ace_100');
-    if (profile.totalAces >= 250) unlock('ace_250');
-    if (profile.totalPointsScored >= 100) unlock('points_100');
-    if (profile.totalPointsScored >= 500) unlock('points_500');
-    if (profile.totalPointsScored >= 2000) unlock('points_2000');
-    if (profile.totalPointsScored >= 5000) unlock('points_5000');
-    if (profile.totalPointsScored >= 10000) unlock('points_10000');
-
-    // Ascent — the ranked ladder, concealed until a first duel has happened.
-    // Keyed on the DERIVED tier rather than on rankMu, because the apex is no
-    // longer a rating threshold alone: it asks for OVERLORD_MIN_DUELS ranked
-    // duels, and a trophy reading the mu would fire while the badge still said
-    // Legend. One rule for all seven rungs, so none can drift from the badge —
-    // `profile.tier` was re-derived above, after this match's rating moved.
-    const holdsTier = (t: Tier): boolean => TIER_ORDER.indexOf(profile.tier) >= TIER_ORDER.indexOf(t);
-    if (placed) unlock('placed');
-    if (holdsTier('vanguard')) unlock('tier_vanguard');
-    if (holdsTier('ace')) unlock('tier_ace');
-    if (holdsTier('master')) unlock('master_tier');
-    if (holdsTier('grandmaster')) unlock('tier_grandmaster');
-    if (holdsTier('legend')) unlock('legend_tier');
-    if (holdsTier('overlord')) unlock('tier_overlord');
-    if (profile.rankedDuels >= OVERLORD_MIN_DUELS) unlock('duels_25');
-    if (profile.rankedDuels >= 100) unlock('duels_100');
-
-    // Dominion — winning, and winning without giving anything back.
-    if (profile.bestWinStreak >= 3) unlock('streak_3');
-    if (profile.bestWinStreak >= 5) unlock('streak_5');
-    if (profile.bestWinStreak >= 10) unlock('streak_10');
-    if (profile.bestWinStreak >= 20) unlock('streak_20');
-    if (profile.bestWinStreak >= 30) unlock('streak_30');
-    if (profile.shutoutsWon >= 5) unlock('shutout_5');
-    if (profile.shutoutsWon >= 15) unlock('shutout_15');
-    if (profile.shutoutsWon >= 50) unlock('shutout_50');
-
-    // Devotion — the long haul, concealed until level 5.
-    if (profile.level >= 10) unlock('level_10');
-    if (profile.level >= 25) unlock('level_25');
-    if (profile.level >= 50) unlock('level_50');
-    if (profile.level >= 75) unlock('level_75');
-    if (profile.level >= 100) unlock('level_100');
-    if (profile.dailyStreak >= 3) unlock('daily_3');
-    if (profile.dailyStreak >= 7) unlock('streak_7');
-    if (profile.dailyStreak >= 30) unlock('daily_30');
-    if (profile.dailyStreak >= 100) unlock('daily_100');
-
-    // Daily mission progress rides the same server-verified match record, so
-    // it can never be reported independently of an actual game — and it is
-    // advanced INSIDE the transaction below, not here. See the note there.
-
-    // Achievement XP can push the profile over a level threshold too
-    const finalLevel = calculateLevelFromXp(profile.xp);
-    profile.level = finalLevel.level;
-    profile.xpNext = finalLevel.xpNext;
-
-    // 5. Store match record
-    const matchRecord: MatchRecord = {
-      id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      player1Id: payload.playerId,
-      player1Name: profile.username,
-      player2Id: payload.opponentId || (payload.mode === 'solo' ? `AI-${difficulty}` : 'Player 2'),
-      player2Name: payload.opponentName || (payload.mode === 'solo' ? `AI (${difficulty})` : 'Opponent'),
-      winnerId: isWin ? payload.playerId : (payload.opponentId || 'opponent'),
-      winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
-      scoreP1: payload.playerScore,
-      scoreP2: payload.opponentScore,
-      maxRally: payload.bestStreak,
-      mode: payload.mode,
-      difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
-      timestamp: new Date().toISOString(),
-      // Persisted so history can tell Ranked from Un-Ranked later: this is
-      // ranksThisMatch — the match actually moved the visible ladder — not
-      // merely "the rules sat in the ranked bands". A stock-rules Rookie solo
-      // stores 0, because it rated nothing, whatever its rules were.
-      ranked: ranksThisMatch ? 1 : 0,
-    };
-
-    const result: MatchEndResult = {
-      profile,
-      earnedXp,
-      leveledUp,
-      winProbability: winProb,
-      previousTier: ranksThisMatch ? previousTier : null,
-      tier: ranksThisMatch ? profile.tier : null,
-      tierChanged: ranksThisMatch && profile.tier !== previousTier,
-      ranked,
-      rankDirection,
-      rankMagnitude,
-      newAchievements,
-      // Filled from inside the transaction below, after the progress it
-      // reports has actually been written.
-      missions: [],
-    };
+    // §2.9: a match that was not eligible to move competitive rating consumes
+    // no pair, band or daily count. That question is EXACTLY the one above,
+    // reused rather than re-derived, so every exclusion it already makes is
+    // inherited unchanged — the venue, the rules, the sonar, `forceUnranked`,
+    // `forceUnrankedLadder`, and the solo arm. A partial reconstruction such
+    // as `ranked && venueRates && !forceUnrankedLadder` reads as equivalent
+    // and silently drops that last one; the alias exists to say the reuse is
+    // deliberate rather than incidental.
+    const competitivelyEligible = ranksThisMatch;
+    // Whether the visible ladder actually MOVED, which is not the same
+    // question once an anti-farming ladder can zero the update: a hard-capped
+    // match keeps its real ranked classification in history and moves nothing.
+    // Presently a synonym; the weights that separate them come with them.
+    const advancesLadder = competitivelyEligible;
 
     this.sql.exec('BEGIN');
     try {
+      // One row per participant per eligible match, written BEFORE anything is
+      // counted or applied — the ordering §4.5 makes normative. The counts that
+      // read it exclude this `matchKey` explicitly, so the current match can
+      // never be prior evidence about itself.
+      if (competitivelyEligible && context.opponentId) {
+        this.recordExposure({
+          playerId: profile.id,
+          oppId: context.opponentId,
+          matchKey,
+          at: context.decidedAt ?? now,
+          // DERIVED from the trusted id, never carried on a payload.
+          oppIsBot: isBotAccount(context.opponentId),
+          oppBand: context.opponentBand ?? 'unranked',
+        });
+      }
+
+      if (ranked) {
+        const nextMmr = updateRating(
+          myMmr,
+          oppRating,
+          isWin,
+          isPvp ? { ...PVP_UPDATE, performance } : soloOpts
+        );
+        profile.mmrMu = nextMmr.mu;
+        profile.mmrSigma = nextMmr.sigma;
+      }
+      // Sampled before the update so the overlay can say which way the ladder
+      // went. Only the DIRECTION ever leaves the server — the mu itself is not
+      // something the client renders (see src/components/ui/RankBadge.tsx).
+      const rankMuBefore = profile.rankMu;
+      if (advancesLadder) {
+        // While still unplaced, a ranked match sheds uncertainty faster — the
+        // whole point of placement matches, and what makes the profile screen's
+        // "N/PLACEMENT_GAMES" the truth rather than the first of two conditions.
+        const placing = profile.rankedGames < PLACEMENT_GAMES;
+        const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
+        const rankOpts = isPvp
+          ? { ...placementOpts, performance }
+          : {
+              // Lighter on mu than a duel — beating an AI says less than beating
+              // a person — and held under the same ceiling every solo result is,
+              // so farming a rung converges on it and stops.
+              k: SOLO_UPDATE.k,
+              cap: soloMuCap(difficulty),
+              // Sigma converges at the SAME rate as a duel's, deliberately:
+              // placement counts observations, not opponents. Shrinking it
+              // slower would land a solo player on "5/5" and still unranked —
+              // the exact trap placement was just fixed for.
+              sigmaScale: placementOpts.sigmaScale,
+            };
+        // The ladder rates against the LADDER. `oppRating` above is the hidden
+        // estimator: it predicts the match and moves the hidden pair, and the
+        // two genuinely diverge — a solo match moves mmrMu and never rankMu, and
+        // SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other — so using
+        // it here measured the standardised margin across two different scales.
+        // Absent (a solo match, or a caller with no room to sample from) falls
+        // back to an even ladder match against ourselves, the same shape
+        // `oppRating`'s own fallback takes, and never to the hidden pair, which
+        // is the bug.
+        const oppRankRating: Rating = isPvp
+          ? opponentRankRating || { mu: profile.rankMu, sigma: profile.rankSigma }
+          : oppRating;
+        const nextRank = updateRating(
+          { mu: profile.rankMu, sigma: profile.rankSigma },
+          oppRankRating,
+          isWin,
+          rankOpts
+        );
+        profile.rankMu = nextRank.mu;
+        profile.rankSigma = nextRank.sigma;
+        profile.rankedGames += 1;
+        // The duels apart from the games: what the apex is gated on. Counted
+        // only when the match rated, so a Casual duel or one on party rules is
+        // a duel played and not a duel that tested the rating.
+        if (isPvp) profile.rankedDuels += 1;
+      }
+      profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma, profile.rankedDuels);
+      // And the position with it, for the same reason the line above exists: this
+      // object was loaded BEFORE the match was applied and is handed straight
+      // back as MatchEndResult.profile, which the client installs verbatim and
+      // the relay pushes as `match_recorded`. Left to readProfile alone it would
+      // be the pre-match number — and the win that carries somebody into the top
+      // 100 is the exact moment anyone is looking at it.
+      profile.ladderPosition = onLadder(profile)
+        ? this.ladderPosition(profile.id, profile.rankMu) ?? undefined
+        : undefined;
+      // 'none' is both "did not rate" and "rated and did not move" — from the
+      // player's side those are the same fact, and the overlay says so with one
+      // glyph rather than distinguishing a difference nobody can act on.
+      // Direction and size come off ONE delta sharing one epsilon, so they cannot
+      // disagree about whether anything happened — an arrow with no direction, or
+      // a direction with no arrows, is not a state either field can reach alone.
+      const rankDelta = advancesLadder ? profile.rankMu - rankMuBefore : 0;
+      const rankDirection: RankDirection =
+        rankDelta > RANK_MOVE_EPSILON ? 'up' : rankDelta < -RANK_MOVE_EPSILON ? 'down' : 'none';
+      const rankMagnitude: RankMagnitude = rankMoveSize(rankDelta);
+
+      // 3. Update Match Statistics
+      profile.matchesPlayed += 1;
+      if (isWin) {
+        profile.matchesWon += 1;
+      } else {
+        profile.matchesLost += 1;
+      }
+      profile.totalPointsScored += payload.playerScore;
+      // Aces were a stored column nothing ever incremented, so `ace_sniper` was
+      // unobtainable. Self-reported like every other solo stat, and bounded by
+      // the achievements being once-only.
+      profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
+      if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
+      // The same result, kept per mode as well as pooled — written down in the
+      // transaction below rather than here. It is the one write in this function
+      // with no ceiling of its own: mission progress caps at its target and the
+      // profile is upserted whole, but matchesPlayed and the rest only ever add,
+      // so a bump that landed while the match went unstamped would be counted
+      // again by the retry, and again by the one after that.
+      const modeDelta = {
+        played: 1,
+        won: isWin,
+        pointsScored: payload.playerScore,
+        aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
+        bestStreak: payload.bestStreak,
+        endStreak,
+        // How long ago this match ended, by the reporting device's own clock —
+        // the gap between the whistle and the moment this attempt went out. A
+        // result that queued through a replay therefore says so and does not
+        // land back on top of a newer one. Absent (an older client, or a payload
+        // the relay built itself) means "just now".
+        ageMs: resultAgeMs(payload),
+        // This browser's own chain position, for the writes the age cannot
+        // order — see the note beside `stamp` in bumpModeStats.
+        chainId: payload.chainId,
+        runSeq: payload.runSeq,
+      };
+      // Streaks, shutouts and per-difficulty wins are derived here and only
+      // here, from the result the server just accepted — a client can report a
+      // match, never a total.
+      profile.winStreak = isWin ? profile.winStreak + 1 : 0;
+      if (profile.winStreak > profile.bestWinStreak) profile.bestWinStreak = profile.winStreak;
+      // One definition, shared with the daily tasks and quoted by the copy —
+      // this was three identical expressions with the 5-point floor written
+      // down nowhere a player could read it. Declared here and reused by the
+      // achievement triggers below rather than computed a second time.
+      const shutOut = isShutout({
+        isWinner: isWin,
+        playerScore: payload.playerScore,
+        opponentScore: payload.opponentScore,
+      });
+      // ------------------------------------------------------------------
+      // Counters that gate a PERMANENT unlock only advance on ranked-legal
+      // rules.
+      //
+      // `ranked` gated the two rating updates and nothing else, so a match on
+      // `paddleScale: 1.6` + `ballScale: 1.8` + `ballSpeedMax: 1.0` — correctly
+      // refused a rating, and correctly paid XP, which is the documented trade —
+      // still moved every one of these. That bought `rally_150` (900 XP),
+      // `perpetual-blue` and `quantum-gold` off a 160% paddle; the whole shutout
+      // chain and `flawless-white` off a clean sheet nobody had to earn; and,
+      // worst of the three because it is the game's own pacing, the Elite and
+      // Cyber unlocks — `ai_pro_10` then `ai_elite_10` — so the ladder CLAUDE.md
+      // §7 calls "walked, not jumped" could be walked on a 160% paddle.
+      //
+      // XP is not on this list and must not join it: paying for unranked play is
+      // the deliberate trade, and levels never regress. What a permanent unlock
+      // is, though, is the reward ITSELF, and handing one over for a feat the
+      // rules performed is the same mistake as rating the match would have been.
+      //
+      // The line is drawn at counters a permanent unlock reads, not at every
+      // career stat: `aces` and `totalPointsScored` keep counting on any rules,
+      // because they answer "how much have you played" and freezing them would
+      // make a profile under-report matches the player really did play.
+      if (ranked) {
+        if (shutOut) profile.shutoutsWon += 1;
+        if (isWin && payload.mode === 'solo') {
+          if (difficulty === 'rookie') profile.rookieWins += 1;
+          else if (difficulty === 'pro') profile.proWins += 1;
+          else if (difficulty === 'elite') profile.eliteWins += 1;
+          else if (difficulty === 'cyber') profile.cyberWins += 1;
+          else if (difficulty === 'chaos') profile.chaosWins += 1;
+        }
+        // The career best rally STREAK — this player's own consecutive returns,
+        // never the opponent's, and never a whole point's worth of both.
+        if (payload.bestStreak > profile.highestRally) {
+          profile.highestRally = payload.bestStreak;
+        }
+      }
+      profile.lastActive = new Date().toISOString();
+
+      // 4. Check & Unlock Achievements
+      const newAchievements: Achievement[] = [];
+      // Achievements that mean "you beat something" are worth what that something
+      // was actually worth. The AI adapts to the player, so a flat reward would
+      // pay a mu-40 player the same for a Cyber win they take often as a mu-25
+      // player for one they take rarely. Same multiplier the match XP uses, so
+      // there is still no per-difficulty table anywhere.
+      const achievementMultiplier = surpriseMultiplier(winProb, isWin);
+      let achievementBudget = achievementXpCap(profile.level);
+      // Tree rule, strictly: a child cannot be earned before its parent, and the
+      // parent is never granted implicitly. Auto-granting ancestors seemed
+      // helpful until the data showed it handing out `ai_rookie` for beating
+      // Pro — a difficulty the player had never beaten. Where one result really
+      // does satisfy a whole chain (a 50-hit rally is also a 25 and a 10), the
+      // triggers below fire in order and each rung opens the next.
+      // Gates are measured against the profile as it stands when the batch
+      // lands — after this match's own XP and tier update, the same instant the
+      // achievement budget is measured at.
+      const progress = { level: profile.level, tier: profile.tier };
+      const unlock = (achId: string) => {
+        if (!isUnlockable(achId, profile.achievements, progress)) return;
+        grant(achId);
+      };
+
+      const grant = (achId: string) => {
+        if (!profile.achievements.includes(achId)) {
+          profile.achievements.push(achId);
+          const meta = achievementById(achId);
+          if (meta) {
+            const scaled = meta.scaled
+              ? Math.max(1, Math.round(meta.xpReward * achievementMultiplier))
+              : meta.xpReward;
+            // Never hand over most of a level — see the cap's note in rating.ts.
+            // The budget is for everything this match unlocks, so several
+            // achievements landing together cannot stack into a free level. It
+            // is measured against the level the player is on as the batch lands,
+            // which is after this match's own XP has been applied.
+            const awardedXp = Math.max(0, Math.min(scaled, achievementBudget));
+            achievementBudget -= awardedXp;
+            newAchievements.push({ ...meta, unlockedAt: new Date().toISOString(), awardedXp });
+            profile.xp += awardedXp;
+          }
+        }
+      };
+
+      // Achievement triggers
+      const solo = payload.mode === 'solo';
+      const pvp = payload.mode === 'multiplayer';
+      const placed = isPlaced(profile.rankedGames, profile.rankSigma);
+
+      // Foundation
+      // Finishing a match at all. This used to read `payload.maxRally >= 1`,
+      // which under the shared counter was true of anyone who had touched the
+      // ball once. A streak is one player's own returns now, so a player who
+      // never returns a single ball has a best streak of zero — and first_serve
+      // is what opens `mode:multiplayer`, so keying it on that would have left
+      // them unable to reach a duel at all.
+      unlock('first_serve');
+      if (isWin) unlock('first_win');
+      // Keyed on the COUNTER, not on the match in hand, so a clean sheet earned
+      // before the counter existed still opens the Dominion branch on the next
+      // match played. Same shape as `shutout_5`/`shutout_15` below, and the same
+      // reason the rally rungs read `profile.highestRally`: a feat performed
+      // before its gate could open is banked, not lost.
+      if (profile.shutoutsWon >= 1) unlock('shutout');
+      if (profile.matchesPlayed >= 10) unlock('veteran_10');
+      if (profile.matchesPlayed >= 50) unlock('veteran_50');
+      if (profile.matchesPlayed >= 200) unlock('veteran_200');
+      if (profile.matchesPlayed >= 500) unlock('veteran_500');
+      if (profile.matchesPlayed >= 1000) unlock('veteran_1000');
+      if (profile.level >= 5) unlock('level_5');
+
+      // Rally. Measured on the profile's banked best, not this match's rally,
+      // so a feat performed before a gate opened is not lost — the rung lands
+      // on the first match after the gate is met.
+      // Rescaled by 0.72 with the counting change: a rally number is one
+      // player's own consecutive returns now rather than a whole point's worth
+      // of both players', which measures about 0.72x the old figure across the
+      // ladder and both winning scores. These rungs are therefore as far away as
+      // they always were.
+      if (profile.highestRally >= 7) unlock('rally_10');
+      if (profile.highestRally >= 18) unlock('rally_25');
+      if (profile.highestRally >= 36) unlock('rally_50');
+      if (profile.highestRally >= 72) unlock('rally_100');
+      if (profile.highestRally >= 108) unlock('rally_150');
+      if (profile.highestRally >= 144) unlock('rally_200');
+      if (profile.highestRally >= 216) unlock('rally_300');
+
+      // Ladder. The rungs fire in order so a single result can climb a chain
+      // it genuinely satisfies, and each one opens the next.
+      if (isWin && solo && difficulty === 'rookie') unlock('ai_rookie');
+      if (profile.rookieWins >= 10) unlock('ai_rookie_10');
+      if (isWin && solo && difficulty === 'pro') unlock('ai_pro');
+      if (profile.proWins >= 10) unlock('ai_pro_10');
+      if (isWin && solo && difficulty === 'elite') unlock('ai_elite');
+      if (profile.eliteWins >= 10) unlock('ai_elite_10');
+      if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
+      if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
+      if (profile.cyberWins >= 10) unlock('cyber_10');
+      if (profile.cyberWins >= 25) unlock('cyber_25');
+      if (isWin && solo && difficulty === 'chaos') unlock('ai_chaos');
+      if (shutOut && solo && difficulty === 'chaos') unlock('chaos_shutout');
+      if (profile.chaosWins >= 10) unlock('chaos_10');
+      if (profile.chaosWins >= 25) unlock('chaos_25');
+      if (profile.chaosWins >= 50) unlock('chaos_50');
+
+      // Duel
+      if (pvp) unlock('first_duel');
+      if (isWin && pvp) unlock('multiplayer_champ');
+      if (shutOut && pvp) unlock('duel_shutout');
+      if (profile.multiplayerWins >= 10) unlock('duel_10');
+      if (profile.multiplayerWins >= 25) unlock('duel_25');
+      if (profile.multiplayerWins >= 50) unlock('duel_50');
+      if (profile.multiplayerWins >= 100) unlock('duel_100');
+
+      // Craft
+      if (profile.totalAces >= 1) unlock('first_ace');
+      if (profile.totalAces >= 5) unlock('ace_sniper');
+      if (profile.totalAces >= 25) unlock('ace_25');
+      if (profile.totalAces >= 100) unlock('ace_100');
+      if (profile.totalAces >= 250) unlock('ace_250');
+      if (profile.totalPointsScored >= 100) unlock('points_100');
+      if (profile.totalPointsScored >= 500) unlock('points_500');
+      if (profile.totalPointsScored >= 2000) unlock('points_2000');
+      if (profile.totalPointsScored >= 5000) unlock('points_5000');
+      if (profile.totalPointsScored >= 10000) unlock('points_10000');
+
+      // Ascent — the ranked ladder, concealed until a first duel has happened.
+      // Keyed on the DERIVED tier rather than on rankMu, because the apex is no
+      // longer a rating threshold alone: it asks for OVERLORD_MIN_DUELS ranked
+      // duels, and a trophy reading the mu would fire while the badge still said
+      // Legend. One rule for all seven rungs, so none can drift from the badge —
+      // `profile.tier` was re-derived above, after this match's rating moved.
+      const holdsTier = (t: Tier): boolean => TIER_ORDER.indexOf(profile.tier) >= TIER_ORDER.indexOf(t);
+      if (placed) unlock('placed');
+      if (holdsTier('vanguard')) unlock('tier_vanguard');
+      if (holdsTier('ace')) unlock('tier_ace');
+      if (holdsTier('master')) unlock('master_tier');
+      if (holdsTier('grandmaster')) unlock('tier_grandmaster');
+      if (holdsTier('legend')) unlock('legend_tier');
+      if (holdsTier('overlord')) unlock('tier_overlord');
+      if (profile.rankedDuels >= OVERLORD_MIN_DUELS) unlock('duels_25');
+      if (profile.rankedDuels >= 100) unlock('duels_100');
+
+      // Dominion — winning, and winning without giving anything back.
+      if (profile.bestWinStreak >= 3) unlock('streak_3');
+      if (profile.bestWinStreak >= 5) unlock('streak_5');
+      if (profile.bestWinStreak >= 10) unlock('streak_10');
+      if (profile.bestWinStreak >= 20) unlock('streak_20');
+      if (profile.bestWinStreak >= 30) unlock('streak_30');
+      if (profile.shutoutsWon >= 5) unlock('shutout_5');
+      if (profile.shutoutsWon >= 15) unlock('shutout_15');
+      if (profile.shutoutsWon >= 50) unlock('shutout_50');
+
+      // Devotion — the long haul, concealed until level 5.
+      if (profile.level >= 10) unlock('level_10');
+      if (profile.level >= 25) unlock('level_25');
+      if (profile.level >= 50) unlock('level_50');
+      if (profile.level >= 75) unlock('level_75');
+      if (profile.level >= 100) unlock('level_100');
+      if (profile.dailyStreak >= 3) unlock('daily_3');
+      if (profile.dailyStreak >= 7) unlock('streak_7');
+      if (profile.dailyStreak >= 30) unlock('daily_30');
+      if (profile.dailyStreak >= 100) unlock('daily_100');
+
+      // Daily mission progress rides the same server-verified match record, so
+      // it can never be reported independently of an actual game — and it is
+      // advanced INSIDE the transaction below, not here. See the note there.
+
+      // Achievement XP can push the profile over a level threshold too
+      const finalLevel = calculateLevelFromXp(profile.xp);
+      profile.level = finalLevel.level;
+      profile.xpNext = finalLevel.xpNext;
+
+      // 5. Store match record
+      const matchRecord: MatchRecord = {
+        id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        player1Id: payload.playerId,
+        player1Name: profile.username,
+        player2Id: payload.opponentId || (payload.mode === 'solo' ? `AI-${difficulty}` : 'Player 2'),
+        player2Name: payload.opponentName || (payload.mode === 'solo' ? `AI (${difficulty})` : 'Opponent'),
+        winnerId: isWin ? payload.playerId : (payload.opponentId || 'opponent'),
+        winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
+        scoreP1: payload.playerScore,
+        scoreP2: payload.opponentScore,
+        maxRally: payload.bestStreak,
+        mode: payload.mode,
+        difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
+        timestamp: new Date().toISOString(),
+        // Persisted so history can tell Ranked from Un-Ranked later: this is
+        // ranksThisMatch — this match was PLAYED under ranked conditions —
+        // and deliberately not `advancesLadder`, which is whether the ladder
+        // moved. The two are the same today and part company the moment an
+        // anti-farming ladder can zero an update: a hard-capped match keeps
+        // its real classification in History while moving nothing.
+        // Not
+        // merely "the rules sat in the ranked bands". A stock-rules Rookie solo
+        // stores 0, because it rated nothing, whatever its rules were.
+        ranked: ranksThisMatch ? 1 : 0,
+      };
+
+      const result: MatchEndResult = {
+        profile,
+        earnedXp,
+        leveledUp,
+        winProbability: winProb,
+        previousTier: advancesLadder ? previousTier : null,
+        tier: advancesLadder ? profile.tier : null,
+        tierChanged: advancesLadder && profile.tier !== previousTier,
+        ranked,
+        rankDirection,
+        rankMagnitude,
+        newAchievements,
+        // Filled from inside the transaction below, after the progress it
+        // reports has actually been written.
+        missions: [],
+      };
+
       this.bumpModeStats(profile.id, payload.mode, modeDelta);
       // Mission progress is a WRITE with no ceiling of its own — a target
       // clamps a mission at its own goal, but nothing stops the same match
@@ -3716,12 +3789,14 @@ class GameDatabase {
       // key claimed and the XP never awarded.
       if (matchKey) this.stampRecordedMatch(payload.playerId, matchKey, result, now);
       this.sql.exec('COMMIT');
+      // Returned from INSIDE the try, because `result` is built in here now:
+      // the transaction opens above the rating updates, so the exposure row
+      // and the profile move it describes commit as one act.
+      return result;
     } catch (e) {
       this.sql.exec('ROLLBACK');
       throw e;
     }
-
-    return result;
   }
 
   /**
