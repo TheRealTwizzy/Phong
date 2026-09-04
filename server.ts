@@ -21,7 +21,7 @@ import {
   sessionIdentity,
 } from './server/auth';
 import { botIdForSocket } from './server/botSocket';
-import { startBotPlayers, type BotPlayers } from './server/botPlayers';
+import { botsToOffer, startBotPlayers, type BotPlayers } from './server/botPlayers';
 import { buildId } from './server/build';
 import { hasUnlock, playableDifficulty } from './src/achievements';
 import {
@@ -79,7 +79,7 @@ import {
   type EntryVerdict,
   roomsOf,
 } from './src/venues';
-import { validateUsername } from './src/profileRules';
+import { isBotId, validateUsername } from './src/profileRules';
 import {
   REPORTS_PER_DAY,
   REPORT_CATEGORIES,
@@ -676,19 +676,48 @@ function sweepQueue(now: number): void {
     candidates.push(candidate);
   }
 
-  for (;;) {
-    const pair = findPair(candidates, now);
-    if (!pair) return;
+  // HUMANS FIRST, always. Two people waiting must pair with each other even
+  // when a play-bot is also queued — a bot is there so that nobody waits
+  // alone, not so that everybody plays a machine. `findPair` picks the closest
+  // to a coin flip and has no idea what a bot is, so left to itself it would
+  // happily hand a human the bot whenever the bot happened to be the fairer
+  // match. This is the rule that degrades silently if it regresses: every
+  // match still gets made, they are just made against the wrong opponents.
+  const humansOnly = candidates.filter((c) => !isBotId(c.deviceId));
+  const seat = (list: Candidate[]): boolean => {
+    const pair = findPair(list, now);
+    if (!pair) return false;
     const a = byId.get(pair[0].deviceId)!;
     const b = byId.get(pair[1].deviceId)!;
     leaveQueue(a.ws);
     leaveQueue(b.ws);
     seatQueuePair(a, b);
-    // The two seated leave the list rather than the list being rebuilt around
-    // them. `findPair` is pure over this array, so this is the same answer.
     const seated = new Set([pair[0].deviceId, pair[1].deviceId]);
     candidates = candidates.filter((c) => !seated.has(c.deviceId));
-  }
+    for (let i = humansOnly.length - 1; i >= 0; i--) {
+      if (seated.has(humansOnly[i].deviceId)) humansOnly.splice(i, 1);
+    }
+    return true;
+  };
+  // Drain every human-human pair the band allows before any bot is considered.
+  while (seat(humansOnly)) { /* keep going */ }
+  // Then whatever is left, which is where a lone human meets a bot.
+  while (seat(candidates)) { /* keep going */ }
+
+  // Nobody left to play? Offer a bot — but only to somebody who has genuinely
+  // waited. The queue's band is a promise with an expiry: a coin flip for
+  // thirty seconds, then the brief's 40-60, then sliding open to three
+  // minutes. A bot offered instantly would answer that promise before it was
+  // ever tested, and a player would never meet another person while any bot
+  // sat idle. Offered after the tight band has already failed, it is exactly
+  // what the widening was always for: somebody to play.
+  //
+  // PULLED from here rather than pushed by the population, because only the
+  // relay can see that anybody is waiting. The bot still sends its own
+  // `queue_join`, so it comes in by the ordinary door under every guard.
+  if (!botPlayers) return;
+  let offers = botsToOffer(candidates, now);
+  while (offers-- > 0 && botPlayers.offerQueue()) { /* one per waiting human */ }
 }
 
 interface LiveSocket {

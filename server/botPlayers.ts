@@ -130,6 +130,46 @@ export const BOT_PADDLE_HZ = 20;
  */
 export const COUNTDOWN_MS = 3_000;
 
+/**
+ * How long a human waits alone before a bot is offered as an opponent.
+ *
+ * The queue's own band is a promise with an expiry (`server/matchmaking.ts`):
+ * a coin flip for thirty seconds, the brief's 40-60 to ninety, then sliding
+ * open to three minutes. A bot offered instantly would make that promise a
+ * lie by answering it before it was ever tested — the player would never meet
+ * another person while any bot was idle. Offered once the tight band has
+ * already failed, it is what the widening was always for: somebody to play.
+ */
+export const BOT_QUEUE_AFTER_MS = 35_000;
+
+/**
+ * How many bots to offer the queue right now.
+ *
+ * Pure, and separated from the sweep for the reason `server/matchmaking.ts`
+ * and `server/room.ts` are pure: the rule can be argued about in a test
+ * without a socket, a clock or a thirty-five-second wait. The sweep supplies
+ * the queue as it stands and acts on the answer.
+ *
+ * One bot per human who has waited past the threshold, MINUS the bots already
+ * queued — otherwise every sweep while somebody waits adds another, and a
+ * two-second tick would put the whole roster in the queue inside a minute,
+ * where they would then start pairing with each other in front of the person
+ * still waiting.
+ */
+export function botsToOffer(
+  queue: Array<{ deviceId: string | null; joinedAt: number }>,
+  now: number,
+  afterMs: number = BOT_QUEUE_AFTER_MS
+): number {
+  let waitingHumans = 0;
+  let queuedBots = 0;
+  for (const entry of queue) {
+    if (entry.deviceId && entry.deviceId.startsWith('bot-')) queuedBots++;
+    else if (now - entry.joinedAt >= afterMs) waitingHumans++;
+  }
+  return Math.max(0, waitingHumans - queuedBots);
+}
+
 export interface BotHandle {
   readonly id: string;
   readonly socket: BotSocket;
@@ -152,6 +192,8 @@ export interface BotHandle {
   lastPaddleAt: number;
   /** The opponent's paddle, already mirrored into THIS bot's frame. */
   opponentPaddleX: number;
+  /** Waiting in the ranked queue. Cleared the moment it is seated or refused. */
+  queued: boolean;
   send(msg: WSClientMessage): void;
   close(): void;
 }
@@ -176,6 +218,17 @@ export interface BotPlayersDeps {
 export interface BotPlayers {
   /** Live handles, for tests and for a status readout. */
   readonly bots: BotHandle[];
+  /**
+   * Put one idle bot into the ranked queue, if there is one to spare.
+   *
+   * PULLED by the relay rather than pushed by the population, because only the
+   * relay can see that somebody is waiting — a bot is a client and a client
+   * has no view of the queue. The bot still sends its own `queue_join`, so it
+   * enters by the ordinary door and every guard on that path applies to it.
+   *
+   * Returns whether one was offered, so the caller can stop asking.
+   */
+  offerQueue(): boolean;
   /** One pass of the population's bookkeeping. Exposed so a test can step it. */
   tick(): void;
   /** One physics frame for every bot in a match. Exposed for the same reason. */
@@ -254,6 +307,7 @@ export function connectBot(
     countdownUntil: 0,
     lastPaddleAt: 0,
     opponentPaddleX: 0.5,
+    queued: false,
     send: (msg) => socket.receive(msg),
     close: () => socket.close(1000, 'bot leaving'),
   };
@@ -292,12 +346,17 @@ export function startBotPlayers(deps: BotPlayersDeps): BotPlayers {
         bot.roomId = msg.roomId;
         bot.seat = 0;
         bot.hasOpponent = false;
+        // The queue seats a pair itself, through the ordinary room_created /
+        // room_joined shapes — so arriving at a table is also how a bot learns
+        // it is no longer queued.
+        bot.queued = false;
         endMatch(bot);
         break;
       case 'room_joined':
         bot.roomId = msg.roomId;
         bot.seat = msg.playerIndex;
         bot.hasOpponent = true;
+        bot.queued = false;
         endMatch(bot);
         // The guest half of the lobby handshake. Readiness clears whenever the
         // host edits the terms, so this is re-sent on `room_config` too.
@@ -350,6 +409,12 @@ export function startBotPlayers(deps: BotPlayersDeps): BotPlayers {
         });
         break;
       }
+      case 'queue_state':
+        // `found` is a beat, not a prompt — the relay seats the pair itself
+        // and the ordinary room messages follow. Only `cancelled` frees the
+        // bot to be offered again.
+        if (msg.status === 'cancelled') bot.queued = false;
+        break;
       case 'opponent_paddle':
         // Already mirrored into this bot's frame by the relay.
         bot.opponentPaddleX = msg.x;
@@ -388,6 +453,7 @@ export function startBotPlayers(deps: BotPlayersDeps): BotPlayers {
           bot.roomId = null;
           bot.seat = null;
           bot.hasOpponent = false;
+          bot.queued = false;
           endMatch(bot);
         }
         break;
@@ -531,6 +597,17 @@ export function startBotPlayers(deps: BotPlayersDeps): BotPlayers {
     bots,
     tick,
     stepMatches,
+    offerQueue() {
+      // Only a bot with no seat at all. One holding a table is somewhere a
+      // human can already join it, and the relay would make it give that up:
+      // taking a queue place vacates the seat, so offering a seated bot trades
+      // a joinable table for a queue entry, which is a worse board.
+      const spare = bots.find((b) => b.roomId === null && !b.queued);
+      if (!spare) return false;
+      spare.queued = true;
+      spare.send({ type: 'queue_join' });
+      return true;
+    },
     stop() {
       clearInterval(bookkeeping);
       clearInterval(physics);

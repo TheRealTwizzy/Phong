@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { botVenue, difficultyForSkill, trueSkillForBot } from '../server/botPlayers';
+import {
+  BOT_QUEUE_AFTER_MS,
+  botVenue,
+  botsToOffer,
+  difficultyForSkill,
+  trueSkillForBot,
+} from '../server/botPlayers';
 import { DIFFICULTY_ORDER } from '../src/achievements';
 import { roomById, roomEntryVerdict } from '../src/venues';
 import { PLACEMENT_GAMES, PLACEMENT_SIGMA, START_MU, START_SIGMA, tierFor } from '../src/rating';
@@ -116,5 +122,47 @@ describe('where a play-bot opens its table', () => {
     // And it is not one room for everybody: a population that all piles into
     // `beginner` leaves every other browser empty.
     expect(seen.size).toBeGreaterThan(1);
+  });
+});
+
+describe('offering a bot to somebody waiting in the queue', () => {
+  const NOW = 1_000_000;
+  const human = (waitedMs: number) => ({ deviceId: 'dev_x', joinedAt: NOW - waitedMs });
+  const bot = () => ({ deviceId: 'bot-ladder-01', joinedAt: NOW });
+
+  it('offers nobody an empty queue', () => {
+    expect(botsToOffer([], NOW)).toBe(0);
+  });
+
+  it('leaves a fresh arrival alone', () => {
+    // The queue's band is a promise with an expiry: a coin flip for the first
+    // thirty seconds. A bot offered instantly answers that promise before it
+    // was ever tested, and a player would never meet another person while any
+    // bot sat idle.
+    expect(botsToOffer([human(0)], NOW)).toBe(0);
+    expect(botsToOffer([human(BOT_QUEUE_AFTER_MS - 1)], NOW)).toBe(0);
+  });
+
+  it('offers one to somebody who has genuinely waited', () => {
+    expect(botsToOffer([human(BOT_QUEUE_AFTER_MS)], NOW)).toBe(1);
+    expect(botsToOffer([human(BOT_QUEUE_AFTER_MS * 3)], NOW)).toBe(1);
+  });
+
+  it('offers one per waiting human, not one per sweep', () => {
+    expect(botsToOffer([human(60_000), human(60_000)], NOW)).toBe(2);
+  });
+
+  it('counts the bots already queued, so a sweep does not pile them up', () => {
+    // The failure this prevents: the sweep runs every two seconds, so without
+    // subtracting what is already there, one person waiting would pull in the
+    // whole roster inside a minute — and those bots would then start pairing
+    // with EACH OTHER in front of the person still waiting.
+    expect(botsToOffer([human(60_000), bot()], NOW)).toBe(0);
+    expect(botsToOffer([human(60_000), human(60_000), bot()], NOW)).toBe(1);
+    expect(botsToOffer([human(60_000), bot(), bot(), bot()], NOW)).toBe(0);
+  });
+
+  it('never offers a bot to a queue of bots', () => {
+    expect(botsToOffer([bot(), bot()], NOW)).toBe(0);
   });
 });

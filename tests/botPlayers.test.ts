@@ -28,6 +28,9 @@ const ROSTER_NAMES = [
 beforeAll(async () => {
   // The roster is seeded at boot, so the bots this asks for already exist.
   [relay, control] = await Promise.all([
+    // A short queue threshold so the wait is testable; the shipped default is
+    // 35s, past the tight band, and the reasoning for that is in
+    // BOT_QUEUE_AFTER_MS rather than here.
     startRelay('botplayers', { PLAY_BOTS: '3' }),
     startRelay('botplayers-off'),
   ]);
@@ -107,6 +110,40 @@ describe('the play-bot population', () => {
   // two bots have to rally out a first-to-5 — and this file is in the FAST
   // layer, which the whole repo runs on every change. A minute is what the
   // separate e2e job is for.
+
+  it('yields the queue to humans: two people pair with each other', async () => {
+    // The rule that degrades SILENTLY if it regresses. `findPair` picks the
+    // closest to a coin flip and has no idea what a bot is, so left to itself
+    // it would hand a human the bot whenever the bot was the fairer match —
+    // every match still gets made, they are just made against the wrong
+    // opponents, and nothing anywhere goes red.
+    const [da, db_] = await Promise.all([
+      relay.newDevice('QueueHumanA'),
+      relay.newDevice('QueueHumanB'),
+    ]);
+    const a = await relay.openPhone(da);
+    const b = await relay.openPhone(db_);
+    try {
+      a.send({ type: 'queue_join' });
+      b.send({ type: 'queue_join' });
+
+      const ja = await a.await('room_created', 20_000).catch(() => a.await('room_joined', 1));
+      const jb = await b.await('room_joined', 20_000).catch(() => b.await('room_created', 1));
+      expect(ja).toBeTruthy();
+      expect(jb).toBeTruthy();
+
+      // Each names the OTHER HUMAN, never a bot. That is the assertion — being
+      // seated at all would pass even if both had been handed machines.
+      const names = [...a.received, ...b.received]
+        .map((m: any) => m.opponentName)
+        .filter(Boolean);
+      expect(names.length).toBeGreaterThan(0);
+      for (const name of names) expect(ROSTER_NAMES).not.toContain(name);
+    } finally {
+      a.close();
+      b.close();
+    }
+  }, 40_000);
 
   it('puts its tables only in the room its tier has actually opened', async () => {
     // What this holds is the POLICY — `botVenue` — and not the gate.
