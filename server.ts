@@ -965,6 +965,8 @@ function duelStartRatings(room: Room): Array<SeatRating | null> {
       return {
         mmr: { mu: p.mmrMu, sigma: p.mmrSigma },
         rank: { mu: p.rankMu, sigma: p.rankSigma },
+        // Derived HERE, once, and cached with the ratings it belongs beside.
+        band: p.tier,
       };
     };
     room.startRatings = [sample(0), sample(1)];
@@ -1046,6 +1048,11 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
   const ratingBefore = duelStartRatings(room);
+  // ONE anchor for both seats, so the two read the identical rolling window in
+  // the anti-farming store and can never sit at different points on the same
+  // ladder. A per-seat `new Date()` would differ by however long the first
+  // seat's ~30 queries take.
+  const decidedAt = new Date();
   const recorded: Array<{
     seat: 0 | 1;
     player: NonNullable<Room['players'][0]>;
@@ -1095,6 +1102,17 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
     if (oppRating) {
       context.opponentRating = oppRating.mmr;
       context.opponentRankRating = oppRating.rank;
+      // The band the opponent was in when the match STARTED, never re-derived.
+      context.opponentBand = oppRating.band;
+    }
+    // The verified device id and NOT `them.playerId`, which is whatever the
+    // client sent on create_room/join_room: keyed on that, a farming client
+    // sends a fresh id every match and never leaves the first band. Absent for
+    // a cookieless opponent, which is right — there is no account to key on,
+    // so no exposure row forms.
+    if (them.deviceId) {
+      context.opponentId = them.deviceId;
+      context.decidedAt = decidedAt;
     }
     // Only the LEAVER's copy is spared the ladder by a forgiven abandon; the
     // survivor's win rates on its own merits either way.
