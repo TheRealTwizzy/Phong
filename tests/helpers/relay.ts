@@ -130,6 +130,15 @@ export interface Relay {
   /** The throwaway DATA_DIR this server was given. */
   dataDir: string;
   stop(): Promise<void>;
+  /**
+   * SIGTERM and wait for the exit, WITHOUT deleting the data directory.
+   *
+   * `stop` sends SIGKILL, which is right for teardown and wrong for anything
+   * asserting what a DEPLOY does: only SIGTERM reaches `shutdown()`, and
+   * `shuttingDown` is the flag that stops a redeploy charging every live duel
+   * an abandon. The directory survives so the profiles can be read afterwards.
+   */
+  terminate(): Promise<void>;
   /** A browser: own cookie jar, own profile, onboarded, holding a session. */
   newDevice(username: string): Promise<Device>;
   /** A browser with a session but no username yet — mid-onboarding. */
@@ -270,5 +279,18 @@ export async function startRelay(label: string): Promise<Relay> {
     return { p1, p2, roomId: created.roomId, matchSeq: start.matchSeq };
   };
 
-  return { base, wsUrl, dataDir, stop, newDevice, newUnclaimedDevice, openPhone, seatDuel };
+  const terminate = async (): Promise<void> => {
+    if (!server?.pid || server.exitCode !== null) return;
+    const exited = new Promise<void>((resolve) => server.once('exit', () => resolve()));
+    try {
+      process.kill(-server.pid, 'SIGTERM');
+    } catch {
+      server.kill('SIGTERM');
+    }
+    await Promise.race([exited, sleep(10_000)]);
+  };
+
+  return {
+    base, wsUrl, dataDir, stop, terminate, newDevice, newUnclaimedDevice, openPhone, seatDuel,
+  };
 }

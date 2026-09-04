@@ -100,6 +100,7 @@ export class PlaybotDriver {
   private oppPaddleX = 0.5;
   private sentPaddleX = 0.5;
   private opponentPresent = false;
+  private standingDown = false;
 
   constructor(opts: PlaybotDriverOptions) {
     this.opts = opts;
@@ -213,6 +214,20 @@ export class PlaybotDriver {
     this.send({ type: 'queue_join' });
   }
 
+  /**
+   * Stand down when this match ends — never in the middle of one.
+   *
+   * The population controller names bots to deactivate as demand falls, and a
+   * bot cut off mid-rally leaves its opponent on a dead court and is judged an
+   * ABANDON by the relay: a real ranked loss for a bot that did nothing, and a
+   * win handed to whoever it was playing. So a deactivation is a request, and
+   * the whistle is what grants it.
+   */
+  public standDown(): void {
+    this.standingDown = true;
+    if (this.phase === 'idle' || this.phase === 'over' || this.phase === 'lobby') this.leave();
+  }
+
   public leave(): void {
     this.send({ type: 'leave_room' });
     this.roomId = null;
@@ -300,6 +315,7 @@ export class PlaybotDriver {
         if (msg.p1Score >= cap || msg.p2Score >= cap) {
           this.phase = 'over';
           this.ball = null;
+          if (this.standingDown) this.leave();
         } else {
           this.beginPoint(msg.nextServer === this.seat);
         }
