@@ -58,6 +58,15 @@ const bot = (): string => {
   return id;
 };
 
+/**
+ * Placed and well past placement, so nothing here trips PLACEMENT_UPDATE. The
+ * seed is re-applied before EVERY measured match, which is what makes two
+ * fixtures comparable — and means a counter read afterwards is relative to
+ * this rather than cumulative.
+ */
+const SEEDED_RANKED_GAMES = 20;
+const SEEDED_RANK_MU = 25;
+
 /** Put an account on a known rating, so two fixtures start from one place. */
 const seedRating = (id: string, over: Partial<Record<string, number>> = {}) => {
   const raw = new DatabaseSync(DB_FILE);
@@ -69,9 +78,9 @@ const seedRating = (id: string, over: Partial<Record<string, number>> = {}) => {
       .run(
         over.mmrMu ?? 25,
         over.mmrSigma ?? 3,
-        over.rankMu ?? 25,
+        over.rankMu ?? SEEDED_RANK_MU,
         over.rankSigma ?? 3,
-        over.rankedGames ?? 20,
+        over.rankedGames ?? SEEDED_RANKED_GAMES,
         id
       );
   } finally {
@@ -547,5 +556,183 @@ describe('the hard caps', () => {
       opponentRating: { mu: 25, sigma: 3 }, opponentRankRating: { mu: 25, sigma: 3 },
     } as never);
     expect(db.getProfile(me).rankMu).toBe(before.rankMu);
+  });
+});
+
+describe('the daily bot-derived rankedDuels credit cap', () => {
+  // §2.7. A QUALIFICATION counter, not a fourth saturation layer: it
+  // multiplies no mu and no sigma and appears nowhere in §2.6's chain. The 6th
+  // bot duel of a day rates exactly like the 5th and simply banks no credit.
+
+  const DAY = new Date('2026-05-11T09:00:00.000Z');
+
+  /** `n` duels against a FRESH opponent each time, all inside one UTC day. */
+  const playRun = (
+    me: string,
+    n: number,
+    makeOpponent: () => string,
+    over: Partial<Record<string, number>> = {}
+  ) => {
+    for (let i = 0; i < n; i += 1) {
+      seedRating(me, { rankedDuels: undefined, ...over });
+      seq += 1;
+      db.recordMatch(
+        { ...duel(me), matchKey: `credit:${seq}` } as MatchEndPayload,
+        {
+          opponentId: makeOpponent(),
+          opponentBand: 'ace',
+          // Distinct minutes inside one UTC day: distinct opponents keep every
+          // same-pair count at 1, so nothing here is hard-capped and the only
+          // thing being measured is the allowance.
+          decidedAt: new Date(DAY.getTime() + i * 60_000),
+          opponentRating: { mu: 25, sigma: 3 },
+          opponentRankRating: { mu: 25, sigma: 3 },
+        } as never
+      );
+    }
+    return db.getProfile(me);
+  };
+
+  const creditedRows = (me: string): number => {
+    const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      return (
+        raw
+          .prepare('SELECT COALESCE(SUM(duelCredited), 0) AS n FROM competitive_exposure WHERE playerId = ?')
+          .get(me) as { n: number }
+      ).n;
+    } finally {
+      raw.close();
+    }
+  };
+
+  it('grants the 5th bot duel of the day and refuses the 6th', () => {
+    const me = human();
+    const before = db.getProfile(me).rankedDuels;
+    playRun(me, 5, bot);
+    expect(db.getProfile(me).rankedDuels - before).toBe(5);
+    // The 6th still rates and still counts as a ranked GAME — only the
+    // qualification credit is withheld.
+    const beforeSixth = db.getProfile(me);
+    playRun(me, 1, bot);
+    const afterSixth = db.getProfile(me);
+    expect(afterSixth.rankedDuels).toBe(beforeSixth.rankedDuels);
+    // rankedGames is re-seeded before the match, so this reads "the 6th duel
+    // still counted as a ranked game" rather than a cumulative total.
+    expect(afterSixth.rankedGames).toBe(SEEDED_RANKED_GAMES + 1);
+    // Against the SEED rather than against the previous match: the seed is
+    // re-applied before each one, so two identically-seeded duels land on the
+    // identical rating and comparing them would assert nothing.
+    expect(afterSixth.rankMu).not.toBe(SEEDED_RANK_MU);
+  });
+
+  it('counts GRANTED credits, never attempted bot duels', () => {
+    // The current row is inserted at duelCredited = 0 and the allowance is read
+    // before it is stamped, so a match can never consume its own allowance —
+    // and a refused attempt spends nothing, so it cannot push a later duel out.
+    //
+    // Two mutation checks, and only one of them is about the ORDER. Reading
+    // the allowance as attempted bot duels — COUNT(*) rather than
+    // SUM(duelCredited) — reddens this and the hard-capped case, because a
+    // refused attempt would then push a later duel out of the allowance.
+    // Dropping the `matchKey <> ?` exclusion reddens this one, because the
+    // current row would count itself.
+    //
+    // Stamping the credit BEFORE reading the allowance reddens NOTHING, and
+    // that is worth recording rather than pretending otherwise: the exclusion
+    // already hides the current row, so §4.5's insert-then-stamp ordering is
+    // belt-and-braces here and the exclusion is the actual defence. The order
+    // is kept because it is normative and because it is what makes the
+    // exclusion's job legible, not because a test holds it.
+    const me = human();
+    playRun(me, 4, bot);
+    expect(creditedRows(me)).toBe(4);
+    const before = db.getProfile(me).rankedDuels;
+    playRun(me, 1, bot);
+    expect(db.getProfile(me).rankedDuels - before).toBe(1);
+    expect(creditedRows(me)).toBe(5);
+  });
+
+  it('leaves a hard-capped match at zero and spends no allowance', () => {
+    const me = human();
+    const theBot = bot();
+    // Twelve prior matches with this one bot, so the next is the 13th.
+    for (let i = 0; i < 12; i += 1) {
+      seq += 1;
+      db.recordExposure({
+        playerId: me, oppId: theBot, matchKey: `credit:cap:${seq}`,
+        at: new Date(DAY.getTime() - (i + 1) * 60_000), oppIsBot: true, oppBand: 'ace',
+      });
+    }
+    const before = db.getProfile(me);
+    playRun(me, 1, () => theBot);
+    expect(db.getProfile(me).rankedDuels).toBe(before.rankedDuels);
+    expect(creditedRows(me)).toBe(0);
+    // ...and the allowance is untouched, so five real credits still follow.
+    playRun(me, 5, bot);
+    expect(db.getProfile(me).rankedDuels - before.rankedDuels).toBe(5);
+  });
+
+  describe('the decision table — all four pair kinds', () => {
+    // The cap condition is `!selfIsBot && oppIsBot`, NEVER `oppIsBot` alone: in
+    // a bot-vs-bot match every participant's opponent is a bot, so the looser
+    // spelling throttles a BOT's own credits to five a day and bot-vs-bot stops
+    // progressing like the equivalent human duel — which is exactly what §2.7
+    // promises it does.
+    it('credits a human 25 of 25 against humans', () => {
+      const me = human();
+      const before = db.getProfile(me).rankedDuels;
+      playRun(me, 25, human);
+      expect(db.getProfile(me).rankedDuels - before).toBe(25);
+    });
+
+    it('credits a human 5 of 25 against bots', () => {
+      const me = human();
+      const before = db.getProfile(me).rankedDuels;
+      playRun(me, 25, bot);
+      expect(db.getProfile(me).rankedDuels - before).toBe(5);
+    });
+
+    it('credits a bot 25 of 25 against humans', () => {
+      const me = bot();
+      const before = db.getProfile(me).rankedDuels;
+      playRun(me, 25, human);
+      expect(db.getProfile(me).rankedDuels - before).toBe(25);
+    });
+
+    it('credits a bot 25 of 25 against bots, and the 25th is the apex', () => {
+      // 25 and not a smaller number deliberately: 25 is OVERLORD_MIN_DUELS, so
+      // with sufficient rating the 25th credit is what satisfies the apex duel
+      // requirement. A 20-duel fixture would show the counter exceeding five
+      // and say nothing about the threshold the counter exists for.
+      const me = bot();
+      const seed = { rankMu: 40, rankSigma: 1, mmrMu: 40, mmrSigma: 1, rankedGames: 40, rankedDuels: 0 };
+      playRun(me, 24, bot, seed);
+      const at24 = db.getProfile(me);
+      expect(at24.rankedDuels).toBe(24);
+      expect(at24.tier).not.toBe('overlord');
+
+      playRun(me, 1, bot, seed);
+      const at25 = db.getProfile(me);
+      expect(at25.rankedDuels).toBe(25);
+      expect(at25.rankMu).toBeGreaterThanOrEqual(37);
+      expect(at25.tier).toBe('overlord');
+    });
+  });
+
+  it('cannot reach the apex on one day of bot play, at any win rate', () => {
+    // §3.4's simulation as an assertion: at a 90% win rate one UTC day of bot
+    // matches carried 36 of 40 simulated players past mu 37 AND 25 duels. The
+    // cap is what stops that being a one-day route to Cyber Overlord — and it
+    // is a THROTTLE rather than a wall: five a day still reaches 25 in five
+    // days, so no assertion here claims the apex is unreachable.
+    const me = human();
+    const seed = { rankMu: 40, rankSigma: 1, mmrMu: 40, mmrSigma: 1, rankedGames: 40, rankedDuels: 0 };
+    playRun(me, 52, bot, seed);
+    const after = db.getProfile(me);
+    expect(after.rankedDuels).toBe(5);
+    expect(after.rankMu).toBeGreaterThanOrEqual(37);
+    // The rating is there and the duels are not, which is the whole mechanism.
+    expect(after.tier).not.toBe('overlord');
   });
 });

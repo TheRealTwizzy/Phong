@@ -29,6 +29,7 @@ import {
 } from '../src/profileRules';
 import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
 import {
+  BOT_DUEL_CREDITS_PER_DAY,
   pairKindFor,
   participantWeights,
   type ExposureCounts,
@@ -3470,7 +3471,32 @@ class GameDatabase {
         // The duels apart from the games: what the apex is gated on. Counted
         // only when the match rated, so a Casual duel or one on party rules is
         // a duel played and not a duel that tested the rating.
-        if (isPvp) profile.rankedDuels += 1;
+        //
+        // §2.7 caps what a HUMAN may bank from BOT play in one UTC day. The
+        // condition is `!selfIsBot && oppIsBot` and never `oppIsBot` alone: in
+        // bot-vs-bot every participant's opponent is a bot, so the looser
+        // spelling throttles a bot's OWN credits to five a day and bot-vs-bot
+        // stops progressing like the equivalent human duel. Human-vs-human,
+        // bot-vs-human and bot-vs-bot are all uncapped.
+        //
+        // A qualification counter and NOT a saturation layer: it withholds no
+        // mu and no sigma, so the 6th bot duel of a day rates exactly like the
+        // 5th. XP, history and rankedGames are untouched too.
+        const creditIsCapped = !!pairing && !pairing.selfIsBot && pairing.oppIsBot;
+        const creditAllowed =
+          !creditIsCapped ||
+          this.botDuelCreditsToday(profile.id, context.decidedAt ?? now, matchKey) <
+            BOT_DUEL_CREDITS_PER_DAY;
+        if (isPvp && creditAllowed) {
+          profile.rankedDuels += 1;
+          // Stamped after the allowance is read, per §4.5's ordering. The
+          // read's own `matchKey <> ?` exclusion is what actually stops a
+          // match consuming its own allowance -- measured, moving this line
+          // above the read changes nothing -- so the order is here because it
+          // is normative and because it makes the exclusion's job legible,
+          // not because it is load-bearing on its own.
+          this.creditExposureDuel(profile.id, matchKey);
+        }
       }
       profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma, profile.rankedDuels);
       // And the position with it, for the same reason the line above exists: this
@@ -3963,6 +3989,44 @@ class GameDatabase {
   public pruneExposure(now: Date): void {
     const cutoff = new Date(now.getTime() - EXPOSURE_TTL_MS).toISOString();
     this.stmt('DELETE FROM competitive_exposure WHERE at < ?').run(cutoff);
+  }
+
+  /**
+   * §2.7's allowance: how many `rankedDuels` credits this HUMAN has already
+   * been GRANTED from bot play today, excluding the match in hand.
+   *
+   * Granted rather than attempted, which is what `duelCredited = 0` on insert
+   * buys: a refused attempt spends nothing, so it cannot push a later duel out
+   * of the allowance, and the current row cannot consume its own.
+   *
+   * Asked ONLY for a participant satisfying `!selfIsBot && oppIsBot`. The
+   * `oppIsBot = 1` filter reads as "my bot matches" for a human and would read
+   * as "all my matches" for a bot, so the guard is what keeps this a human's
+   * allowance rather than a cap on bot-vs-bot -- which would throttle a bot's
+   * own qualification to five a day and stop bot-vs-bot progressing like the
+   * equivalent human duel.
+   */
+  private botDuelCreditsToday(playerId: string, at: Date, matchKey: string): number {
+    return (
+      this.stmt(
+          `SELECT COALESCE(SUM(duelCredited), 0) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppIsBot = 1 AND day = ? AND matchKey <> ?`
+        )
+        .get(playerId, at.toISOString().slice(0, 10), matchKey) as { n: number }
+    ).n;
+  }
+
+  /**
+   * Stamp the credit onto this participant's exposure row.
+   *
+   * Set for EVERY granted credit whatever the pair kind -- a human-human duel
+   * and a bot's bot-vs-bot duel both stamp 1 -- because it is the live twin of
+   * the durable decision. Only the ALLOWANCE is human-vs-bot; the RECORD of a
+   * credit is universal.
+   */
+  private creditExposureDuel(playerId: string, matchKey: string): void {
+    this.stmt('UPDATE competitive_exposure SET duelCredited = 1 WHERE playerId = ? AND matchKey = ?')
+      .run(playerId, matchKey);
   }
 
   /**
