@@ -81,6 +81,11 @@ const FLOORS = {
   // reachable from a fixture, and the ones that are not are the ones that
   // would let a preference become a refusal.
   'server/playbotPolicy.ts': { statements: 100, branches: 95 },
+  // Which existing bots play and where — pure over an injected snapshot, so
+  // every branch is a demand shape a fixture can build. The uncovered one
+  // would be a rule about when humans get displaced, which is not somewhere to
+  // find out later.
+  'server/playbotPopulation.ts': { statements: 100, branches: 95 },
   'server/db.ts': { statements: 90, branches: 88 },
   // The cookie and session layer — the one file where a regression is somebody
   // losing their account. The STATEMENT number is low and honest about why:
