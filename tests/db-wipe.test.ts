@@ -211,6 +211,57 @@ describe('a wipe takes competitive exposure with it', () => {
   });
 });
 
+describe('a wipe takes the bot roster with it, table AND cache', () => {
+  it('leaves an id the roster used to hold classifying as a human everywhere', async () => {
+    // bot_accounts is the sole classifier and the Set is only a cache, so a
+    // wipe that empties the table and leaves the cache full is the
+    // poisoned-cache state reached by another door — and it is the LIKELIER
+    // door, because the wipe path is written once and never looked at again.
+    // Nothing downstream could notice: the SQL sites would read the empty
+    // table and the hot path would read the stale Set, and the two would
+    // disagree about the same account with no error anywhere.
+    const { db: before, isBotAccount: wasBot } = await import('../server/db');
+    before.insertBot({ id: 'bot-wiped-01', username: 'WipedBot', mu: 24 });
+    expect(wasBot('bot-wiped-01')).toBe(true);
+
+    before.setMeta('wipe_v4', '');
+    vi.resetModules();
+    const { db: booted, isBotAccount } = await import('../server/db');
+
+    // The table is empty and the CACHE agrees — asserted through the new
+    // module's own export, since resetModules gives the reload a fresh Set.
+    //
+    // What this holds is the DROP. The reload inside applyWipe is redundant
+    // against `migrateSchema`, which reloads too and runs after every wipe in
+    // the constructor, so removing it reddens nothing — measured, and recorded
+    // beside the call rather than left to be rediscovered.
+    expect(isBotAccount('bot-wiped-01')).toBe(false);
+    const raw = new DatabaseSync(path.join(TMP, 'phong.db'), { readOnly: true });
+    try {
+      expect(
+        (raw.prepare('SELECT COUNT(*) AS n FROM bot_accounts').get() as { n: number }).n
+      ).toBe(0);
+    } finally {
+      raw.close();
+    }
+
+    // And a re-seed repopulates both: the wipe clears `meta`, so bot_roster_v1
+    // is unstamped and the boot after it seeds again. Through the real
+    // seedBotRoster rather than insertBot, because that guard is part of what
+    // is being asserted — and with a COMPLETE BotSeed, since botProfileFields
+    // derives rankedGames from matchesPlayed and a partial one lands NaN.
+    const seeded = booted.seedBotRoster([
+      {
+        id: 'bot-wiped-01', username: 'WipedBot', mu: 24, xp: 500,
+        matchesPlayed: 20, matchesWon: 12, highestRally: 8, totalPointsScored: 90,
+      },
+    ]);
+    expect(seeded.skipped).toEqual([]);
+    expect(seeded.inserted).toBe(1);
+    expect(isBotAccount('bot-wiped-01')).toBe(true);
+  });
+});
+
 describe('manual db:reset script', () => {
   it('refuses without --yes and deletes the database files with it', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-reset-script-'));

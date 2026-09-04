@@ -1078,7 +1078,15 @@ class GameDatabase {
       throw e;
     }
     this.ensureBaseSchema();
-    // After the COMMIT, for the reason the drop above states.
+    // After the COMMIT, for the reason the drop above states: a cache emptied
+    // INSIDE the transaction with a ROLLBACK behind it would leave every bot
+    // reading as a human, and this is the sole classifier so nothing
+    // downstream could notice.
+    //
+    // Redundant today and kept deliberately: `migrateSchema` reloads the Set
+    // too and runs after every wipe in the constructor, so removing this line
+    // reddens no test — measured. What it buys is that the coherence of the
+    // cache does not silently depend on that ORDER, which nothing else states.
     this.reloadBotAccounts();
     // EVERY wipe flag is re-stamped, earlier and later alike. Stamping only
     // the keys up to this one used to be enough with two of them, but each
