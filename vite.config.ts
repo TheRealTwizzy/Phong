@@ -76,6 +76,11 @@ const FLOORS = {
   // that out. The seeder is also the one place the population curve is
   // decided, and it is decided ONCE, at creation.
   'server/playbotTraits.ts': { statements: 100, branches: 100 },
+  // What an autonomous bot chooses, and what it cannot. Pure over what it is
+  // handed — no clock, no random source, no database — so every branch is
+  // reachable from a fixture, and the ones that are not are the ones that
+  // would let a preference become a refusal.
+  'server/playbotPolicy.ts': { statements: 100, branches: 95 },
   'server/db.ts': { statements: 90, branches: 88 },
   // The cookie and session layer — the one file where a regression is somebody
   // losing their account. The STATEMENT number is low and honest about why:
