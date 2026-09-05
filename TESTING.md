@@ -64,7 +64,7 @@ coverage number.
 | `playbotPolicy` `playbotPopulation` | What an autonomous bot chooses, and which existing bots should be playing (both pure, both floored at 100/95). The coverage floor found a duplicated rule rather than an untested line: the patience clause existed in two places, and one copy had no test |
 | `exposure` `exposureRelay` | The anti-farming store: both seats reading one window, one persisted match counting once however long it ran, the prior/current off-by-one pinned on BOTH sides of every band transition, and retention asserted apart from eligibility — a row can be retained and eligible for nothing, which is the normal state of the back half of the window |
 | `playbotRecord` `advancedLadder` | The weights inside `recordMatch`, the three history columns, and the trust/eligibility separation — which takes three cases because "is the opponent trusted" and "is this match eligible" are independent questions |
-| `playbotDuel` `playbotLifecycle` `playbotSupervisor` | The driver and the population against a real server: two bots playing a duel end to end, a SIGTERM mid-duel charging nobody an abandon, a stand-down waiting for the whistle, and the population starting with the process and coming back to its own accounts across a restart |
+| `playbotDuel` `playbotLifecycle` `playbotSupervisor` | The driver and the population against a real server: two bots playing a duel end to end, a SIGTERM mid-duel charging nobody an abandon, a stand-down waiting for the whistle, and the population starting with the process and coming back to its own accounts across a restart, and the reap letting go of a driver the controller has stopped naming |
 | `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `seatGate` `p2pParity` `headers` | Twelve suites that boot the real server (see §4) |
 | `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` `rankedDuelsBackfill` `advancedLadder` `botIdentity` | The one-shot migrations. **A one-shot is invisible to a test that does not un-stamp it and re-import** — its key is already in `meta`, so nothing drives it and a mutation to its SQL reddens nothing. Clear the key, `vi.resetModules()`, re-import, then assert the repair |
@@ -177,6 +177,15 @@ identity too. That guard FIRED, on a slower run where only one crossing arrived 
 land within 2% of the base. It cost a fixture change (the serve speed is measured, not picked) and
 it is the difference between a test that holds the rule and one that passes for a reason it does
 not name.
+
+And where two assertions cover two properties, **check that each mutation reddens only its own** —
+a pair that fails together is one assertion wearing two names. Round eleven's reap needed both a
+condition change and a move, so it carries a behavioural test for the condition and a source read
+for the position. The source read first anchored on the predicate text, so changing the condition
+reddened it too: two failures, neither of which said which of the two things had moved. Anchored on
+`m.driver.close()` instead — the thing the test is actually about — each mutation now reddens
+exactly one. Naming the mutation is only half the habit; the other half is naming what should
+STAY GREEN.
 
 ## 3. Reading a coverage report honestly
 

@@ -419,3 +419,76 @@ describe('a bot plays more than one match', () => {
     expect(best).toBeGreaterThanOrEqual(2);
   }, 180_000);
 });
+
+describe('a driver the controller has stopped naming', () => {
+  it('closes a driver the controller has stopped naming', async () => {
+    // `deactivate` is `s.activeBotIds.filter((id) => !kept.has(id))` and
+    // `activeBotIds` IS the engaged set, so the two states a bot ends a job in
+    // -- a finished court, and an empty lobby past its window -- are exactly
+    // the states in which it can never be named. Not named means never
+    // `retiring`, and the reap loop opened with `m.retiring &&`, so nothing
+    // ever let that driver go: it kept its socket, its seat and its 16ms
+    // timer while the controller ranked other dormant accounts above it.
+    //
+    // The bot is dispatched with nobody about, then the server fills up: at
+    // twenty humans online the idle baseline rounds to zero, so the target is
+    // zero and the controller names NOBODY. That is the case under test --
+    // not a stand-down, which was always reaped, but a bot the controller has
+    // simply stopped mentioning.
+    relay = await startRelay('playbot-reap');
+    const rows = new Map<string, ReturnType<PlaybotAccountStore['load']>[number]>();
+    // Flipped between the two ticks, so one supervisor sees both worlds.
+    let crowded = false;
+    const sup = new PlaybotSupervisor({
+      base: relay.base,
+      wsUrl: relay.wsUrl,
+      rosterSize: 1,
+      tickMs: 3_600_000,
+      // Short, so the lone bot's own empty lobby stops counting as engagement
+      // inside the test rather than after twenty seconds of it.
+      idleLobbyMs: 500,
+      idleLobbyJitterMs: 0,
+      traitsFor: (u) => ({ ...seedTraits(u), skill: MIN_AI_COMPETENCE }),
+      store: {
+        load: () => [...rows.values()],
+        save: (botId, deviceCookie, traits) => {
+          rows.set(botId, {
+            botId,
+            username: botId,
+            deviceCookie,
+            traits,
+            mu: 25,
+            recentMatches: 0,
+            level: 1,
+            tier: 'unranked' as const,
+          });
+        },
+      },
+      live: () => ({
+        humansOnline: crowded ? 20 : 0,
+        queuedHumans: 0,
+        longestWaitMs: 0,
+        openTables: 0,
+      }),
+    });
+    await sup.start();
+
+    sup.tick();
+    for (let i = 0; i < 60 && sup.connectedBotIds().length === 0; i++) await sleep(250);
+    // The precondition, asserted rather than assumed: without a driver in hand
+    // there is nothing to reap and the assertion below would pass on an empty
+    // set for the wrong reason.
+    expect(sup.connectedBotIds()).toHaveLength(1);
+
+    // Past the idle-lobby window, so the driver is genuinely not engaged.
+    await sleep(1_000);
+    expect(sup.activeBotIds()).toHaveLength(0);
+
+    crowded = true;
+    sup.tick();
+    await sleep(500);
+
+    expect(sup.connectedBotIds()).toHaveLength(0);
+    await sup.stop();
+  }, 60_000);
+});

@@ -385,6 +385,40 @@ describe('what the composition has to pass along', () => {
     expect(src).toMatch(/m\.dispatching = true;[\s\S]*?finally \{[\s\S]*?m\.dispatching = false;/);
   });
 
+  it('lets go of idle drivers AFTER it has dispatched', () => {
+    // The reap ran FIRST and opened with `m.retiring &&`, and both halves were
+    // wrong together. The condition made it unreachable for a driver the
+    // controller had simply stopped naming -- `deactivate` filters the ENGAGED
+    // set, so a finished court and a stale empty lobby are exactly the states
+    // that can never be named -- and the position is what makes the broader
+    // condition safe, since a bot dispatched on this tick must not have the
+    // socket it is about to reuse closed underneath it.
+    //
+    // Read rather than driven, because ORDER is the assertion: once the reap
+    // is correct, a behavioural test passes from either position. What only
+    // the source can say is that it sits below the dispatch.
+    const src = read('server/playbotSupervisor.ts');
+    // Bounded to tick()'s OWN body, at the method that follows it. Sliced to
+    // end-of-file this test is vacuous in the one direction that matters:
+    // `dispatchInner` closes a dead driver with the same `m.driver.close();`,
+    // and it sits below tick(), so deleting the reap outright would match
+    // THAT one, still be "after the dispatch", and pass.
+    const start = src.indexOf('public tick(): void');
+    const end = src.indexOf('private async tickSafely', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const tick = src.slice(start, end);
+    const dispatched = tick.indexOf('void this.dispatch(m, action);');
+    // Anchored on the CLOSE and not on the condition text: this test is about
+    // where the reap sits, so wording it against the predicate would make it
+    // redden for a condition change too, and then neither failure would say
+    // which of the two things had moved.
+    const reaped = tick.indexOf('m.driver.close();');
+    expect(dispatched).toBeGreaterThan(-1);
+    expect(reaped).toBeGreaterThan(-1);
+    expect(reaped).toBeGreaterThan(dispatched);
+  });
+
   it('refreshes that bracket state on every roster read', () => {
     // The half the fifth round's own fix left open, and the note beside it
     // said the opposite: `roster()` reloads the store every tick and took `mu`

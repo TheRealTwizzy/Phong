@@ -254,6 +254,18 @@ export class PlaybotSupervisor {
     return this.engagedIds(urgencyOf(this.live()));
   }
 
+  /**
+   * The bots still HOLDING a driver, engaged or not.
+   *
+   * Deliberately a different question from `activeBotIds`, and the gap between
+   * the two is the whole of the reap: a driver on a finished court or in a
+   * stale empty lobby is not engaged, so it is absent from the active set
+   * while its socket, its seat and its 16ms timer are all still there.
+   */
+  public connectedBotIds(): string[] {
+    return this.managed.filter((m) => m.driver).map((m) => m.botId);
+  }
+
   private engagedIds(urgent: number): string[] {
     return this.managed.filter((m) => this.engaged(m, urgent)).map((m) => m.botId);
   }
@@ -389,19 +401,8 @@ export class PlaybotSupervisor {
    */
   public tick(): void {
     if (this.stopped || this.opts.rosterSize <= 0) return;
-    // Reap first: a bot asked to stand down leaves at the whistle, and this is
-    // where its socket is let go once it is out. Closing it at the request
-    // instead would cut it off mid-rally, which the relay judges an abandon —
-    // a real ranked loss for a bot that did nothing.
     const live = this.live();
     const urgent = urgencyOf(live);
-    for (const m of this.managed) {
-      if (m.retiring && m.driver && !this.engaged(m, urgent)) {
-        m.driver.close();
-        m.driver = null;
-        m.retiring = false;
-      }
-    }
 
     const target = targetActivation(this.snapshotFrom(live), live.bandCentre ?? START_MU);
 
@@ -416,6 +417,34 @@ export class PlaybotSupervisor {
       if (!m?.driver) continue;
       m.retiring = true;
       m.driver.standDown();
+    }
+
+    // Reap LAST, and on the DRIVER rather than on the request.
+    //
+    // It used to run first and open with `m.retiring &&`, which made it
+    // unreachable for the two states a bot actually ends a job in. `deactivate`
+    // is `activeBotIds.filter(not kept)` and `activeBotIds` IS the engaged set,
+    // so a driver on a finished court or in a stale empty lobby is absent from
+    // the set the controller can name — never named, never `retiring`, never
+    // reaped, and holding its socket, its seat and its 16ms timer while the
+    // controller ranked other dormant accounts above it.
+    //
+    // Running it AFTER the two loops is what makes that safe: a bot dispatched
+    // on this very tick is protected twice over — `dispatch` sets `dispatching`
+    // synchronously before its first await, and `dispatchInner` sets
+    // `dispatchedAt` the same way, so the grace answers too. Reaping first
+    // would instead close a socket that is about to be reused, and one still
+    // holding a seat the driver gives up properly with `leave`.
+    //
+    // Still never mid-rally: `engaged` covers every playing phase, so a bot
+    // asked to stand down is let go at the whistle exactly as before — which
+    // is the abandon this loop has always been careful of.
+    for (const m of this.managed) {
+      if (m.driver && !m.dispatching && !this.engaged(m, urgent)) {
+        m.driver.close();
+        m.driver = null;
+        m.retiring = false;
+      }
     }
   }
 
