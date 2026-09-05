@@ -398,7 +398,24 @@ export class PlaybotDriver {
 
   /** What the supervisor knows about the seat opposite, or the safe default. */
   private opponentFacts(): { isBot: boolean; recentPairCount: number } {
-    const asked = this.opponentId ? this.opts.opponentFacts?.(this.opponentId) : null;
+    let asked: { isBot: boolean; recentPairCount: number } | null | undefined;
+    try {
+      asked = this.opponentId ? this.opts.opponentFacts?.(this.opponentId) : null;
+    } catch (e) {
+      // This is the first thing in a message handler that reaches the
+      // DATABASE, and `handle()` is called straight out of `ws.on('message')`
+      // with nothing between: a throw there is an uncaught exception, which
+      // CLAUDE.md §5 answers with a controlled SHUTDOWN. A full disk deciding
+      // one bot's rematch must not end every live duel on the server.
+      //
+      // Caught HERE and not around `handle()`, deliberately: §5's own lesson
+      // is that a handler which logs and resumes suppresses termination for
+      // faults that have no owner. This one has an owner and a right answer --
+      // a read that failed is a driver that could not find out, which is the
+      // same state as no `opponentFacts` at all.
+      console.warn('[playbot] could not read the opponent:', (e as Error)?.message ?? e);
+      asked = null;
+    }
     // A person with no history: never refused, and never tapered.
     return asked ?? { isBot: false, recentPairCount: 0 };
   }
@@ -627,6 +644,11 @@ export class PlaybotDriver {
         this.phase = 'over';
         this.ball = null;
         this.opponentPresent = false;
+        // Who was sitting opposite is about the PAIR, so it goes when they do
+        // -- the same rule `resetTableForNextPair` states one level up, and
+        // the same one `leave()` already follows. Left standing it is a
+        // departed player's id answering a question about whoever arrives.
+        this.opponentId = null;
         break;
       case 'rtc_signal':
         // Declined: a bot plays relayed, so src/net/p2p.ts stays untouched and

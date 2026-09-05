@@ -448,6 +448,46 @@ describe('a bot at a table with a human', () => {
     bot.close();
   }, 90_000);
 
+  it('answers a person anyway when it cannot find out who they are', async () => {
+    // `opponentFacts` is the first thing in a message handler that reaches the
+    // DATABASE, and `handle()` is called straight out of `ws.on('message')`:
+    // an uncaught throw there is one CLAUDE.md §5 answers with a controlled
+    // SHUTDOWN, so a failing read while deciding one bot's rematch would end
+    // every live duel on the server.
+    //
+    // The right answer is also the safe one: a read that failed is a driver
+    // that could not find out, which §2.11 says accepts.
+    const bot = await bootBot('FactsThrow', 0.12, {
+      traits: { rematchAppetite: 0 },
+      opponentFacts: () => {
+        throw new Error('the disk is full');
+      },
+      rollFor: () => 0.999,
+    });
+    bot.host({ winningScore: 3 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+
+    const human = await relay.newDevice('FactsThrowHuman');
+    const phone = await relay.openPhone(human);
+    phone.send({ type: 'join_room', roomId: bot.roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    phone.send({ type: 'player_ready', ready: true });
+    await phone.await('game_start');
+
+    const seat = bot.seat === 0 ? 'p1' : 'p2';
+    for (let i = 1; i <= 3; i += 1) {
+      phone.send({ type: 'point_scored', scorer: seat });
+      await phone.awaitCount('score_update', i);
+    }
+    await until('the bot to see the whistle', () => bot.phase === 'over');
+
+    phone.send({ type: 'rematch_request' });
+    await phone.awaitCount('game_start', 2, 20_000);
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
   it('asks another bot, and takes no for an answer', async () => {
     // `acceptsRematch` had no caller: the driver accepted every vote it was
     // shown and cast none of its own, so the bot-vs-bot arm was unreachable
