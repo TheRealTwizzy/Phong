@@ -97,7 +97,13 @@ const nameTap = await human.waitForSelector('#btn-view-opponent-profile', { time
 if (!nameTap) fail("the opponent's name is not a tap target");
 const botName = (await human.textContent('#btn-view-opponent-profile')).trim();
 await human.click('#btn-view-opponent-profile');
-await human.waitForSelector('#public-profile-card', { timeout: 10000 });
+// `#public-profile-username`, NOT `#public-profile-card`. The Sheet mounts the
+// card immediately and fills it when the fetch returns, so waiting on the card
+// asserts the badge against a spinner -- which passes on a fast box and loses
+// the race on a CI runner. The username renders only on `state === 'ready' &&
+// profile`, which is the readiness this suite actually needs; `e2e-cosmetics`
+// carries the same note beside the same trap.
+await human.waitForSelector('#public-profile-username', { timeout: 10000 });
 // The badge is a DISCLOSURE, not decoration: the card must never imply a
 // person is behind it. Server-derived from bot_accounts, so a client can no
 // more invent it than it can invent a tier.
@@ -141,7 +147,7 @@ await human.waitForSelector('[id^="history-record-"]', { timeout: 15000 })
 const opponentLink = await human.$('[id^="history-opponent-"]');
 if (!opponentLink) fail("history does not make the bot's name a tap target");
 await opponentLink.click();
-await human.waitForSelector('#public-profile-card', { timeout: 10000 });
+await human.waitForSelector('#public-profile-username', { timeout: 10000 });
 if (!(await human.$('#public-profile-bot-badge'))) fail('the history profile carries no BOT badge');
 ok("history names the bot and opens the same badged profile");
 
