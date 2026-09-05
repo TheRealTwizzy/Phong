@@ -965,6 +965,36 @@ describe('a finished court holds a rematch window', () => {
     await sup.stop();
   }, 90_000);
 
+  it('is not taken away by a stand-down inside the window either', async () => {
+    // The window closed one door and opened another, which is the shape this
+    // feature keeps producing: holding a finished court in `engaged` is what
+    // puts that bot INTO `activeBotIds`, and the controller names its
+    // deactivations from exactly that set -- so as the target fades the bot is
+    // ranked outside `kept`, arrives in `target.deactivate`, and `standDown`
+    // on a phase of `over` leaves the table on the spot. Same loss to the same
+    // human, through the door the fix had just created.
+    const { sup, phone, botId, crowd, seat } = await seatedAgainstOneBot('playbot-window-standdown');
+
+    await sleep(5_500);
+    await playOut(phone, seat);
+
+    // Twenty humans online with nobody queued: the target rounds to zero and
+    // urgency stays zero, which is the state that names a still-engaged bot
+    // for deactivation without any human being unserved.
+    crowd(true);
+    expect(targetActivation(sup.snapshot(), START_MU).deactivate).toEqual([botId]);
+    sup.tick();
+    await sleep(500);
+
+    expect(phone.last('opponent_left')).toBeUndefined();
+
+    phone.send({ type: 'rematch_request' });
+    await phone.awaitCount('game_start', 2, 20_000);
+
+    phone.close();
+    await sup.stop();
+  }, 90_000);
+
   it('gives the court up anyway when a human has no game at all', async () => {
     // §4.13's priority rule, which this feature has now made nominal three
     // separate times: a bot holding something that is not a match must not

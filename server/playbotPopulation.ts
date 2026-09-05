@@ -266,8 +266,29 @@ export function targetActivation(
   // `_queue` room, which gates nobody, so a bot the brackets refuse is still a
   // legitimate opponent there. Narrowing it too would take supply away from
   // people in the queue in order to reserve it for a table.
+  //
+  // It does, however, spend the bot the TABLE cannot replace last. Serving the
+  // queue first is a priority statement and this does not weaken it — the
+  // queue is served either way, by somebody — but taking whoever ranks highest
+  // was leaving both humans worse off: at a Beginner table, whose `tierMax` is
+  // Contender, the only eligible bot can be the one nearest the band centre,
+  // so the queue consumed it, the table loop found nobody, and that host
+  // waited out an unrelated match while a Casual-only bot sat free that the
+  // queue would have accepted. The reservation is sized to the demand it
+  // protects, exactly as `findPair`'s fallback reservation is, and yields
+  // completely when it would otherwise leave the queue unserved: a bot held
+  // for a table nobody can fill is a bot spent on nobody.
+  const neededForTable = (): Set<string> => {
+    const eligible = available.filter(
+      (b) => !spent.has(b.id) && s.openTableVenues.some((v) => b.venues.includes(v))
+    );
+    const slots = demand.table - activate.filter((a) => a.action === 'join').length;
+    return eligible.length <= slots ? new Set(eligible.map((b) => b.id)) : new Set();
+  };
   for (let i = 0; i < demand.queue && hasRoom(); i += 1) {
-    const bot = available.find((b) => !spent.has(b.id));
+    const reserved = neededForTable();
+    const free = available.filter((b) => !spent.has(b.id));
+    const bot = free.find((b) => !reserved.has(b.id)) ?? free[0];
     if (!bot) break;
     take(bot, 'queue');
   }

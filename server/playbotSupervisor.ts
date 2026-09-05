@@ -321,6 +321,23 @@ export class PlaybotSupervisor {
     return this.managed.filter((m) => this.engaged(m, urgent)).map((m) => m.botId);
   }
 
+  /**
+   * A court that has finished with somebody still sitting at it, inside the
+   * window their Play Again is answered in. See REMATCH_GRACE_MS.
+   *
+   * Asked in two places and they must not drift: `engaged` KEEPS such a bot,
+   * and the deactivation loop must not send it a `standDown` — which, on a
+   * phase of `over`, leaves the table on the spot. Holding it in `engaged`
+   * alone would therefore have handed the same loss back through the other
+   * door: the controller ranks the bot outside `kept` as the target fades, it
+   * is named for deactivation precisely BECAUSE it is now counted as active,
+   * and the human loses the opponent inside the grace that exists for them.
+   */
+  private inRematchGrace(m: Managed): boolean {
+    if (!m.driver || m.driver.phase !== 'over' || !m.driver.hasOpponent()) return false;
+    return Date.now() - m.driver.finishedAt < (this.opts.rematchGraceMs ?? REMATCH_GRACE_MS);
+  }
+
   private engaged(m: Managed, urgent: number): boolean {
     if (!m.driver) return false;
     // A table nobody has joined is not a match — see IDLE_LOBBY_MS. And when a
@@ -338,9 +355,9 @@ export class PlaybotSupervisor {
     // A finished court is not a match, and it is not nothing either — see
     // REMATCH_GRACE_MS. Somebody is still sitting at it, and their Play Again
     // is theirs to press.
-    if (m.driver.phase === 'over' && m.driver.hasOpponent()) {
+    if (this.inRematchGrace(m)) {
       if (urgent > 0) return false;
-      return Date.now() - m.driver.finishedAt < (this.opts.rematchGraceMs ?? REMATCH_GRACE_MS);
+      return true;
     }
     if (ENGAGED.has(m.driver.phase)) return true;
     // A dispatch still in flight counts, or the next tick sends it twice.
@@ -473,6 +490,14 @@ export class PlaybotSupervisor {
       const m = this.managed.find((x) => x.botId === id);
       if (!m?.driver) continue;
       m.retiring = true;
+      // `standDown` LEAVES on a phase of `over`, so a bot inside its rematch
+      // window is asked later rather than now: the request stands (`retiring`
+      // is set, and the derived pass below leaves it alone), and the window
+      // ends on its own — after which this driver is no longer engaged and the
+      // reap closes it. Unserved demand still takes it away at once, because
+      // `engaged` returns false under urgency, so such a bot is not in the
+      // active set the controller names from at all.
+      if (this.inRematchGrace(m)) continue;
       m.driver.standDown();
     }
 

@@ -482,3 +482,59 @@ describe('a table slot goes to a bot that can sit at the table', () => {
     expect(target.activate).toEqual([{ id: 'placed', action: 'host' }]);
   });
 });
+
+describe('a bot only ONE kind of demand can use', () => {
+  const bot = (id: string, mu: number, venues: string[]) => ({
+    id,
+    traits: seedTraits(id),
+    mu,
+    recentMatches: 0,
+    venues,
+  });
+
+  it('spends the venue-eligible bot on the table, not on the queue', () => {
+    // The queue is not narrowed -- the hidden `_queue` room gates nobody -- so
+    // it took whoever ranked highest, and that is exactly the bot a bracketed
+    // table may be unable to replace. At a Beginner table, whose `tierMax` is
+    // Contender, the only eligible bot can also be the one nearest the band
+    // centre: the queue consumed it, the table loop found nobody, and that
+    // host waited out an unrelated match while a Casual-only bot sat free that
+    // the queue would have accepted just as well.
+    //
+    // Serving the queue FIRST is untouched, which is the half worth stating:
+    // both humans are served here, and the reservation only decides which bot
+    // each one gets.
+    const snapshot = {
+      humansOnline: 2,
+      queuedHumans: 1,
+      longestWaitMs: 0,
+      openTableVenues: ['beginner'],
+      activeBotIds: [],
+      roster: [
+        // Nearest the band centre AND the only one Beginner would admit.
+        bot('both', 25, ['casual', 'beginner']),
+        bot('casual-only', 20, ['casual']),
+      ],
+    };
+    expect(targetActivation(snapshot, 25).activate).toEqual([
+      { id: 'casual-only', action: 'queue' },
+      { id: 'both', action: 'join' },
+    ]);
+  });
+
+  it('yields the reservation rather than leaving the queue unserved', () => {
+    // A bot held for a table nobody else can fill is a bot spent on nobody, so
+    // the reservation gives way completely when it is the last candidate: the
+    // queue is served, and the table slot goes unspent as it already does when
+    // no eligible bot exists at all.
+    const snapshot = {
+      humansOnline: 2,
+      queuedHumans: 1,
+      longestWaitMs: 0,
+      openTableVenues: ['beginner'],
+      activeBotIds: [],
+      roster: [bot('both', 25, ['casual', 'beginner'])],
+    };
+    expect(targetActivation(snapshot, 25).activate).toEqual([{ id: 'both', action: 'queue' }]);
+  });
+});
