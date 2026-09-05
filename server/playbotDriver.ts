@@ -440,9 +440,28 @@ export class PlaybotDriver {
         this.rules = normalizeRules(msg.config.rules);
         break;
       case 'ready_state':
-        // Host only: start once the guest has said yes.
-        if (this.seat === 0 && msg.ready[1] && this.phase === 'lobby') {
-          this.send({ type: 'start_match' });
+        if (this.seat === null || this.phase !== 'lobby') break;
+        if (this.seat === 0) {
+          // Host: start once the guest has said yes.
+          if (msg.ready[1]) this.send({ type: 'start_match' });
+        } else if (!msg.ready[this.seat]) {
+          // Guest: a readiness is not standing consent. `set_room_config`
+          // clears BOTH flags on every host edit -- a yes to old rules is not
+          // a yes to new ones -- and this case was host-only, so the single
+          // yes sent on `room_joined` was the only one the bot ever gave. A
+          // human who joined a bot to their table and then picked a winning
+          // score, which is what a pre-match lobby is FOR, disarmed it and had
+          // no way to get it back: Start is `!opponentName || !guestReady`, so
+          // it stayed dead with no error and nothing to press.
+          //
+          // The occupied-lobby rule in `standDown` is what makes that
+          // permanent rather than transient -- the bot is engaged, so nothing
+          // moves it -- which is the fix above turning a passing annoyance
+          // into a table wedged for the life of the process.
+          //
+          // No loop: the relay answers this with `ready[1] = true`, and the
+          // bot never unreadies, so the guard is false from then on.
+          this.send({ type: 'player_ready', ready: true });
         }
         break;
       case 'rematch_state': {

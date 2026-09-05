@@ -249,6 +249,55 @@ describe('a deactivated bot waits for the whistle', () => {
     bot.close();
   }, 90_000);
 
+  it('says yes again when the host changes the terms', async () => {
+    // A guest's readiness is not a standing consent: `set_room_config` clears
+    // BOTH flags on every host edit, because a yes to old rules is not a yes
+    // to new ones. The bot readied once, on `room_joined`, and its
+    // `ready_state` case was host-only -- so a human who joined a bot to their
+    // table and then picked a winning score, which is what a pre-match lobby
+    // is FOR, disarmed the bot's yes and had no way to get it back. Start is
+    // `!opponentName || !guestReady`, so it stayed dead with no error.
+    //
+    // The occupied-lobby rule above is what makes that permanent rather than
+    // transient: the bot is engaged, so nothing stands it down, and it sits
+    // there for the life of the process opposite a human who cannot start.
+    relay = await startRelay('playbot-lifecycle');
+    const r = relay;
+    const human = await r.newDevice('TermSetter');
+    const phone = await r.openPhone(human);
+    phone.send({
+      type: 'create_room',
+      playerId: human.id,
+      config: { winningScore: 5, rules: {} },
+      visibility: 'public',
+    });
+    const created = (await phone.await('room_created')) as { roomId: string };
+
+    const bot = await bootBot(r, 'reready');
+    bot.join(created.roomId);
+    await until('the guest to ready', () => phone.last('ready_state')?.ready[1] === true);
+
+    phone.clear();
+    phone.send({ type: 'set_room_config', config: { winningScore: 3, rules: {} } });
+    await until(
+      'the guest to say yes again under the new terms',
+      () => phone.last('ready_state')?.ready[1] === true
+    );
+
+    // The PRECONDITION, asserted rather than assumed. Without it this test
+    // passes on a relay that never cleared the flag at all -- the re-ready
+    // would be the ORIGINAL yes still standing, and the fixture would be
+    // exercising the empty case.
+    expect(phone.all('ready_state')[0].ready[1]).toBe(false);
+
+    // And the whole point of the yes: the host can now start.
+    phone.send({ type: 'start_match' });
+    await phone.await('game_start');
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
   it('leaves the QUEUE when it is stood down', async () => {
     // `queued` is an ENGAGED phase, so a driver left sitting in it is counted
     // active forever and the supervisor's reap -- `retiring && !engaged` --
