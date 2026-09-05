@@ -89,7 +89,15 @@ export interface PopulationSnapshot {
 export type PopulationAction = 'queue' | 'host' | 'join';
 
 export interface PopulationTarget {
-  activate: Array<{ id: string; action: PopulationAction }>;
+  /**
+   * `venue` is set for a `join` matched to a SPECIFIC waiting table, and it is
+   * the whole point of matching per slot: recorded as a bare `join`, the
+   * dispatch searches every venue the bot may enter and chooses globally, so
+   * two bots matched to two different venues can both walk up to the same
+   * table — one join refused as full, and the other host unserved. Carrying it
+   * is what makes the allocation above real rather than nominal.
+   */
+  activate: Array<{ id: string; action: PopulationAction; venue?: string }>;
   /** Bots that should stand down once their current match ends. */
   deactivate: string[];
 }
@@ -257,9 +265,9 @@ export function targetActivation(
   const spent = new Set<string>();
   const available = ordered.filter((b) => !active.has(b.id));
   const hasRoom = (): boolean => kept.size + activate.length < room;
-  const take = (bot: PopulationBot, action: PopulationAction): void => {
+  const take = (bot: PopulationBot, action: PopulationAction, venue?: string): void => {
     spent.add(bot.id);
-    activate.push({ id: bot.id, action });
+    activate.push(venue ? { id: bot.id, action, venue } : { id: bot.id, action });
   };
 
   // The queue is not narrowed: matchmaking seats its pair in the hidden
@@ -342,7 +350,7 @@ export function targetActivation(
     // Every remaining slot is one no available bot can enter. Left unspent
     // rather than sent to a door that will not open.
     if (!pick) break;
-    take(pick.eligible[0]!, 'join');
+    take(pick.eligible[0]!, 'join', slots[pick.idx]);
     slots.splice(pick.idx, 1);
   }
 

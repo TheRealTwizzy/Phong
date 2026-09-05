@@ -496,7 +496,7 @@ describe('what the composition has to pass along', () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const tick = src.slice(start, end);
-    const dispatched = tick.indexOf('void this.dispatch(m, action);');
+    const dispatched = tick.indexOf('void this.dispatch(m, action, venue);');
     // Anchored on the CLOSE and not on the condition text: this test is about
     // where the reap sits, so wording it against the predicate would make it
     // redden for a condition change too, and then neither failure would say
@@ -636,7 +636,7 @@ describe('what the composition has to pass along', () => {
     expect(src).toMatch(/roomEntryVerdict\(roomById\(id\), who\)\.ok/);
     // BOTH consumers, or the half that was left raw is the half that breaks.
     expect(src).toMatch(/chooseVenue\(\{[\s\S]*?allowed,[\s\S]*?\}\)/);
-    expect(src).toMatch(/this\.openTable\(m, venue, allowed\)/);
+    expect(src).toMatch(/this\.openTable\(m, venue, allowed, assigned\)/);
   });
 
   it('chooses its table through the preference rather than by arrival order', () => {
@@ -647,5 +647,10 @@ describe('what the composition has to pass along', () => {
     const src = read('server/playbotSupervisor.ts');
     expect(src).toMatch(/humanTablesFirst\(free, /);
     expect(src).toMatch(/free\.push\(\{ id: t\.id, seatedIds \}\)/);
+    // And the ASSIGNED venue is searched on its own first, which is the only
+    // place a venue narrows the gather rather than ordering it: matching a bot
+    // to a slot and then dispatching it at the union is the allocation made
+    // nominal, with two bots walking up to the same table.
+    expect(src).toMatch(/this\.pickTable\(await this\.freeTables\(\[assigned\], m\), m\)/);
   });
 });

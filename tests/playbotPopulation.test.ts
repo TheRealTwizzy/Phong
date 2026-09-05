@@ -419,7 +419,9 @@ describe('a table slot goes to a bot that can sit at the table', () => {
     });
     // One slot, and it is the table's.
     expect(targetActiveCount(s)).toBe(1);
-    expect(targetActivation(s, 25).activate).toEqual([{ id: 'eligible', action: 'join' }]);
+    expect(targetActivation(s, 25).activate).toEqual([
+      { id: 'eligible', action: 'join', venue: 'beginner' },
+    ]);
   });
 
   it('still prefers the nearest bot when it CAN sit there', () => {
@@ -433,7 +435,9 @@ describe('a table slot goes to a bot that can sit at the table', () => {
         bot('far', { mu: 18, venues: ['casual', 'beginner'] }),
       ],
     });
-    expect(targetActivation(s, 25).activate).toEqual([{ id: 'near', action: 'join' }]);
+    expect(targetActivation(s, 25).activate).toEqual([
+      { id: 'near', action: 'join', venue: 'beginner' },
+    ]);
   });
 
   it('serves the QUEUE with a bot no table would have', () => {
@@ -452,7 +456,7 @@ describe('a table slot goes to a bot that can sit at the table', () => {
     });
     expect(targetActivation(s, 25).activate).toEqual([
       { id: 'placed', action: 'queue' },
-      { id: 'eligible', action: 'join' },
+      { id: 'eligible', action: 'join', venue: 'beginner' },
     ]);
   });
 
@@ -518,7 +522,7 @@ describe('a bot only ONE kind of demand can use', () => {
     };
     expect(targetActivation(snapshot, 25).activate).toEqual([
       { id: 'casual-only', action: 'queue' },
-      { id: 'both', action: 'join' },
+      { id: 'both', action: 'join', venue: 'beginner' },
     ]);
   });
 

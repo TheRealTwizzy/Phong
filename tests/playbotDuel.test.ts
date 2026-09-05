@@ -663,3 +663,91 @@ describe('the serve frame', () => {
     expect(Math.abs(mean(0.5))).toBeLessThan(0.2);
   });
 });
+
+describe('a seat that changes hands under the bot', () => {
+
+  it('starts a fresh match for somebody who takes a vacated seat', async () => {
+    // `opponent_left` puts the driver in `over` and leaves it there for the
+    // supervisor to reap -- and the table stays listed in the meantime, so
+    // somebody can walk into it first. Recorded and left in `over`, the bot was
+    // deaf to the handshake that follows: `ready_state` requires `lobby`, so a
+    // guest never re-readied and a host never started, and that player sat at
+    // an occupied table that could not begin until the reap took the bot away
+    // underneath them.
+    const bot = await bootBot('Replaced', 0.12);
+    bot.host({ winningScore: 3 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+    const roomId = bot.roomId!;
+
+    const first = await relay.newDevice('ReplacedFirst');
+    const firstPhone = await relay.openPhone(first);
+    firstPhone.send({ type: 'join_room', roomId, playerId: first.id });
+    await firstPhone.await('room_joined');
+    await until('the bot to see the guest', () => bot.hasOpponent());
+
+    // They leave WITHOUT playing, which is the state under test: the bot goes
+    // to `over` having never been in a match at all.
+    firstPhone.send({ type: 'leave_room' });
+    firstPhone.close();
+    await until('the bot to lose them', () => bot.phase === 'over');
+
+    const second = await relay.newDevice('ReplacedNext');
+    const secondPhone = await relay.openPhone(second);
+    secondPhone.send({ type: 'join_room', roomId, playerId: second.id });
+    await secondPhone.await('room_joined');
+
+    // The bot is the HOST here, so what has to happen is that it hears this
+    // guest's yes and presses Start -- which it can only do from `lobby`.
+    secondPhone.send({ type: 'player_ready', ready: true });
+    await secondPhone.await('game_start', 20_000);
+
+    secondPhone.close();
+    bot.close();
+  }, 90_000);
+
+  it('starts again as the GUEST when a new host takes the empty seat', async () => {
+    // The other half, and the one the seat map makes reachable: a table
+    // outlives its host, so seat 0 empties and `join_room` gives the newcomer
+    // that seat. The relay clears readiness on every join and only broadcasts
+    // `ready_state` when a flag moves, so nothing will re-ask the bot -- and
+    // the new host's Start is `!opponentName || !guestReady`, which stays dead
+    // with no error and nothing to press.
+    const human = await relay.newDevice('GuestBotHost');
+    const humanPhone = await relay.openPhone(human);
+    humanPhone.send({
+      type: 'create_room',
+      playerId: human.id,
+      venueRoomId: 'casual',
+      visibility: 'public',
+    });
+    const created = await humanPhone.await('room_created');
+    const roomId = created.roomId;
+
+    const bot = await bootBot('GuestBot', 0.12);
+    bot.join(roomId);
+    await until('the bot seated as guest', () => bot.seat === 1);
+
+    // The host walks out, leaving the bot alone in seat 1 with the table live.
+    humanPhone.send({ type: 'leave_room' });
+    humanPhone.close();
+    await until('the bot to lose them', () => bot.phase === 'over');
+
+    const next = await relay.newDevice('GuestBotNext');
+    const nextPhone = await relay.openPhone(next);
+    nextPhone.send({ type: 'join_room', roomId, playerId: next.id });
+    const joined = await nextPhone.await('room_joined');
+    // The precondition, since the whole point is that they ADOPT the host seat:
+    // in seat 1 they would be the one who readies and the test would prove
+    // nothing about the bot.
+    expect(joined.playerIndex).toBe(0);
+
+    // No `player_ready` from this side -- they are the host. Start is theirs
+    // to press, and it only works if the bot said yes without being asked.
+    await until('the bot to be ready again', () => bot.phase === 'lobby');
+    nextPhone.send({ type: 'start_match' });
+    await nextPhone.await('game_start', 20_000);
+
+    nextPhone.close();
+    bot.close();
+  }, 90_000);
+});

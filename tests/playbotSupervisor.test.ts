@@ -406,7 +406,7 @@ describe('the roster the controller is shown', () => {
       // And therefore the one slot this demand buys goes to the bot that can
       // sit down, not to the one nearest the band.
       expect(targetActivation(snapshot, 25).activate).toEqual([
-        { id: 'bot-open', action: 'join' },
+        { id: 'bot-open', action: 'join', venue: 'beginner' },
       ]);
     } finally {
       await sup.stop();

@@ -481,10 +481,10 @@ export class PlaybotSupervisor {
 
     const target = targetActivation(this.snapshotFrom(live), live.bandCentre ?? START_MU);
 
-    for (const { id, action } of target.activate) {
+    for (const { id, action, venue } of target.activate) {
       const m = this.managed.find((x) => x.botId === id);
       if (!m) continue;
-      void this.dispatch(m, action);
+      void this.dispatch(m, action, venue);
     }
     for (const id of target.deactivate) {
       const m = this.managed.find((x) => x.botId === id);
@@ -651,7 +651,7 @@ export class PlaybotSupervisor {
    * would put two sockets on one device id, which the relay resolves by
    * evicting the first — mid-match, if that bot happened to be playing.
    */
-  private async dispatch(m: Managed, action: PopulationAction): Promise<void> {
+  private async dispatch(m: Managed, action: PopulationAction, assigned?: string): Promise<void> {
     // One at a time per bot, for the whole of it — see `Managed.dispatching`.
     // `tickSafely`'s guard cannot do this: `tick()` is synchronous and fires
     // its dispatches with `void`, so `ticking` is false again while every one
@@ -661,7 +661,7 @@ export class PlaybotSupervisor {
     if (this.engaged(m, urgencyOf(this.live()))) return;
     m.dispatching = true;
     try {
-      await this.dispatchInner(m, action);
+      await this.dispatchInner(m, action, assigned);
     } catch (e) {
       // A dispatch that throws must not end every live duel on the server.
       //
@@ -685,7 +685,16 @@ export class PlaybotSupervisor {
     }
   }
 
-  private async dispatchInner(m: Managed, action: PopulationAction): Promise<void> {
+  private async dispatchInner(
+    m: Managed,
+    action: PopulationAction,
+    /**
+     * The venue this JOIN was matched to, when the controller matched it to a
+     * specific waiting table. A preference the search may widen past, never a
+     * refusal — see `openTable`.
+     */
+    assigned?: string
+  ): Promise<void> {
     // Claim the slot BEFORE the await, or two ticks in flight dispatch the
     // same bot twice.
     m.dispatchedAt = Date.now();
@@ -764,7 +773,7 @@ export class PlaybotSupervisor {
     // overriding the preference (§2.11 makes diversity a preference and never a
     // prohibition); it is the preference having been tried and answered.
     const wantsTable = action !== 'queue' && (action === 'join' || gaveUpEmptyTable);
-    const table = wantsTable ? await this.openTable(m, venue, allowed) : null;
+    const table = wantsTable ? await this.openTable(m, venue, allowed, assigned) : null;
     if (table) {
       // Deliberately WITHOUT leaving first: `join_room` vacates whatever seat
       // this socket already holds, and only once the destination is certain —
@@ -803,16 +812,50 @@ export class PlaybotSupervisor {
    * `beginner` — the human preference applied within a venue and not across
    * them, so the activation that existed to serve that person served a bot.
    */
-  private async openTable(m: Managed, venue: string | null, allowed: string[]): Promise<string | null> {
+  private async openTable(
+    m: Managed,
+    venue: string | null,
+    allowed: string[],
+    /**
+     * The venue the CONTROLLER matched this join to, when it matched it to a
+     * specific waiting table.
+     *
+     * Searched alone first, and this is the only place a venue narrows the
+     * gather rather than merely ordering it. Round five's finding was the
+     * opposite mistake — returning inside the first venue that held any free
+     * table, so a bot table in Casual was taken while a human waited in
+     * Beginner — so the ordinary bias-chosen `venue` still gathers everything
+     * and chooses globally. An assignment is different in kind: it names the
+     * human this activation exists for, and dropping it is what let two bots
+     * matched to two different venues both walk up to the same table, one join
+     * refused as full and the other host unserved.
+     *
+     * It widens rather than refuses, because the table may have filled between
+     * the tick and the dispatch, and a bot that finds nothing does nothing.
+     */
+    assigned?: string
+  ): Promise<string | null> {
+    if (assigned) {
+      const first = this.pickTable(await this.freeTables([assigned], m), m);
+      if (first) return first;
+    }
+    return this.pickTable(
+      await this.freeTables([...new Set(venue ? [venue, ...allowed] : allowed)], m),
+      m
+    );
+  }
+
+  /** Every joinable table in these rooms, as the listing reports them. */
+  private async freeTables(rooms: string[], m: Managed): Promise<FreeTable[]> {
     const selfId = m.botId;
     /** The table this bot is already sitting at, if any — never a candidate. */
     const ownRoomId = m.driver?.roomId ?? null;
     const free: FreeTable[] = [];
-    // Deduped: `venue` is drawn FROM `allowed`, so the plain concatenation
-    // asked the same room for its tables twice and pushed every table in it
-    // into `free` twice — a wasted round trip per dispatch, and a list that
-    // does not describe what is out there.
-    for (const room of new Set(venue ? [venue, ...allowed] : allowed)) {
+    // Deduped by the caller: `venue` is drawn FROM `allowed`, so a plain
+    // concatenation asked the same room for its tables twice and pushed every
+    // table in it into `free` twice — a wasted round trip per dispatch, and a
+    // list that does not describe what is out there.
+    for (const room of rooms) {
       try {
         const res = await fetch(`${this.opts.base}/api/rooms/${encodeURIComponent(room)}/tables`);
         if (!res.ok) continue;
@@ -836,6 +879,12 @@ export class PlaybotSupervisor {
         // A listing that cannot be read is a listing with nothing in it.
       }
     }
+    return free;
+  }
+
+  /** Which of them to walk up to. */
+  private pickTable(free: FreeTable[], m: Managed): string | null {
+    const selfId = m.botId;
     // A human's table comes first wherever it was found — §4.13's priority
     // rule, and it decides BEFORE the preference below rather than competing
     // with it, since a bot that would rather play another bot must not act on

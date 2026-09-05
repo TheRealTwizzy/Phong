@@ -538,6 +538,34 @@ export class PlaybotDriver {
       case 'opponent_joined':
         this.opponentPresent = true;
         this.opponentId = msg.opponentId;
+        // A NEWCOMER at a table this bot is still holding is a fresh lobby.
+        //
+        // `opponent_left` puts the driver in `over` and leaves it there for
+        // the supervisor to reap, and the table stays listed in the meantime —
+        // so somebody can walk into it first. Recorded and left in `over`, the
+        // bot was then deaf to the handshake: `ready_state` requires `lobby`,
+        // so a guest never re-readied and a host never started, and that
+        // player sat at an occupied table that could not begin until the reap
+        // took the bot away underneath them.
+        //
+        // Not the rematch path, which never comes through here: after a
+        // whistle the seat opposite has not changed, so `rematch_state` and
+        // `game_start` carry it. This is only ever a seat that emptied and was
+        // taken again — which is exactly what a fresh handshake is for.
+        //
+        // The PHASE is the whole fix. A guest's yes needs no explicit resend
+        // here: the relay clears readiness on every join, a bot in seat 1 has
+        // always readied, so the flag moves and the `ready_state` that follows
+        // re-arms it through the guard that already exists — measured, adding
+        // a `player_ready` here and then removing it again changes no test in
+        // either direction, which makes it a line that reads like a fix and
+        // is not one.
+        if (this.phase === 'over') {
+          this.phase = 'lobby';
+          this.scores = [0, 0];
+          this.ball = null;
+          this.finishedAt = 0;
+        }
         break;
       case 'room_config':
         this.config = msg.config;
