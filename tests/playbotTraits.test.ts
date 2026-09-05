@@ -103,13 +103,28 @@ describe('seeding', () => {
       });
     }
 
-    // ...and the one INSERT that carries traits is insertBot's. The backfill
-    // inserts an id and a timestamp only, so a claimed legacy row reads as the
-    // unremarkable default rather than as an extreme.
+    // ...and every INSERT that carries traits is a CREATION path, named. Two
+    // of them, because there are two ways an account becomes a bot: the
+    // curated roster (`insertBot`, seeded at boot) and a play-bot the
+    // supervisor onboards (`rememberPlaybot`). The backfill is the third
+    // writer of this table and carries an id and a timestamp only, so a
+    // claimed legacy row reads as the unremarkable default rather than as an
+    // extreme.
+    //
+    // Asserted by the ENCLOSING METHOD rather than by a count, so a trait
+    // insert that appears inside anything but a creation path reddens even if
+    // the total happens to stay the same.
     const dbSrc = fs.readFileSync(path.join(process.cwd(), 'server', 'db.ts'), 'utf8');
-    const carriers = dbSrc.split('INSERT OR IGNORE INTO bot_accounts').slice(1);
-    expect(carriers.length).toBeGreaterThan(0);
-    expect(carriers.filter((c) => c.slice(0, 200).includes('TRAIT_KEYS'))).toHaveLength(1);
+    const parts = dbSrc.split('INSERT OR IGNORE INTO bot_accounts');
+    expect(parts.length - 1).toBeGreaterThan(0);
+    const owners: string[] = [];
+    for (let i = 1; i < parts.length; i++) {
+      if (!parts[i].slice(0, 200).includes('TRAIT_KEYS')) continue;
+      const before = parts.slice(0, i).join('INSERT OR IGNORE INTO bot_accounts');
+      const method = [...before.matchAll(/public\s+(\w+)\s*\(/g)].pop();
+      owners.push(method ? method[1] : '<top level>');
+    }
+    expect(owners.sort()).toEqual(['insertBot', 'rememberPlaybot']);
   });
 
   it('has no function that takes a target rank, a band or a demand signal', () => {

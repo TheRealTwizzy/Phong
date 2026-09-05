@@ -67,6 +67,7 @@ import {
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
+import { PlaybotSupervisor, liveStateFrom } from './server/playbotSupervisor';
 import {
   DEFAULT_VENUE_ROOM,
   MATCHMAKING_ROOM,
@@ -4411,6 +4412,59 @@ async function startServer() {
     }
   });
 
+  /**
+   * The play-bot population, and it starts with the process (§7 step 22).
+   *
+   * OFF unless `PLAYBOT_ROSTER_SIZE` says otherwise, which is §5's rule about
+   * the population being a tunable with a measured ceiling rather than a
+   * constant: nothing ships a default before step 27 has run the load test,
+   * and a roster of 0 provisions nothing and burns no usernames. The size is
+   * passed IN rather than gating the construction, so ONE place decides
+   * whether there is a population and it is `start()` — gated in both, that
+   * guard is unreachable and a mutation removing it reddens nothing.
+   *
+   * It talks to this same process over `127.0.0.1` — the ordinary HTTP and WS
+   * doors, every gate included. Loopback is rate-limit exempt by design
+   * (CLAUDE.md §5), so this needs no exemption of its own, and there is
+   * deliberately no privileged in-process shortcut: that would be a second
+   * door past `requireActiveSession` and the WS upgrade.
+   */
+  const playbots = new PlaybotSupervisor({
+    base: `http://127.0.0.1:${PORT}`,
+    wsUrl: `ws://127.0.0.1:${PORT}/ws`,
+    rosterSize: Number(process.env.PLAYBOT_ROSTER_SIZE) || 0,
+    tickMs: Number(process.env.PLAYBOT_TICK_MS) || undefined,
+    // The SERVER's own db handle, so a marker row and the `isBotAccount` cache
+    // that reads it move together. A separate connection would write the row
+    // and leave this process still classifying that account as a human —
+    // rating it at full stakes, badging it as a person, counting it in a
+    // human's ladder lane — with nothing anywhere to see.
+    store: {
+      load: () => db.playbotAccounts(),
+      save: (botId, cookie, traits) => db.rememberPlaybot(botId, cookie, traits),
+    },
+    live: () =>
+      liveStateFrom({
+        connectedIds: [...liveSockets].map((e) => e.deviceId),
+        queue: queue.map((e) => ({ playerId: e.playerId, joinedAt: e.joinedAt })),
+        // A public table with one playing seat filled is a table somebody
+        // could walk into, which is unmet demand of the same kind an odd
+        // queue is.
+        openTables: [...rooms.values()].filter(
+          (r) =>
+            r.visibility === 'public' &&
+            ((r.players[0] && !r.players[1]) || (!r.players[0] && r.players[1]))
+        ).length,
+        now: Date.now(),
+        isBot: (id) => isBotAccount(id),
+      }),
+  });
+  // Never fatal: a population that cannot start is a server with no bots in
+  // it, which is exactly what every deployment ran until now.
+  void playbots.start().catch((e: any) => {
+    console.warn('[playbot] population did not start:', e?.message ?? e);
+  });
+
   // Render stops the old instance on every deploy of a disk-backed service;
   // close sockets and the listener cleanly instead of dying mid-request.
   const shutdown = (signal: string, code = 0) => {
@@ -4420,6 +4474,11 @@ async function startServer() {
     if (shuttingDown) return;
     // Before a single socket is closed: every close below runs vacateSeat.
     shuttingDown = true;
+    // Stop the population's clock first, so nothing reconnects into a server
+    // that is closing. Its drivers' sockets are closed by the loop below like
+    // any other client, and `shuttingDown` is what stops those closes being
+    // charged as abandons.
+    void playbots.stop();
     console.log(`${signal} received, shutting down`);
     for (const client of wss.clients) {
       client.close(1001, 'Server restarting');

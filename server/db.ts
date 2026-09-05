@@ -1001,6 +1001,15 @@ class GameDatabase {
       CREATE TABLE IF NOT EXISTS bot_accounts (
         botId TEXT PRIMARY KEY,
         createdAt TEXT NOT NULL,
+        -- The device cookie this play-bot holds, so a restart comes back to the
+        -- SAME account instead of minting a new one. A play-bot's id is ISSUED
+        -- (it onboards through the ordinary doors), so it cannot be
+        -- re-derived: without this every boot burns another username out of the
+        -- pool for good and strands the previous account's rating and history.
+        --
+        -- NULL for the curated roster, which holds no credential and is not
+        -- drivable -- that is exactly what separates the two kinds of row here.
+        deviceCookie TEXT,
         skill REAL,
         volatility REAL,
         aggression REAL,
@@ -1210,6 +1219,11 @@ class GameDatabase {
         if (!botCols.some((c) => c.name === key)) {
           this.sql.exec(`ALTER TABLE bot_accounts ADD COLUMN ${key} REAL`);
         }
+      }
+      // ...and the credential a play-bot comes back on, added the same way. A
+      // roster row keeps NULL and stays undrivable, which is correct.
+      if (!botCols.some((c) => c.name === 'deviceCookie')) {
+        this.sql.exec('ALTER TABLE bot_accounts ADD COLUMN deviceCookie TEXT');
       }
     }
     if (matchCols.length && !matchCols.some((c) => c.name === 'advancedLadder')) {
@@ -4189,6 +4203,63 @@ class GameDatabase {
    * is thin and no bot suits it, the answer is seeding more bots, not retuning
    * one that is already playing.
    */
+  /**
+   * Remember a play-bot the supervisor has just provisioned: the marker row
+   * that MAKES it a bot, the credential it comes back on, and its traits.
+   *
+   * The marker is the one step with no HTTP route behind it, deliberately —
+   * a client that could declare itself a bot could take the reduced stakes
+   * with it (§4.7). Traits are written ONCE, here, at creation: §4.13's rule
+   * is that creation may seed and nothing after it may steer, which is why
+   * there is no UPDATE of this table anywhere in the server.
+   */
+  public rememberPlaybot(botId: string, deviceCookie: string, traits: PlaybotTraits): void {
+    const t = normalizeTraits(traits);
+    this.stmt(
+        `INSERT OR IGNORE INTO bot_accounts
+           (botId, createdAt, deviceCookie, ${TRAIT_KEYS.join(', ')})
+         VALUES (?, ?, ?, ${TRAIT_KEYS.map(() => '?').join(', ')})`
+      )
+      .run(botId, new Date().toISOString(), deviceCookie, ...TRAIT_KEYS.map((k) => t[k]));
+    botAccountIds.add(botId);
+  }
+
+  /**
+   * Every play-bot account this process can drive: a marker row that carries a
+   * credential, with the username and earned rating selection needs.
+   *
+   * The curated roster is excluded by the `deviceCookie IS NOT NULL` test
+   * rather than by an id shape — those rows are leaderboard furniture with no
+   * credential and no driver, and asking about the prefix here would be the
+   * classifier D26 retired.
+   */
+  public playbotAccounts(): Array<{
+    botId: string;
+    username: string;
+    deviceCookie: string;
+    traits: PlaybotTraits;
+    mu: number;
+    recentMatches: number;
+  }> {
+    const rows = this.stmt(
+        `SELECT b.botId AS botId, p.username AS username, b.deviceCookie AS deviceCookie,
+                p.rankMu AS mu, p.matchesPlayed AS recentMatches, ${TRAIT_KEYS.map((k) => `b.${k} AS ${k}`).join(', ')}
+           FROM bot_accounts b
+           JOIN players p ON p.id = b.botId
+          WHERE b.deviceCookie IS NOT NULL AND p.initializedAt IS NOT NULL
+          ORDER BY b.createdAt, b.botId`
+      )
+      .all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      botId: String(r.botId),
+      username: String(r.username),
+      deviceCookie: String(r.deviceCookie),
+      traits: normalizeTraits(r as Partial<PlaybotTraits>),
+      mu: Number(r.mu),
+      recentMatches: Number(r.recentMatches) || 0,
+    }));
+  }
+
   public botTraits(botId: string): PlaybotTraits {
     const row = this.stmt(`SELECT ${TRAIT_KEYS.join(', ')} FROM bot_accounts WHERE botId = ?`)
       .get(botId) as Partial<PlaybotTraits> | undefined;

@@ -86,6 +86,14 @@ const FLOORS = {
   // would be a rule about when humans get displaced, which is not somewhere to
   // find out later.
   'server/playbotPopulation.ts': { statements: 100, branches: 95 },
+  // NO FLOOR for server/playbotDriver.ts or server/playbotSupervisor.ts, and
+  // the absence is deliberate rather than an oversight. Both are exercised
+  // only by suites that boot a real server in a CHILD process, where V8 cannot
+  // see them — the same reason TESTING.md gives for `server.ts` and every
+  // `.tsx` reading 0%. A floor over them would either fail on that or be set
+  // low enough to measure nothing. What IS floored is the pure logic they call
+  // (the four modules above) and the one pure function the supervisor exports
+  // for it, `liveStateFrom`, which is where its only arguable rule lives.
   'server/db.ts': { statements: 90, branches: 88 },
   // The cookie and session layer — the one file where a regression is somebody
   // losing their account. The STATEMENT number is low and honest about why:

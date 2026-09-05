@@ -175,6 +175,47 @@ export class PlaybotDriver {
     mark(this.botId);
   }
 
+  /**
+   * The device cookie this bot holds — persisted by the supervisor so a later
+   * boot can come back to the SAME account.
+   *
+   * A play-bot's id is ISSUED, so it cannot be re-derived: without this a
+   * second boot mints a second account, burns a second username out of the
+   * pool for good, and strands the first one's rating and history under an id
+   * nothing holds a credential for.
+   */
+  public deviceCookie(): string {
+    return this.cookies;
+  }
+
+  /**
+   * Come back to an account this bot already holds, over the same doors a
+   * returning browser uses: present the device cookie, mint a fresh session,
+   * read back who that makes you.
+   *
+   * Deliberately NOT a privileged in-process mint. The cookie is signed over a
+   * secret in `meta`, so it survives a restart and a deploy — sessions are
+   * disposable, the device→account binding is not (CLAUDE.md §5) — and every
+   * gate downstream is the one a human passes.
+   */
+  public async resume(deviceCookie: string): Promise<void> {
+    this.cookies = deviceCookie;
+    this.absorb(
+      await fetch(`${this.opts.base}/api/session`, {
+        method: 'POST',
+        headers: { cookie: this.cookies, 'content-type': 'application/json' },
+        body: '{}',
+      })
+    );
+    const me = (await (
+      await fetch(`${this.opts.base}/api/profile/me`, { headers: { cookie: this.cookies } })
+    ).json()) as { id?: string; initializedAt?: string | null };
+    if (!me?.id || !me.initializedAt) {
+      throw new Error('playbot could not resume: the stored cookie holds no initialized account');
+    }
+    this.botId = me.id;
+  }
+
   public async connect(): Promise<void> {
     if (!this.botId) throw new Error('playbot must be provisioned before it connects');
     const ws = new WebSocket(this.opts.wsUrl, { headers: { cookie: this.cookies } });
