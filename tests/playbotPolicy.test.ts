@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'fs';
-import { OPEN_VENUES, preferHumanTable } from '../server/playbotSupervisor';
+import { OPEN_VENUES, humanTablesFirst } from '../server/playbotSupervisor';
 import { roomById, roomEntryVerdict } from '../src/venues';
 import { TIER_ORDER } from '../src/rating';
 import path from 'path';
@@ -285,7 +285,7 @@ describe('which table to walk up to, and which venues may be tried', () => {
       { id: 'CASU', seatedIds: ['bot-a'] },
       { id: 'BEGN', seatedIds: ['dev_human000000000001'] },
     ];
-    expect(preferHumanTable(free, bots)).toBe('BEGN');
+    expect(humanTablesFirst(free, bots).map((t) => t.id)).toEqual(['BEGN']);
   });
 
   it('sees a human who is not in the host’s chair', () => {
@@ -301,17 +301,20 @@ describe('which table to walk up to, and which venues may be tried', () => {
       // no seat 0, one human in seat 1.
       { id: 'BEGN', seatedIds: ['dev_human000000000001'] },
     ];
-    expect(preferHumanTable(free, bots)).toBe('BEGN');
+    expect(humanTablesFirst(free, bots).map((t) => t.id)).toEqual(['BEGN']);
   });
 
   it('still takes a bot’s table when that is all there is', () => {
     // The preference is never a refusal — a bot with only bots to play plays
     // them, which is §2.11's rule one level down.
     const bots = new Set(['bot-a']);
-    expect(preferHumanTable([{ id: 'CASU', seatedIds: ['bot-a'] }], bots)).toBe('CASU');
-    expect(preferHumanTable([], bots)).toBeNull();
+    // The partition falls back to ALL of them rather than to none, so the
+    // preference downstream still has something to choose between.
+    expect(humanTablesFirst([{ id: 'CASU', seatedIds: ['bot-a'] }], bots).map((t) => t.id))
+      .toEqual(['CASU']);
+    expect(humanTablesFirst([], bots)).toEqual([]);
     // A table nobody is sitting at is not preferred as a human's.
-    expect(preferHumanTable([{ id: 'X', seatedIds: [] }], bots)).toBe('X');
+    expect(humanTablesFirst([{ id: 'X', seatedIds: [] }], bots).map((t) => t.id)).toEqual(['X']);
   });
 
   it('leaves every bot somewhere it may play, at every tier it can reach', () => {

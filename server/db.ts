@@ -4486,6 +4486,30 @@ class GameDatabase {
   }
 
   /**
+   * How much of a PAIR has already been played, and when it last was.
+   *
+   * The same rolling window and the same table the same-pair saturation ladder
+   * counts over, asked forward rather than at record time: §2.11's diversity
+   * preference is about who a bot would RATHER play, so it has to be
+   * answerable before the match rather than after it. A read, and only a read
+   * — nothing here writes an exposure row.
+   */
+  public pairHistory(
+    playerId: string,
+    oppId: string,
+    now: Date = new Date()
+  ): { count: number; lastAt: number | null } {
+    const since = new Date(now.getTime() - EXPOSURE_WINDOW_MS).toISOString();
+    const row = this.stmt(
+        `SELECT COUNT(*) AS n, MAX(at) AS last FROM competitive_exposure
+          WHERE playerId = ? AND oppId = ? AND at >= ?`
+      )
+      .get(playerId, oppId, since) as unknown as { n: number; last: string | null };
+    const lastAt = row?.last ? Date.parse(row.last) : NaN;
+    return { count: Number(row?.n) || 0, lastAt: Number.isFinite(lastAt) ? lastAt : null };
+  }
+
+  /**
    * The PRIOR counts this participant's match is judged on -- never including
    * the match being recorded.
    *

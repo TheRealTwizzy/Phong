@@ -36,6 +36,23 @@ import { sleep, startRelay, type Relay } from './helpers/relay';
 // nothing anywhere to see. So the suite boots a real server with the feature
 // flag on and asserts from outside, which is also how a deployment runs it.
 
+/**
+ * A store's pairing view for suites that are NOT testing the preference: an
+ * even rating and no shared history, so `chooseOpponent` falls through to its
+ * id tiebreak and which table a bot walks up to stays deterministic.
+ */
+const flatPairingView = (_selfId: string, ids: string[]) => ({
+  self: { mu: 25, sigma: 8.333 },
+  candidates: ids.map((id) => ({
+    id,
+    isBot: false,
+    mu: 25,
+    sigma: 8.333,
+    recentPairCount: 0,
+    lastPlayedAt: null,
+  })),
+});
+
 let relay: Relay | null = null;
 let leftovers: string[] = [];
 
@@ -360,6 +377,9 @@ describe('the roster the controller is shown', () => {
       save: () => {
         throw new Error('nothing in this test provisions');
       },
+      pairingView: () => {
+        throw new Error('nothing in this test dispatches');
+      },
     };
     const sup = new PlaybotSupervisor({
       base: 'http://127.0.0.1:1',
@@ -389,6 +409,108 @@ describe('the roster the controller is shown', () => {
       await sup.stop();
     }
   });
+});
+
+describe('§2.11: which of two comparable tables a bot walks up to', () => {
+  it('prefers the opponent it has played less, not the first one listed', async () => {
+    // `chooseOpponent` had no caller in the shipped server: a repository-wide
+    // search found it in its own unit tests and nowhere else, so the diversity
+    // preference existed, was tested, and did nothing. `openTable` took the
+    // first free listing entry, so the same bots repeated the same pairings
+    // while fresher comparable opponents sat free -- spending the same-pair
+    // rating allowance on matches that then counted for nothing.
+    //
+    // Both tables are hosted by HUMANS, so the §4.13 partition keeps both and
+    // this is the preference deciding on its own. The one listed FIRST is the
+    // one with the history, so a first-entry rule fails here rather than
+    // passing on the order it happened to be given.
+    relay = await startRelay('playbot-prefer');
+    const dir = relay.dataDir;
+
+    const seen = await relay.newDevice('PreferSeen');
+    const fresh = await relay.newDevice('PreferFresh');
+    const seenPhone = await relay.openPhone(seen);
+    const freshPhone = await relay.openPhone(fresh);
+    seenPhone.send({
+      type: 'create_room',
+      playerId: seen.id,
+      venueRoomId: 'casual',
+      visibility: 'public',
+    });
+    await seenPhone.await('room_created');
+    freshPhone.send({
+      type: 'create_room',
+      playerId: fresh.id,
+      venueRoomId: 'casual',
+      visibility: 'public',
+    });
+    await freshPhone.await('room_created');
+
+    const rows = new Map<string, ReturnType<typeof rowFor>>();
+    const rowFor = (botId: string, deviceCookie: string, traits: PlaybotTraits) => ({
+      botId,
+      username: botId,
+      deviceCookie,
+      traits,
+      mu: 25,
+      recentMatches: 0,
+      level: 1,
+      tier: 'unranked' as const,
+    });
+
+    let asked: string[] = [];
+    const sup = new PlaybotSupervisor({
+      base: relay.base,
+      wsUrl: relay.wsUrl,
+      rosterSize: 1,
+      tickMs: 3_600_000,
+      store: {
+        load: () => [...rows.values()],
+        save: (botId, deviceCookie, traits) => {
+          rows.set(botId, rowFor(botId, deviceCookie, traits));
+        },
+        // Identical ratings, so the two are comparable by construction and
+        // nothing but the history can separate them. This is the store's job
+        // in production too: the listing carries an id and the ratings and the
+        // pair history come from the database beside it.
+        pairingView: (_selfId, ids) => {
+          asked = ids;
+          return {
+            self: { mu: 25, sigma: 8.333 },
+            candidates: ids.map((id) => ({
+              id,
+              isBot: false,
+              mu: 25,
+              sigma: 8.333,
+              recentPairCount: id === seen.id ? 5 : 0,
+              lastPlayedAt: id === seen.id ? Date.now() - 1000 : null,
+            })),
+          };
+        },
+      },
+      // Two tables waiting and nobody in the queue, so the one bot is
+      // activated for a TABLE and dispatched to join one of them.
+      live: () => ({
+        humansOnline: 8,
+        queuedHumans: 0,
+        longestWaitMs: 0,
+        openTableVenues: ['casual', 'casual'],
+      }),
+    });
+    await sup.start();
+    sup.tick();
+
+    await freshPhone.await('opponent_joined', 20_000);
+    // And it is not that BOTH were joined in turn: the bot holds one seat.
+    expect(seenPhone.last('opponent_joined')).toBeUndefined();
+    // The policy was asked about the people at the tables, not about tables.
+    expect([...asked].sort()).toEqual([fresh.id, seen.id].sort());
+
+    await sup.stop();
+    seenPhone.close();
+    freshPhone.close();
+    expect(fs.existsSync(path.join(dir, 'phong.db'))).toBe(true);
+  }, 60_000);
 });
 
 describe('§4.13: the controller selects, it never steers', () => {
@@ -462,6 +584,7 @@ describe('a bot plays more than one match', () => {
             tier: 'unranked' as const,
           });
         },
+        pairingView: flatPairingView,
       },
       live: () => ({ humansOnline: 0, queuedHumans: 0, longestWaitMs: 0, openTableVenues: [] }),
     });
@@ -544,6 +667,7 @@ describe('a driver the controller has stopped naming', () => {
             tier: 'unranked' as const,
           });
         },
+        pairingView: flatPairingView,
       },
       live: () => ({
         humansOnline: crowded ? 20 : 0,

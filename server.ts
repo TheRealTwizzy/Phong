@@ -4494,6 +4494,25 @@ async function startServer() {
     store: {
       load: () => db.playbotAccounts(),
       save: (botId, cookie, traits) => db.rememberPlaybot(botId, cookie, traits),
+      // Both sides on the MATCHMAKER's own estimator, which is the one that
+      // decides whether the pair this preference is about could happen at all
+      // (`queueCandidate` reads the same pair). Reading self on the visible
+      // ladder and the candidates on the hidden one would be §7's
+      // each-estimator-against-its-own-counterpart rule broken in a place
+      // nothing renders, so it comes back from one call.
+      pairingView: (selfId, ids) => ({
+        self: db.matchmakingRating(selfId) ?? newRating(),
+        candidates: ids.map((id) => {
+          const seen = db.pairHistory(selfId, id);
+          return {
+            id,
+            isBot: isBotAccount(id),
+            ...(db.matchmakingRating(id) ?? newRating()),
+            recentPairCount: seen.count,
+            lastPlayedAt: seen.lastAt,
+          };
+        }),
+      }),
     },
     live: () =>
       liveStateFrom({

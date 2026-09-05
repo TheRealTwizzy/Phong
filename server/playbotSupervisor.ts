@@ -27,7 +27,7 @@
 
 import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
-import { chooseVenue } from './playbotPolicy';
+import { chooseOpponent, chooseVenue, type PolicyCandidate } from './playbotPolicy';
 import { roomById, roomEntryVerdict } from '../src/venues';
 import type { Tier } from '../src/rating';
 import {
@@ -76,6 +76,24 @@ export interface PlaybotAccountStore {
   }>;
   /** Marker row, credential and traits, written once at creation. */
   save(botId: string, deviceCookie: string, traits: PlaybotTraits): void;
+  /**
+   * What §2.11's diversity preference needs about people this bot could sit
+   * down with: the three things a table listing cannot carry.
+   *
+   * `self` comes back from the SAME call, deliberately, so both sides are read
+   * on one estimator. This feeds `winProbability`, and §7's rule is that each
+   * estimator rates against its own counterpart — a self read on the visible
+   * ladder against candidates read on the hidden one is a comparison across
+   * two scales that diverge by design. One call makes that unrepresentable.
+   */
+  pairingView(selfId: string, ids: string[]): PairingView;
+}
+
+/** One question — who could this bot play — answered on one estimator. */
+export interface PairingView {
+  /** This bot, on the same estimator the candidates below are read on. */
+  self: { mu: number; sigma: number };
+  candidates: PolicyCandidate[];
 }
 
 export interface PlaybotSupervisorOptions {
@@ -634,9 +652,7 @@ export class PlaybotSupervisor {
     // overriding the preference (§2.11 makes diversity a preference and never a
     // prohibition); it is the preference having been tried and answered.
     const wantsTable = action !== 'queue' && (action === 'join' || gaveUpEmptyTable);
-    const table = wantsTable
-      ? await this.openTable(venue, allowed, m.botId, m.driver.roomId)
-      : null;
+    const table = wantsTable ? await this.openTable(m, venue, allowed) : null;
     if (table) {
       // Deliberately WITHOUT leaving first: `join_room` vacates whatever seat
       // this socket already holds, and only once the destination is certain —
@@ -675,15 +691,16 @@ export class PlaybotSupervisor {
    * `beginner` — the human preference applied within a venue and not across
    * them, so the activation that existed to serve that person served a bot.
    */
-  private async openTable(
-    venue: string | null,
-    allowed: string[],
-    selfId: string,
+  private async openTable(m: Managed, venue: string | null, allowed: string[]): Promise<string | null> {
+    const selfId = m.botId;
     /** The table this bot is already sitting at, if any — never a candidate. */
-    ownRoomId: string | null
-  ): Promise<string | null> {
+    const ownRoomId = m.driver?.roomId ?? null;
     const free: FreeTable[] = [];
-    for (const room of venue ? [venue, ...allowed] : allowed) {
+    // Deduped: `venue` is drawn FROM `allowed`, so the plain concatenation
+    // asked the same room for its tables twice and pushed every table in it
+    // into `free` twice — a wasted round trip per dispatch, and a list that
+    // does not describe what is out there.
+    for (const room of new Set(venue ? [venue, ...allowed] : allowed)) {
       try {
         const res = await fetch(`${this.opts.base}/api/rooms/${encodeURIComponent(room)}/tables`);
         if (!res.ok) continue;
@@ -707,7 +724,38 @@ export class PlaybotSupervisor {
         // A listing that cannot be read is a listing with nothing in it.
       }
     }
-    return preferHumanTable(free, new Set(this.managed.map((m) => m.botId)));
+    // A human's table comes first wherever it was found — §4.13's priority
+    // rule, and it decides BEFORE the preference below rather than competing
+    // with it, since a bot that would rather play another bot must not act on
+    // that while somebody is waiting.
+    const pool = humanTablesFirst(free, new Set(this.managed.map((x) => x.botId)));
+    if (!pool.length) return null;
+
+    // And among those, §2.11: where comparably suitable opponents are
+    // available, prefer the less recently played one. `chooseOpponent` had no
+    // caller in the shipped server at all, so the preference existed, was
+    // tested, and did nothing — the same bots repeated the same pairings while
+    // fresher comparable ones sat free, spending the same-pair rating
+    // allowance on matches that then counted for nothing.
+    //
+    // Keyed by OCCUPANT, because the policy chooses an opponent and the table
+    // is only where they are sitting. First occupant wins for a table with
+    // more than one, which today is only a claimable CPU chair beside a
+    // person.
+    const tableOf = new Map<string, string>();
+    for (const t of pool) {
+      for (const id of t.seatedIds) if (!tableOf.has(id)) tableOf.set(id, t.id);
+    }
+    if (!tableOf.size) return pool[0].id;
+    const view = this.store.pairingView(selfId, [...tableOf.keys()]);
+    const pick = chooseOpponent({
+      self: { id: selfId, mu: view.self.mu, sigma: view.self.sigma, traits: m.traits },
+      candidates: view.candidates,
+      now: Date.now(),
+    });
+    // Never a refusal: `chooseOpponent` answers null only for an empty list,
+    // and a candidate the store could not describe still has a table.
+    return (pick && tableOf.get(pick.id)) ?? pool[0].id;
   }
 }
 
@@ -730,7 +778,14 @@ export interface FreeTable {
 }
 
 /**
- * Which free table to walk up to: a HUMAN's, wherever it was found.
+ * The tables worth choosing between: a HUMAN's, wherever they were found, and
+ * otherwise all of them.
+ *
+ * A PARTITION rather than a pick, because two different rules decide those two
+ * questions and only one of them is negotiable. Serving a waiting person comes
+ * first (§4.13) and is never traded away; which of several comparable tables
+ * to walk up to is §2.11's preference, and it decides inside whichever
+ * partition this returns.
  *
  * Takes the WHOLE gathered list rather than one venue's, which is the shape
  * the bug had: returning inside the first venue that held any free table meant
@@ -748,11 +803,12 @@ export interface FreeTable {
  * hosts a table and the population is single-process by design, so `managed`
  * is the complete set of bot-held tables and this needs no new dependency.
  */
-export function preferHumanTable(
+export function humanTablesFirst(
   free: ReadonlyArray<FreeTable>,
   botIds: ReadonlySet<string>
-): string | null {
-  return free.find((t) => t.seatedIds.some((id) => !botIds.has(id)))?.id ?? free[0]?.id ?? null;
+): FreeTable[] {
+  const human = free.filter((t) => t.seatedIds.some((id) => !botIds.has(id)));
+  return human.length ? human : [...free];
 }
 
 /**

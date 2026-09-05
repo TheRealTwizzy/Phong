@@ -497,7 +497,7 @@ describe('what the composition has to pass along', () => {
     // every tick.
     const src = read('server/playbotSupervisor.ts');
     expect(src).toMatch(/t\.id === ownRoomId/);
-    expect(src).toMatch(/this\.openTable\(\s*venue,\s*allowed,\s*m\.botId,\s*m\.driver\.roomId\s*\)/);
+    expect(src).toMatch(/const ownRoomId = m\.driver\?\.roomId \?\? null;/);
   });
 
   it('offers a bot only the venues its own tier may enter', () => {
@@ -512,16 +512,16 @@ describe('what the composition has to pass along', () => {
     expect(src).toMatch(/roomEntryVerdict\(roomById\(id\), who\)\.ok/);
     // BOTH consumers, or the half that was left raw is the half that breaks.
     expect(src).toMatch(/chooseVenue\(\{[\s\S]*?allowed,[\s\S]*?\}\)/);
-    expect(src).toMatch(/this\.openTable\(\s*venue,\s*allowed,\s*m\.botId/);
+    expect(src).toMatch(/this\.openTable\(m, venue, allowed\)/);
   });
 
   it('chooses its table through the preference rather than by arrival order', () => {
-    // The behaviour is `preferHumanTable`'s and is unit-tested there, across
+    // The behaviour is `humanTablesFirst`'s and is unit-tested there, across
     // venues. What can only be read here is that `openTable` GATHERS and then
     // asks it — the bug was a `return` inside the venue loop, which no test of
     // a pure chooser can see.
     const src = read('server/playbotSupervisor.ts');
-    expect(src).toMatch(/return preferHumanTable\(free, /);
+    expect(src).toMatch(/humanTablesFirst\(free, /);
     expect(src).toMatch(/free\.push\(\{ id: t\.id, seatedIds \}\)/);
   });
 });
