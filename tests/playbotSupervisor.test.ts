@@ -7,6 +7,8 @@ import {
   liveStateFrom,
   bandCentreFor,
   rotate,
+  normalizeRosterSize,
+  normalizeTickMs,
   defaultPlaybotName,
   type PlaybotAccountStore,
 } from '../server/playbotSupervisor';
@@ -1238,5 +1240,51 @@ describe('two bots sent to one venue', () => {
     // than an assignment.
     const src = fs.readFileSync(path.join(process.cwd(), 'server', 'playbotSupervisor.ts'), 'utf8');
     expect(src).toMatch(/humanTablesFirst\(\s*rotate\(free, jitterFraction\(selfId\)\),/);
+  });
+});
+
+describe('two settings that arrive as an environment string', () => {
+  it('never provisions past a whole roster', () => {
+    // `slice(0, 6.5)` loads six accounts while the provisioning loop's
+    // `managed.length < 6.5` creates a seventh -- so every restart excludes
+    // that seventh, skips its held name, and mints another: one username
+    // burned out of the pool permanently per deploy. `Infinity` is the same
+    // bug with no bound at all, and `Number(x) || 0` catches neither, because
+    // it only ever answers junk and zero.
+    expect(normalizeRosterSize(6.5)).toBe(6);
+    expect(normalizeRosterSize(Infinity)).toBe(0);
+    expect(normalizeRosterSize(NaN)).toBe(0);
+    expect(normalizeRosterSize(undefined)).toBe(0);
+    expect(normalizeRosterSize(-3)).toBe(0);
+    // The ordinary values are untouched.
+    expect(normalizeRosterSize(0)).toBe(0);
+    expect(normalizeRosterSize(60)).toBe(60);
+  });
+
+  it('never hands setInterval a value it will read as 1ms', () => {
+    // Node coerces a negative, sub-millisecond, infinite or over-range delay
+    // to 1ms -- so a typo runs the supervisor a thousand times a second,
+    // loading the roster and the live state each time, on the loop that
+    // relays every live match.
+    expect(normalizeTickMs(-5)).toBeUndefined();
+    expect(normalizeTickMs(0.5)).toBeUndefined();
+    expect(normalizeTickMs(Infinity)).toBeUndefined();
+    expect(normalizeTickMs(NaN)).toBeUndefined();
+    expect(normalizeTickMs(undefined)).toBeUndefined();
+    expect(normalizeTickMs(2_147_483_648)).toBeUndefined();
+    // ...and undefined is the DEFAULT rather than a disabled timer, which is
+    // what makes rejecting a bad value safe.
+    expect(normalizeTickMs(15_000)).toBe(15_000);
+    expect(normalizeTickMs(2_147_483_647)).toBe(2_147_483_647);
+  });
+
+  it('bounds them where the supervisor reads them, not only at the env', () => {
+    // The invariant belongs to the two consumers -- the `slice` and the
+    // provisioning bound are both in that file -- so a caller constructing one
+    // by hand gets the same answer, and server.ts is left passing a bare
+    // `Number(...)` rather than a second spelling of the rule.
+    const src = fs.readFileSync(path.join(process.cwd(), 'server.ts'), 'utf8');
+    expect(src).toMatch(/rosterSize: Number\(process\.env\.PLAYBOT_ROSTER_SIZE\),/);
+    expect(src).not.toMatch(/PLAYBOT_ROSTER_SIZE\) \|\| 0/);
   });
 });

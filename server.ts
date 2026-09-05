@@ -4489,8 +4489,12 @@ async function startServer() {
   const playbots = new PlaybotSupervisor({
     base: `http://127.0.0.1:${PORT}`,
     wsUrl: `ws://127.0.0.1:${PORT}/ws`,
-    rosterSize: Number(process.env.PLAYBOT_ROSTER_SIZE) || 0,
-    tickMs: Number(process.env.PLAYBOT_TICK_MS) || undefined,
+    // Bounded by the supervisor itself — see `normalizeRosterSize`. `Number`
+    // and nothing else here, deliberately: a `|| 0` reads as a guard and only
+    // catches junk and zero, letting a fractional or infinite value through to
+    // burn a username out of the pool on every restart.
+    rosterSize: Number(process.env.PLAYBOT_ROSTER_SIZE),
+    tickMs: Number(process.env.PLAYBOT_TICK_MS),
     // The SERVER's own db handle, so a marker row and the `isBotAccount` cache
     // that reads it move together. A separate connection would write the row
     // and leave this process still classifying that account as a human —

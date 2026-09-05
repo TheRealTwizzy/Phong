@@ -326,6 +326,39 @@ const IDLE_LIVE: LiveState = {
   openTableVenues: [],
 };
 
+/** Node's own ceiling: past it `setInterval` fires every 1ms instead. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * The two settings that arrive as an environment STRING, bounded here.
+ *
+ * `Number(process.env.X) || fallback` reads as a guard and is not one: it
+ * catches junk and zero and passes everything else through. A fractional
+ * roster size is the sharp one — `slice(0, 6.5)` loads six accounts while the
+ * provisioning loop's `managed.length < 6.5` creates a seventh, so every
+ * restart excludes that seventh, skips its held name, and mints another:
+ * one username burned out of the pool permanently per deploy. `Infinity` is
+ * the same bug with no bound at all. And a negative or sub-millisecond tick
+ * reaches `setInterval`, which coerces it to 1ms — the supervisor loading the
+ * roster and the live state a thousand times a second on the relay's event
+ * loop, from one typo.
+ *
+ * Normalized HERE rather than at the call site, because the invariant belongs
+ * to the two consumers: the `slice` and the provisioning bound are both in
+ * this file, and a second caller constructing a supervisor by hand gets the
+ * same answer for free.
+ */
+export function normalizeRosterSize(v: number | undefined): number {
+  if (!Number.isFinite(v ?? NaN)) return 0;
+  return Math.max(0, Math.floor(v!));
+}
+
+export function normalizeTickMs(v: number | undefined): number | undefined {
+  if (!Number.isFinite(v ?? NaN)) return undefined;
+  const ms = Math.floor(v!);
+  return ms >= 1 && ms <= MAX_TIMER_MS ? ms : undefined;
+}
+
 export class PlaybotSupervisor {
   private readonly opts: PlaybotSupervisorOptions;
   private readonly store: PlaybotAccountStore;
@@ -336,7 +369,11 @@ export class PlaybotSupervisor {
   private stopped = false;
 
   constructor(opts: PlaybotSupervisorOptions) {
-    this.opts = opts;
+    this.opts = {
+      ...opts,
+      rosterSize: normalizeRosterSize(opts.rosterSize),
+      tickMs: normalizeTickMs(opts.tickMs),
+    };
     this.store = opts.store;
     this.live = opts.live ?? (() => IDLE_LIVE);
   }
