@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'fs';
+import { OPEN_VENUES, preferHumanTable } from '../server/playbotSupervisor';
+import { roomById, roomEntryVerdict } from '../src/venues';
+import { TIER_ORDER } from '../src/rating';
 import path from 'path';
 import { DEFAULT_TRAITS, seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import {
@@ -263,5 +266,58 @@ describe('what this module cannot do', () => {
     const once = chooseOpponent({ self: { ...self, traits: seedTraits('bot-pure') }, candidates: roster, now: NOW });
     const twice = chooseOpponent({ self: { ...self, traits: seedTraits('bot-pure') }, candidates: roster, now: NOW });
     expect(once?.id).toBe(twice?.id);
+  });
+});
+
+describe('which table to walk up to, and which venues may be tried', () => {
+  it('prefers a human’s table found in ANY venue, not just the first', () => {
+    // The gathered list is searched as a whole. Returning inside the first
+    // venue that held any free table meant a bot table in `casual` was taken
+    // while a human sat waiting in `beginner` — the preference applied within
+    // a venue and not across them, so the activation that existed to serve
+    // that person served a bot.
+    //
+    // The bot table is FIRST in the list deliberately: it is the one a
+    // first-match rule returns, so the fixture fails against that rule rather
+    // than passing on the order it happened to be given.
+    const bots = new Set(['bot-a', 'bot-b']);
+    const free = [
+      { id: 'CASU', hostId: 'bot-a' },
+      { id: 'BEGN', hostId: 'dev_human000000000001' },
+    ];
+    expect(preferHumanTable(free, bots)).toBe('BEGN');
+  });
+
+  it('still takes a bot’s table when that is all there is', () => {
+    // The preference is never a refusal — a bot with only bots to play plays
+    // them, which is §2.11's rule one level down.
+    const bots = new Set(['bot-a']);
+    expect(preferHumanTable([{ id: 'CASU', hostId: 'bot-a' }], bots)).toBe('CASU');
+    expect(preferHumanTable([], bots)).toBeNull();
+    // A table with no host at all is not preferred as a human's.
+    expect(preferHumanTable([{ id: 'X', hostId: null }], bots)).toBe('X');
+  });
+
+  it('leaves every bot somewhere it may play, at every tier it can reach', () => {
+    // `chooseVenue`'s `allowed` is the set the bracket gate permits, and the
+    // caller handed it the raw list — so a bot that had climbed past Contender
+    // was sent at `beginner`, which carries a tierMax, and refused. A refused
+    // HOST fell back; a refused JOIN had nowhere to fall back to and retried
+    // the same forbidden table every tick while its human waited.
+    //
+    // The filter is only safe because it can never empty: this is that
+    // property, over every tier a bot's own results can reach.
+    for (const tier of TIER_ORDER) {
+      for (const level of [1, 5, 20, 100]) {
+        const open = OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), { level, tier }).ok);
+        expect(open, `${tier} at level ${level} may enter nowhere`).not.toHaveLength(0);
+      }
+    }
+    // And it genuinely NARROWS, or it is not a filter: a bot past Contender
+    // loses `beginner` and keeps `casual`.
+    const climbed = OPEN_VENUES.filter(
+      (id) => roomEntryVerdict(roomById(id), { level: 20, tier: 'master' }).ok
+    );
+    expect(climbed).toEqual(['casual']);
   });
 });

@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { PlaybotSupervisor, liveStateFrom, defaultPlaybotName } from '../server/playbotSupervisor';
+import {
+  PlaybotSupervisor,
+  liveStateFrom,
+  defaultPlaybotName,
+  type PlaybotAccountStore,
+} from '../server/playbotSupervisor';
 import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import { MIN_AI_COMPETENCE } from '../src/game/physics';
 import { PATIENCE_MS } from '../server/playbotPopulation';
@@ -339,7 +344,9 @@ describe('a bot plays more than one match', () => {
     // written and none is asserted -- the suite above owns that.
     relay = await startRelay('playbot-redispatch');
     const dir = relay.dataDir;
-    const rows = new Map<string, { botId: string; username: string; deviceCookie: string; traits: PlaybotTraits; mu: number; recentMatches: number }>();
+    // Typed from the store's own contract, so a field added there is a
+    // compile error here rather than a fixture that has quietly drifted.
+    const rows = new Map<string, ReturnType<PlaybotAccountStore['load']>[number]>();
     const sup = new PlaybotSupervisor({
       base: relay.base,
       wsUrl: relay.wsUrl,
@@ -367,6 +374,11 @@ describe('a bot plays more than one match', () => {
             traits,
             mu: 25,
             recentMatches: 0,
+            // A fresh account, which is what the bracket gate judges an
+            // unplayed bot as — and what makes every OPEN_VENUES room
+            // enterable, since `beginner` carries a ceiling and no floor.
+            level: 1,
+            tier: 'unranked' as const,
           });
         },
       },

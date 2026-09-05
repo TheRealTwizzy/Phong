@@ -28,6 +28,8 @@
 import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
 import { chooseVenue } from './playbotPolicy';
+import { roomById, roomEntryVerdict } from '../src/venues';
+import type { Tier } from '../src/rating';
 import {
   impatientDemand,
   targetActivation,
@@ -65,6 +67,9 @@ export interface PlaybotAccountStore {
     traits: PlaybotTraits;
     mu: number;
     recentMatches: number;
+    /** What the bracket gate judges — see `venuesFor`. */
+    level: number;
+    tier: Tier;
   }>;
   /** Marker row, credential and traits, written once at creation. */
   save(botId: string, deviceCookie: string, traits: PlaybotTraits): void;
@@ -140,6 +145,9 @@ interface Managed {
   driver: PlaybotDriver | null;
   /** Asked to stand down; closed once it is out of whatever it was in. */
   retiring: boolean;
+  /** The bot's own bracket standing, refreshed whenever the roster is loaded. */
+  level: number;
+  tier: Tier;
   /** When it was last sent somewhere, so a reply in flight is not re-sent. */
   dispatchedAt: number;
 }
@@ -306,6 +314,8 @@ export class PlaybotSupervisor {
         driver: null,
         retiring: false,
         dispatchedAt: 0,
+        level: row.level,
+        tier: row.tier,
       });
     }
     // A name index that advances INDEPENDENTLY of how many accounts exist.
@@ -455,6 +465,11 @@ export class PlaybotSupervisor {
       driver: null,
       retiring: false,
       dispatchedAt: 0,
+      // A brand new account: level 1 and unplaced, which is what the bracket
+      // gate will judge it as until its own matches move it. The next roster
+      // load reads the real values.
+      level: 1,
+      tier: 'unranked',
     });
   }
 
@@ -510,11 +525,19 @@ export class PlaybotSupervisor {
     // choice did not work out.
     const gaveUpEmptyTable = m.driver.phase === 'lobby' && !m.driver.hasOpponent();
     m.dispatchedAt = Date.now();
+    // Only venues this bot may actually ENTER. `chooseVenue`'s own doc says
+    // `allowed` is the set the bracket gate permits, supplied by the caller,
+    // and the caller handed it the raw list — so a bot that had climbed past
+    // Contender was sent at `beginner`, which carries a tierMax, and refused.
+    // A refused HOST fell back; a refused JOIN had nowhere to fall back to and
+    // simply retried the same forbidden table on every tick, while the human
+    // it was dispatched to serve went on waiting.
+    const allowed = this.venuesFor(m);
     // An INDEPENDENT roll, never the bias itself — see `rollFor`.
     const venue = chooseVenue({
       traits: m.traits,
       roll: (this.opts.rollFor ?? Math.random)(),
-      allowed: OPEN_VENUES,
+      allowed,
     });
     // JOIN means join. Mapping it to `host` looked harmless — a table somebody
     // can walk into is the same offer from the other side — and it is what
@@ -529,7 +552,7 @@ export class PlaybotSupervisor {
     // overriding the preference (§2.11 makes diversity a preference and never a
     // prohibition); it is the preference having been tried and answered.
     const wantsTable = action !== 'queue' && (action === 'join' || gaveUpEmptyTable);
-    const table = wantsTable ? await this.openTable(venue, m.botId) : null;
+    const table = wantsTable ? await this.openTable(venue, allowed, m.botId) : null;
     if (table) {
       // Deliberately WITHOUT leaving first: `join_room` vacates whatever seat
       // this socket already holds, and only once the destination is certain —
@@ -546,40 +569,53 @@ export class PlaybotSupervisor {
     else m.driver.host({}, venue ?? undefined);
   }
 
-  /** An open public table in this venue that somebody else is sitting at. */
-  private async openTable(venue: string | null, selfId: string): Promise<string | null> {
-    for (const room of venue ? [venue, ...OPEN_VENUES] : OPEN_VENUES) {
+  /**
+   * The venues this bot may enter, judged by the same predicate the relay asks.
+   *
+   * Never empty in practice — `casual` gates nobody — but the empty case is
+   * handled rather than assumed, since `chooseVenue` answers null for it and
+   * `host` then creates a table with no venue at all, which is the ungated
+   * `_default` room.
+   */
+  private venuesFor(m: Managed): string[] {
+    const who = { level: m.level, tier: m.tier };
+    return OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), who).ok);
+  }
+
+  /**
+   * An open public table somebody else is sitting at, preferring a HUMAN's.
+   *
+   * Gathered across every venue BEFORE choosing, which is the half a first
+   * version got wrong: returning inside the first venue that had any free
+   * table meant a bot table in `casual` was taken while a human sat waiting in
+   * `beginner` — the human preference applied within a venue and not across
+   * them, so the activation that existed to serve that person served a bot.
+   */
+  private async openTable(
+    venue: string | null,
+    allowed: string[],
+    selfId: string
+  ): Promise<string | null> {
+    const free: Array<{ id: string; hostId: string | null }> = [];
+    for (const room of venue ? [venue, ...allowed] : allowed) {
       try {
         const res = await fetch(`${this.opts.base}/api/rooms/${encodeURIComponent(room)}/tables`);
         if (!res.ok) continue;
         const body = (await res.json()) as {
           tables?: Array<{ id: string; isFull: boolean; hostId: string | null }>;
         };
-        const free = (body.tables ?? []).filter((t) => !t.isFull && t.hostId !== selfId);
-        // A HUMAN's table first, always. This took the first listing entry,
-        // so a bot dispatched to serve a waiting human could walk up to
-        // another BOT's table instead and leave that human exactly where they
-        // were -- which makes §4.13's priority rule nominal at the one step
-        // that acts on it, and half-undoes sending the bot to a table at all.
-        //
-        // NOT the full `chooseOpponent` preference: that wants each
-        // candidate's rating, pair count and last-played time, and the tables
-        // listing carries an id and a host. Wiring it needs a rating and an
-        // exposure read per candidate, which is a design step rather than a
-        // fix, and it is reported on the PR rather than widened into here.
-        // "One of MY OWN bots" rather than `isBotAccount`, and it is the same
-        // question here: the curated roster never hosts a table, and the
-        // population is single-process by design, so `managed` is the complete
-        // set of bot-hosted tables and this needs no new dependency.
-        const mine = new Set(this.managed.map((m) => m.botId));
-        const human = free.find((t) => t.hostId && !mine.has(t.hostId));
-        if (human) return human.id;
-        if (free.length) return free[0].id;
+        for (const t of body.tables ?? []) {
+          if (!t.isFull && t.hostId !== selfId) free.push({ id: t.id, hostId: t.hostId });
+        }
       } catch {
         // A listing that cannot be read is a listing with nothing in it.
       }
     }
-    return null;
+    // "One of MY OWN bots" rather than `isBotAccount`: the curated roster
+    // never hosts a table and the population is single-process by design, so
+    // `managed` is the complete set of bot-hosted tables and this needs no new
+    // dependency.
+    return preferHumanTable(free, new Set(this.managed.map((m) => m.botId)));
   }
 }
 
@@ -593,6 +629,26 @@ export class PlaybotSupervisor {
  * population.
  */
 export const OPEN_VENUES = ['casual', 'beginner'];
+
+/**
+ * Which free table to walk up to: a HUMAN's, wherever it was found.
+ *
+ * Takes the WHOLE gathered list rather than one venue's, which is the shape
+ * the bug had: returning inside the first venue that held any free table meant
+ * a bot table in `casual` was taken while a human sat waiting in `beginner` —
+ * the preference applied within a venue and not across them, so the activation
+ * that existed to serve that person served a bot instead.
+ *
+ * NOT the full `chooseOpponent` preference, which wants each candidate's
+ * rating, pair count and last-played time where the listing carries an id and
+ * a host. That is a design step rather than a fix.
+ */
+export function preferHumanTable(
+  free: ReadonlyArray<{ id: string; hostId: string | null }>,
+  botIds: ReadonlySet<string>
+): string | null {
+  return free.find((t) => t.hostId && !botIds.has(t.hostId))?.id ?? free[0]?.id ?? null;
+}
 
 /**
  * The nth name the population asks for.

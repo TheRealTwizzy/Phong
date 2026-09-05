@@ -352,16 +352,28 @@ describe('what the composition has to pass along', () => {
     expect(read('server/playbotDriver.ts')).toMatch(/clampBallSpeed\(hit\.speed, this\.rules\)/);
   });
 
-  it('prefers a human’s table when a bot goes to join one', () => {
-    // A bot dispatched to serve a human waiting at a public table took the
-    // FIRST free listing entry, so it could walk up to another bot's table and
-    // leave that human exactly where they were — §4.13's priority rule made
-    // nominal at the one step that acts on it.
-    //
-    // Not the full `chooseOpponent` preference: that wants a rating, a pair
-    // count and a last-played time per candidate, and the tables listing
-    // carries an id and a host. That gap is real and is reported rather than
-    // widened into this fix.
-    expect(read('server/playbotSupervisor.ts')).toMatch(/free\.find\(\(t\) => t\.hostId && !mine\.has\(t\.hostId\)\)/);
+  it('offers a bot only the venues its own tier may enter', () => {
+    // `chooseVenue`'s `allowed` is documented as the set the bracket gate
+    // permits, supplied by the caller — and the caller passed the raw list.
+    // A refused HOST fell back to casual; a refused JOIN had nowhere to fall
+    // back TO and retried the same forbidden table on every tick while the
+    // human it was sent to serve went on waiting. Both call sites take the
+    // filtered list now, which is the root the two fallbacks were patching.
+    const src = read('server/playbotSupervisor.ts');
+    expect(src).toMatch(/const allowed = this\.venuesFor\(m\)/);
+    expect(src).toMatch(/roomEntryVerdict\(roomById\(id\), who\)\.ok/);
+    // BOTH consumers, or the half that was left raw is the half that breaks.
+    expect(src).toMatch(/chooseVenue\(\{[\s\S]*?allowed,[\s\S]*?\}\)/);
+    expect(src).toMatch(/this\.openTable\(venue, allowed, m\.botId\)/);
+  });
+
+  it('chooses its table through the preference rather than by arrival order', () => {
+    // The behaviour is `preferHumanTable`'s and is unit-tested there, across
+    // venues. What can only be read here is that `openTable` GATHERS and then
+    // asks it — the bug was a `return` inside the venue loop, which no test of
+    // a pure chooser can see.
+    const src = read('server/playbotSupervisor.ts');
+    expect(src).toMatch(/return preferHumanTable\(free, /);
+    expect(src).toMatch(/free\.push\(\{ id: t\.id, hostId: t\.hostId \}\)/);
   });
 });

@@ -4362,10 +4362,26 @@ class GameDatabase {
     traits: PlaybotTraits;
     mu: number;
     recentMatches: number;
+    /**
+     * What the bracket gate judges, carried here rather than looked up later.
+     *
+     * A bot's venue eligibility was never modelled at all, and its symptoms
+     * were patched one at a time: a host refused `VENUE_LOCKED` fell back, and
+     * then a JOIN refused the same way had nowhere to fall back TO and simply
+     * retried the forbidden table on every tick while the human it was sent to
+     * serve went on waiting. `chooseVenue`'s own doc says `allowed` is the set
+     * the gate says it may enter, supplied by the caller — so the caller has
+     * to be able to ask, and asking costs four more columns on a query it was
+     * already running.
+     */
+    level: number;
+    tier: Tier;
   }> {
     const rows = this.stmt(
         `SELECT b.botId AS botId, p.username AS username, b.deviceCookie AS deviceCookie,
-                p.rankMu AS mu, p.matchesPlayed AS recentMatches, ${TRAIT_KEYS.map((k) => `b.${k} AS ${k}`).join(', ')}
+                p.rankMu AS mu, p.matchesPlayed AS recentMatches, p.level AS level,
+                p.rankSigma AS rankSigma, p.rankedGames AS rankedGames, p.rankedDuels AS rankedDuels,
+                ${TRAIT_KEYS.map((k) => `b.${k} AS ${k}`).join(', ')}
            FROM bot_accounts b
            JOIN players p ON p.id = b.botId
           WHERE b.deviceCookie IS NOT NULL AND p.initializedAt IS NOT NULL
@@ -4379,6 +4395,15 @@ class GameDatabase {
       traits: normalizeTraits(r as Partial<PlaybotTraits>),
       mu: Number(r.mu),
       recentMatches: Number(r.recentMatches) || 0,
+      level: Number(r.level) || 1,
+      // Derived exactly as `rowToProfile` derives it, so a bot is judged by
+      // the same tier the relay will judge it by.
+      tier: tierFor(
+        Number(r.mu),
+        Number(r.rankedGames) || 0,
+        Number(r.rankSigma),
+        Number(r.rankedDuels) || 0
+      ),
     }));
   }
 
