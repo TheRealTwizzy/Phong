@@ -300,3 +300,46 @@ describe('rank is earned, never seeded', () => {
     }
   });
 });
+
+// Three wirings that a review found MISSING and that have nothing to observe
+// at runtime without new plumbing. Read here rather than left to prose, the
+// same idiom step 9's case C and step 15 use — and each one is the same shape
+// as the rest of this feature's findings: a module that was right, and a
+// composition that never called it.
+describe('what the composition has to pass along', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  it('gives OpponentAI the bot’s persisted spinRead', () => {
+    // `styleFor` returns an AIStyle — volatility and aggression and nothing
+    // else — so a spinRead folded into it is dropped, and the AI derived its
+    // spin reading from competence alone. Two bots differing ONLY in that
+    // seeded trait then played identically against spin, which makes it an
+    // inert trait rather than a style.
+    expect(read('server/playbotDriver.ts')).toMatch(/spinRead:\s*opts\.traits\.spinRead/);
+    // ...and the AI has to prefer it over the competence-derived value.
+    expect(read('src/game/physics.ts')).toMatch(/this\.override\?\.spinRead \?\? p\.spinRead/);
+  });
+
+  it('tells the controller which band is thin', () => {
+    // `liveStateFrom` has always accepted `bandCentre` and the production
+    // wiring never supplied one, so `targetActivation` fell back to START_MU
+    // on every tick: a high- or low-rated human queued and the middle of the
+    // roster was activated, possibly outside even the matcher's widest band.
+    const call = /liveStateFrom\(\{([\s\S]*?)\n      \}\)/.exec(read('server.ts'));
+    expect(call, 'server.ts no longer builds a LiveState').toBeTruthy();
+    expect(call![1]).toMatch(/bandCentre:/);
+  });
+
+  it('prefers a human’s table when a bot goes to join one', () => {
+    // A bot dispatched to serve a human waiting at a public table took the
+    // FIRST free listing entry, so it could walk up to another bot's table and
+    // leave that human exactly where they were — §4.13's priority rule made
+    // nominal at the one step that acts on it.
+    //
+    // Not the full `chooseOpponent` preference: that wants a rating, a pair
+    // count and a last-played time per candidate, and the tables listing
+    // carries an id and a host. That gap is real and is reported rather than
+    // widened into this fix.
+    expect(read('server/playbotSupervisor.ts')).toMatch(/free\.find\(\(t\) => t\.hostId && !mine\.has\(t\.hostId\)\)/);
+  });
+});

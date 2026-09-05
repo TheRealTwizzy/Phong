@@ -122,6 +122,15 @@ export interface PlaybotSupervisorOptions {
 
 export const DEFAULT_TICK_MS = 15_000;
 
+/**
+ * How many name collisions provisioning will walk past before giving up.
+ *
+ * Bounded rather than unlimited: a server where every candidate name is held
+ * should log a few warnings and carry on with a smaller population, which is
+ * what `provision` already treats a collision as.
+ */
+const NAME_ATTEMPT_SLACK = 8;
+
 /** A bot the supervisor holds an account for, connected or not. */
 interface Managed {
   botId: string;
@@ -282,7 +291,13 @@ export class PlaybotSupervisor {
     // forever over an empty roster. A cost guard, like step 10's human-only
     // exposure queries, and kept for the same reason.
     if (this.opts.rosterSize <= 0) return;
-    for (const row of this.store.load()) {
+    // The configured size bounds what is LOADED, not just what is created.
+    // `targetActiveCount` clamps against `snapshot.roster.length`, so without
+    // this a deployment turned down from 60 to 1 goes on activating the old
+    // 60 under demand and the operational bound stops being one. The extra
+    // accounts are dormant rows -- two columns, no socket, no timer -- and
+    // come back if the size is raised again.
+    for (const row of this.store.load().slice(0, this.opts.rosterSize)) {
       this.managed.push({
         botId: row.botId,
         username: row.username,
@@ -293,7 +308,27 @@ export class PlaybotSupervisor {
         dispatchedAt: 0,
       });
     }
-    for (let n = this.managed.length; n < this.opts.rosterSize; n++) {
+    // A name index that advances INDEPENDENTLY of how many accounts exist.
+    // Starting it at `managed.length` leaves a permanent collision permanently
+    // short: with a size of 2 and `Rally01Bot` already held by a human, index 0
+    // fails and index 1 makes `Rally02Bot` -- and every later boot loads one
+    // account, starts the loop at 1, and retries the name that account already
+    // holds. It never reaches `Rally03Bot`, so the roster is one short for the
+    // life of the deployment.
+    //
+    // Names already held are skipped rather than retried, and the attempt
+    // budget is bounded so a server where every candidate is taken logs a
+    // handful of warnings instead of spinning.
+    const held = new Set(this.managed.map((m) => m.username));
+    const naming = this.opts.nameFor ?? defaultName;
+    let attempts = 0;
+    for (
+      let n = 0;
+      this.managed.length < this.opts.rosterSize && attempts < this.opts.rosterSize + NAME_ATTEMPT_SLACK;
+      n += 1
+    ) {
+      if (held.has(naming(n))) continue;
+      attempts += 1;
       await this.provision(n);
     }
     const every = this.opts.tickMs ?? DEFAULT_TICK_MS;
@@ -513,8 +548,26 @@ export class PlaybotSupervisor {
         const body = (await res.json()) as {
           tables?: Array<{ id: string; isFull: boolean; hostId: string | null }>;
         };
-        const free = (body.tables ?? []).find((t) => !t.isFull && t.hostId !== selfId);
-        if (free) return free.id;
+        const free = (body.tables ?? []).filter((t) => !t.isFull && t.hostId !== selfId);
+        // A HUMAN's table first, always. This took the first listing entry,
+        // so a bot dispatched to serve a waiting human could walk up to
+        // another BOT's table instead and leave that human exactly where they
+        // were -- which makes §4.13's priority rule nominal at the one step
+        // that acts on it, and half-undoes sending the bot to a table at all.
+        //
+        // NOT the full `chooseOpponent` preference: that wants each
+        // candidate's rating, pair count and last-played time, and the tables
+        // listing carries an id and a host. Wiring it needs a rating and an
+        // exposure read per candidate, which is a design step rather than a
+        // fix, and it is reported on the PR rather than widened into here.
+        // "One of MY OWN bots" rather than `isBotAccount`, and it is the same
+        // question here: the curated roster never hosts a table, and the
+        // population is single-process by design, so `managed` is the complete
+        // set of bot-hosted tables and this needs no new dependency.
+        const mine = new Set(this.managed.map((m) => m.botId));
+        const human = free.find((t) => t.hostId && !mine.has(t.hostId));
+        if (human) return human.id;
+        if (free.length) return free[0].id;
       } catch {
         // A listing that cannot be read is a listing with nothing in it.
       }
@@ -534,7 +587,16 @@ export class PlaybotSupervisor {
  */
 const OPEN_VENUES = ['casual', 'beginner'];
 
-const defaultName = (n: number): string => `Rally${String(n + 1).padStart(2, '0')}Bot`;
+/**
+ * The nth name the population asks for.
+ *
+ * Exported so a test can take one out of the pool before the population boots
+ * and watch it walk past — the collision that used to leave the roster short
+ * for the life of the deployment.
+ */
+export const defaultPlaybotName = (n: number): string =>
+  `Rally${String(n + 1).padStart(2, '0')}Bot`;
+const defaultName = defaultPlaybotName;
 
 /** Humans the queue and the tables cannot serve by themselves, right now. */
 const urgencyOf = (live: LiveState): number =>

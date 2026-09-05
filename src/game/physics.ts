@@ -858,13 +858,13 @@ export class OpponentAI {
    * measurement of something. Absent — which is every solo match — nothing
    * below changes at all.
    */
-  private override: { competence: number; style: AIStyle } | null = null;
+  private override: { competence: number; style: AIStyle; spinRead?: number } | null = null;
   private rallyCompetence: number = 0;
 
   constructor(
     difficulty: AIDifficulty = 'pro',
     playerMu: number = START_MU,
-    override: { competence: number; style: AIStyle } | null = null
+    override: { competence: number; style: AIStyle; spinRead?: number } | null = null
   ) {
     this.difficulty = difficulty;
     this.playerMu = playerMu;
@@ -946,7 +946,13 @@ export class OpponentAI {
     this.readsBounce = Math.random() < p.bounceSkill;
     // Rolled per rally like everything else: an AI commits to one reading of
     // this ball. Re-deciding every tick would average out to a perfect read.
-    this.spinRead = clamp(p.spinRead * (0.75 + Math.random() * 0.5), 0, 1);
+    // A play-bot's spin reading is a PERSISTENT TRAIT, not a function of its
+    // competence: two bots that have converged on the same tier still read
+    // spin differently, which is the whole point of style being separate from
+    // skill (§4.13). Absent -- every solo match -- this is `p.spinRead` and
+    // the line is byte-identical to what it was.
+    const spinBase = this.override?.spinRead ?? p.spinRead;
+    this.spinRead = clamp(spinBase * (0.75 + Math.random() * 0.5), 0, 1);
     this.lapsed = Math.random() < p.lapseChance;
     // Which corner this rally is played for, committed once like every other
     // read. Applied to the ball LEAVING (see aimBias), never to where the

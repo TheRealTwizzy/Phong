@@ -123,6 +123,10 @@ export class PlaybotDriver {
     this.ai = new OpponentAI('pro', 25, {
       competence: opts.traits.skill,
       style: styleFor(opts.traits),
+      // A separate trait from the style pair, and it has to travel separately:
+      // `styleFor` returns an AIStyle, which is volatility and aggression and
+      // nothing else, so a spinRead folded into it would be dropped.
+      spinRead: opts.traits.spinRead,
     });
   }
 
@@ -372,6 +376,31 @@ export class PlaybotDriver {
           this.send({ type: 'start_match' });
         }
         break;
+      case 'rematch_state': {
+        // A human who finishes a duel with a bot and presses Play Again sends
+        // `rematch_request`, and the relay broadcasts the votes. Nothing here
+        // handled that message, so the bot never cast its own and the human
+        // sat on the winner overlay until the supervisor happened to move the
+        // bot somewhere else -- while §2.11 says an explicit human Rematch is
+        // legitimate play that nothing may block or decline.
+        //
+        // Accepted UNCONDITIONALLY, which is D25's rule for a human and the
+        // safe default for the other case: telling a human from a bot here
+        // would mean plumbing an identity resolver into a component written as
+        // a client, and it would only feed `acceptsRematch`'s taper, which
+        // also wants a `recentPairCount` the driver does not have. Repeating a
+        // pair is not prevented by refusing it in any case -- the saturation
+        // ladders make it worth progressively less and then nothing, which is
+        // the safeguard that actually holds (§2.3).
+        //
+        // So `server/playbotPolicy.ts`'s `acceptsRematch` stays unwired, and
+        // that is recorded rather than left to look like an oversight.
+        if (this.seat === null || this.phase !== 'over') break;
+        const mine = msg.votes[this.seat];
+        const theirs = msg.votes[this.seat === 0 ? 1 : 0];
+        if (theirs && !mine) this.send({ type: 'rematch_request' });
+        break;
+      }
       case 'game_start':
         this.config = msg.config;
         this.rules = normalizeRules(msg.config.rules);

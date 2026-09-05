@@ -250,6 +250,39 @@ describe('a bot at a table with a human', () => {
     bot.close();
   }, 90_000);
 
+  it('answers a human\u2019s Play Again', async () => {
+    // §2.11 makes an explicit human Rematch legitimate play that nothing may
+    // block or decline -- and the driver had no `rematch_state` case at all,
+    // so it never cast its own vote. The human sat on the winner overlay
+    // waiting for a second player who was never going to answer, until the
+    // supervisor happened to move the bot somewhere else.
+    const bot = await bootBot('RematchBot');
+    bot.host({ winningScore: 3 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+
+    const human = await relay.newDevice('RematchHuman');
+    const phone = await relay.openPhone(human);
+    phone.send({ type: 'join_room', roomId: bot.roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    phone.send({ type: 'player_ready', ready: true });
+    await phone.await('game_start');
+
+    const seat = bot.seat === 0 ? 'p1' : 'p2';
+    for (let i = 1; i <= 3; i += 1) {
+      phone.send({ type: 'point_scored', scorer: seat });
+      await phone.awaitCount('score_update', i);
+    }
+    await until('the bot to see the whistle', () => bot.phase === 'over');
+
+    // One vote from the human is all it takes: the relay needs two, and the
+    // bot's is the one that was missing.
+    phone.send({ type: 'rematch_request' });
+    await phone.awaitCount('game_start', 2, 20_000);
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
   it('joins a table a human is hosting', async () => {
     const human = await relay.newDevice('TableOwner');
     const phone = await relay.openPhone(human);

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { PlaybotSupervisor, liveStateFrom } from '../server/playbotSupervisor';
+import { PlaybotSupervisor, liveStateFrom, defaultPlaybotName } from '../server/playbotSupervisor';
 import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import { MIN_AI_COMPETENCE } from '../src/game/physics';
 import { PATIENCE_MS } from '../server/playbotPopulation';
@@ -161,6 +161,47 @@ describe('the population starts with the process', () => {
     // two assertions above green over a server running an empty population.
     // Measured: without this, dropping the load entirely reddened nothing.
     expect(await waitForSeated(relay.base)).toBeGreaterThan(0);
+  }, 180_000);
+
+  it('lets the configured size bound the pool it will DRIVE, not just create', async () => {
+    // `targetActiveCount` clamps against `snapshot.roster.length`, so loading
+    // every stored account made the env var a creation-time setting rather
+    // than an operational bound: a deployment turned down from many to one
+    // went on activating the old many under demand.
+    relay = await withPopulation(3, undefined, { PLAYBOT_TICK_MS: '1000' });
+    const dir = relay.dataDir;
+    leftovers.push(dir);
+    expect(await settle(dir, 3)).toHaveLength(3);
+    await relay.terminate();
+
+    // Same database, turned down. The three accounts survive -- they are
+    // dormant rows and come back if the size is raised -- and at most one is
+    // driven.
+    relay = await withPopulation(1, dir, { PLAYBOT_TICK_MS: '1000' });
+    await sleep(3000);
+    expect(playbots(dir)).toHaveLength(3);
+    expect(await waitForSeated(relay.base, 20)).toBeLessThanOrEqual(1);
+  }, 180_000);
+
+  it('walks past a name a human already holds', async () => {
+    // The name index used to start at `managed.length`, so one permanent
+    // collision left the roster permanently short: index 0 fails, index 1
+    // makes the second name, and every later boot loads one account, starts at
+    // 1, and retries the name that account already holds. It never reaches the
+    // third name and the pool never fills.
+    relay = await withPopulation(0);
+    const dir = relay.dataDir;
+    leftovers.push(dir);
+    // A HUMAN takes the first name the population would have asked for.
+    const squatter = await relay.newDevice(defaultPlaybotName(0));
+    expect(squatter.id).toBeTruthy();
+    await relay.terminate();
+
+    relay = await withPopulation(2, dir, { PLAYBOT_TICK_MS: '1000' });
+    const born = await settle(dir, 2);
+    expect(born).toHaveLength(2);
+    // Two accounts, and neither wearing the name the human holds.
+    expect(playbotNames(dir)).not.toContain(defaultPlaybotName(0));
   }, 180_000);
 
   it('starts nothing at all when the roster size is zero', async () => {

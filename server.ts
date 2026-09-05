@@ -4504,6 +4504,23 @@ async function startServer() {
         }).length,
         now: Date.now(),
         isBot: (id) => isBotAccount(id),
+        // Where the population is needed, and it was never supplied — so
+        // `targetActivation` fell back to START_MU on every tick and always
+        // ranked bots by their distance from mu 25. A high- or low-rated human
+        // then queued and the controller activated the MIDDLE of the roster,
+        // which may sit outside even the matcher's widest 20-80 band: supply
+        // existed and never reached them.
+        //
+        // The longest-waiting human's own rating is the honest answer to
+        // "which band is thin right now", and it is read through
+        // `db.matchmakingRating` for the reason §7 gives — two floats off the
+        // relay's hot path rather than a whole profile and a ladder scan.
+        bandCentre: (() => {
+          const waiting = queue
+            .filter((e) => !isBotAccount(e.playerId))
+            .sort((a, b) => a.joinedAt - b.joinedAt)[0];
+          return waiting ? (db.matchmakingRating(waiting.playerId)?.mu ?? undefined) : undefined;
+        })(),
       }),
   });
   // Never fatal: a population that cannot start is a server with no bots in
