@@ -431,6 +431,11 @@ export class PlaybotSupervisor {
       const m = this.managed.find((x) => x.botId === id);
       if (!m) continue;
       m.retiring = false;
+      // The DRIVER's own latch too, not just the controller's flag. A bot told
+      // to stand down and then wanted again went on leaving at every whistle
+      // and refusing every rematch, because nothing ever told it the decision
+      // had been reversed.
+      m.driver?.backInService();
       void this.dispatch(m, action);
     }
     for (const id of target.deactivate) {

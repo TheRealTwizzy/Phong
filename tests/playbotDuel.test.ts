@@ -488,6 +488,60 @@ describe('a bot at a table with a human', () => {
     bot.close();
   }, 90_000);
 
+  it('stops standing down once it is wanted again', async () => {
+    // `standingDown` is a LATCH and nothing cleared it. The supervisor clears
+    // its own `Managed.retiring` when demand recovers; the driver went on
+    // believing it had been let go, so it left at every subsequent whistle --
+    // giving up a table the controller had just decided to keep -- and, once
+    // `wantsRematch` learned to consult the flag, refused every rematch.
+    //
+    // Including a PERSON's, which §2.11 says nothing may do. That is the half
+    // this fixture drives, because it is the one that costs somebody a game:
+    // the bot is stood down and then put back in service BEFORE the match, and
+    // the human's Play Again has to be answered anyway.
+    const bot = await bootBot('StandBack', 0.12, {
+      opponentFacts: () => ({ isBot: false, recentPairCount: 0 }),
+    });
+    bot.host({ winningScore: 3 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+    // Demand falls, then recovers -- the exact sequence two population ticks
+    // produce. Standing down from an EMPTY lobby gives the table up at once
+    // (there is no whistle to wait for), and the recovery tick puts the bot
+    // back in service and dispatches it again, which is what `host` is here.
+    bot.standDown();
+    await until('the table given up', () => bot.roomId === null);
+    bot.backInService();
+    bot.host({ winningScore: 3 }, 'casual');
+    await until('a second table', () => bot.roomId !== null);
+
+    const human = await relay.newDevice('StandBackHuman');
+    const phone = await relay.openPhone(human);
+    phone.send({ type: 'join_room', roomId: bot.roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    phone.send({ type: 'player_ready', ready: true });
+    await phone.await('game_start');
+
+    const seat = bot.seat === 0 ? 'p1' : 'p2';
+    for (let i = 1; i <= 3; i += 1) {
+      phone.send({ type: 'point_scored', scorer: seat });
+      await phone.awaitCount('score_update', i);
+    }
+    // Waited on LEAVING PLAY rather than on 'over', because a latched
+    // stand-down leaves inside the very handler that sets it: polling for
+    // 'over' would then time out and the failure would name the poll instead
+    // of the bug.
+    await until('the bot to leave play', () => bot.phase === 'over' || bot.phase === 'idle');
+    // Still at the table, still holding its seat. A latched stand-down gives
+    // both up at the whistle, and then there is nobody to answer the vote.
+    expect([bot.phase, bot.roomId === null]).toEqual(['over', false]);
+
+    phone.send({ type: 'rematch_request' });
+    await phone.awaitCount('game_start', 2, 20_000);
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
   it('asks another bot, and takes no for an answer', async () => {
     // `acceptsRematch` had no caller: the driver accepted every vote it was
     // shown and cast none of its own, so the bot-vs-bot arm was unreachable

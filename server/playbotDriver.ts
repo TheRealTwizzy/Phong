@@ -34,6 +34,7 @@ import {
   PADDLE_HEIGHT,
   PADDLE_WIDTH_RATIO,
   PADDLE_Y,
+  SERVE_BALL_Y,
   aiServeAim,
   aiServeDelay,
   bounceOffWall,
@@ -372,6 +373,20 @@ export class PlaybotDriver {
    * win handed to whoever it was playing. So a deactivation is a request, and
    * the whistle is what grants it.
    */
+  /**
+   * Put back into service after a stand-down that was never spent.
+   *
+   * `standingDown` is a LATCH and nothing cleared it: the supervisor clears its
+   * own `Managed.retiring` when demand recovers, and the driver went on
+   * believing it had been let go. It then left at every subsequent whistle —
+   * giving up a table the controller had just decided to keep — and, once
+   * `wantsRematch` learned to consult it, refused every rematch including a
+   * PERSON's, which §2.11 says nothing may do.
+   */
+  public backInService(): void {
+    this.standingDown = false;
+  }
+
   public standDown(): void {
     this.standingDown = true;
     // A bot WAITING is not a bot playing, so there is no whistle to wait for
@@ -741,7 +756,14 @@ export class PlaybotDriver {
     const v = serveVelocity(aim, this.rules);
     this.ball = {
       x: this.ai.paddleX,
-      y: PADDLE_Y - 0.04,
+      // The same point the ball is HELD at while a person lines a serve up,
+      // and launched from, so the ball being aimed is the ball that leaves
+      // (§3). This said `PADDLE_Y - 0.04`, which is 0.016 nearer the net than
+      // `SERVE_BALL_Y` — a shorter flight and, at an angle, a different x by
+      // the time it crosses. Third of the same shape: the bot's half is a
+      // second court, and every term it spells for itself is one the two
+      // halves can disagree on.
+      y: SERVE_BALL_Y,
       vx: v.vx,
       vy: v.vy,
       radius: BALL_BASE_RADIUS * this.rules.ballScale,
@@ -804,7 +826,18 @@ export class PlaybotDriver {
         return;
       }
 
-      if (ball.vy > 0 && ball.y >= PADDLE_Y - radius) {
+      // NO pre-gate, which is what `src/App.tsx` does: it calls this every
+      // substep and lets the helper decide. There was one, `ball.vy > 0 &&
+      // ball.y >= PADDLE_Y - radius`, and the second half is the paddle's own
+      // half-height LATE — contact begins at `PADDLE_Y - PADDLE_HEIGHT / 2 -
+      // radius` inside `checkPaddleCollision`, so the driver skipped the
+      // substeps a browser would have registered the hit in and sampled the
+      // ball 0.012 deeper, which moves the contact offset and can turn an edge
+      // return into a miss. Both halves of the gate were already the helper's
+      // own first two tests, so the fix is to stop asking them twice: a
+      // threshold modelled in two places is one that drifts, which is the rule
+      // the venue filter and the ball entry both landed on.
+      {
         const hit = checkPaddleCollision(
           ball,
           this.ai.paddleX,

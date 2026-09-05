@@ -538,6 +538,42 @@ describe('what the composition has to pass along', () => {
     expect(app).not.toMatch(/\by: 0\.02,/);
   });
 
+  it('serves from the point the ball is HELD at, like every other court', () => {
+    // The browser holds the ball on the paddle's face at `SERVE_BALL_Y` while
+    // a player lines the serve up and launches it from exactly there, so the
+    // ball being aimed is the ball that leaves (§3). The driver launched from
+    // `PADDLE_Y - 0.04` -- 0.016 nearer the net -- so a bot's serve had a
+    // shorter flight than the identical serve from a phone, and at an angle a
+    // different x by the time it crossed.
+    //
+    // A source read for the same reason as the two geometry checks above it:
+    // a crossing carries no `y`, so no message can catch the two courts
+    // disagreeing. Both halves, because the literal left in place beside the
+    // constant is what would let the divergence ship under a passing test.
+    const strip = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const drv = strip(read('server/playbotDriver.ts'));
+    expect(drv).toContain('y: SERVE_BALL_Y');
+    expect(drv).not.toContain('PADDLE_Y - 0.04');
+  });
+
+  it('asks the paddle helper on every substep, as the browser does', () => {
+    // `checkPaddleCollision` begins contact at `PADDLE_Y - PADDLE_HEIGHT / 2 -
+    // radius`, and the driver gated the call on `ball.y >= PADDLE_Y - radius`
+    // -- the paddle's own half-height LATE. So it skipped the substeps a
+    // browser registers the hit in and sampled the ball 0.012 deeper, which
+    // moves the contact offset and can turn an edge return into a miss.
+    //
+    // Both halves of that gate were already the helper's own first two tests,
+    // so the repair is to stop asking them twice rather than to correct the
+    // second copy: a threshold modelled in two places is one that drifts.
+    // `src/App.tsx` has no pre-gate at all, which is the shape being matched.
+    const strip = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const drv = strip(read('server/playbotDriver.ts'));
+    expect(drv).not.toMatch(/if \(ball\.vy > 0 && ball\.y >= PADDLE_Y - radius\)/);
+  });
+
   it('refreshes that bracket state on every roster read', () => {
     // The half the fifth round's own fix left open, and the note beside it
     // said the opposite: `roster()` reloads the store every tick and took `mu`
