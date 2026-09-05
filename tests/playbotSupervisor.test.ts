@@ -292,6 +292,14 @@ describe('a bot plays more than one match', () => {
       wsUrl: relay.wsUrl,
       rosterSize: 2,
       tickMs: 3_600_000,
+      // The idle-lobby window is what makes the FIRST pairing happen when both
+      // bots' seeded appetites say host, and waiting one out is thirty seconds
+      // of CI for something this test does not assert. Shortened here; the
+      // production constants are what ship, and the jitter is kept because
+      // WITHOUT a stagger the two come free on the same tick and deadlock,
+      // which is the bug the jitter exists for and would fail this test.
+      idleLobbyMs: 1_500,
+      idleLobbyJitterMs: 1_500,
       // Barely-there opponents, so a first-to-3 match is over in seconds.
       // `tests/playbotTraits.test.ts` owns how good a bot is; what is under
       // test here is that a finished one is sent somewhere again.

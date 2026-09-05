@@ -114,7 +114,14 @@ describe('two bots play a duel', () => {
 
     // Played by the two AI halves, with no help from here: the serve, the
     // rally, the crossings and the points are all the drivers' own.
-    await until('the match to finish', () => host.phase === 'over' && guest.phase === 'over', 40_000);
+    // 90s rather than 40s, and the ceiling is not what this asserts. Two AI
+    // halves rallying is genuinely timing-dependent — the serve delays, the
+    // ball travel and the points each bot happens to win — and 40s was tuned
+    // on an idle box. It fell over on CI once the supervisor suite started
+    // booting its own servers in a parallel test FILE, which is contention
+    // rather than a slower match. What is under test is that the two drivers
+    // play a duel out between them, not how long a loaded runner takes.
+    await until('the match to finish', () => host.phase === 'over' && guest.phase === 'over', 90_000);
     expect(Math.max(...host.scores)).toBe(3);
     expect(host.scores).toEqual(guest.scores);
 

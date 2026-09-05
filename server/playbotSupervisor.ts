@@ -89,6 +89,14 @@ export interface PlaybotSupervisorOptions {
   /** Names new accounts. Injected only so a test can make them predictable. */
   nameFor?: (n: number) => string;
   /**
+   * How long a bot may sit at a table nobody joined before it counts as spare,
+   * and the spread that window is jittered over. Injected ONLY to keep a test
+   * that has to wait one out from costing thirty seconds of CI — the same seam
+   * `tickMs` is, and for the same reason. Production uses the constants.
+   */
+  idleLobbyMs?: number;
+  idleLobbyJitterMs?: number;
+  /**
    * The traits a NEW account is seeded with. Creation may seed and nothing
    * after it may steer (§4.13), so this is reachable exactly once per account
    * and there is no path that reaches an existing one — which is what makes it
@@ -217,8 +225,9 @@ export class PlaybotSupervisor {
     // behind a bot that is doing nothing.
     if (m.driver.phase === 'lobby' && !m.driver.hasOpponent()) {
       if (urgent > 0) return false;
-      const window = IDLE_LOBBY_MS + jitterFraction(m.botId) * IDLE_LOBBY_JITTER_MS;
-      return Date.now() - m.dispatchedAt < window;
+      const base = this.opts.idleLobbyMs ?? IDLE_LOBBY_MS;
+      const spread = this.opts.idleLobbyJitterMs ?? IDLE_LOBBY_JITTER_MS;
+      return Date.now() - m.dispatchedAt < base + jitterFraction(m.botId) * spread;
     }
     if (ENGAGED.has(m.driver.phase)) return true;
     // A dispatch still in flight counts, or the next tick sends it twice.
