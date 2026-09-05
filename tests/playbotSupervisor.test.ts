@@ -708,22 +708,26 @@ describe('a driver the controller has stopped naming', () => {
  * server back to empty, where the target is six and the bot is KEPT.
  */
 const seatedAgainstOneBot = async (
-  label: string
+  label: string,
+  rematchGraceMs?: number
 ): Promise<{
   sup: PlaybotSupervisor;
   phone: Awaited<ReturnType<Relay['openPhone']>>;
   botId: string;
   crowd: (on: boolean) => void;
+  queue: (n: number) => void;
   seat: 'p1' | 'p2';
 }> => {
   relay = await startRelay(label);
   const rows = new Map<string, ReturnType<PlaybotAccountStore['load']>[number]>();
   let crowded = false;
+  let queued = 0;
   const sup = new PlaybotSupervisor({
     base: relay.base,
     wsUrl: relay.wsUrl,
     rosterSize: 1,
     tickMs: 3_600_000,
+    rematchGraceMs,
     traitsFor: (u) => ({
       ...seedTraits(u),
       skill: MIN_AI_COMPETENCE,
@@ -753,7 +757,7 @@ const seatedAgainstOneBot = async (
     },
     live: () => ({
       humansOnline: crowded ? 20 : 0,
-      queuedHumans: 0,
+      queuedHumans: queued,
       longestWaitMs: 0,
       openTableVenues: [],
     }),
@@ -785,6 +789,9 @@ const seatedAgainstOneBot = async (
     botId: sup.connectedBotIds()[0],
     crowd: (on: boolean) => {
       crowded = on;
+    },
+    queue: (n: number) => {
+      queued = n;
     },
     seat: joined.playerIndex === 0 ? 'p1' : 'p2',
   };
@@ -878,6 +885,100 @@ describe('a stand-down is derived from the controller, never latched', () => {
     expect(phone.last('opponent_left')).toBeUndefined();
 
     await playOut(phone, seat);
+    await phone.await('opponent_left', 20_000);
+
+    phone.close();
+    await sup.stop();
+  }, 90_000);
+});
+
+describe('a finished court holds a rematch window', () => {
+  it('does not take the bot away while the human is deciding', async () => {
+    // The whistle puts the driver in `over`, which `engaged()` treats as
+    // inactive -- so the very next tick either redispatches that bot or reaps
+    // it, while the human is still looking at the result overlay with Play
+    // Again under their thumb. At the default 15s tick and a phase that is
+    // random against the whistle, a large share of rematches simply vanish:
+    // the bot's socket closes, the relay vacates its seat, and the vote the
+    // human then casts is one nobody is left to answer.
+    //
+    // That is §2.11's own promise -- an explicit human Rematch is legitimate
+    // play nothing may block -- lost to the population rather than to a
+    // refusal, which is why wiring `acceptsRematch` did not reach it.
+    //
+    // The round-eleven reap is still right and still bounded: what it fixed
+    // was a driver held on a finished court FOREVER, and a window that
+    // expires does not bring that back.
+    const { sup, phone, crowd, seat } = await seatedAgainstOneBot('playbot-rematch-window');
+    void crowd;
+
+    // Past DISPATCH_GRACE_MS before the whistle, and this is the assertion's
+    // whole validity: without it the fixture finishes about two seconds after
+    // the dispatch, `engaged()` returns true on `Date.now() - dispatchedAt <
+    // 5_000` whatever the phase is, and the test passes against the unfixed
+    // code -- the catalogue's own "a guard defended by a second guard
+    // upstream". Measured: it did. A real match is minutes long, so the
+    // dispatch grace never covers a real whistle.
+    await sleep(5_500);
+
+    await playOut(phone, seat);
+    sup.tick();
+    await sleep(500);
+
+    expect(phone.last('opponent_left')).toBeUndefined();
+
+    phone.send({ type: 'rematch_request' });
+    await phone.awaitCount('game_start', 2, 20_000);
+
+    phone.close();
+    await sup.stop();
+  }, 90_000);
+
+  it('lets the window EXPIRE, so a finished court is still released', async () => {
+    // The bound, which is the half that keeps the round-eleven reap true: what
+    // it fixed was a driver held on a finished court forever, and a grace with
+    // no end would be exactly that wearing a reason. Driven at a short window
+    // rather than the real twenty seconds -- the same seam `idleLobbyMs` is,
+    // and for the same reason.
+    const { sup, phone, seat } = await seatedAgainstOneBot('playbot-window-ends', 500);
+
+    await sleep(5_500);
+    await playOut(phone, seat);
+
+    // Inside the window: still there, so this is not passing because the bot
+    // had already left for some other reason.
+    sup.tick();
+    await sleep(200);
+    expect(phone.last('opponent_left')).toBeUndefined();
+
+    // Past it. Released is not the same as CLOSED: with demand for it the very
+    // same tick sends it somewhere else, so what the human sees is the seat
+    // emptying rather than the roster shrinking -- `connectedBotIds` stays at
+    // one, which is why the assertion is at the court and not at the pool.
+    await sleep(700);
+    sup.tick();
+    await phone.await('opponent_left', 20_000);
+
+    phone.close();
+    await sup.stop();
+  }, 90_000);
+
+  it('gives the court up anyway when a human has no game at all', async () => {
+    // §4.13's priority rule, which this feature has now made nominal three
+    // separate times: a bot holding something that is not a match must not
+    // outrank a human with nothing. The window yields to unserved demand
+    // exactly as the idle-lobby window does -- somebody deciding whether to
+    // play a SECOND game is a weaker claim than somebody waiting for a first.
+    const { sup, phone, queue, seat } = await seatedAgainstOneBot('playbot-window-yields');
+
+    await sleep(5_500);
+    await playOut(phone, seat);
+
+    // One human in the queue is an odd queue, so `unmetHumanDemand` is 1 and
+    // the whole window is skipped -- well inside the twenty seconds it would
+    // otherwise be held for.
+    queue(1);
+    sup.tick();
     await phone.await('opponent_left', 20_000);
 
     phone.close();

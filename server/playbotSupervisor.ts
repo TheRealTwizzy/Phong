@@ -122,6 +122,8 @@ export interface PlaybotSupervisorOptions {
    */
   idleLobbyMs?: number;
   idleLobbyJitterMs?: number;
+  /** Overrides REMATCH_GRACE_MS, so a suite can drive both sides of it. */
+  rematchGraceMs?: number;
   /**
    * The traits a NEW account is seeded with. Creation may seed and nothing
    * after it may steer (§4.13), so this is reachable exactly once per account
@@ -238,6 +240,34 @@ const IDLE_LOBBY_MS = 20_000;
  */
 const IDLE_LOBBY_JITTER_MS = 12_000;
 
+/**
+ * How long a bot holds a FINISHED court while the human decides.
+ *
+ * The whistle puts the driver in `over`, which is not an ENGAGED phase -- so
+ * without this the next tick either redispatches that bot or reaps it, while
+ * the human is still on the result overlay with Play Again under their thumb.
+ * At the default 15s tick, on a phase that is random against the whistle, a
+ * large share of rematches simply vanished: the socket closed, the relay
+ * vacated the seat, and the vote the human then cast was one nobody was left
+ * to answer. §2.11 says an explicit human Rematch is legitimate play that
+ * nothing may block, and this is the way it was being blocked that wiring
+ * `acceptsRematch` could never reach -- the population took the opponent
+ * away rather than the bot declining.
+ *
+ * It does NOT bring back what the round-eleven reap fixed, which was a driver
+ * held on a finished court forever: this window expires, and a bot whose
+ * opponent has already gone (`opponent_left`, so `hasOpponent()` is false) is
+ * never held at all. Unserved human demand still outranks it, exactly as it
+ * outranks the idle-lobby window: somebody with no game at all is a stronger
+ * claim than somebody deciding whether to play a second one.
+ *
+ * Un-jittered, deliberately, where IDLE_LOBBY_MS is not: that stagger exists
+ * because bots coming free together all host together and deadlock, and a
+ * finished court is released to a bot that is about to be sent somewhere by
+ * the controller rather than to one choosing for itself.
+ */
+const REMATCH_GRACE_MS = 20_000;
+
 /** A stable 0..1 from an id, so the stagger survives a restart. */
 function jitterFraction(id: string): number {
   let h = 2166136261;
@@ -304,6 +334,13 @@ export class PlaybotSupervisor {
       const base = this.opts.idleLobbyMs ?? IDLE_LOBBY_MS;
       const spread = this.opts.idleLobbyJitterMs ?? IDLE_LOBBY_JITTER_MS;
       return Date.now() - m.dispatchedAt < base + jitterFraction(m.botId) * spread;
+    }
+    // A finished court is not a match, and it is not nothing either — see
+    // REMATCH_GRACE_MS. Somebody is still sitting at it, and their Play Again
+    // is theirs to press.
+    if (m.driver.phase === 'over' && m.driver.hasOpponent()) {
+      if (urgent > 0) return false;
+      return Date.now() - m.driver.finishedAt < (this.opts.rematchGraceMs ?? REMATCH_GRACE_MS);
     }
     if (ENGAGED.has(m.driver.phase)) return true;
     // A dispatch still in flight counts, or the next tick sends it twice.

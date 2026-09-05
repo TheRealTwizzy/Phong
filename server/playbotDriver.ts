@@ -126,6 +126,15 @@ export class PlaybotDriver {
   public seat: 0 | 1 | null = null;
   public phase: Phase = 'idle';
   public scores: [number, number] = [0, 0];
+  /**
+   * When this court finished, or 0 while a match is live.
+   *
+   * The supervisor's own clock cannot answer this: `engaged()` is a predicate
+   * asked every tick and may not record anything, and `dispatchedAt` is when
+   * the bot was SENT, which a real match outlives by minutes. It is read for
+   * the rematch window -- see REMATCH_GRACE_MS.
+   */
+  public finishedAt = 0;
 
   private ws: WebSocket | null = null;
   private cookies = '';
@@ -639,6 +648,7 @@ export class PlaybotDriver {
         const cap = this.config?.winningScore ?? 3;
         if (msg.p1Score >= cap || msg.p2Score >= cap) {
           this.phase = 'over';
+          this.finishedAt = Date.now();
           this.ball = null;
           if (this.standingDown) this.leave();
           else {
@@ -659,6 +669,7 @@ export class PlaybotDriver {
       }
       case 'opponent_left':
         this.phase = 'over';
+        this.finishedAt = Date.now();
         this.ball = null;
         this.opponentPresent = false;
         // Who was sitting opposite is about the PAIR, so it goes when they do
