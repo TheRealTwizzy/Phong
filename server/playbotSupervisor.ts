@@ -29,7 +29,9 @@ import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
 import { chooseVenue } from './playbotPolicy';
 import {
+  impatientDemand,
   targetActivation,
+  unmetHumanDemand,
   type PopulationAction,
   type PopulationBot,
   type PopulationSnapshot,
@@ -86,6 +88,13 @@ export interface PlaybotSupervisorOptions {
   live?: () => LiveState;
   /** Names new accounts. Injected only so a test can make them predictable. */
   nameFor?: (n: number) => string;
+  /**
+   * The traits a NEW account is seeded with. Creation may seed and nothing
+   * after it may steer (§4.13), so this is reachable exactly once per account
+   * and there is no path that reaches an existing one. Injected for the load
+   * test, which needs a population whose matches are short enough to measure.
+   */
+  traitsFor?: (username: string) => PlaybotTraits;
 }
 
 export const DEFAULT_TICK_MS = 15_000;
@@ -97,6 +106,73 @@ interface Managed {
   deviceCookie: string;
   traits: PlaybotTraits;
   driver: PlaybotDriver | null;
+  /** Asked to stand down; closed once it is out of whatever it was in. */
+  retiring: boolean;
+  /** When it was last sent somewhere, so a reply in flight is not re-sent. */
+  dispatchedAt: number;
+}
+
+/**
+ * A bot is ENGAGED when it is in a match or waiting for one.
+ *
+ * `idle` and `over` are both "has nothing to do": a driver sitting on a
+ * finished match holds a room and plays nobody, and this is what makes the
+ * controller see it as spare capacity and send it somewhere again. Without it
+ * a bot plays exactly ONE match for the life of the process — and a human who
+ * queues while every bot is mid-match waits forever, because the controller
+ * counts them all active and activates nobody.
+ */
+const ENGAGED = new Set(['queued', 'lobby', 'serving', 'rally', 'waiting']);
+
+/**
+ * How long a dispatch is given to become a phase.
+ *
+ * `create_room` and `join_room` are round trips, so a driver reads `idle` for
+ * the beat between asking and being answered — and a tick landing inside that
+ * beat would ask again, seating the bot at two tables.
+ */
+const DISPATCH_GRACE_MS = 5_000;
+
+/**
+ * How long a bot may sit at a table nobody has joined before it counts as
+ * spare again.
+ *
+ * A hosted table with nobody at it is a bot doing NOTHING, and reading it as
+ * engagement is what turns a population into a deadlock: every bot whose
+ * appetite says host opens a table, none of them is available to join
+ * anybody's, and the roster sits in parallel empty lobbies playing no matches
+ * at all. Measured — two bots that both chose `host` played nothing in two
+ * minutes. It is also what makes a waiting HUMAN reachable: a bot parked in an
+ * empty lobby becomes spare, and the next tick sends it to the queue where
+ * they are.
+ *
+ * Long enough that a real arrival is not raced, short enough that a human's
+ * wait is bounded by it.
+ */
+const IDLE_LOBBY_MS = 20_000;
+
+/**
+ * Spread over which that window is JITTERED, per bot, deterministically.
+ *
+ * Without it every bot dispatched on the same tick comes free on the same
+ * tick: they all give up their tables at the same instant, all look for one to
+ * join at the same instant, all find nothing (each other's are being torn down
+ * in the same breath) and all host again — a synchronised deadlock that looks
+ * exactly like the un-jittered one and survives every fix to the join path.
+ * Measured: two bots churned leave/host every tick for two minutes and played
+ * nothing. Staggered, the first to come free finds the second still parked and
+ * walks up to it.
+ */
+const IDLE_LOBBY_JITTER_MS = 12_000;
+
+/** A stable 0..1 from an id, so the stagger survives a restart. */
+function jitterFraction(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 1000) / 1000;
 }
 
 const IDLE_LIVE: LiveState = {
@@ -121,19 +197,44 @@ export class PlaybotSupervisor {
     this.live = opts.live ?? (() => IDLE_LIVE);
   }
 
-  /** The bots currently holding a connection — the controller's active set. */
+  /** The bots actually playing or waiting to — the controller's active set. */
   public activeBotIds(): string[] {
-    return this.managed.filter((m) => m.driver !== null).map((m) => m.botId);
+    return this.engagedIds(urgencyOf(this.live()));
+  }
+
+  private engagedIds(urgent: number): string[] {
+    return this.managed.filter((m) => this.engaged(m, urgent)).map((m) => m.botId);
+  }
+
+  private engaged(m: Managed, urgent: number): boolean {
+    if (!m.driver) return false;
+    // A table nobody has joined is not a match — see IDLE_LOBBY_MS. And when a
+    // HUMAN is unserved it is not engagement at ALL: §4.13's priority rule is
+    // that more human demand than human supply activates bots, and a bot
+    // parked at an empty table is precisely the supply. Without this clause
+    // that rule is only nominally true — the human waits out the idle window
+    // behind a bot that is doing nothing.
+    if (m.driver.phase === 'lobby' && !m.driver.hasOpponent()) {
+      if (urgent > 0) return false;
+      const window = IDLE_LOBBY_MS + jitterFraction(m.botId) * IDLE_LOBBY_JITTER_MS;
+      return Date.now() - m.dispatchedAt < window;
+    }
+    if (ENGAGED.has(m.driver.phase)) return true;
+    // A dispatch still in flight counts, or the next tick sends it twice.
+    return Date.now() - m.dispatchedAt < DISPATCH_GRACE_MS;
   }
 
   public snapshot(): PopulationSnapshot {
-    const live = this.live();
+    return this.snapshotFrom(this.live());
+  }
+
+  private snapshotFrom(live: LiveState): PopulationSnapshot {
     return {
       humansOnline: live.humansOnline,
       queuedHumans: live.queuedHumans,
       longestWaitMs: live.longestWaitMs,
       openTables: live.openTables,
-      activeBotIds: this.activeBotIds(),
+      activeBotIds: this.engagedIds(urgencyOf(live)),
       roster: this.roster(),
     };
   }
@@ -164,6 +265,8 @@ export class PlaybotSupervisor {
         deviceCookie: row.deviceCookie,
         traits: row.traits,
         driver: null,
+        retiring: false,
+        dispatchedAt: 0,
       });
     }
     for (let n = this.managed.length; n < this.opts.rosterSize; n++) {
@@ -204,18 +307,33 @@ export class PlaybotSupervisor {
    */
   public tick(): void {
     if (this.stopped || this.opts.rosterSize <= 0) return;
+    // Reap first: a bot asked to stand down leaves at the whistle, and this is
+    // where its socket is let go once it is out. Closing it at the request
+    // instead would cut it off mid-rally, which the relay judges an abandon —
+    // a real ranked loss for a bot that did nothing.
     const live = this.live();
-    const snapshot = this.snapshot();
-    const target = targetActivation(snapshot, live.bandCentre ?? START_MU);
+    const urgent = urgencyOf(live);
+    for (const m of this.managed) {
+      if (m.retiring && m.driver && !this.engaged(m, urgent)) {
+        m.driver.close();
+        m.driver = null;
+        m.retiring = false;
+      }
+    }
+
+    const target = targetActivation(this.snapshotFrom(live), live.bandCentre ?? START_MU);
 
     for (const { id, action } of target.activate) {
       const m = this.managed.find((x) => x.botId === id);
-      if (!m || m.driver) continue;
-      void this.activate(m, action);
+      if (!m) continue;
+      m.retiring = false;
+      void this.dispatch(m, action);
     }
     for (const id of target.deactivate) {
       const m = this.managed.find((x) => x.botId === id);
-      m?.driver?.standDown();
+      if (!m?.driver) continue;
+      m.retiring = true;
+      m.driver.standDown();
     }
   }
 
@@ -252,7 +370,7 @@ export class PlaybotSupervisor {
   /** Onboard a brand-new play-bot through the doors a browser uses. */
   private async provision(n: number): Promise<void> {
     const username = (this.opts.nameFor ?? defaultName)(n);
-    const traits = seedTraits(username);
+    const traits = (this.opts.traitsFor ?? seedTraits)(username);
     const driver = new PlaybotDriver({
       base: this.opts.base,
       wsUrl: this.opts.wsUrl,
@@ -276,44 +394,103 @@ export class PlaybotSupervisor {
       deviceCookie: driver.deviceCookie(),
       traits,
       driver: null,
+      retiring: false,
+      dispatchedAt: 0,
     });
   }
 
-  private async activate(m: Managed, action: PopulationAction): Promise<void> {
-    const driver = new PlaybotDriver({
-      base: this.opts.base,
-      wsUrl: this.opts.wsUrl,
-      username: m.username,
-      traits: m.traits,
-    });
-    // Claim the slot BEFORE the await, or two ticks in flight activate the
-    // same bot twice and it holds two sockets on one account — which the
-    // relay resolves by evicting the first, mid-match.
-    m.driver = driver;
-    try {
-      await driver.resume(m.deviceCookie);
-      await driver.connect();
-    } catch (e) {
-      console.warn(`[playbot] ${m.username} could not connect:`, (e as Error)?.message ?? e);
-      driver.close();
-      m.driver = null;
-      return;
+  /**
+   * Send one bot where the controller said, connecting it first if it is not
+   * already, and letting go of a finished match on the way.
+   *
+   * REUSES the driver when there is one. Building a second on the same account
+   * would put two sockets on one device id, which the relay resolves by
+   * evicting the first — mid-match, if that bot happened to be playing.
+   */
+  private async dispatch(m: Managed, action: PopulationAction): Promise<void> {
+    if (this.engaged(m, urgencyOf(this.live()))) return;
+    // Claim the slot BEFORE the await, or two ticks in flight dispatch the
+    // same bot twice.
+    m.dispatchedAt = Date.now();
+    if (!m.driver) {
+      const driver = new PlaybotDriver({
+        base: this.opts.base,
+        wsUrl: this.opts.wsUrl,
+        username: m.username,
+        traits: m.traits,
+      });
+      m.driver = driver;
+      try {
+        await driver.resume(m.deviceCookie);
+        await driver.connect();
+      } catch (e) {
+        console.warn(`[playbot] ${m.username} could not connect:`, (e as Error)?.message ?? e);
+        driver.close();
+        m.driver = null;
+        return;
+      }
+      if (this.stopped) {
+        driver.close();
+        m.driver = null;
+        return;
+      }
     }
-    if (this.stopped) {
-      driver.close();
-      m.driver = null;
-      return;
-    }
-    if (action === 'queue') {
-      driver.queue();
-      return;
-    }
-    // Hosting and joining both put a table in a venue the bot's own appetite
-    // picks. `join` has no table to aim at until the browser poll lands, so it
-    // opens one and waits — a table somebody can walk into is the same offer
-    // from the other side, and it never leaves the bot doing nothing.
+    // A room this bot is still sitting in has to be given up first — a
+    // finished match, or a table nobody came to. The next pair cannot have
+    // that seat until it stands up, and `queue_join` is refused outright for a
+    // socket that already holds one.
+    //
+    // An EMPTY lobby is the one piece of evidence this bot has that its last
+    // choice did not work out.
+    const gaveUpEmptyTable = m.driver.phase === 'lobby' && !m.driver.hasOpponent();
+    m.dispatchedAt = Date.now();
     const venue = chooseVenue({ traits: m.traits, roll: m.traits.rankedBias, allowed: OPEN_VENUES });
-    driver.host({}, venue ?? undefined);
+    // JOIN means join. Mapping it to `host` looked harmless — a table somebody
+    // can walk into is the same offer from the other side — and it is what
+    // deadlocks the population: with nobody ever joining, every bot opens its
+    // own table and the roster plays nothing.
+    //
+    // The same deadlock survives a `join` that works, because the appetites are
+    // seeded and therefore FIXED: a roster whose bots all prefer hosting opens
+    // parallel empty tables forever. Measured — two such bots played nothing in
+    // two minutes. So a bot that has just given up a table nobody came to
+    // looks for one to walk up to whatever its appetite said. That is not
+    // overriding the preference (§2.11 makes diversity a preference and never a
+    // prohibition); it is the preference having been tried and answered.
+    const wantsTable = action !== 'queue' && (action === 'join' || gaveUpEmptyTable);
+    const table = wantsTable ? await this.openTable(venue, m.botId) : null;
+    if (table) {
+      // Deliberately WITHOUT leaving first: `join_room` vacates whatever seat
+      // this socket already holds, and only once the destination is certain —
+      // so a table that has gone in the meantime costs nothing, where leaving
+      // first would have cost the seat and left the bot with neither.
+      m.driver.join(table);
+      return;
+    }
+    // Hosting and queueing both need the old seat given up: `queue_join` is
+    // refused outright for a socket holding one, and a bot that hosts while
+    // seated leaves its previous table behind for the reaper.
+    if (m.driver.phase === 'over' || m.driver.phase === 'lobby') m.driver.leave();
+    if (action === 'queue') m.driver.queue();
+    else m.driver.host({}, venue ?? undefined);
+  }
+
+  /** An open public table in this venue that somebody else is sitting at. */
+  private async openTable(venue: string | null, selfId: string): Promise<string | null> {
+    for (const room of venue ? [venue, ...OPEN_VENUES] : OPEN_VENUES) {
+      try {
+        const res = await fetch(`${this.opts.base}/api/rooms/${encodeURIComponent(room)}/tables`);
+        if (!res.ok) continue;
+        const body = (await res.json()) as {
+          tables?: Array<{ id: string; isFull: boolean; hostId: string | null }>;
+        };
+        const free = (body.tables ?? []).find((t) => !t.isFull && t.hostId !== selfId);
+        if (free) return free.id;
+      } catch {
+        // A listing that cannot be read is a listing with nothing in it.
+      }
+    }
+    return null;
   }
 }
 
@@ -329,6 +506,10 @@ export class PlaybotSupervisor {
 const OPEN_VENUES = ['casual', 'beginner'];
 
 const defaultName = (n: number): string => `Rally${String(n + 1).padStart(2, '0')}Bot`;
+
+/** Humans the queue and the tables cannot serve by themselves, right now. */
+const urgencyOf = (live: LiveState): number =>
+  unmetHumanDemand(live) + impatientDemand(live);
 
 /**
  * The live picture the controller needs, built from what `server.ts` holds.

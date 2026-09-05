@@ -81,7 +81,14 @@ export interface PlaybotDriverOptions {
   now?: () => number;
 }
 
-type Phase = 'idle' | 'lobby' | 'serving' | 'rally' | 'waiting' | 'over';
+/**
+ * `queued` is between asking for a match and being seated in one. It exists so
+ * the supervisor can tell a bot that is WAITING for a game from one that is
+ * doing nothing — without it a queued bot reads as idle, gets re-dispatched on
+ * every tick, and is counted as spare capacity the controller can activate
+ * somebody else instead of.
+ */
+type Phase = 'idle' | 'queued' | 'lobby' | 'serving' | 'rally' | 'waiting' | 'over';
 
 export class PlaybotDriver {
   /** Issued by the server on the document navigation, like any browser's. */
@@ -256,8 +263,14 @@ export class PlaybotDriver {
     this.send({ type: 'join_room', roomId, playerId: this.botId });
   }
 
+  /** Whether somebody is sitting opposite. A lobby with nobody in it is a wait. */
+  public hasOpponent(): boolean {
+    return this.opponentPresent;
+  }
+
   public queue(): void {
     this.send({ type: 'queue_join' });
+    this.phase = 'queued';
   }
 
   /**

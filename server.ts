@@ -4447,14 +4447,20 @@ async function startServer() {
       liveStateFrom({
         connectedIds: [...liveSockets].map((e) => e.deviceId),
         queue: queue.map((e) => ({ playerId: e.playerId, joinedAt: e.joinedAt })),
-        // A public table with one playing seat filled is a table somebody
-        // could walk into, which is unmet demand of the same kind an odd
-        // queue is.
-        openTables: [...rooms.values()].filter(
-          (r) =>
+        // A public table with one playing seat filled is somebody waiting for
+        // an opponent, which is unmet demand of the same kind an odd queue is
+        // — and it is counted only when that somebody is a HUMAN. The
+        // population's own empty tables are not demand: counted, a roster that
+        // prefers hosting reads its own parked tables as people to serve and
+        // activates more bots to open more of them.
+        openTables: [...rooms.values()].filter((r) => {
+          const seated = r.players.filter(Boolean);
+          return (
             r.visibility === 'public' &&
-            ((r.players[0] && !r.players[1]) || (!r.players[0] && r.players[1]))
-        ).length,
+            seated.length === 1 &&
+            !isBotAccount(seated[0]!.playerId)
+          );
+        }).length,
         now: Date.now(),
         isBot: (id) => isBotAccount(id),
       }),

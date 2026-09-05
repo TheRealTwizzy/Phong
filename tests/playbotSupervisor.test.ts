@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { liveStateFrom } from '../server/playbotSupervisor';
+import { PlaybotSupervisor, liveStateFrom } from '../server/playbotSupervisor';
+import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
+import { MIN_AI_COMPETENCE } from '../src/game/physics';
 import { PATIENCE_MS } from '../server/playbotPopulation';
 import { sleep, startRelay, type Relay } from './helpers/relay';
 
@@ -266,4 +268,81 @@ describe('§4.13: the controller selects, it never steers', () => {
     // It may READ a rating and select on it -- that is what it is for.
     expect(code).toMatch(/targetActivation/);
   });
+});
+
+describe('a bot plays more than one match', () => {
+  it('sends a bot somewhere again once its match is over', async () => {
+    // WITHOUT this the population plays exactly ONE match for the life of the
+    // process: a driver sitting on a finished court still holds a room and a
+    // socket, so `activeBotIds` counted it, `targetActivation` kept it, and
+    // nothing ever dispatched it anywhere. The consequence that matters is not
+    // the idle bots — it is the human who queues while every bot is mid-match
+    // and waits forever, because the controller sees a full active set and
+    // activates nobody for them.
+    //
+    // Driven from the TEST process rather than through the flag, because this
+    // is about the supervisor's own dispatch and needs the tick under the
+    // test's hand. Classification is irrelevant here, so no marker row is
+    // written and none is asserted -- the suite above owns that.
+    relay = await startRelay('playbot-redispatch');
+    const dir = relay.dataDir;
+    const rows = new Map<string, { botId: string; username: string; deviceCookie: string; traits: PlaybotTraits; mu: number; recentMatches: number }>();
+    const sup = new PlaybotSupervisor({
+      base: relay.base,
+      wsUrl: relay.wsUrl,
+      rosterSize: 2,
+      tickMs: 3_600_000,
+      // Barely-there opponents, so a first-to-3 match is over in seconds.
+      // `tests/playbotTraits.test.ts` owns how good a bot is; what is under
+      // test here is that a finished one is sent somewhere again.
+      traitsFor: (u) => ({ ...seedTraits(u), skill: MIN_AI_COMPETENCE }),
+      store: {
+        load: () => [...rows.values()],
+        save: (botId, deviceCookie, traits) => {
+          rows.set(botId, {
+            botId,
+            username: botId,
+            deviceCookie,
+            traits,
+            mu: 25,
+            recentMatches: 0,
+          });
+        },
+      },
+      live: () => ({ humansOnline: 0, queuedHumans: 0, longestWaitMs: 0, openTables: 0 }),
+    });
+    await sup.start();
+    // The usernames are issued names, so read them back off the accounts.
+    for (const [botId] of rows) {
+      const row = rows.get(botId)!;
+      row.username = readDb(dir, (h) =>
+        (h.prepare('SELECT username FROM players WHERE id = ?').get(botId) as { username: string })
+          .username
+      );
+    }
+
+    const played = (): number =>
+      readDb(dir, (h) =>
+        Math.max(
+          0,
+          ...[...rows.keys()].map(
+            (id) =>
+              (
+                h.prepare('SELECT matchesPlayed AS n FROM players WHERE id = ?').get(id) as {
+                  n: number;
+                }
+              ).n
+          )
+        )
+      );
+
+    let best = 0;
+    for (let i = 0; i < 120 && best < 2; i++) {
+      sup.tick();
+      await sleep(1000);
+      best = played();
+    }
+    await sup.stop();
+    expect(best).toBeGreaterThanOrEqual(2);
+  }, 180_000);
 });
