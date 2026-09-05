@@ -91,8 +91,9 @@ export interface PlaybotSupervisorOptions {
   /**
    * The traits a NEW account is seeded with. Creation may seed and nothing
    * after it may steer (§4.13), so this is reachable exactly once per account
-   * and there is no path that reaches an existing one. Injected for the load
-   * test, which needs a population whose matches are short enough to measure.
+   * and there is no path that reaches an existing one — which is what makes it
+   * safe to expose at all. Injected only by a test that needs a population
+   * whose matches are short enough to measure; production seeds from the id.
    */
   traitsFor?: (username: string) => PlaybotTraits;
 }
