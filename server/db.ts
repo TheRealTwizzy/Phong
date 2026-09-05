@@ -246,6 +246,45 @@ const WIPE_V3_KEY = 'wipe_v3';
 const WIPE_V4_KEY = 'wipe_v4';
 
 /**
+ * The ladder is cleared before the play-bot population is let onto it.
+ *
+ * A ladder that bots and humans share has to start from one line, and every
+ * rating on disk was earned in a game whose only opponents were people and the
+ * solo AI. So ranks, career statistics, mode statistics, match history, XP,
+ * levels, achievements and the permanent unlocks those gate all go.
+ *
+ * IT IS NOT A WIPE, and the difference is the whole design. `wipe_v1`..`v4`
+ * DROP every table and clear `meta`, which retires every device cookie and
+ * makes every player re-onboard and re-pick a username — a released name can
+ * be taken by somebody else on the way back. Here IDENTITY SURVIVES: the
+ * account, the username, the avatar, the recovery code and every browser
+ * signed in to it are untouched, so a player opens the game and is still
+ * themselves, standing at the bottom of a ladder that has been reset. That
+ * also means this must NOT clear `meta` and must NOT re-stamp the wipe keys;
+ * the alternating-wipe hazard those carry does not apply to a migration that
+ * leaves the flag table alone.
+ *
+ * Two consequences are accepted rather than worked around. It BREAKS "levels
+ * never regress" (§7), which is an invariant enforced everywhere else and is
+ * broken here once, by instruction, at a moment chosen for it. And relocking
+ * achievements RELOCKS CONTENT — the AI ladder above Rookie, the longer
+ * winning scores, the earned cosmetics and titles — which needs no new code
+ * because `playableDifficulty`/`playableWinningScore` already clamp a stored
+ * setting down to what the profile has earned, and because the equipped
+ * cosmetic and title are cleared here rather than left painting a look the
+ * picker no longer offers.
+ *
+ * The CURATED ROSTER is exempt. Its rows are leaderboard furniture whose stats
+ * were seeded rather than earned, `bot_roster_v1` is already stamped so
+ * nothing would re-seed them, and zeroing them would leave the board showing
+ * accounts with nothing on them — worse than either keeping or removing them.
+ * A bot's record is not a player's progress. It runs AFTER `claimPrefixedBots`
+ * for exactly that reason: the exemption reads `bot_accounts`, so the roster
+ * has to be in it first or the exemption matches nobody.
+ */
+const PROGRESS_RESET_V1_KEY = 'progress_reset_v1';
+
+/**
  * The oldest a reported result may claim to be, for ordering purposes.
  *
  * A nonsense age — a clock that jumped, a hand-written payload — should sort
@@ -1082,6 +1121,84 @@ class GameDatabase {
     this.applyWipe(WIPE_V4_KEY, 'wipe_v4: cleared all player data for the rally-streak rework (0 players)');
   }
 
+  /**
+   * `progress_reset_v1` — see the key's own comment for what this is and, more
+   * importantly, for what it deliberately is NOT.
+   */
+  private applyProgressReset(): void {
+    if (this.getMeta(PROGRESS_RESET_V1_KEY)) return;
+    const fresh = newRating();
+    const opening = calculateLevelFromXp(0);
+    // Everything a PLAYER earned, and nothing a player IS.
+    const NOT_A_BOT = 'NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = players.id)';
+    this.sql.exec('BEGIN');
+    try {
+      this.sql
+        .prepare(
+          `UPDATE players SET
+             level = ?, xp = 0, xpNext = ?,
+             mmrMu = ?, mmrSigma = ?, rankMu = ?, rankSigma = ?,
+             rankedGames = 0, rankedDuels = 0,
+             matchesPlayed = 0, matchesWon = 0, matchesLost = 0,
+             highestRally = 0, totalPointsScored = 0, totalAces = 0,
+             multiplayerWins = 0, winStreak = 0, bestWinStreak = 0,
+             shutoutsWon = 0, rookieWins = 0, proWins = 0, eliteWins = 0,
+             cyberWins = 0, chaosWins = 0, abandons = 0,
+             -- A run of consecutive active days is a statistic like any other,
+             -- and it is what daily_3 / streak_7 / daily_30 / daily_100 read.
+             -- '' rather than NULL because the column is NOT NULL, and it is
+             -- what updatePlayerStreak already treats as "never seen".
+             dailyStreak = 1, lastDailyDate = '',
+             achievements = '[]',
+             -- Cosmetics and titles are EARNED, so they go with the
+             -- achievements that gate them. Left equipped, a look the picker
+             -- no longer offers would go on painting the whole app.
+             cosmetic = NULL, title = NULL
+           WHERE ${NOT_A_BOT}`
+        )
+        .run(opening.level, opening.xpNext, fresh.mu, fresh.sigma, fresh.mu, fresh.sigma);
+
+      // History goes wholesale rather than per player: every seat files its
+      // own row, so a surviving row would be one account's record of a match
+      // the other account no longer has, against a career that no longer
+      // counts it. The roster has none.
+      this.sql.exec('DELETE FROM matches');
+      // The idempotency ledger, or a replayed report is answered
+      // `alreadyRecorded` for a match this account is no longer credited with.
+      this.sql.exec('DELETE FROM recorded_matches');
+      // A 48h rolling store about matches that no longer exist.
+      this.sql.exec('DELETE FROM competitive_exposure');
+      // Day-keyed state that describes a career being reset underneath it:
+      // mission progress, the reroll spend, today's abandon forgiveness, the
+      // practice XP cap and the solo fatigue count. `recent_missions` is the
+      // one that is deliberately NOT day-keyed and would otherwise carry a
+      // deal memory across the reset.
+      for (const table of [
+        'daily_missions', 'daily_mission_slots', 'daily_rerolls', 'daily_abandons',
+        'daily_practice', 'daily_solo', 'recent_missions',
+      ]) {
+        this.sql.exec(`DELETE FROM ${table}`);
+      }
+      // Per-mode stats and the permanent elite ledger are player-keyed, so
+      // they take the exemption too -- a play-bot on a later database keeps
+      // its own record for the same reason the roster keeps its own stats.
+      const notABotById = 'NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = playerId)';
+      this.sql.exec(`DELETE FROM player_mode_stats WHERE ${notABotById}`);
+      // Not day-keyed, so a surviving row hands back a theme or a title the
+      // achievements no longer gate.
+      this.sql.exec(`DELETE FROM elite_completions WHERE ${notABotById}`);
+      this.setMeta(PROGRESS_RESET_V1_KEY, new Date().toISOString());
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    console.log(
+      'progress_reset_v1: cleared every rank, statistic and unlock for the play-bot ladder ' +
+        '(accounts, usernames and avatars kept)'
+    );
+  }
+
   private applyWipe(key: string, message: string): void {
     if (this.getMeta(key)) return;
     const hadPlayers = this.playerCount() > 0;
@@ -1329,6 +1446,11 @@ class GameDatabase {
     // human — which would put the whole roster on the human ladder.
     this.claimPrefixedBots();
     this.reloadBotAccounts();
+    // LAST, and after the roster is in `bot_accounts`: this reads that table
+    // to exempt the curated bots, and it clears the counters every backfill
+    // above spent its run deriving. Both orders end in the same state; last
+    // is the one that is obvious rather than merely equivalent.
+    this.applyProgressReset();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')

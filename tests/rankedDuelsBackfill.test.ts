@@ -109,7 +109,12 @@ function seedLegacyDatabase() {
   }
 
   const stamp = sql.prepare('INSERT INTO meta VALUES (?, ?)');
-  for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4']) stamp.run(key, now);
+  // Every DESTRUCTIVE one-shot is stamped, or it erases the legacy history this
+  // fixture exists to migrate. progress_reset_v1 deletes `matches` outright and
+  // zeroes every career counter, and it runs LAST, so without this the migration
+  // under test runs correctly and its result is wiped before a single assertion.
+  for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4', 'progress_reset_v1'])
+    stamp.run(key, now);
   sql.close();
 }
 

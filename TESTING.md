@@ -159,6 +159,12 @@ recognising rather than rediscovering:
 9. **Vacuous by arithmetic** — a value equal to the boundary, so both branches agree.
 10. **An assertion inside the noise** of a stochastic quantity. Assert the MARGIN.
 11. **A one-shot migration nothing un-stamped**, so it never ran at all.
+12. **A DESTRUCTIVE one-shot nothing stamped** — the mirror of 11, and it takes out fixtures that
+    are not testing it. `progress_reset_v1` runs LAST in `migrateSchema` and deletes `matches`
+    and every earned counter, so the four suites that hand-build a pre-migration database
+    (`chaosRelabel`, `rankedBackfill`, `rankedDuelsBackfill`, `shutoutRecount`) migrated
+    correctly and had the result erased before their first assertion. It reads exactly like a
+    broken migration. **A legacy fixture stamps every destructive key, not just the wipes.**
 
 The standing habit: **before writing an assertion, name the mutation it should redden, then check
 that the mutation compiles and that it does.**

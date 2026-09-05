@@ -61,7 +61,9 @@ moved. Make that a decision.
 ## 3. A one-shot migration is flagged, and a wipe re-stamps everything
 
 Non-destructive fixes (`placement_sigma_v1`, `tasks_reset_v1`, `ranked_backfill_v1`,
-`chaos_relabel_v1`) and destructive wipes (`wipe_v1`…`wipe_v4`) are keyed in the `meta` table
+`chaos_relabel_v1`, `shutout_recount_v1`, `bot_accounts_backfill_v1`,
+`advanced_ladder_backfill_v1`, `ranked_duel_credited_backfill_v1`), the destructive
+`progress_reset_v1`, and destructive wipes (`wipe_v1`…`wipe_v4`) are keyed in the `meta` table
 so each runs at most once per database.
 
 The mechanism has one sharp edge: **every wipe clears `meta`, so every wipe must re-stamp ALL
@@ -78,8 +80,20 @@ Two more things about migrations here:
   safety net, but the backfill is what makes the data true.
 
 Each migration gets a suite: `db-wipe`, `taskReset`, `placementRescue`, `rankedBackfill`,
-`chaosRelabel`, `advancedLadder` (which covers both of the history-column backfills),
-`botIdentity` (`bot_accounts_backfill_v1`).
+`chaosRelabel`, `shutoutRecount`, `rankedDuelsBackfill`, `advancedLadder` (which covers both of
+the history-column backfills), `botIdentity` (`bot_accounts_backfill_v1`), `progressReset`.
+
+**A destructive one-shot that is not a wipe still erases every legacy fixture in the suite.**
+`progress_reset_v1` clears everything a player EARNED — both rating pairs, every counter, XP and
+level, achievements, the equipped cosmetic and title, `elite_completions`, `matches`,
+`recorded_matches`, `competitive_exposure` and the day-keyed tables — while keeping the row, the
+username, the avatar, the recovery code and `device_links`, so nobody is signed out. It runs LAST
+in `migrateSchema`, after every backfill. That ordering is right in production and lethal in a
+test: four suites hand-build a pre-migration database (`chaosRelabel`, `rankedBackfill`,
+`rankedDuelsBackfill`, `shutoutRecount`), and until they stamped `progress_reset_v1` alongside the
+wipe flags their migration ran correctly and its result was deleted before a single assertion.
+**A legacy fixture stamps every DESTRUCTIVE key, not just the wipes** — and the failure looks
+exactly like a broken migration, which is why it belongs here rather than in a comment.
 
 **A one-shot is INVISIBLE to any test that does not un-stamp it and re-import.** Its key is
 already in `meta` by the time a suite runs, so nothing drives it and a mutation to its SQL

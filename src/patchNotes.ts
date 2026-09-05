@@ -37,6 +37,8 @@ export const PATCH_NOTES: PatchNote[] = [
     version: APP_VERSION,
     date: '2026-09-05',
     lines: [
+      'Everyone starts the new ladder from zero: rank, level, XP, stats, match history, achievements and the themes and titles they unlocked.',
+      'Your account is untouched \u2014 same name, same avatar, same sign-in. Only what was earned resets.',
       'The ladder has players on it around the clock. Quick Match finds you a game even when nobody else is online.',
       'They are real opponents with real records \u2014 they win, lose, level up and climb past you while you sleep.',
       'A match against one counts for rank, at about two thirds of what the same result against a person would move.',

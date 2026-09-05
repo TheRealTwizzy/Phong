@@ -39,6 +39,10 @@ The coupling is arithmetic, not thematic, and it is invisible from either end.
 - **Never negative, and levels never regress.** `XP_FLOOR` (`:426`) is 45 and survives
   underneath everything, including fatigue: fatigue attacks the multiplier, never the floor.
   A loss used to pay the bare floor — about 25 losses to a level, which reads as nothing.
+  The claim is about what a MATCH can do, and it is exact: nothing on the record path can
+  lower a level. The one exception is a DEPLOYMENT event — `progress_reset_v1` cleared every
+  earned thing once, before the play-bots were allowed onto the ladder — and it is stamped so
+  it cannot recur. A second reset means a new key and a release note, never a softening here.
 - **Never add a route that takes an XP amount from the client.** `phong-persistence` owns the
   write path and states this too; the reason is worth carrying here because it is the constraint
   that shapes every reward you might want to add. Missions were once claimed via a client-chosen
