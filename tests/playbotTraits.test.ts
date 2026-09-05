@@ -447,6 +447,32 @@ describe('what the composition has to pass along', () => {
     expect(drv).not.toContain('PADDLE_Y - radius - 0.001');
   });
 
+  it('spawns an incoming ball at the offset every browser court uses', () => {
+    // A crossing carries no `y`, so the receiving half decides where the ball
+    // appears — and the browser has said 0.02 at all three of its own entry
+    // points since long before there were bots (`ball_incoming`, and both
+    // halves of the solo cross-net). The driver said 0, so every ball a human
+    // put over reached the bot's paddle with 0.02 of court more to travel:
+    // more time to read it, and a different x by the time it arrived, since
+    // the extra run is taken at the shot's own angle.
+    //
+    // A source read for the reason the paddle-edge one above is: `y` is not on
+    // the wire, so there is no message in which the two courts can be caught
+    // disagreeing. What IS assertable is that one exported constant is the
+    // only thing either file spells.
+    const strip = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const drv = strip(read('server/playbotDriver.ts'));
+    const app = strip(read('src/App.tsx'));
+    expect(drv).toContain('y: BALL_ENTRY_Y');
+    expect(app).toContain('y: BALL_ENTRY_Y');
+    // The literals are GONE rather than joined by the constant. Left in place,
+    // this passes with the divergence still shipping — which is the whole of
+    // what went wrong here, since 0 and 0.02 both look like a net line.
+    expect(drv).not.toMatch(/\by: 0,/);
+    expect(app).not.toMatch(/\by: 0\.02,/);
+  });
+
   it('refreshes that bracket state on every roster read', () => {
     // The half the fifth round's own fix left open, and the note beside it
     // said the opposite: `roster()` reloads the store every tick and took `mu`

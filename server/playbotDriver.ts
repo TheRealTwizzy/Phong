@@ -26,6 +26,7 @@ import type { BallState, MatchRules, RoomMatchConfig, WSServerMessage } from '..
 import type { ServeAim } from '../src/game/physics';
 import {
   BALL_BASE_RADIUS,
+  BALL_ENTRY_Y,
   BOT_MAX_COMPETENCE,
   BASE_BALL_SPEED,
   clampBallSpeed,
@@ -531,10 +532,15 @@ export class PlaybotDriver {
         // match's ball scale, not from the sender's frame.
         this.ball = {
           ...msg.ball,
-          // It enters AT the net. The wire carries a crossing, not a
-          // position: `y` and `radius` belong to the receiving half, which is
-          // why neither travels.
-          y: 0,
+          // The wire carries a crossing, not a position: `y` and `radius`
+          // belong to the receiving half, which is why neither travels — and
+          // therefore every half that receives a ball has to decide `y` the
+          // same way. This said `0` where all three of the browser's own entry
+          // points say `BALL_ENTRY_Y`, so a ball a human put over reached the
+          // bot's paddle with 0.02 of court more to travel: more time to read
+          // it, and a different x on arrival, since the extra run is taken at
+          // the shot's own angle.
+          y: BALL_ENTRY_Y,
           radius: BALL_BASE_RADIUS * this.rules.ballScale,
           active: true,
         };

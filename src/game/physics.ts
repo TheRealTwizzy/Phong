@@ -21,6 +21,25 @@ export const PADDLE_WIDTH_RATIO = 0.22;
  * one simply appeared, a visible distance above the paddle, once they let go.
  */
 export const SERVE_BALL_Y = PADDLE_Y - PADDLE_HEIGHT / 2 - 0.012;
+/**
+ * Where a ball that has crossed the net appears on the receiving half.
+ *
+ * Just inside the line rather than on it, so the receiving court owns a ball
+ * that is unambiguously in play: entered at exactly 0 it sits on the boundary
+ * the crossing test itself uses (`y <= 0`), and it is the receiver's clock
+ * that starts, not the sender's.
+ *
+ * A crossing carries `x`, `vx`, `vy`, `spin` and `speedMultiplier` and NO `y`,
+ * so the receiver decides this for itself — which means every half that
+ * receives a ball has to decide it the same way or they are playing two
+ * different games. Shared for exactly that reason: `src/App.tsx` uses it at
+ * all three of its entry points (a relayed `ball_incoming`, and both halves of
+ * the solo cross-net) and `server/playbotDriver.ts` at its one, and a
+ * play-bot spelling it `0` gave every ball a human put over 0.02 of extra
+ * court to travel — more time to read the shot, and a different x on arrival,
+ * since the extra run is taken at the shot's own angle.
+ */
+export const BALL_ENTRY_Y = 0.02;
 export const BALL_BASE_RADIUS = 0.022;
 export const BASE_BALL_SPEED = 0.85; // units per second
 export const MAX_BALL_SPEED = 2.4;
