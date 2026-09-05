@@ -6,6 +6,7 @@ import {
   PlaybotSupervisor,
   liveStateFrom,
   bandCentreFor,
+  rotate,
   defaultPlaybotName,
   type PlaybotAccountStore,
 } from '../server/playbotSupervisor';
@@ -393,6 +394,7 @@ describe('the roster the controller is shown', () => {
       live: () => ({
         humansOnline: 8,
         queuedHumans: 0,
+        queuedBots: 0,
         longestWaitMs: 0,
         openTableVenues: ['beginner'],
       }),
@@ -496,6 +498,7 @@ describe('§2.11: which of two comparable tables a bot walks up to', () => {
       live: () => ({
         humansOnline: 8,
         queuedHumans: 0,
+        queuedBots: 0,
         longestWaitMs: 0,
         openTableVenues: ['casual', 'casual'],
       }),
@@ -589,7 +592,13 @@ describe('a bot plays more than one match', () => {
         },
         pairingView: flatPairingView,
       },
-      live: () => ({ humansOnline: 0, queuedHumans: 0, longestWaitMs: 0, openTableVenues: [] }),
+      live: () => ({
+        humansOnline: 0,
+        queuedHumans: 0,
+        queuedBots: 0,
+        longestWaitMs: 0,
+        openTableVenues: [],
+      }),
     });
     await sup.start();
     // The usernames are issued names, so read them back off the accounts.
@@ -675,6 +684,7 @@ describe('a driver the controller has stopped naming', () => {
       live: () => ({
         humansOnline: crowded ? 20 : 0,
         queuedHumans: 0,
+        queuedBots: 0,
         longestWaitMs: 0,
         openTableVenues: [],
       }),
@@ -760,6 +770,7 @@ const seatedAgainstOneBot = async (
     live: () => ({
       humansOnline: crowded ? 20 : 0,
       queuedHumans: queued,
+      queuedBots: 0,
       longestWaitMs: 0,
       openTableVenues: [],
     }),
@@ -1080,6 +1091,7 @@ describe('a dispatch that throws', () => {
       live: () => ({
         humansOnline: 1,
         queuedHumans: 0,
+        queuedBots: 0,
         longestWaitMs: 0,
         openTableVenues: ['casual'],
       }),
@@ -1190,5 +1202,41 @@ describe('whose band the roster is ranked against', () => {
         ratingOf,
       })
     ).toBeUndefined();
+  });
+});
+
+describe('two bots sent to one venue', () => {
+  it('starts each of them at a different point in the listing', async () => {
+    // The preference is keyed on pair history, and with none -- the ordinary
+    // case for a fresh population -- every bot falls through to the same
+    // tiebreak and picks the same entry. One join lands, the rest are refused
+    // as full, and those hosts wait another tick: with several tables in a
+    // venue that degrades to serving roughly one of them per tick while bots
+    // sit spare.
+    expect(rotate(['a', 'b', 'c'], 0)).toEqual(['a', 'b', 'c']);
+    expect(rotate(['a', 'b', 'c'], 0.4)).toEqual(['b', 'c', 'a']);
+    expect(rotate(['a', 'b', 'c'], 0.9)).toEqual(['c', 'a', 'b']);
+    // Never off the end, whatever a fraction of exactly 1 would index.
+    expect(rotate(['a', 'b'], 1)).toEqual(['b', 'a']);
+    // Nothing to spread.
+    expect(rotate(['a'], 0.9)).toEqual(['a']);
+    expect(rotate([], 0.5)).toEqual([]);
+  });
+
+  it('rotates BEFORE the human-table partition, not after it', () => {
+    // `humanTablesFirst` is a stable partition, so rotating its input rotates
+    // within each half and §4.13's priority survives. Rotating its OUTPUT
+    // would move a bot's table in front of a waiting human's -- the rule that
+    // partition exists to hold, undone by the spread meant to sit under it.
+    //
+    // Read rather than driven, and this is the honest reason: the spread is
+    // deterministic per bot but the ids are ISSUED, so whether two particular
+    // bots rotate onto different tables is a property of the ids the server
+    // happened to mint. A behavioural fixture asserting they differ is a coin
+    // flip with two tables -- it would pass or fail on the hash, not on the
+    // code -- which is also why the comment there calls this a spread rather
+    // than an assignment.
+    const src = fs.readFileSync(path.join(process.cwd(), 'server', 'playbotSupervisor.ts'), 'utf8');
+    expect(src).toMatch(/humanTablesFirst\(\s*rotate\(free, jitterFraction\(selfId\)\),/);
   });
 });

@@ -38,6 +38,7 @@ const roster = (n: number, at = 25): PopulationBot[] =>
 const snap = (over: Partial<PopulationSnapshot> = {}): PopulationSnapshot => ({
   humansOnline: 0,
   queuedHumans: 0,
+  queuedBots: 0,
   longestWaitMs: 0,
   openTableVenues: [],
   activeBotIds: [],
@@ -307,6 +308,7 @@ describe('activation and deactivation', () => {
         for (const waited of [0, PATIENCE_MS]) {
           const s = snap({
             queuedHumans: q,
+            queuedBots: 0,
             openTableVenues: Array(tables).fill('casual'),
             longestWaitMs: waited,
           });
@@ -448,6 +450,7 @@ describe('a table slot goes to a bot that can sit at the table', () => {
     const s = snap({
       humansOnline: 8,
       queuedHumans: 1,
+      queuedBots: 0,
       openTableVenues: ['beginner'],
       roster: [
         bot('placed', { mu: 25, venues: ['casual'] }),
@@ -511,6 +514,7 @@ describe('a bot only ONE kind of demand can use', () => {
     const snapshot = {
       humansOnline: 2,
       queuedHumans: 1,
+      queuedBots: 0,
       longestWaitMs: 0,
       openTableVenues: ['beginner'],
       activeBotIds: [],
@@ -534,12 +538,67 @@ describe('a bot only ONE kind of demand can use', () => {
     const snapshot = {
       humansOnline: 2,
       queuedHumans: 1,
+      queuedBots: 0,
       longestWaitMs: 0,
       openTableVenues: ['beginner'],
       activeBotIds: [],
       roster: [bot('both', 25, ['casual', 'beginner'])],
     };
     expect(targetActivation(snapshot, 25).activate).toEqual([{ id: 'both', action: 'queue' }]);
+  });
+
+  it('reserves the only Beginner-eligible bot even when supply LOOKS ample', () => {
+    // The reservation counted eligible bots against remaining slots, so it
+    // discarded itself the moment total supply looked sufficient: one
+    // dual-venue bot and two Casual-only bots is three eligible against two
+    // slots, nothing was reserved, and the dual-venue bot -- ranking first --
+    // went to the queue. Beginner was then unservable, though a Casual-only
+    // bot would have served the queue just as well and all three humans would
+    // have had a game.
+    const snapshot = {
+      humansOnline: 3,
+      queuedHumans: 1,
+      queuedBots: 0,
+      longestWaitMs: 0,
+      openTableVenues: ['casual', 'beginner'],
+      activeBotIds: [],
+      roster: [
+        bot('both', 25, ['casual', 'beginner']),
+        bot('casual-a', 24, ['casual']),
+        bot('casual-b', 23, ['casual']),
+      ],
+    };
+    const activate = targetActivation(snapshot, 25).activate;
+    expect(activate.find((a) => a.action === 'queue')?.id).not.toBe('both');
+    expect(activate.find((a) => a.venue === 'beginner')?.id).toBe('both');
+  });
+
+  it('reserves nobody when no single bot is the only door in', () => {
+    // The rule is UNIQUELY required, not merely eligible. With two bots able
+    // to enter Beginner, taking one for the queue still leaves the other to
+    // cover the slot -- so reserving on eligibility alone starves the queue of
+    // its best match for nothing: it would be pushed down to the Casual-only
+    // bot while a bot the table did not need sat reserved.
+    //
+    // Both humans are served under either rule, which is why the assertion is
+    // on WHICH bot each one gets. That is the whole cost of over-reserving,
+    // and it is the band quality the activation ranking exists to protect.
+    const snapshot = {
+      humansOnline: 3,
+      queuedHumans: 1,
+      queuedBots: 0,
+      longestWaitMs: 0,
+      openTableVenues: ['beginner'],
+      activeBotIds: [],
+      roster: [
+        bot('dual-a', 25, ['casual', 'beginner']),
+        bot('dual-b', 24, ['casual', 'beginner']),
+        bot('casual-only', 23, ['casual']),
+      ],
+    };
+    const activate = targetActivation(snapshot, 25).activate;
+    expect(activate.find((a) => a.action === 'queue')?.id).toBe('dual-a');
+    expect(activate.find((a) => a.action === 'join')?.id).toBe('dual-b');
   });
 
   it('serves the SCARCE venue rather than two of the plentiful one', () => {
@@ -551,6 +610,7 @@ describe('a bot only ONE kind of demand can use', () => {
     const snapshot = {
       humansOnline: 4,
       queuedHumans: 0,
+      queuedBots: 0,
       longestWaitMs: 0,
       openTableVenues: ['casual', 'beginner'],
       activeBotIds: [],
@@ -567,21 +627,62 @@ describe('a bot only ONE kind of demand can use', () => {
     ]);
   });
 
-  it('yields the least table-useful bot when it has to yield at all', () => {
-    // Everything free is reserved, so the queue's fallback decides which bot
-    // it takes -- and taking the best-ranked one hands it the only bot that
-    // could have entered Beginner, when the Casual-only bot would have served
-    // the queue just as well.
+  it('gives the queue a uniquely-required bot rather than nobody', () => {
+    // Reaching the fallback means every free bot is uniquely required by some
+    // slot, so one table goes unserved whichever the queue takes -- and the
+    // queue is served, because a bot held for a table it cannot also fill is
+    // a bot spent on nobody.
     const snapshot = {
-      humansOnline: 2,
+      humansOnline: 3,
       queuedHumans: 1,
+      queuedBots: 0,
       longestWaitMs: 0,
       openTableVenues: ['casual', 'beginner'],
       activeBotIds: [],
-      roster: [bot('both', 25, ['casual', 'beginner']), bot('casual-only', 24, ['casual'])],
+      roster: [bot('casual-only', 25, ['casual']), bot('beginner-only', 24, ['beginner'])],
     };
     const activate = targetActivation(snapshot, 25).activate;
     expect(activate.find((a) => a.action === 'queue')?.id).toBe('casual-only');
-    expect(activate.find((a) => a.action === 'join')?.id).toBe('both');
+    expect(activate.find((a) => a.action === 'join')?.id).toBe('beginner-only');
+  });
+});
+
+describe('supply already spent on the queue', () => {
+  const base = {
+    humansOnline: 1,
+    queuedHumans: 1,
+    queuedBots: 0,
+    longestWaitMs: 0,
+    openTableVenues: [] as string[],
+    activeBotIds: [] as string[],
+    roster: [],
+  };
+
+  it('stops asking for a bot the queue already has', () => {
+    // Queue demand is `queuedHumans % 2` and stays 1 for as long as that
+    // person is unpaired -- so the bot dispatched to serve them is engaged,
+    // lands in `kept`, and the next tick adds the same slot again on top of
+    // it. One more activation per tick for one already-covered waiter, and
+    // since `findPair` may hold that first bot as their OPEN-band fallback
+    // while their own band is still tight, the human stays unpaired and the
+    // connected population climbs toward the roster limit.
+    expect(demandSplit({ ...base, queuedBots: 0 }).queue).toBe(1);
+    expect(demandSplit({ ...base, queuedBots: 1 }).queue).toBe(0);
+  });
+
+  it('never lets a queue full of bots subtract from TABLE demand', () => {
+    // `room` adds the two together, so a negative queue figure would eat a
+    // table slot -- and the tables are where the other unserved human is.
+    const s = { ...base, queuedBots: 5, openTableVenues: ['casual'] };
+    expect(demandSplit(s).queue).toBe(0);
+    expect(demandSplit(s).table).toBe(1);
+  });
+
+  it('still counts a human the queue cannot pair at all', () => {
+    // Three humans and one bot: parity says one human is unmatched and the bot
+    // covers them, so nothing further is asked for. Five humans and one bot
+    // says the same. The rule is about DOUBLE counting, not about capping.
+    expect(demandSplit({ ...base, queuedHumans: 3, queuedBots: 0 }).queue).toBe(1);
+    expect(demandSplit({ ...base, queuedHumans: 3, queuedBots: 1 }).queue).toBe(0);
   });
 });

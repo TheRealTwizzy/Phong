@@ -54,6 +54,8 @@ export interface PopulationSnapshot {
   humansOnline: number;
   /** Humans waiting in the ranked queue. */
   queuedHumans: number;
+  /** Bots waiting in it too — supply already spent on those humans. */
+  queuedBots: number;
   /** How long the longest-waiting human has waited, ms. */
   longestWaitMs: number;
   /**
@@ -221,8 +223,19 @@ function actionFor(t: PlaybotTraits): PopulationAction {
  * bot spent on a table is spent. The totals are identical either way.
  */
 export function demandSplit(s: PopulationSnapshot): { queue: number; table: number } {
+  // Bots already in the queue are supply spent on exactly this demand, so they
+  // come off it. Without that, queue demand is `queuedHumans % 2` and stays 1
+  // for as long as that person is unpaired: the bot sent to serve them is
+  // engaged, lands in `kept`, and the next tick adds the slot again on top —
+  // one more activation per tick for one already-covered waiter, growing the
+  // connected population toward the roster limit while `findPair` holds the
+  // first bot as their fallback and their own band is still tight.
+  //
+  // Floored at zero rather than allowed to go negative, which would otherwise
+  // let a queue full of bots subtract from TABLE demand through `room`.
+  const queue = (s.queuedHumans % 2) + impatientDemand(s);
   return {
-    queue: (s.queuedHumans % 2) + impatientDemand(s),
+    queue: Math.max(0, queue - s.queuedBots),
     table: s.openTableVenues.length,
   };
 }
@@ -286,28 +299,49 @@ export function targetActivation(
   // protects, exactly as `findPair`'s fallback reservation is, and yields
   // completely when it would otherwise leave the queue unserved: a bot held
   // for a table nobody can fill is a bot spent on nobody.
+  // Reserved PER SLOT, never against aggregate supply.
+  //
+  // Counting eligible bots against remaining slots discards every reservation
+  // the moment supply looks sufficient in total: one dual-venue bot and two
+  // Casual-only bots is three eligible against two slots, so nothing was
+  // reserved — and if the dual-venue bot ranked first the queue took it and
+  // Beginner became unservable, though a Casual-only bot would have served the
+  // queue and all three humans would have had a game. Aggregate supply is the
+  // wrong question; whether each CONSTRAINED slot still has somebody is the
+  // right one.
+  //
+  // A bot is reserved when it is the only free candidate for some remaining
+  // slot. That is the uniquely-required case and nothing wider: two dual-venue
+  // bots against a Casual and a Beginner slot reserve neither, since either
+  // can cover either. Hall's condition over the whole bipartite graph is the
+  // complete answer and is the same maximum-matching machinery §4.14 defers;
+  // this catches every case a single bot is the only door into a bracket,
+  // which is what these failures are made of.
   const neededForTable = (): Set<string> => {
-    const eligible = available.filter(
-      (b) => !spent.has(b.id) && s.openTableVenues.some((v) => b.venues.includes(v))
-    );
-    const slots = demand.table - activate.filter((a) => a.action === 'join').length;
-    return eligible.length <= slots ? new Set(eligible.map((b) => b.id)) : new Set();
+    const free = available.filter((b) => !spent.has(b.id));
+    const taken = activate.filter((a) => a.action === 'join').length;
+    const reserved = new Set<string>();
+    for (const venue of s.openTableVenues.slice(0, Math.max(0, demand.table - taken))) {
+      const eligible = free.filter((b) => b.venues.includes(venue));
+      if (eligible.length === 1) reserved.add(eligible[0]!.id);
+    }
+    return reserved;
   };
   //
-  // And when it must yield, it yields the LEAST table-useful bot rather than
-  // the best-ranked one: with a Casual and a Beginner table waiting and only a
-  // dual-venue bot and a Casual-only bot free, everything is reserved, so the
-  // fallback decides — and handing the queue the dual-venue bot leaves
-  // Beginner unservable when the Casual-only bot would have served the queue
-  // just as well.
-  const tableUsefulness = (b: PopulationBot): number =>
-    new Set(s.openTableVenues.filter((v) => b.venues.includes(v))).size;
+  // And when it must yield it takes the best-ranked bot, because by then the
+  // choice cannot matter. An earlier version sorted the fallback by how many
+  // demanded venues each bot could enter, and under the AGGREGATE reservation
+  // that was load-bearing; under this one it is unreachable as a decision.
+  // Reaching the fallback means every free bot is uniquely required by some
+  // slot, and a bot eligible for strictly more venues than another is by
+  // definition also eligible for that other's slot — which would make that
+  // slot non-unique and leave the lesser bot unreserved for the queue to take
+  // through the line above. So the two can only ever tie here, and a sort that
+  // cannot change an answer is a line that reads like a rule and is not one.
   for (let i = 0; i < demand.queue && hasRoom(); i += 1) {
     const reserved = neededForTable();
     const free = available.filter((b) => !spent.has(b.id));
-    const bot =
-      free.find((b) => !reserved.has(b.id)) ??
-      free.slice().sort((a, b) => tableUsefulness(a) - tableUsefulness(b))[0];
+    const bot = free.find((b) => !reserved.has(b.id)) ?? free[0];
     if (!bot) break;
     take(bot, 'queue');
   }

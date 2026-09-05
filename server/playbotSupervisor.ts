@@ -46,6 +46,20 @@ export interface LiveState {
   humansOnline: number;
   /** Humans waiting in the ranked queue — never the bots sitting in it too. */
   queuedHumans: number;
+  /**
+   * Bots waiting in that same queue, which is supply ALREADY SPENT on the
+   * humans in it.
+   *
+   * Counted because queue demand is `queuedHumans % 2` and stays 1 for as long
+   * as that person is unpaired — so a bot dispatched to serve them is engaged,
+   * lands in `kept`, and the very next tick adds the same demand slot again on
+   * top of it. Every tick then activated one more bot for one already-covered
+   * waiter, and since `findPair` may hold that bot as their fallback while
+   * their own band is still tight, the human stays unpaired and the connected
+   * population grows toward the roster limit — the fading bound defeated by a
+   * queue that is already being served.
+   */
+  queuedBots: number;
   /** How long the longest-waiting HUMAN has waited, ms. */
   longestWaitMs: number;
   /**
@@ -268,6 +282,32 @@ const IDLE_LOBBY_JITTER_MS = 12_000;
  */
 const REMATCH_GRACE_MS = 20_000;
 
+/**
+ * The same list, started at a per-bot offset.
+ *
+ * Concurrent dispatches to one venue were choosing the SAME table: the
+ * preference below is keyed on pair history, and with none — which is the
+ * ordinary case for a fresh population — every bot falls through to the same
+ * tiebreak and picks the same entry. One join lands, the rest are refused as
+ * full, and those hosts wait another tick; with several tables in a venue that
+ * degrades to serving roughly one of them per tick while bots sit spare.
+ *
+ * A SPREAD and not an assignment, which is the honest description: two bots
+ * can still rotate onto the same table, and the complete answer is for the
+ * controller to name the table rather than the venue — which needs table
+ * identity in `PopulationSnapshot`, and is recorded in CLAUDE.md §5 as
+ * deferred rather than done. This costs nothing and removes the case where
+ * they collide EVERY time.
+ *
+ * Deterministic per bot, like every other stagger here, so it survives a
+ * restart and a test can state it.
+ */
+export function rotate<T>(xs: T[], fraction: number): T[] {
+  if (xs.length < 2) return xs;
+  const at = Math.min(xs.length - 1, Math.floor(fraction * xs.length));
+  return [...xs.slice(at), ...xs.slice(0, at)];
+}
+
 /** A stable 0..1 from an id, so the stagger survives a restart. */
 function jitterFraction(id: string): number {
   let h = 2166136261;
@@ -281,6 +321,7 @@ function jitterFraction(id: string): number {
 const IDLE_LIVE: LiveState = {
   humansOnline: 0,
   queuedHumans: 0,
+  queuedBots: 0,
   longestWaitMs: 0,
   openTableVenues: [],
 };
@@ -372,6 +413,7 @@ export class PlaybotSupervisor {
     return {
       humansOnline: live.humansOnline,
       queuedHumans: live.queuedHumans,
+      queuedBots: live.queuedBots,
       longestWaitMs: live.longestWaitMs,
       openTableVenues: live.openTableVenues,
       activeBotIds: this.engagedIds(urgencyOf(live)),
@@ -889,7 +931,14 @@ export class PlaybotSupervisor {
     // rule, and it decides BEFORE the preference below rather than competing
     // with it, since a bot that would rather play another bot must not act on
     // that while somebody is waiting.
-    const pool = humanTablesFirst(free, new Set(this.managed.map((x) => x.botId)));
+    // Rotated BEFORE the partition, never after it: `humanTablesFirst` is a
+    // stable partition, so rotating its input rotates within each half and the
+    // §4.13 priority survives — rotating its output would move a bot's table
+    // in front of a waiting human's, which is the rule it exists to hold.
+    const pool = humanTablesFirst(
+      rotate(free, jitterFraction(selfId)),
+      new Set(this.managed.map((x) => x.botId))
+    );
     if (!pool.length) return null;
 
     // And among those, §2.11: where comparably suitable opponents are
@@ -1062,6 +1111,7 @@ export function liveStateFrom(a: {
   return {
     humansOnline: a.connectedIds.filter((id) => !a.isBot(id)).length,
     queuedHumans: humanQueue.length,
+    queuedBots: a.queue.length - humanQueue.length,
     longestWaitMs,
     openTableVenues: a.openTableVenues,
     bandCentre: a.bandCentre,

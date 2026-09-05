@@ -645,7 +645,7 @@ describe('what the composition has to pass along', () => {
     // asks it — the bug was a `return` inside the venue loop, which no test of
     // a pure chooser can see.
     const src = read('server/playbotSupervisor.ts');
-    expect(src).toMatch(/humanTablesFirst\(free, /);
+    expect(src).toMatch(/humanTablesFirst\(\s*rotate\(free, jitterFraction\(selfId\)\),/);
     expect(src).toMatch(/free\.push\(\{ id: t\.id, seatedIds \}\)/);
     // And the ASSIGNED venue is searched on its own first, which is the only
     // place a venue narrows the gather rather than ordering it: matching a bot
