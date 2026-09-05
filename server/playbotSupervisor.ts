@@ -145,6 +145,18 @@ interface Managed {
   driver: PlaybotDriver | null;
   /** Asked to stand down; closed once it is out of whatever it was in. */
   retiring: boolean;
+  /**
+   * A dispatch that has not finished, so a later tick cannot start a second.
+   *
+   * `dispatchedAt` plus DISPATCH_GRACE_MS was the only thing standing here and
+   * it is a GUESS: a `resume`/`connect` slower than the grace lets the next
+   * tick dispatch the same bot, and that second dispatch can close and replace
+   * `m.driver` while the first is still awaiting — after which the first
+   * continuation drives the REPLACEMENT, marking an unconnected driver queued
+   * and leaving its own live socket managed by nobody. A boolean is exact
+   * where a timeout is a bet on how slow loopback can be.
+   */
+  dispatching: boolean;
   /** The bot's own bracket standing, refreshed whenever the roster is loaded. */
   level: number;
   tier: Tier;
@@ -313,6 +325,7 @@ export class PlaybotSupervisor {
         traits: row.traits,
         driver: null,
         retiring: false,
+        dispatching: false,
         dispatchedAt: 0,
         level: row.level,
         tier: row.tier,
@@ -407,8 +420,10 @@ export class PlaybotSupervisor {
   }
 
   private async tickSafely(): Promise<void> {
-    // Re-entrant guard: a tick that is still awaiting a connect must not have
-    // a second one start alongside it and activate the same bot twice.
+    // Re-entrant guard for the TICK's own body. It does not extend to the
+    // dispatches it fires — `tick()` is synchronous and launches them with
+    // `void` — so a bot already being dispatched is held by `Managed.dispatching`
+    // instead, which is per-bot and covers the whole await.
     if (this.ticking) return;
     this.ticking = true;
     try {
@@ -477,6 +492,7 @@ export class PlaybotSupervisor {
       traits,
       driver: null,
       retiring: false,
+      dispatching: false,
       dispatchedAt: 0,
       // A brand new account: level 1 and unplaced, which is what the bracket
       // gate judges it as, and correct until its own matches move it. The
@@ -496,7 +512,22 @@ export class PlaybotSupervisor {
    * evicting the first — mid-match, if that bot happened to be playing.
    */
   private async dispatch(m: Managed, action: PopulationAction): Promise<void> {
+    // One at a time per bot, for the whole of it — see `Managed.dispatching`.
+    // `tickSafely`'s guard cannot do this: `tick()` is synchronous and fires
+    // its dispatches with `void`, so `ticking` is false again while every one
+    // of them is still in flight, and its own comment described a guarantee it
+    // was not providing.
+    if (m.dispatching) return;
     if (this.engaged(m, urgencyOf(this.live()))) return;
+    m.dispatching = true;
+    try {
+      await this.dispatchInner(m, action);
+    } finally {
+      m.dispatching = false;
+    }
+  }
+
+  private async dispatchInner(m: Managed, action: PopulationAction): Promise<void> {
     // Claim the slot BEFORE the await, or two ticks in flight dispatch the
     // same bot twice.
     m.dispatchedAt = Date.now();

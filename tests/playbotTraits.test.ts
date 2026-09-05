@@ -368,6 +368,23 @@ describe('what the composition has to pass along', () => {
     expect(read('server/playbotDriver.ts')).toMatch(/clampBallSpeed\(hit\.speed, this\.rules\)/);
   });
 
+  it('holds a dispatch for the whole of it, not for a guessed grace', () => {
+    // `tickSafely`'s guard covers the TICK's body, and `tick()` is synchronous
+    // -- it fires its dispatches with `void` -- so `ticking` is false again
+    // while every one of them is still awaiting `resume`/`connect`. The only
+    // thing standing there was `dispatchedAt` plus a five-second grace, which
+    // is a bet on how slow loopback can be: past it, the next tick dispatches
+    // the same bot, closes and REPLACES `m.driver`, and the first
+    // continuation then drives the replacement -- marking an unconnected
+    // driver queued and leaving its own live socket managed by nobody.
+    //
+    // Read rather than driven: reproducing it needs a connect held open past
+    // the grace, which is a bet in the other direction.
+    const src = read('server/playbotSupervisor.ts');
+    expect(src).toMatch(/if \(m\.dispatching\) return;/);
+    expect(src).toMatch(/m\.dispatching = true;[\s\S]*?finally \{[\s\S]*?m\.dispatching = false;/);
+  });
+
   it('refreshes that bracket state on every roster read', () => {
     // The half the fifth round's own fix left open, and the note beside it
     // said the opposite: `roster()` reloads the store every tick and took `mu`
