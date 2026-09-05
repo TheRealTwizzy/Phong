@@ -330,6 +330,22 @@ describe('what the composition has to pass along', () => {
     expect(call![1]).toMatch(/bandCentre:/);
   });
 
+  it('counts as demand only a table a bot could actually join', () => {
+    // A human playing the MACHINE has one real player at their table, so it
+    // read as somebody waiting for an opponent -- and mid-match the machine's
+    // chair is not claimable, so the bot activated to serve them could not
+    // join and hosted a table of its own instead. Enough concurrent CPU
+    // players would activate the whole roster as though all of them were
+    // waiting, which is the fading population bound defeated by people who are
+    // not waiting at all.
+    //
+    // The same predicate the LISTING asks, so the row a bot can tap and the
+    // demand that sends it there cannot disagree -- which is the venue filter
+    // below, one rule up.
+    const call = /liveStateFrom\(\{([\s\S]*?)\n      \}\)/.exec(read('server.ts'));
+    expect(call![1]).toMatch(/!r\.config\.cpu \|\| cpuSeatClaimable\(r\)/);
+  });
+
   it('counts as demand only the venues the dispatch will search', () => {
     // `openTable` looks in OPEN_VENUES and nowhere else, while the demand
     // count took every public room — so a human hosting in `intermediate`

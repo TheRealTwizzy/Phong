@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { seedTraits } from '../server/playbotTraits';
 import { PlaybotDriver, serveAimFor } from '../server/playbotDriver';
 import { BASE_BALL_SPEED } from '../src/game/physics';
+import { MATCH_START_COUNTDOWN_SECONDS } from '../src/matchRules';
 import { sleep, startRelay, type Relay } from './helpers/relay';
 
 // Two bots, a real relay, a real socket each, and a duel played out to a
@@ -245,6 +246,45 @@ describe('a bot at a table with a human', () => {
       balls.some((b) => Math.abs(b.speedMultiplier - 1) > 0.02),
       'every crossing left at the base speed, so this proves nothing'
     ).toBe(true);
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
+  it('waits out the match-start countdown before serving', async () => {
+    // `game_start` arms a three-second countdown in every browser client and
+    // App.tsx blocks its own serves under it -- aimed, automatic and the space
+    // bar alike. `aiServeDelay` is at most 1.15s, so a bot that served on the
+    // message put the ball on the human's court while their countdown overlay
+    // was still up. The arriving `ball_incoming` clears their serve gate, so
+    // it was not a wasted serve but a free opening attack, on every match the
+    // bot opened.
+    const bot = await bootBot('CountdownBot', 0.6);
+    bot.host({ winningScore: 3 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+
+    const human = await relay.newDevice('CountdownHuman');
+    const phone = await relay.openPhone(human);
+    phone.send({ type: 'join_room', roomId: bot.roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    phone.send({ type: 'player_ready', ready: true });
+    const started = (await phone.await('game_start')) as { servingPlayer: number };
+    const startedAt = Date.now();
+
+    // THE PRECONDITION, asserted rather than assumed: if the human served
+    // first, no ball would cross either way and the emptiness below would
+    // prove nothing at all (vacuity shape 8).
+    expect(started.servingPlayer, 'the bot is not the first server').toBe(bot.seat);
+
+    // Sampled just inside the countdown. The old code's entire serve delay is
+    // under half of this window, so it served here on every match.
+    await sleep(MATCH_START_COUNTDOWN_SECONDS * 1000 - 400);
+    expect(phone.all('ball_incoming')).toHaveLength(0);
+    expect(Date.now() - startedAt).toBeLessThan(MATCH_START_COUNTDOWN_SECONDS * 1000);
+
+    // ...and it does serve once the countdown is out, so the silence above was
+    // the gate rather than a bot that never plays.
+    await phone.await('ball_incoming', 20_000);
 
     phone.close();
     bot.close();

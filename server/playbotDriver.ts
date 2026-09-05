@@ -40,7 +40,7 @@ import {
   playerPressure,
   serveVelocity,
 } from '../src/game/physics';
-import { normalizeRules } from '../src/matchRules';
+import { MATCH_START_COUNTDOWN_SECONDS, normalizeRules } from '../src/matchRules';
 import { styleFor, type PlaybotTraits } from './playbotTraits';
 
 /** How often the simulated half advances. A phone's animation frame. */
@@ -110,6 +110,14 @@ export class PlaybotDriver {
   private rules: MatchRules = normalizeRules({});
   private config: RoomMatchConfig | null = null;
   private serveTimer = 0;
+  /**
+   * Seconds left of the match-start countdown, during which nothing serves.
+   *
+   * The browser's own gate, kept here rather than folded into `serveTimer`:
+   * that timer is re-armed by every point, and the countdown belongs to the
+   * MATCH.
+   */
+  private startCountdown = 0;
   private oppPaddleX = 0.5;
   private sentPaddleX = 0.5;
   private opponentPresent = false;
@@ -475,6 +483,15 @@ export class PlaybotDriver {
         // means a bot that never moves never publishes at all.
         this.sentPaddleX = this.ai.paddleX;
         this.send({ type: 'paddle_move', x: this.ai.paddleX });
+        // The same countdown every browser client runs. `game_start` arms a
+        // three-second overlay and App.tsx blocks its own serves under it --
+        // aimed, automatic and the space bar alike -- while `aiServeDelay` is
+        // at most 1.15s, so a bot that served on the message put the ball on
+        // the human's court while their countdown was still on screen. The
+        // arriving `ball_incoming` clears their serve gate, so it was not even
+        // a wasted serve: it was a free opening attack, on every match the bot
+        // opened.
+        this.startCountdown = MATCH_START_COUNTDOWN_SECONDS;
         this.beginPoint(msg.servingPlayer === this.seat);
         break;
       case 'ball_incoming':
@@ -550,6 +567,7 @@ export class PlaybotDriver {
     const dt = Math.min(0.05, (now - this.lastTick) / 1000);
     this.lastTick = now;
     if (dt <= 0) return;
+    if (this.startCountdown > 0) this.startCountdown -= dt;
 
     const paddleWidth = PADDLE_WIDTH_RATIO * this.rules.paddleScale;
     this.ai.update(this.ball, dt, paddleWidth, this.rules);
@@ -559,8 +577,10 @@ export class PlaybotDriver {
     }
 
     if (this.phase === 'serving') {
-      this.serveTimer -= dt;
-      if (this.serveTimer <= 0) this.serve();
+      if (this.startCountdown <= 0) {
+        this.serveTimer -= dt;
+        if (this.serveTimer <= 0) this.serve();
+      }
       return;
     }
     if (this.phase !== 'rally' || !this.ball?.active) return;

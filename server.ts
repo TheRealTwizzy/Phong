@@ -4513,7 +4513,19 @@ async function startServer() {
             r.visibility === 'public' &&
             OPEN_VENUES.includes(r.venueRoomId) &&
             seated.length === 1 &&
-            !isBotAccount(seated[0]!.playerId)
+            !isBotAccount(seated[0]!.playerId) &&
+            // A human playing the MACHINE has one real player at their table,
+            // so it read as somebody waiting for an opponent — and mid-match
+            // the machine's chair is not claimable, so the bot activated to
+            // serve them could not join and hosted a table of its own instead.
+            // Enough concurrent CPU players would activate the whole roster as
+            // though all of them were waiting, which is the fading population
+            // bound defeated by people who are not waiting at all.
+            //
+            // The same predicate the LISTING asks, so the row a bot can tap
+            // and the demand that sends it there cannot disagree — the rule
+            // the venue filter above is already an instance of.
+            (!r.config.cpu || cpuSeatClaimable(r))
           );
         }).length,
         now: Date.now(),
