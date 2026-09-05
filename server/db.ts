@@ -4377,9 +4377,20 @@ class GameDatabase {
     level: number;
     tier: Tier;
   }> {
+    // `mu` is the MATCHMAKER's estimator and not the visible ladder's, because
+    // the only thing the controller compares it against is a waiting human's
+    // `matchmakingRating` (`bandCentre`, server.ts). §7's rule is that each
+    // estimator is read against its own counterpart, and these two diverge BY
+    // DESIGN for a bot: a Casual table pays XP and moves hidden MMR and never
+    // the visible tier, so a bot whose `rankedBias` sends it to Casual
+    // accumulates mmr with `rankMu` frozen at START_MU. Ranked on `rankMu`
+    // every such bot sat at the same distance from every band centre, and the
+    // controller passed over the one whose real rating suited the person
+    // waiting -- then the matcher refused the pairing it did make.
     const rows = this.stmt(
         `SELECT b.botId AS botId, p.username AS username, b.deviceCookie AS deviceCookie,
-                p.rankMu AS mu, p.matchesPlayed AS recentMatches, p.level AS level,
+                p.mmrMu AS mu, p.rankMu AS rankMu,
+                p.matchesPlayed AS recentMatches, p.level AS level,
                 p.rankSigma AS rankSigma, p.rankedGames AS rankedGames, p.rankedDuels AS rankedDuels,
                 ${TRAIT_KEYS.map((k) => `b.${k} AS ${k}`).join(', ')}
            FROM bot_accounts b
@@ -4397,9 +4408,13 @@ class GameDatabase {
       recentMatches: Number(r.recentMatches) || 0,
       level: Number(r.level) || 1,
       // Derived exactly as `rowToProfile` derives it, so a bot is judged by
-      // the same tier the relay will judge it by.
+      // the same tier the relay will judge it by — which means the VISIBLE
+      // ladder's rating and emphatically not `mu` above, however alike the two
+      // columns look here. A tier read off the hidden estimator would decide
+      // venue eligibility by a number no badge ever shows, and the relay would
+      // then refuse the very rooms `venuesFor` had just said were open.
       tier: tierFor(
-        Number(r.mu),
+        Number(r.rankMu),
         Number(r.rankedGames) || 0,
         Number(r.rankSigma),
         Number(r.rankedDuels) || 0

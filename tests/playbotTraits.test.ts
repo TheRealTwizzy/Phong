@@ -306,6 +306,59 @@ describe('rank is earned, never seeded', () => {
 // same idiom step 9's case C and step 15 use — and each one is the same shape
 // as the rest of this feature's findings: a module that was right, and a
 // composition that never called it.
+describe('the two ratings a play-bot row carries', () => {
+  /** A drivable play-bot: a marker row WITH a credential, and an account. */
+  const drivable = (mmrMu: number, rankMu: number): string => {
+    const id = newBot();
+    const raw = new DatabaseSync(DB_FILE);
+    try {
+      raw.prepare('UPDATE players SET mmrMu = ?, rankMu = ? WHERE id = ?').run(mmrMu, rankMu, id);
+      raw
+        .prepare('UPDATE bot_accounts SET deviceCookie = ? WHERE botId = ?')
+        .run(`cookie-${id}`, id);
+    } finally {
+      raw.close();
+    }
+    return id;
+  };
+
+  it('ranks activation on the estimator the MATCHER pairs on', () => {
+    // The controller compares this against `bandCentre`, which is a waiting
+    // human's `db.matchmakingRating`. Read off `rankMu` it was a comparison
+    // across two scales that diverge BY DESIGN for a bot: a Casual table pays
+    // XP and moves hidden MMR and never the visible tier, so a bot whose
+    // `rankedBias` sends it to Casual accumulates mmr with `rankMu` frozen at
+    // START_MU -- and every such bot then sat at the same distance from every
+    // band centre, so the controller passed over the one whose real rating
+    // suited the person waiting, and the matcher refused the pairing it made
+    // instead.
+    const id = drivable(31.5, 25);
+    const row = db.playbotAccounts().find((r) => r.botId === id);
+    expect(row, 'the bot is not drivable').toBeTruthy();
+    // Asserted against the very function `bandCentre` reads, not against the
+    // number: that is the invariant, and it survives either column moving.
+    expect(row!.mu).toBe(db.matchmakingRating(id)!.mu);
+    expect(row!.mu).toBe(31.5);
+  });
+
+  it('still judges the BRACKET on the visible ladder', () => {
+    // The other half, and the trap: `tier` is derived in the same map from a
+    // column that used to be the same alias. Off the hidden estimator it would
+    // decide venue eligibility by a number no badge ever shows, and the relay
+    // would refuse the very rooms `venuesFor` had just said were open.
+    //
+    // 25 hidden and 34.5 visible: Legend on the ladder, Ace on the estimator,
+    // so a tier read off the wrong one is a different word.
+    const id = drivable(25, 34.5);
+    const row = db.playbotAccounts().find((r) => r.botId === id);
+    expect(row!.tier).toBe('legend');
+    // Deliberately NOT asserting `mu` here as well. It would be true, and it
+    // would make the alias mutation redden both of these -- a pair that fails
+    // together is one assertion wearing two names, and then neither failure
+    // says which of the two columns moved. That one is the test above.
+  });
+});
+
 describe('what the composition has to pass along', () => {
   const read = (rel: string) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 

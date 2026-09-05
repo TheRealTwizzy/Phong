@@ -25,9 +25,13 @@ export interface PopulationBot {
   id: string;
   traits: PlaybotTraits;
   /**
-   * Its EARNED ladder rating. The controller SELECTS on this and never writes
-   * it: a bot suits a thin band or it does not, and if none does the answer is
-   * more bots rather than a different bot.
+   * Its EARNED rating, on the estimator the MATCHER pairs on.
+   *
+   * The controller SELECTS on this and never writes it: a bot suits a thin
+   * band or it does not, and if none does the answer is more bots rather than
+   * a different bot. The estimator is the matchmaker's own, because the only
+   * thing this is compared against is `bandCentre` — a waiting human's
+   * `matchmakingRating` — and the two estimators diverge by design.
    */
   mu: number;
   /** Matches it has played in the recent window, for spreading participation. */
