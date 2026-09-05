@@ -43,6 +43,7 @@ import {
   serveVelocity,
 } from '../src/game/physics';
 import { MATCH_START_COUNTDOWN_SECONDS, normalizeRules } from '../src/matchRules';
+import { acceptsRematch } from './playbotPolicy';
 import { styleFor, type PlaybotTraits } from './playbotTraits';
 
 /** How often the simulated half advances. A phone's animation frame. */
@@ -91,6 +92,21 @@ export interface PlaybotDriverOptions {
   traits: PlaybotTraits;
   /** Injected so a test can drive the loop by hand. */
   now?: () => number;
+  /**
+   * Who this bot is sitting opposite, as the database knows them.
+   *
+   * The driver is written as a CLIENT and has no reach of its own, so the two
+   * things §2.11's rematch rule turns on — is this a person, and how much of
+   * this pair has already been played — are handed to it by the supervisor.
+   *
+   * Absent, the answer is a HUMAN with no history, which is the safe reading
+   * rather than the convenient one: an explicit human Rematch is legitimate
+   * play that nothing may block or decline, so a driver that cannot find out
+   * accepts. Every path that can refuse needs to KNOW.
+   */
+  opponentFacts?: (opponentId: string) => { isBot: boolean; recentPairCount: number } | null;
+  /** The coin flip an appetite is judged against, in [0,1). Injected in tests. */
+  rollFor?: () => number;
 }
 
 /**
@@ -134,6 +150,8 @@ export class PlaybotDriver {
   /** Last `ball_pos` send, so the sonar feed is throttled like a client's. */
   private lastBallPosAt = 0;
   private opponentPresent = false;
+  /** The account opposite, for the rematch rule. Null until one arrives. */
+  private opponentId: string | null = null;
   /** A `create_room` whose venue may still be refused. Cleared once answered. */
   private pendingHost: { config: Partial<RoomMatchConfig> } | null = null;
   private standingDown = false;
@@ -378,6 +396,35 @@ export class PlaybotDriver {
     if (this.phase === 'idle' || this.phase === 'over' || this.phase === 'lobby') this.leave();
   }
 
+  /** What the supervisor knows about the seat opposite, or the safe default. */
+  private opponentFacts(): { isBot: boolean; recentPairCount: number } {
+    const asked = this.opponentId ? this.opts.opponentFacts?.(this.opponentId) : null;
+    // A person with no history: never refused, and never tapered.
+    return asked ?? { isBot: false, recentPairCount: 0 };
+  }
+
+  private opponentIsBot(): boolean {
+    return this.opponentFacts().isBot;
+  }
+
+  /**
+   * §2.11, through the one function that owns it.
+   *
+   * A standing-down bot never wants one: it is waiting for this whistle in
+   * order to leave, and `standDown`'s whole promise is that it does not walk
+   * out of a match in progress.
+   */
+  private wantsRematch(): boolean {
+    if (this.standingDown) return false;
+    const facts = this.opponentFacts();
+    return acceptsRematch({
+      traits: this.opts.traits,
+      fromHuman: !facts.isBot,
+      recentPairCount: facts.recentPairCount,
+      roll: (this.opts.rollFor ?? Math.random)(),
+    });
+  }
+
   public leave(): void {
     this.send({ type: 'leave_room' });
     this.roomId = null;
@@ -391,6 +438,7 @@ export class PlaybotDriver {
     // `engaged()` never applied the idle-lobby window to it, and the bot was
     // parked there permanently instead of coming free for the next demand.
     this.opponentPresent = false;
+    this.opponentId = null;
   }
 
   public close(): void {
@@ -433,12 +481,14 @@ export class PlaybotDriver {
         // `create_room` without one -- and a stale `true` parks the bot for
         // good, which is worse than the redundancy.
         this.opponentPresent = false;
+        this.opponentId = null;
         break;
       case 'room_joined':
         this.roomId = msg.roomId;
         this.seat = msg.playerIndex;
         this.phase = 'lobby';
         this.opponentPresent = true;
+        this.opponentId = msg.opponentId;
         // A guest's half of the lobby handshake. The host cannot start
         // without it, so a bot that never readied would seat itself and wait
         // forever — which is a bot that has taken a human's table and is not
@@ -447,6 +497,7 @@ export class PlaybotDriver {
         break;
       case 'opponent_joined':
         this.opponentPresent = true;
+        this.opponentId = msg.opponentId;
         break;
       case 'room_config':
         this.config = msg.config;
@@ -485,21 +536,23 @@ export class PlaybotDriver {
         // bot somewhere else -- while §2.11 says an explicit human Rematch is
         // legitimate play that nothing may block or decline.
         //
-        // Accepted UNCONDITIONALLY, which is D25's rule for a human and the
-        // safe default for the other case: telling a human from a bot here
-        // would mean plumbing an identity resolver into a component written as
-        // a client, and it would only feed `acceptsRematch`'s taper, which
-        // also wants a `recentPairCount` the driver does not have. Repeating a
-        // pair is not prevented by refusing it in any case -- the saturation
-        // ladders make it worth progressively less and then nothing, which is
-        // the safeguard that actually holds (§2.3).
+        // A HUMAN's request is accepted unconditionally, at any pair count,
+        // including past the same-pair hard cap -- where the match simply
+        // rates nothing. That is a rating decision and never a reason to
+        // refuse somebody a game, and `acceptsRematch` says so in its first
+        // line. Between two bots there is nobody to disappoint, so the
+        // appetite decides, tapered by how much of the pair has been played.
         //
-        // So `server/playbotPolicy.ts`'s `acceptsRematch` stays unwired, and
-        // that is recorded rather than left to look like an oversight.
+        // It used to be unconditional for BOTH, with the reasoning that a
+        // driver written as a client cannot tell a person from a bot. That is
+        // true of the driver ALONE, and the supervisor holds both facts --
+        // so they are handed in (`opponentFacts`) rather than the rule being
+        // dropped, which had left `rematchAppetite` a seeded trait that
+        // decided nothing, the same shape as the `spinRead` it sits beside.
         if (this.seat === null || this.phase !== 'over') break;
         const mine = msg.votes[this.seat];
         const theirs = msg.votes[this.seat === 0 ? 1 : 0];
-        if (theirs && !mine) this.send({ type: 'rematch_request' });
+        if (theirs && !mine && this.wantsRematch()) this.send({ type: 'rematch_request' });
         break;
       }
       case 'game_start':
@@ -557,6 +610,14 @@ export class PlaybotDriver {
           this.phase = 'over';
           this.ball = null;
           if (this.standingDown) this.leave();
+          // Two bots have nobody to wait on, so one of them has to ask or the
+          // rematch never happens and `rematchAppetite` decides nothing. A
+          // HUMAN is never asked: their Play Again is theirs to press, and a
+          // vote cast before they have decided commits a bot to a table it may
+          // be about to be stood down from.
+          else if (this.opponentIsBot() && this.wantsRematch()) {
+            this.send({ type: 'rematch_request' });
+          }
         } else {
           this.beginPoint(msg.nextServer === this.seat);
         }

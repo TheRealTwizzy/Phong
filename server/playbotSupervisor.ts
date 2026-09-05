@@ -599,6 +599,15 @@ export class PlaybotSupervisor {
         wsUrl: this.opts.wsUrl,
         username: m.username,
         traits: m.traits,
+        // The driver is a client and has no reach of its own; the two facts
+        // §2.11's rematch rule turns on live here. Read at the moment it is
+        // asked rather than cached at the join, because `recentPairCount`
+        // rises with the match that has just been played.
+        opponentFacts: (oppId) => {
+          const c = this.store.pairingView(m.botId, [oppId]).candidates[0];
+          return c ? { isBot: c.isBot, recentPairCount: c.recentPairCount } : null;
+        },
+        rollFor: this.opts.rollFor,
       });
       m.driver = driver;
       try {

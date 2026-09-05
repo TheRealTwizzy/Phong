@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { seedTraits } from '../server/playbotTraits';
+import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import { PlaybotDriver, serveAimFor } from '../server/playbotDriver';
 import { BASE_BALL_SPEED } from '../src/game/physics';
 import { MATCH_START_COUNTDOWN_SECONDS } from '../src/matchRules';
@@ -40,7 +40,20 @@ afterAll(async () => {
 let seq = 0;
 
 /** A play-bot: onboarded through the ordinary doors, then marked as a bot. */
-const bootBot = async (label: string, skill = 0.12): Promise<PlaybotDriver> => {
+const bootBot = async (
+  label: string,
+  skill = 0.12,
+  /**
+   * What the SUPERVISOR supplies in production: who this bot turns out to be
+   * sitting opposite, and the coin flip an appetite is judged against.
+   * Injected here so a rematch decision is a fact rather than a fifty-fifty.
+   */
+  extra: {
+    traits?: Partial<PlaybotTraits>;
+    opponentFacts?: (opponentId: string) => { isBot: boolean; recentPairCount: number } | null;
+    rollFor?: () => number;
+  } = {}
+): Promise<PlaybotDriver> => {
   seq += 1;
   const username = `${label}${seq}`.slice(0, 16);
   // Traits are seeded from the id, which is ISSUED — so they are applied after
@@ -54,7 +67,9 @@ const bootBot = async (label: string, skill = 0.12): Promise<PlaybotDriver> => {
     // test: what is under test here is the plumbing, not how good a bot is,
     // and a fixture that takes a minute is one that goes flaky on a loaded
     // runner. `tests/playbotTraits.test.ts` owns the strength side.
-    traits: { ...seedTraits(username), skill },
+    traits: { ...seedTraits(username), skill, ...extra.traits },
+    opponentFacts: extra.opponentFacts,
+    rollFor: extra.rollFor,
   });
   await driver.provision((botId) => {
     // The one step with no HTTP route behind it, deliberately: a client that
@@ -394,6 +409,108 @@ describe('a bot at a table with a human', () => {
     phone.close();
     bot.close();
   }, 90_000);
+
+  it('never refuses a person, whatever its own appetite says', async () => {
+    // §2.11's first rule: an explicit human Rematch is legitimate play that
+    // nothing may block or decline, at ANY pair count -- including past the
+    // same-pair hard cap, where the match simply rates nothing. That is a
+    // rating decision and never a reason to refuse somebody a game.
+    //
+    // Hostile on every axis the bot arm turns on: an appetite of zero, a roll
+    // that fails any threshold, and a pair already played fifty times. All
+    // three are ignored because the request came from a PERSON.
+    const bot = await bootBot('NeverRefuse', 0.12, {
+      traits: { rematchAppetite: 0 },
+      opponentFacts: () => ({ isBot: false, recentPairCount: 50 }),
+      rollFor: () => 0.999,
+    });
+    bot.host({ winningScore: 3 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+
+    const human = await relay.newDevice('NeverRefused');
+    const phone = await relay.openPhone(human);
+    phone.send({ type: 'join_room', roomId: bot.roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    phone.send({ type: 'player_ready', ready: true });
+    await phone.await('game_start');
+
+    const seat = bot.seat === 0 ? 'p1' : 'p2';
+    for (let i = 1; i <= 3; i += 1) {
+      phone.send({ type: 'point_scored', scorer: seat });
+      await phone.awaitCount('score_update', i);
+    }
+    await until('the bot to see the whistle', () => bot.phase === 'over');
+
+    phone.send({ type: 'rematch_request' });
+    await phone.awaitCount('game_start', 2, 20_000);
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
+  it('asks another bot, and takes no for an answer', async () => {
+    // `acceptsRematch` had no caller: the driver accepted every vote it was
+    // shown and cast none of its own, so the bot-vs-bot arm was unreachable
+    // and `rematchAppetite` was a seeded trait that decided nothing -- the
+    // same shape as the `spinRead` that sat inert beside it.
+    //
+    // Both halves in one fixture, and each is a POSITIVE observation rather
+    // than a wait for something not to happen. The asker's own vote can only
+    // come from the initiating branch, since nobody has asked it for one; the
+    // decliner's silence is read from the SAME `rematch_state` that carries
+    // the asker's vote, which it received and acted on before the message
+    // reached the watcher.
+    const asker = await bootBot('RematchAsker', 0.12, {
+      traits: { rematchAppetite: 1 },
+      opponentFacts: () => ({ isBot: true, recentPairCount: 0 }),
+      rollFor: () => 0,
+    });
+    // Appetite 0.5 against a roll of 0.99: the taper is 1 at a pair count of
+    // zero, so this is the APPETITE refusing and nothing else.
+    const decliner = await bootBot('RematchDecliner', 0.12, {
+      traits: { rematchAppetite: 0.5 },
+      opponentFacts: () => ({ isBot: true, recentPairCount: 0 }),
+      rollFor: () => 0.99,
+    });
+
+    // Watching seats open, so a phone can read the votes off the wire without
+    // taking a playing seat: `rematch_state` is a room broadcast and a
+    // spectator receives it byte-identically.
+    asker.host({ winningScore: 3, spectators: true }, 'casual');
+    await until('a table', () => asker.roomId !== null);
+    const watcher = await relay.newDevice('RematchWatcher');
+    const phone = await relay.openPhone(watcher);
+    phone.send({ type: 'spectate_room', roomId: asker.roomId! });
+    await phone.await('spectator_sync');
+
+    decliner.join(asker.roomId!);
+
+    // Waited for at the WIRE rather than by watching both phases reach 'over'.
+    // A rematch takes them straight back out of it, so a poll for that pair is
+    // a race against the fix working -- it reddens for the right change and
+    // for the wrong reason, which is a test that will mislead somebody later.
+    // The asker volunteered this vote: nobody asked it for one.
+    const first = await phone.await('rematch_state', 150_000);
+    expect(first.votes.filter(Boolean).length).toBe(1);
+
+    // And the decliner answered no, which is read from the PHASES and
+    // deliberately not from a second `rematch_state`. The relay broadcasts one
+    // only while the room is still short of a vote (`bothAgreed` goes straight
+    // to `startMatch`), so an accepted rematch puts no further votes on the
+    // wire at all and a wire assertion here would pass either way -- a guard
+    // defended by a guard upstream, which is the catalogue shape this suite
+    // exists to avoid. A rematch takes both drivers straight out of 'over';
+    // staying there is what a room short of a second vote looks like from the
+    // inside. The decliner had the message above a relay hop before the
+    // watcher did, so this settle is a round trip rather than a guess at how
+    // long a match takes.
+    await sleep(1_000);
+    expect([asker.phase, decliner.phase]).toEqual(['over', 'over']);
+
+    phone.close();
+    asker.close();
+    decliner.close();
+  }, 180_000);
 
   it('joins a table a human is hosting', async () => {
     const human = await relay.newDevice('TableOwner');
