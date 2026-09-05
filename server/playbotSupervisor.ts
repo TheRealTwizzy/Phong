@@ -637,6 +637,24 @@ export class PlaybotSupervisor {
     m.dispatching = true;
     try {
       await this.dispatchInner(m, action);
+    } catch (e) {
+      // A dispatch that throws must not end every live duel on the server.
+      //
+      // `tick()` is synchronous and fires these with `void`, so a rejection
+      // here has no handler at all and reaches `process.on('unhandledRejection')`,
+      // which `server.ts` answers with `onFatal` — a controlled shutdown of the
+      // whole process. `tickSafely` cannot cover it (its guard is the tick's own
+      // body, and its comment says so), and the reachable throw is not exotic:
+      // `openTable` reads `pairingView`, which is a SQLite read, so a full disk
+      // or a volume remounted read-only turns one bot's opponent ranking into an
+      // outage.
+      //
+      // Caught at the same granularity `provision` already uses — one bot short
+      // is a smaller population, not a failed boot — and deliberately not around
+      // `tick()`, because §5's lesson is that a handler which swallows faults with
+      // no owner is worse than the crash. This one has an owner and a right
+      // answer: skip this dispatch, and let the next tick try again.
+      console.warn(`[playbot] could not dispatch ${m.username}:`, (e as Error)?.message ?? e);
     } finally {
       m.dispatching = false;
     }
@@ -890,6 +908,51 @@ export function humanTablesFirst(
 export const defaultPlaybotName = (n: number): string =>
   `Rally${String(n + 1).padStart(2, '0')}Bot`;
 const defaultName = defaultPlaybotName;
+
+/**
+ * Whose band the controller should be ranking bots against, right now.
+ *
+ * `targetActivation` orders the roster by distance from this, so it decides
+ * WHICH bot is spent on the human being served. It was never supplied at all
+ * once (round thirteen), and the repair reached only half the demand: it read
+ * the queue, so a human sitting ALONE at a public table produced no centre,
+ * the fallback was START_MU, and the bot nearest mu 25 was activated for a
+ * player who might be a Legend or a beginner. `openTable` cannot rescue that —
+ * it ranks TABLES for a bot already chosen, and cannot swap in a better-rated
+ * dormant one — so the mismatch stands with suitable roster capacity idle.
+ *
+ * The QUEUE wins where both exist: a queued player's own band is widening on a
+ * timer (`server/matchmaking.ts`), so they are the one whose wait has a cost
+ * attached, and a table host can still be joined by anybody. Within each, the
+ * longest wait wins, which is the same rule `findPair` judges a pairing on.
+ *
+ * Bots are excluded from both, for the reason `liveStateFrom` counts humans:
+ * the population sits in that queue and at those tables itself, so ranking the
+ * roster against one of its own members is a population steering by its own
+ * appetite. Pure over an injected `ratingOf` so the rule is a fast test rather
+ * than something only a live server can show — and read through
+ * `db.matchmakingRating` at the call site for the reason §7 gives: the HIDDEN
+ * estimator, because that is the pair `queueCandidate` itself pairs on, and
+ * two floats rather than a whole profile and a ladder scan.
+ */
+export function bandCentreFor(a: {
+  queue: Array<{ playerId: string; joinedAt: number }>;
+  /** One entry per public table with a lone occupant, and when it began waiting. */
+  tables: Array<{ playerId: string; waitingSince: number }>;
+  isBot: (id: string) => boolean;
+  ratingOf: (id: string) => number | null;
+}): number | undefined {
+  const queued = a.queue
+    .filter((e) => !a.isBot(e.playerId))
+    .sort((x, y) => x.joinedAt - y.joinedAt)[0];
+  const waiting =
+    queued ??
+    a.tables
+      .filter((t) => !a.isBot(t.playerId))
+      .sort((x, y) => x.waitingSince - y.waitingSince)[0];
+  if (!waiting) return undefined;
+  return a.ratingOf(waiting.playerId) ?? undefined;
+}
 
 /** Humans the queue and the tables cannot serve by themselves, right now. */
 const urgencyOf = (live: LiveState): number =>

@@ -361,6 +361,33 @@ describe('the two ratings a play-bot row carries', () => {
 
 describe('what the composition has to pass along', () => {
   const read = (rel: string) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+  /**
+   * The whole `live:` block server.ts hands the supervisor.
+   *
+   * The block and not the `liveStateFrom({...})` argument alone: the table
+   * filter is built ABOVE that call now, so both consumers can read one list,
+   * and a slice of the argument would silently stop covering it -- which is
+   * how these two tests went red when it moved rather than when it broke.
+   */
+  const liveBlock = (): string => {
+    const m = /live: \(\) => \{([\s\S]*?)\n    \},/.exec(read('server.ts'));
+    expect(m, 'server.ts no longer builds a LiveState').toBeTruthy();
+    return m![1];
+  };
+
+  it('asks bandCentreFor about the TABLES as well as the queue', () => {
+    // A pure module is only as real as its call site, which this feature has
+    // now learned often enough to be its own rule. `bandCentreFor` decides
+    // which bot is spent on the human being served, and the whole finding was
+    // that the derivation read the queue alone -- so what has to be pinned is
+    // not the function (its own tests are next door) but that server.ts hands
+    // it the tables, and that the old inline queue-only sort is GONE rather
+    // than merely joined by it.
+    const src = read('server.ts');
+    expect(src).toMatch(/bandCentreFor\(\{/);
+    expect(src).toMatch(/tables: openTables\.map\(/);
+    expect(src).not.toMatch(/bandCentre: \(\(\) =>/);
+  });
 
   it('gives OpponentAI the bot’s persisted spinRead', () => {
     // `styleFor` returns an AIStyle — volatility and aggression and nothing
@@ -378,9 +405,7 @@ describe('what the composition has to pass along', () => {
     // wiring never supplied one, so `targetActivation` fell back to START_MU
     // on every tick: a high- or low-rated human queued and the middle of the
     // roster was activated, possibly outside even the matcher's widest band.
-    const call = /liveStateFrom\(\{([\s\S]*?)\n      \}\)/.exec(read('server.ts'));
-    expect(call, 'server.ts no longer builds a LiveState').toBeTruthy();
-    expect(call![1]).toMatch(/bandCentre:/);
+    expect(liveBlock()).toMatch(/bandCentre:/);
   });
 
   it('counts as demand only a table a bot could actually join', () => {
@@ -395,8 +420,7 @@ describe('what the composition has to pass along', () => {
     // The same predicate the LISTING asks, so the row a bot can tap and the
     // demand that sends it there cannot disagree -- which is the venue filter
     // below, one rule up.
-    const call = /liveStateFrom\(\{([\s\S]*?)\n      \}\)/.exec(read('server.ts'));
-    expect(call![1]).toMatch(/!r\.config\.cpu \|\| cpuSeatClaimable\(r\)/);
+    expect(liveBlock()).toMatch(/!r\.config\.cpu \|\| cpuSeatClaimable\(r\)/);
   });
 
   it('counts as demand only the venues the dispatch will search', () => {
@@ -407,8 +431,7 @@ describe('what the composition has to pass along', () => {
     // Narrowed at the count rather than widened at the search: the other
     // brackets gate who may PLAY, so serving them needs the bot's own tier
     // judged, which is a design step and not this fix.
-    const call = /liveStateFrom\(\{([\s\S]*?)\n      \}\)/.exec(read('server.ts'));
-    expect(call![1]).toMatch(/OPEN_VENUES\.includes\(r\.venueRoomId\)/);
+    expect(liveBlock()).toMatch(/OPEN_VENUES\.includes\(r\.venueRoomId\)/);
   });
 
   it('clamps a bot’s return into the match’s own speed band', () => {

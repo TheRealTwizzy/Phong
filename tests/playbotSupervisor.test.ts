@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   PlaybotSupervisor,
   liveStateFrom,
+  bandCentreFor,
   defaultPlaybotName,
   type PlaybotAccountStore,
 } from '../server/playbotSupervisor';
@@ -369,8 +370,9 @@ describe('the roster the controller is shown', () => {
       // `ace` is above `beginner`'s tierMax of Contender, which is the state a
       // bot reaches by winning -- and mu 25 is the Ace FLOOR, so this is also
       // the bot sitting nearest a band centre that has fallen back to
-      // START_MU, which is what happens whenever the waiting human is at a
-      // table rather than in the queue.
+      // START_MU, which is now only what happens when nobody is waiting
+      // anywhere the controller can see (`bandCentreFor` reads the tables as
+      // well as the queue; this fixture passes 25 by hand).
       load: () => [
         row('bot-placed', { mu: 25, level: 10, tier: 'ace' }),
         row('bot-open', { mu: 18, level: 1, tier: 'unranked' }),
@@ -984,4 +986,179 @@ describe('a finished court holds a rematch window', () => {
     phone.close();
     await sup.stop();
   }, 90_000);
+});
+
+describe('a dispatch that throws', () => {
+  it('costs one bot its turn, never the process', async () => {
+    // `tick()` is synchronous and fires its dispatches with `void`, so a
+    // rejection inside one has no handler anywhere: it reaches
+    // `process.on('unhandledRejection')`, which `server.ts` answers with
+    // `onFatal` — a controlled shutdown. One bot's opponent ranking would then
+    // end every live duel on the server, and the throw is not exotic:
+    // `openTable` reads `pairingView`, which is a SQLite read, so a full disk
+    // or a volume remounted read-only is enough.
+    //
+    // The listener is the assertion. Vitest reports an unhandled rejection on
+    // its own, but as a run-level error rather than as this test failing, so
+    // the mutation would redden something that does not name the rule.
+    relay = await startRelay('playbot-dispatch-throws');
+    const rows = new Map<string, ReturnType<PlaybotAccountStore['load']>[number]>();
+
+    // A human sitting alone at a public table, which is what makes the
+    // dispatch a JOIN and therefore what makes it reach `pairingView` at all.
+    const host = await relay.newDevice('ThrowHost');
+    const hostPhone = await relay.openPhone(host);
+    hostPhone.send({
+      type: 'create_room',
+      playerId: host.id,
+      venueRoomId: 'casual',
+      visibility: 'public',
+    });
+    await hostPhone.await('room_created');
+
+    const sup = new PlaybotSupervisor({
+      base: relay.base,
+      wsUrl: relay.wsUrl,
+      rosterSize: 1,
+      tickMs: 3_600_000,
+      traitsFor: (u) => ({
+        ...seedTraits(u),
+        skill: MIN_AI_COMPETENCE,
+        rankedBias: 0,
+        hostAppetite: 0,
+        joinAppetite: 1,
+        queueAppetite: 0,
+      }),
+      store: {
+        load: () => [...rows.values()],
+        save: (botId, deviceCookie, traits) => {
+          rows.set(botId, {
+            botId,
+            username: botId,
+            deviceCookie,
+            traits,
+            mu: 25,
+            recentMatches: 0,
+            level: 1,
+            tier: 'unranked' as const,
+          });
+        },
+        pairingView: () => {
+          throw new Error('database is locked');
+        },
+      },
+      live: () => ({
+        humansOnline: 1,
+        queuedHumans: 0,
+        longestWaitMs: 0,
+        openTableVenues: ['casual'],
+      }),
+    });
+    await sup.start();
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => {
+      unhandled.push(e);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      sup.tick();
+      await sleep(2_000);
+      expect(unhandled).toEqual([]);
+      // And the supervisor is still usable afterwards rather than merely
+      // silent: the next tick is what retries this bot.
+      expect(() => sup.tick()).not.toThrow();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      hostPhone.close();
+      await sup.stop();
+    }
+  }, 60_000);
+});
+
+describe('whose band the roster is ranked against', () => {
+  const rating: Record<string, number> = { legend: 36, novice: 14, mid: 25, bot: 30 };
+  const ratingOf = (id: string): number | null => rating[id] ?? null;
+  const isBot = (id: string): boolean => id === 'bot';
+
+  it('reads a human waiting ALONE at a table, not only the queue', async () => {
+    // The round-thirteen repair reached half the demand. It read the queue, so
+    // a human sitting alone at a public table produced no centre at all, the
+    // fallback was START_MU, and `targetActivation` activated the bot nearest
+    // mu 25 for a player who might be a Legend or a beginner. `openTable`
+    // cannot rescue that: it ranks TABLES for a bot already chosen and cannot
+    // swap in a better-rated dormant one, so the mismatch stands while
+    // suitable roster capacity sits idle.
+    expect(
+      bandCentreFor({
+        queue: [],
+        tables: [{ playerId: 'legend', waitingSince: 10 }],
+        isBot,
+        ratingOf,
+      })
+    ).toBe(36);
+  });
+
+  it('prefers the queue where both are waiting', async () => {
+    // A queued player's own band is widening on a timer, so theirs is the wait
+    // with a cost attached; a table host can still be joined by anybody.
+    expect(
+      bandCentreFor({
+        queue: [{ playerId: 'novice', joinedAt: 50 }],
+        tables: [{ playerId: 'legend', waitingSince: 10 }],
+        isBot,
+        ratingOf,
+      })
+    ).toBe(14);
+  });
+
+  it('takes the longest wait within each', async () => {
+    expect(
+      bandCentreFor({
+        queue: [
+          { playerId: 'mid', joinedAt: 90 },
+          { playerId: 'legend', joinedAt: 20 },
+        ],
+        tables: [],
+        isBot,
+        ratingOf,
+      })
+    ).toBe(36);
+    expect(
+      bandCentreFor({
+        queue: [],
+        tables: [
+          { playerId: 'mid', waitingSince: 90 },
+          { playerId: 'novice', waitingSince: 20 },
+        ],
+        isBot,
+        ratingOf,
+      })
+    ).toBe(14);
+  });
+
+  it('never ranks the population against one of its own', async () => {
+    // The bots sit in that queue and at those tables themselves, so counting
+    // one is a population steering by its own appetite -- the rule
+    // `liveStateFrom` already follows for the demand count, applied to the
+    // player that demand is ranked against.
+    expect(
+      bandCentreFor({
+        queue: [{ playerId: 'bot', joinedAt: 1 }],
+        tables: [{ playerId: 'bot', waitingSince: 1 }],
+        isBot,
+        ratingOf,
+      })
+    ).toBeUndefined();
+    // And an unrated human is not a centre of zero: `ratingOf` answering null
+    // means there is nothing to rank against, which is what START_MU is for.
+    expect(
+      bandCentreFor({
+        queue: [],
+        tables: [{ playerId: 'stranger', waitingSince: 1 }],
+        isBot,
+        ratingOf,
+      })
+    ).toBeUndefined();
+  });
 });

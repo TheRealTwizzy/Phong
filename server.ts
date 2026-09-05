@@ -67,7 +67,12 @@ import {
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
-import { PlaybotSupervisor, liveStateFrom, OPEN_VENUES } from './server/playbotSupervisor';
+import {
+  PlaybotSupervisor,
+  liveStateFrom,
+  bandCentreFor,
+  OPEN_VENUES,
+} from './server/playbotSupervisor';
 import {
   DEFAULT_VENUE_ROOM,
   MATCHMAKING_ROOM,
@@ -4514,79 +4519,71 @@ async function startServer() {
         }),
       }),
     },
-    live: () =>
-      liveStateFrom({
+    live: () => {
+      // Built ONCE and read twice — by the demand count and by the band centre
+      // below — so the table the controller is told about and the player it
+      // ranks the roster against can never be two different people.
+      //
+      // A public table with one playing seat filled is somebody waiting for an
+      // opponent, which is unmet demand of the same kind an odd queue is — and
+      // it is counted only when that somebody is a HUMAN. The population's own
+      // empty tables are not demand: counted, a roster that prefers hosting
+      // reads its own parked tables as people to serve and activates more bots
+      // to open more of them.
+      //
+      // Demand and the search have to name the SAME venues, or the count asks
+      // for bots the dispatch cannot spend. `openTable` looks in OPEN_VENUES
+      // and nowhere else, so a human hosting in `intermediate` was counted
+      // here, a bot was activated to serve them, it searched two rooms it was
+      // never in, found nothing and opened a table of its own — while that
+      // human went on waiting. Narrowed here rather than widened there,
+      // deliberately: the other brackets gate who may PLAY, so a bot walking
+      // into one has to clear `roomEntryVerdict` on its own tier, and the
+      // search would have to carry that judgement. Counting only what the
+      // population can actually serve is the honest half.
+      const openTables = [...rooms.values()].filter((r) => {
+        const seated = r.players.filter(Boolean);
+        return (
+          r.visibility === 'public' &&
+          OPEN_VENUES.includes(r.venueRoomId) &&
+          seated.length === 1 &&
+          !isBotAccount(seated[0]!.playerId) &&
+          // A human playing the MACHINE has one real player at their table, so
+          // it read as somebody waiting for an opponent — and mid-match the
+          // machine's chair is not claimable, so the bot activated to serve
+          // them could not join and hosted a table of its own instead. Enough
+          // concurrent CPU players would activate the whole roster as though
+          // all of them were waiting, which is the fading population bound
+          // defeated by people who are not waiting at all.
+          //
+          // The same predicate the LISTING asks, so the row a bot can tap and
+          // the demand that sends it there cannot disagree — the rule the
+          // venue filter below is already an instance of.
+          (!r.config.cpu || cpuSeatClaimable(r))
+        );
+      });
+      return liveStateFrom({
         connectedIds: [...liveSockets].map((e) => e.deviceId),
         queue: queue.map((e) => ({ playerId: e.playerId, joinedAt: e.joinedAt })),
-        // A public table with one playing seat filled is somebody waiting for
-        // an opponent, which is unmet demand of the same kind an odd queue is
-        // — and it is counted only when that somebody is a HUMAN. The
-        // population's own empty tables are not demand: counted, a roster that
-        // prefers hosting reads its own parked tables as people to serve and
-        // activates more bots to open more of them.
-        // Demand and the search have to name the SAME venues, or the count
-        // asks for bots the dispatch cannot spend. `openTable` looks in
-        // OPEN_VENUES and nowhere else, so a human hosting in `intermediate`
-        // was counted here, a bot was activated to serve them, it searched two
-        // rooms it was never in, found nothing and opened a table of its own —
-        // while that human went on waiting.
-        //
-        // Narrowed here rather than widened there, deliberately: the other
-        // brackets gate who may PLAY, so a bot walking into one has to clear
-        // `roomEntryVerdict` on its own tier, and the search would have to
-        // carry that judgement. Counting only what the population can actually
-        // serve is the honest half; serving bracketed tables is a design step
-        // and is not this fix.
         // The VENUE of each rather than only how many there are, and one entry
-        // per table so the two answers cannot disagree. A bracketed room
-        // refuses a BOT on its own tier exactly as it refuses a player on
-        // theirs, so an activation aimed at a table without asking that
-        // question is one the relay turns away — and nothing about the bot
-        // changes when it is, so the next tick picks the same one again.
-        openTableVenues: [...rooms.values()]
-          .filter((r) => {
-            const seated = r.players.filter(Boolean);
-            return (
-              r.visibility === 'public' &&
-              OPEN_VENUES.includes(r.venueRoomId) &&
-              seated.length === 1 &&
-              !isBotAccount(seated[0]!.playerId) &&
-              // A human playing the MACHINE has one real player at their
-              // table, so it read as somebody waiting for an opponent — and
-              // mid-match the machine's chair is not claimable, so the bot
-              // activated to serve them could not join and hosted a table of
-              // its own instead. Enough concurrent CPU players would activate
-              // the whole roster as though all of them were waiting, which is
-              // the fading population bound defeated by people who are not
-              // waiting at all.
-              //
-              // The same predicate the LISTING asks, so the row a bot can tap
-              // and the demand that sends it there cannot disagree — the rule
-              // the venue filter above is already an instance of.
-              (!r.config.cpu || cpuSeatClaimable(r))
-            );
-          })
-          .map((r) => r.venueRoomId),
+        // per table so its length IS the count and the two answers cannot
+        // disagree.
+        openTableVenues: openTables.map((r) => r.venueRoomId),
         now: Date.now(),
         isBot: (id) => isBotAccount(id),
-        // Where the population is needed, and it was never supplied — so
-        // `targetActivation` fell back to START_MU on every tick and always
-        // ranked bots by their distance from mu 25. A high- or low-rated human
-        // then queued and the controller activated the MIDDLE of the roster,
-        // which may sit outside even the matcher's widest 20-80 band: supply
-        // existed and never reached them.
-        //
-        // The longest-waiting human's own rating is the honest answer to
-        // "which band is thin right now", and it is read through
-        // `db.matchmakingRating` for the reason §7 gives — two floats off the
-        // relay's hot path rather than a whole profile and a ladder scan.
-        bandCentre: (() => {
-          const waiting = queue
-            .filter((e) => !isBotAccount(e.playerId))
-            .sort((a, b) => a.joinedAt - b.joinedAt)[0];
-          return waiting ? (db.matchmakingRating(waiting.playerId)?.mu ?? undefined) : undefined;
-        })(),
-      }),
+        bandCentre: bandCentreFor({
+          queue,
+          // The same list the demand count is built from, one entry per lone
+          // occupant — see `bandCentreFor` for why the queue outranks it.
+          tables: openTables.map((r) => ({
+            playerId: r.players.filter(Boolean)[0]!.playerId,
+            waitingSince: r.soloSince ?? r.lastActive,
+          })),
+          isBot: (id) => isBotAccount(id),
+          ratingOf: (id) => db.matchmakingRating(id)?.mu ?? null,
+        }),
+      });
+    },
   });
   // Never fatal: a population that cannot start is a server with no bots in
   // it, which is exactly what every deployment ran until now.
