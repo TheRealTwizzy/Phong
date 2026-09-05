@@ -81,7 +81,12 @@ const CosmeticPicker: React.FC<{
 }> = ({ profile, equipped, onEquip, language }) => {
   const owned = COSMETIC_IDS.filter((id) => isCosmeticUnlocked(id, profile));
   return (
-    <div className="flex flex-col gap-3">
+    // Ids on the two picker sections so a browser suite can scope its
+    // "a locked reward is never NAMED" check to the picker. Over the whole
+    // page body that check is unsound: six elite TASKS are named after the
+    // TITLE they pay ("Wallbreaker", "Cold Steel", …), so a body-wide regex
+    // reddens on the day the seeded deal hands the account one of them.
+    <div id="cosmetic-picker" className="flex flex-col gap-3">
       <p id="cosmetic-owned-count" className="text-2xs text-ink-dim">
         {t('cosmetics_owned', language, { n: String(owned.length) })}
       </p>
@@ -148,7 +153,7 @@ const TitlePicker: React.FC<{
       active ? 'border-accent bg-accent/15 text-accent' : 'border-line bg-surface-2 text-ink-muted'
     }`;
   return (
-    <div className="flex flex-col gap-2">
+    <div id="title-picker" className="flex flex-col gap-2">
       <p id="title-owned-count" className="text-2xs text-ink-dim">
         {t('titles_owned', language, { n: String(owned.length) })}
       </p>
