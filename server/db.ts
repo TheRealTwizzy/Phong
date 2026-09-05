@@ -3186,6 +3186,7 @@ class GameDatabase {
   public getPublicProfile(id: string): PublicProfile | null {
     const p = this.readProfile(id);
     if (!p || !p.initializedAt) return null;
+    const isBot = isBotAccount(p.id);
     return {
       id: p.id,
       username: p.username,
@@ -3206,7 +3207,18 @@ class GameDatabase {
       // OWNER's cosmetic, so the owner's choice has to leave the server.
       cosmetic: p.cosmetic,
       title: p.title,
-      dailyStreak: p.dailyStreak,
+      // A bot's card is the same card, and this is the ONE field neutralised
+      // out of it (§4.11/D27) -- individually, rather than by withholding the
+      // profile, because a play-bot is a persistent participant with a real
+      // record. "Consecutive active days" is a claim about a HABIT, and a
+      // scheduled process does not have one: for the roster it is whatever
+      // insertBot seeded and nothing will ever advance it, and for a play-bot
+      // recordMatch goes through getProfile like any account, so the number is
+      // real and measures the deployment rather than a person.
+      //
+      // Absent rather than zero: a 0 is still a value, and the flame tile
+      // would print it. The client renders the tile only when it is there.
+      dailyStreak: isBot ? undefined : p.dailyStreak,
       tier: p.tier,
       // A position, not a rating. It is the one rank number that is already
       // public — the leaderboard prints it for everybody — so a stranger reads
@@ -3217,7 +3229,7 @@ class GameDatabase {
       achievements: p.achievements,
       hasAvatar: p.hasAvatar,
       avatarVersion: p.avatarVersion,
-      isBot: isBotAccount(p.id) || undefined,
+      isBot: isBot || undefined,
     };
   }
 

@@ -171,20 +171,30 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
             </div>
           </div>
 
-          {/* Headline numbers */}
-          <div className="grid grid-cols-3 gap-2">
+          {/* Headline numbers. The daily-streak flame is the one field with no
+              meaningful bot equivalent, so the server omits it for a bot
+              (§4.11) and the tile goes with it rather than printing a 0 --
+              which is why the column count follows the value rather than
+              being fixed at three and leaving a hole. */}
+          <div
+            className={`grid gap-2 ${
+              profile.dailyStreak === undefined ? 'grid-cols-2' : 'grid-cols-3'
+            }`}
+          >
             <StatTile
               label={t('ranked_games', language)}
               value={profile.rankedGames}
               tone="accent"
             />
             <StatTile label={t('win_rate', language)} value={`${winRate}%`} tone="win" />
-            <StatTile
-              label={t('daily_streak', language)}
-              value={profile.dailyStreak}
-              tone="warn"
-              icon={<Flame className="h-3.5 w-3.5 fill-current" />}
-            />
+            {profile.dailyStreak !== undefined && (
+              <StatTile
+                label={t('daily_streak', language)}
+                value={profile.dailyStreak}
+                tone="warn"
+                icon={<Flame className="h-3.5 w-3.5 fill-current" />}
+              />
+            )}
           </div>
 
           {/* Career */}
@@ -214,23 +224,28 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
             )}
           </div>
 
-          {/* Match history, public. Hidden for bots: the roster plays no
-              matches, and an empty tabbed list on every bot profile is
-              noise, not information. */}
-          {!profile.isBot && (
-            <div className="flex flex-col gap-2">
-              <span className="text-kicker text-ink-dim uppercase">
-                {t('public_history_section', language)}
-              </span>
-              <MatchHistoryList
-                language={language}
-                perspectiveId={profile.id}
-                source={{ kind: 'public', playerId: profile.id }}
-                onViewProfile={onViewProfile}
-                idPrefix="public-history"
-              />
-            </div>
-          )}
+          {/* Match history, public, and shown for a BOT too. It was hidden for
+              them on the reasoning that "the roster plays no matches", which
+              was true of eight rows of leaderboard furniture and stopped being
+              true the moment a play-bot became a persistent participant with a
+              real record -- §4.11 names match history among what its card
+              shows, and the history IS the record that makes the card worth
+              opening. Nothing distinguishes a roster row from a play-bot at
+              this layer (both are bot_accounts, both carry seeded or earned
+              stats), so the honest answer is to show the list for everybody
+              and let a roster bot's read empty, which is the truth about it. */}
+          <div className="flex flex-col gap-2">
+            <span className="text-kicker text-ink-dim uppercase">
+              {t('public_history_section', language)}
+            </span>
+            <MatchHistoryList
+              language={language}
+              perspectiveId={profile.id}
+              source={{ kind: 'public', playerId: profile.id }}
+              onViewProfile={onViewProfile}
+              idPrefix="public-history"
+            />
+          </div>
         </>
       )}
     </Sheet>

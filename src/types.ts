@@ -438,7 +438,11 @@ export interface PublicProfile {
   cosmetic?: CosmeticId;
   /** The title the owner wears, shown beside their name. */
   title?: TitleId;
-  dailyStreak: number;
+  /**
+   * Consecutive active days — omitted entirely for a bot, which has no habit
+   * to describe (§4.11). Absent rather than 0, so nothing renders a value.
+   */
+  dailyStreak?: number;
   // Tier only — a public profile never exposes raw mu/sigma numbers.
   tier: Tier;
   /**
