@@ -368,6 +368,33 @@ describe('what the composition has to pass along', () => {
     expect(read('server/playbotDriver.ts')).toMatch(/clampBallSpeed\(hit\.speed, this\.rules\)/);
   });
 
+  it('refreshes that bracket state on every roster read', () => {
+    // The half the fifth round's own fix left open, and the note beside it
+    // said the opposite: `roster()` reloads the store every tick and took `mu`
+    // and `recentMatches` off the fresh row while DISCARDING `level` and
+    // `tier`. So `venuesFor` judged every bot by whatever it was at startup,
+    // and a bot provisioned in this process stayed level 1 and unranked for
+    // good -- one that climbed past Contender went on being sent at
+    // `beginner`, was refused, and left its human unserved until a restart.
+    const src = read('server/playbotSupervisor.ts');
+    const body = /private roster\(\)[\s\S]*?\n  \}/.exec(src);
+    expect(body, 'roster() is gone').toBeTruthy();
+    expect(body![0]).toMatch(/m\.level = row\.level/);
+    expect(body![0]).toMatch(/m\.tier = row\.tier/);
+  });
+
+  it('never walks up to the table it is already sitting at', () => {
+    // A bot in seat 1 whose host has left holds a table that is still listed,
+    // with `hostId: null` -- which is not `selfId`, so a host-only comparison
+    // kept it and the bot could pick its OWN room as the fallback. `join_room`
+    // answers ALREADY_AT_TABLE for the room a socket already sits in, the
+    // driver does not transition on it, and the same room is chosen again on
+    // every tick.
+    const src = read('server/playbotSupervisor.ts');
+    expect(src).toMatch(/t\.id === ownRoomId/);
+    expect(src).toMatch(/this\.openTable\(\s*venue,\s*allowed,\s*m\.botId,\s*m\.driver\.roomId\s*\)/);
+  });
+
   it('offers a bot only the venues its own tier may enter', () => {
     // `chooseVenue`'s `allowed` is documented as the set the bracket gate
     // permits, supplied by the caller — and the caller passed the raw list.
@@ -380,7 +407,7 @@ describe('what the composition has to pass along', () => {
     expect(src).toMatch(/roomEntryVerdict\(roomById\(id\), who\)\.ok/);
     // BOTH consumers, or the half that was left raw is the half that breaks.
     expect(src).toMatch(/chooseVenue\(\{[\s\S]*?allowed,[\s\S]*?\}\)/);
-    expect(src).toMatch(/this\.openTable\(venue, allowed, m\.botId\)/);
+    expect(src).toMatch(/this\.openTable\(\s*venue,\s*allowed,\s*m\.botId/);
   });
 
   it('chooses its table through the preference rather than by arrival order', () => {

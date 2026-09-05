@@ -424,6 +424,19 @@ export class PlaybotSupervisor {
     const byId = new Map(this.store.load().map((r) => [r.botId, r]));
     return this.managed.map((m) => {
       const row = byId.get(m.botId);
+      // The bracket state is REFRESHED here, and the note that used to sit at
+      // the provision site -- "the next roster load reads the real values" --
+      // was simply wrong: there is a load, every tick, and it took `mu` and
+      // `recentMatches` off the fresh row while discarding `level` and `tier`.
+      // So `venuesFor` judged every bot by whatever it was at startup, and a
+      // bot provisioned in this process stayed level 1 and unranked for good:
+      // one that CLIMBED past Contender went on being sent at `beginner`, was
+      // refused, and left its human unserved until a restart. That is the
+      // fifth round's own finding surviving inside its own fix.
+      if (row) {
+        m.level = row.level;
+        m.tier = row.tier;
+      }
       return {
         id: m.botId,
         traits: m.traits,
@@ -466,8 +479,9 @@ export class PlaybotSupervisor {
       retiring: false,
       dispatchedAt: 0,
       // A brand new account: level 1 and unplaced, which is what the bracket
-      // gate will judge it as until its own matches move it. The next roster
-      // load reads the real values.
+      // gate judges it as, and correct until its own matches move it. The
+      // per-tick roster read refreshes both from the store afterwards -- see
+      // `roster`, where discarding them was a bug in its own right.
       level: 1,
       tier: 'unranked',
     });
@@ -552,7 +566,9 @@ export class PlaybotSupervisor {
     // overriding the preference (§2.11 makes diversity a preference and never a
     // prohibition); it is the preference having been tried and answered.
     const wantsTable = action !== 'queue' && (action === 'join' || gaveUpEmptyTable);
-    const table = wantsTable ? await this.openTable(venue, allowed, m.botId) : null;
+    const table = wantsTable
+      ? await this.openTable(venue, allowed, m.botId, m.driver.roomId)
+      : null;
     if (table) {
       // Deliberately WITHOUT leaving first: `join_room` vacates whatever seat
       // this socket already holds, and only once the destination is certain —
@@ -594,7 +610,9 @@ export class PlaybotSupervisor {
   private async openTable(
     venue: string | null,
     allowed: string[],
-    selfId: string
+    selfId: string,
+    /** The table this bot is already sitting at, if any — never a candidate. */
+    ownRoomId: string | null
   ): Promise<string | null> {
     const free: Array<{ id: string; hostId: string | null }> = [];
     for (const room of venue ? [venue, ...allowed] : allowed) {
@@ -605,7 +623,16 @@ export class PlaybotSupervisor {
           tables?: Array<{ id: string; isFull: boolean; hostId: string | null }>;
         };
         for (const t of body.tables ?? []) {
-          if (!t.isFull && t.hostId !== selfId) free.push({ id: t.id, hostId: t.hostId });
+          // By ROOM ID and not only by host. A bot in seat 1 whose host has
+          // left holds a table that is still listed, with `hostId: null` --
+          // which is not `selfId`, so the host comparison kept it and the bot
+          // could pick its OWN room as the fallback. `join_room` answers
+          // ALREADY_AT_TABLE for the room a socket already sits in, the driver
+          // does not transition on it, and the same room is chosen again on
+          // every tick: a bot that has stopped playing anybody and cannot
+          // recover without a restart.
+          if (t.isFull || t.hostId === selfId || t.id === ownRoomId) continue;
+          free.push({ id: t.id, hostId: t.hostId });
         }
       } catch {
         // A listing that cannot be read is a listing with nothing in it.
