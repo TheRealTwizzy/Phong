@@ -378,8 +378,20 @@ describe('what the composition has to pass along', () => {
     // continuation then drives the replacement -- marking an unconnected
     // driver queued and leaving its own live socket managed by nobody.
     //
-    // Read rather than driven: reproducing it needs a connect held open past
-    // the grace, which is a bet in the other direction.
+    // A source read, and MEASURED to be the only thing available rather than
+    // merely assumed. A behavioural version was built and thrown away: the
+    // grace was made injectable so it could be turned off, two ticks were
+    // fired in one macrotask so the second landed between `m.driver = driver`
+    // and the first await, and the guard removed. It passed, three runs out
+    // of three -- and so did a probe of the table listing, which showed one
+    // table either way.
+    //
+    // The reason is the shape of the failure: the second dispatch REPLACES
+    // `m.driver`, so something is always there to count, and the orphaned
+    // driver loses its session to the winner's own `resume` and never opens a
+    // table. Nothing at this surface differs. So the seam went back out --
+    // a production option whose only consumer is a test that proves nothing
+    // is worse than no test -- and what is left is the shape itself.
     const src = read('server/playbotSupervisor.ts');
     expect(src).toMatch(/if \(m\.dispatching\) return;/);
     expect(src).toMatch(/m\.dispatching = true;[\s\S]*?finally \{[\s\S]*?m\.dispatching = false;/);

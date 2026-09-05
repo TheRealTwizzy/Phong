@@ -165,6 +165,18 @@ recognising rather than rediscovering:
     (`chaosRelabel`, `rankedBackfill`, `rankedDuelsBackfill`, `shutoutRecount`) migrated
     correctly and had the result erased before their first assertion. It reads exactly like a
     broken migration. **A legacy fixture stamps every destructive key, not just the wipes.**
+13. **A behavioural test whose failure is invisible at the surface it watches** — the odd one
+    out, because it is not a fixture true for the wrong reason but a behavioural test that
+    cannot exist. Round nine's re-entrancy guard (`Managed.dispatching`) is held by a source
+    read whose comment called a behavioural version a bet on timing. One was built anyway: the
+    dispatch grace was made injectable so it could be turned off, two ticks fired in a single
+    macrotask so the second landed mid-dispatch, and the guard removed. It passed three runs
+    out of three, and a probe of the table listing showed one table either way — because the
+    second dispatch REPLACES the driver, so something is always there to count, and the orphan
+    loses its session to the winner's own `resume` and never opens a table. The seam went back
+    out with the test. **A production option whose only consumer is a test that proves nothing
+    is worse than no test at all**, and the difference between "a behavioural test would be
+    hard" and "there is nothing to observe" is whether anybody ran it.
 
 The standing habit: **before writing an assertion, name the mutation it should redden, then check
 that the mutation compiles and that it does.**
