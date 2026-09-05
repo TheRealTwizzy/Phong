@@ -32,6 +32,16 @@ export interface Candidate {
    * anywhere in this repo and this does not need to be the thing that adds it.
    */
   rttMs: number | null;
+  /**
+   * Whether this seat is a play-bot, from `bot_accounts` (D26) via
+   * `queueCandidate`.
+   *
+   * REQUIRED, not optional. An optional field defaults to false and silently
+   * misclassifies every bot — the reasoning `tierFor` already uses for its
+   * required fourth argument. `tsc` is what enforces it at the call site,
+   * which no test in this file can do.
+   */
+  isBot: boolean;
 }
 
 /** The acceptable win-probability window, widening with the wait. */
@@ -90,14 +100,22 @@ const ratingOf = (c: Candidate): Rating => ({ mu: c.mu, sigma: c.sigma });
  * Longest-waiting first, so a queue drains in the order it filled rather than
  * leaving somebody permanently unlucky.
  */
-export function findPair(queue: Candidate[], now: number): [Candidate, Candidate] | null {
-  const waiting = [...queue].sort((a, b) => a.joinedAt - b.joinedAt);
+export function bestPairAmong(
+  candidates: Candidate[],
+  now: number,
+  eligiblePair?: (a: Candidate, b: Candidate) => boolean
+): [Candidate, Candidate] | null {
+  const waiting = [...candidates].sort((a, b) => a.joinedAt - b.joinedAt);
   for (let i = 0; i < waiting.length; i++) {
     const a = waiting[i];
     let best: Candidate | null = null;
     let bestGap = Infinity;
     for (let j = i + 1; j < waiting.length; j++) {
       const b = waiting[j];
+      // The ONLY addition: an admissibility question asked BEFORE the
+      // existing scoring evaluates the pair. Omitted, every pair is eligible
+      // and this function is byte-equivalent to what it always was.
+      if (eligiblePair && !eligiblePair(a, b)) continue;
       // `a` is the more-waited of the pair: the list is sorted by joinedAt.
       const band = bandFor(now - a.joinedAt);
       const p = winProbability(ratingOf(a), ratingOf(b));
@@ -116,4 +134,92 @@ export function findPair(queue: Candidate[], now: number): [Candidate, Candidate
     if (best) return [a, best];
   }
   return null;
+}
+
+/**
+ * The bots no waiting human is entitled to fall back on.
+ *
+ * Pass 2 returning null means no human-bot pair is legal RIGHT NOW; it does
+ * not mean no bot is needed, because a waiting human's band is still widening
+ * and a bot paired into a bot-vs-bot match now will not be there when it does.
+ * So each still-unpaired human, longest-waiting first, claims their best
+ * OPEN_BAND-compatible bot.
+ *
+ * ONE bot per unpaired human, never every bot in the band. Measured, the
+ * blanket version reserved 42-44% of a live-ladder roster per waiting human,
+ * so bot-vs-bot would have stopped whenever anyone was queued and the
+ * simulated population's own ladder would only progress while nobody played.
+ *
+ * `OPEN_BAND` is the compatibility test because the question is what that
+ * human will be entitled to once their band widens — it is no longer the
+ * QUANTITY rule.
+ *
+ * What this guarantees is narrower than "every human is covered", and
+ * deliberately so: greedy wait-order assignment is not maximum matching. With
+ * h1 compatible with {X, Y} and h2, h3 with {X} only, h1 takes X and Y is
+ * never reserved. That is the same greedy-cardinality class as the defect
+ * `tests/matchmaking.test.ts` records against findPair itself, it is accepted
+ * for this feature, and it must not be fixed here.
+ */
+function freeBots(humans: Candidate[], bots: Candidate[]): Candidate[] {
+  const reserved = new Set<Candidate>();
+  // Longest-waiting first, matching findPair's own ordering, so the human who
+  // has waited most gets first claim on the bot best suited to them.
+  for (const h of [...humans].sort((a, b) => a.joinedAt - b.joinedAt)) {
+    let best: Candidate | null = null;
+    let bestGap = Infinity;
+    for (const b of bots) {
+      if (reserved.has(b)) continue;
+      const p = winProbability(ratingOf(h), ratingOf(b));
+      if (p < OPEN_BAND.lo || p > OPEN_BAND.hi) continue;
+      const gap = Math.abs(p - 0.5);
+      if (gap < bestGap - 1e-9) {
+        best = b;
+        bestGap = gap;
+      }
+    }
+    if (best) reserved.add(best);
+  }
+  return bots.filter((b) => !reserved.has(b));
+}
+
+/**
+ * The best pair the queue can offer right now, or null — in pair-class
+ * precedence order (D28).
+ *
+ *   1  Human vs Human        always wins
+ *   2  Human vs Play-Bot     a waiting human beats bots playing each other
+ *   3  Play-Bot vs Play-Bot  only with bots no waiting human needs
+ *
+ * Bots fill gaps. Stated as the guarantee actually provided rather than the
+ * stronger one: bots never displace a valid human-human pairing; a bot
+ * ACTUALLY reserved as a human's fallback is not consumed by bot-vs-bot;
+ * unreserved bots stay free; and greedy reservation does NOT guarantee
+ * maximum-cardinality fallback coverage.
+ *
+ * The precedence lives here rather than in the bot's own policy layer because
+ * it is a pairing rule — anywhere else and the matcher stays type-blind, so
+ * the next caller, or a bot entering the queue by a path that layer does not
+ * own, reintroduces exactly this.
+ *
+ * Each call preserves precedence on the RESIDUAL queue. It does not "drain
+ * every legal pair" of a class: each pass is `bestPairAmong`, which is greedy,
+ * so a class can be left with legal pairs unmade. Precedence is the guarantee;
+ * cardinality is not.
+ */
+export function findPair(queue: Candidate[], now: number): [Candidate, Candidate] | null {
+  const humans = queue.filter((c) => !c.isBot);
+  const bots = queue.filter((c) => c.isBot);
+
+  const hh = bestPairAmong(humans, now);
+  if (hh) return hh;
+
+  // Exactly ONE bot, so the predicate is `a.isBot !== b.isBot` — a
+  // DIFFERENT-class test. Run over the whole queue rather than a pre-split
+  // set, which is what keeps a human's partner search seeing every legal bot
+  // and a bot's seeing every legal human.
+  const hb = bestPairAmong(queue, now, (a, b) => a.isBot !== b.isBot);
+  if (hb) return hb;
+
+  return bestPairAmong(freeBots(humans, bots), now);
 }

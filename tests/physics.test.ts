@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AIDifficulty, BallState } from '../src/types';
+import { effectiveAiMu } from '../src/rating';
 import {
+  BOT_MAX_COMPETENCE,
+  lapseForCompetence,
   BASE_BALL_SPEED,
   MAX_BALL_SPEED,
   PADDLE_WIDTH_RATIO,
@@ -884,5 +887,165 @@ describe('keyboard paddles move per SECOND, in every component that has one', ()
     for (const line of uses) expect(line).toMatch(/KEY_PADDLE_SPEED \* dt/);
     // And the per-second constant is declared, rather than a bare literal.
     expect(src).toMatch(/const KEY_PADDLE_SPEED = [\d.]+ \* 60;/);
+  });
+});
+
+
+describe('a play-bot brings its own competence, and solo does not notice', () => {
+  // Step 17 deferred this: a bot's competence is an intrinsic TRAIT, so
+  // OpponentAI has to be able to take one instead of deriving it from the
+  // difficulty ladder. The whole risk in that change is the solo path, which
+  // must be byte-identical — so that is asserted first and over the whole grid.
+
+  const RUNGS: AIDifficulty[] = ['rookie', 'pro', 'elite', 'cyber', 'chaos'];
+  const PLAYER_MU = [8, 15, 20, 25, 30, 36, 42];
+
+  it('derives competence exactly as it always did when nothing is overridden', () => {
+    for (const rung of RUNGS) {
+      for (const mu of PLAYER_MU) {
+        const ai = new OpponentAI(rung, mu);
+        expect({ rung, mu, c: ai.competence() }).toEqual({
+          rung,
+          mu,
+          c: competenceForMu(effectiveAiMu(rung, mu)),
+        });
+      }
+    }
+  });
+
+  it('takes the override instead, and stops adapting to the opponent', () => {
+    // The separation at the physics boundary. A solo rung slides toward the
+    // player; a bot must not, or its strength would chase its own results.
+    for (const mu of PLAYER_MU) {
+      const bot = new OpponentAI('pro', mu, { competence: 0.42, style: { volatility: 0, aggression: 0.3 } });
+      expect(bot.competence()).toBe(0.42);
+    }
+    // ...and the same rung WITHOUT the override does adapt, so the fixture is
+    // measuring the override rather than a rung that happens to be flat.
+    const solo = PLAYER_MU.map((mu) => new OpponentAI('pro', mu).competence());
+    expect(new Set(solo).size).toBeGreaterThan(1);
+  });
+
+  it('plays a bot at its own strength, whatever the opponent is rated', () => {
+    // setPlayerSkill is what a duel would call as the opponent's rating moves.
+    // For a bot it must change nothing.
+    const bot = new OpponentAI('pro', 25, { competence: 0.6, style: { volatility: 0, aggression: 0.5 } });
+    const before = bot.competence();
+    bot.setPlayerSkill(45);
+    expect(bot.competence()).toBe(before);
+    bot.setPlayerSkill(5);
+    expect(bot.competence()).toBe(before);
+  });
+});
+
+
+describe('a play-bot plays under its own ceiling, and solo keeps the old one', () => {
+  // §4.8. MAX_AI_COMPETENCE is a statement about the five DIFFICULTIES: their
+  // top knot, their clamp, and the denominator their lapse and serve skill are
+  // normalised by. It came DOWN to 0.81 because an adapted Cyber returning 93%
+  // made the top rung a lottery on the AI's own error — reasoning that is not
+  // about a bot, which is not a rung of anybody's ladder and has to hold its
+  // own against a Cyber Overlord for the population to reach the top of the
+  // board at all.
+  //
+  // The whole risk is the SOLO path, so that is asserted first and over a
+  // grid, exactly as the competence override was.
+
+  const RUNGS: AIDifficulty[] = ['rookie', 'pro', 'elite', 'cyber', 'chaos'];
+  const PLAYER_MU = [8, 15, 20, 25, 30, 36, 42];
+
+  it('leaves every difficulty on the solo ceiling', () => {
+    for (const rung of RUNGS) {
+      for (const mu of PLAYER_MU) {
+        expect({ rung, mu, c: new OpponentAI(rung, mu).ceiling() }).toEqual({
+          rung, mu, c: MAX_AI_COMPETENCE,
+        });
+      }
+    }
+  });
+
+  it('gives a bot the higher one', () => {
+    const bot = new OpponentAI('pro', 25, {
+      competence: 0.9,
+      style: { volatility: 0, aggression: 0.5 },
+    });
+    expect(bot.ceiling()).toBe(BOT_MAX_COMPETENCE);
+    expect(BOT_MAX_COMPETENCE).toBeGreaterThan(MAX_AI_COMPETENCE);
+    // ...and it actually plays there, rather than being clamped back to a
+    // rung's limit the moment a rally begins.
+    expect(bot.competence()).toBe(0.9);
+  });
+
+  it('does not clamp a strong bot back to a rung’s limit when a rally begins', () => {
+    // `beginRally` clamps the rolled competence, and under the solo constant a
+    // bot at 0.95 plays every rally at 0.81 — the ceiling would be a field
+    // nothing read. Everything the clamp feeds is private and its only other
+    // consequence is a return rate no fixture can attribute to one ceiling, so
+    // the rolled value is exposed.
+    const ball: BallState = {
+      x: 0.5, y: 0.05, vx: 0, vy: 1, radius: 0.022, active: true, spin: 0, speedMultiplier: 1,
+    };
+    const bot = new OpponentAI('pro', 25, {
+      competence: 0.95,
+      style: { volatility: 0, aggression: 0.5 },
+    });
+    bot.update(ball, 0.016, 0.22);
+    expect(bot.lastRallyCompetence()).toBeCloseTo(0.95, 6);
+    expect(bot.lastRallyCompetence()).toBeGreaterThan(MAX_AI_COMPETENCE);
+
+    // A difficulty is unchanged: it can never roll above the solo ceiling.
+    const rung = new OpponentAI('chaos', 42);
+    rung.update(ball, 0.016, 0.22);
+    expect(rung.lastRallyCompetence()).toBeLessThanOrEqual(MAX_AI_COMPETENCE);
+  });
+
+  it('does not saturate a strong bot’s serve skill', () => {
+    // The collapse this prevents is one the ladder already had: normalised by
+    // 0.81, every competence above it lands on skill 1.000, so all three top
+    // rungs served IDENTICALLY. A population of strong bots would do the same.
+    const aim = (c: number, ceiling: number) => {
+      let total = 0;
+      for (let i = 0; i < 600; i += 1) total += Math.abs(aiServeAim(c, 0.05, ceiling).angle);
+      return total / 600;
+    };
+    // Under the solo ceiling two strong bots are indistinguishable...
+    expect(aim(0.85, MAX_AI_COMPETENCE)).toBeCloseTo(aim(0.95, MAX_AI_COMPETENCE), 1);
+    // ...and the SAME competence read against the two ceilings is not, which
+    // is the assertion that isolates the ceiling rather than the competence:
+    // a monotonicity check passes whichever denominator is used. 0.88 sits
+    // strictly BETWEEN the two ceilings on purpose — at 0.95 both normalise to
+    // skill 1.000 and the comparison is vacuous, which is how it was written
+    // first.
+    expect(aim(0.88, BOT_MAX_COMPETENCE)).toBeLessThan(aim(0.88, MAX_AI_COMPETENCE));
+  });
+
+  it('reads the lapse chance against the same ceiling', () => {
+    // The fifth site, and the one with nothing to observe it: `lapseChance` is
+    // private and its only consequence is a rally the AI stands out of.
+    // Normalised by the solo constant a strong bot lapses as if it were at
+    // skill 1.000 — measured, reverting it reddened nothing until this
+    // existed, so the pure function is exported and read directly.
+    expect(lapseForCompetence(0.88, BOT_MAX_COMPETENCE)).toBeGreaterThan(
+      lapseForCompetence(0.88, MAX_AI_COMPETENCE)
+    );
+    // A difficulty is unmoved: at or below the solo ceiling the two agree.
+    expect(lapseForCompetence(0.5, MAX_AI_COMPETENCE)).toBe(lapseForCompetence(0.5));
+  });
+
+  it('keeps the same-delay collapse away from the serve TIMER too', () => {
+    const delay = (c: number, ceiling: number) => {
+      let total = 0;
+      for (let i = 0; i < 600; i += 1) total += aiServeDelay(c, 0.5, ceiling);
+      return total / 600;
+    };
+    expect(delay(0.85, MAX_AI_COMPETENCE)).toBeCloseTo(delay(0.95, MAX_AI_COMPETENCE), 2);
+    // Same competence, two ceilings — the one comparison the denominator can
+    // change. A strong bot read against its own ceiling is slower to serve
+    // than one pinned to skill 1.000 by the solo constant.
+    // By a MARGIN, not merely greater: `aiServeDelay` carries ±0.06 of
+    // jitter, so over 600 samples the two means differ by ~0.0014 of noise
+    // alone and a bare `>` passes about half the time whatever the code does.
+    // The real gap here is ~0.04.
+    expect(delay(0.88, BOT_MAX_COMPETENCE) - delay(0.88, MAX_AI_COMPETENCE)).toBeGreaterThan(0.01);
   });
 });

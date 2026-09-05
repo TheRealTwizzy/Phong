@@ -12,6 +12,37 @@ Measured on a 4-core / 16GB Linux box against `NODE_ENV=production node dist/ser
 
 The script was broken for a while and this note used to say so. It is repaired, exports `runLoadTest()`, and is now covered by a registered smoke suite (`scripts/e2e-load.mjs`, two rooms and three seconds) so the next protocol change that breaks it breaks a build instead of a claim in a document.
 
+### The play-bot population
+
+Off by default. `PLAYBOT_ROSTER_SIZE` is the number of bot accounts the server keeps; unset or `0` means no population at all, which is what every deployment ran before this existed.
+
+**The roster is a POOL, not a concurrency figure**, and reading it as one is the mistake to avoid. How many bots are *playing* at any moment is decided by the population controller, not by the roster:
+
+```
+active = max( unserved humans , round(6 / (1 + humans online)) )
+```
+
+— so an empty server runs about **six** active bots however large the roster is, and a busy one runs roughly one per human the queue cannot pair by itself. A dormant bot is a `players` row and a `bot_accounts` row and nothing else: no socket, no timer, no cost. The roster's job is to give the controller *variety* — bots across rank bands to pick from — and the answer to a thin band is more bots at creation, never retuning one that is already playing.
+
+Measured on the same 4-core / 16GB box, against `NODE_ENV=production node dist/server.cjs`:
+
+```
+DATA_DIR=/tmp/pb PORT=4022 NODE_ENV=production PLAYBOT_ROSTER_SIZE=200 node dist/server.cjs
+node scripts/load-test.mjs 150 20 ws://127.0.0.1:4022/ws
+```
+
+| Roster | 150 concurrent matches | Loss | p50 / p95 | Server errors |
+|---|---|---|---|---|
+| 0 (off) | 179,573 paddle msgs | 0.00% | 2ms / 6ms | 0 |
+| 60 | 179,350 | 0.00% | 2ms / 8ms | 0 |
+| 200 | 179,248 | 0.00% | 2ms / 8ms | 0 |
+
+A roster of 200 provisions in **2 seconds** at boot and the process sits at **105MB RSS**. The population costs about **2ms at p95** under a full relay load, and that cost is the ~6 ACTIVE bots rather than the roster: 60 and 200 measure the same because 194 of the 200 are dormant.
+
+**A starting value of `PLAYBOT_ROSTER_SIZE=60` is the recommendation**, and it is chosen for variety rather than for load — enough accounts for the controller to find one near a thin band, small enough that a new deployment's ladder is recognisable rather than a wall of strangers. Raise it if the ladder looks thin at some tier; there is headroom to 200 and beyond on this box, and the bound that matters is the active count above, which the roster does not change.
+
+Two caveats, both making the real number lower rather than higher. The load generator competes for the same four cores, as above. And the bots' own matches DO end with profile writes — the exposure rows, the rating updates, the match rows — which the cookieless load generator never exercises; at six active bots that is a handful of writes a minute, but it scales with the active count and not with the roster.
+
 > **One-time player wipes (`wipe_v1` … `wipe_v4`)**: each clears ALL existing player data on the volume once — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). Each runs exactly once, flagged in the DB `meta` table; later deploys never wipe. A database that has already been stamped with all four — which is every deployment past the rally-streak rework — sees none of them. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.
 
 **Pick your path by what already runs on the box:**
@@ -28,7 +59,7 @@ The too-many-coins.com KVM runs Dokploy, whose Traefik terminates TLS for every 
 2. **In the Dokploy dashboard** (port 3000 on the box):
    - Create a project (e.g. `phong`) → **Application**.
    - **Source**: this GitHub repository, branch `main`. Build type: **Dockerfile**.
-   - **Environment**: nothing required — the Dockerfile defaults `NODE_ENV=production`, `PORT=3000`, `DATA_DIR=/data`. (Add `TURN_URL`/`TURN_STATIC_SECRET` here later if you enable TURN.)
+   - **Environment**: nothing required — the Dockerfile defaults `NODE_ENV=production`, `PORT=3000`, `DATA_DIR=/data`. (Add `TURN_URL`/`TURN_STATIC_SECRET` here later if you enable TURN, and `PLAYBOT_ROSTER_SIZE` to switch the play-bot population on — see [The play-bot population](#the-play-bot-population).)
    - **Advanced → Mounts**: add a **Volume Mount**, name `phong-data`, mount path `/data`. **This is the step that keeps player data across deploys** — skip it and every deploy silently resets profiles, ELO, and history.
    - **Advanced → Mounts, a SECOND one**: name `phong-backups`, mount path `/backups`. Dokploy builds the `Dockerfile` and does **not** read `docker-compose.yml`, so the `phong-backups` volume that compose declares does not exist here — you have to add it. Skipping it is quieter than skipping `/data` and just as bad: the `Dockerfile` `mkdir`s `/backups` so it is *writable inside the image layer*, the scheduler runs, snapshots appear, and every deploy throws them away. The boot log says so — `[backup] WARNING: BACKUP_DIR is not a mounted volume — every snapshot is written inside the container and destroyed by the next deploy` — which is the only way to catch it, since the directory exists, is writable, and every snapshot verifies. A **bind mount** to a host path works just as well as a named volume here; what matters is that something is mounted at `/backups` at all. A separate `[backup] note:` line about sharing a filesystem with `DATA_DIR` is not that alarm — it is true of a perfectly good bind mount on the same disk, and it is saying that one disk loss takes both copies, which is what offsite covers.
    - **Domains**: add `phong.too-many-coins.com`, container port **3000**, HTTPS on (Let's Encrypt).

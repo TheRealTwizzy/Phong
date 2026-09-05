@@ -355,6 +355,16 @@ export interface Room {
 export interface SeatRating {
   mmr: { mu: number; sigma: number };
   rank: { mu: number; sigma: number };
+  /**
+   * The DERIVED tier at match start, for the anti-farming band ladder.
+   *
+   * The string and not its inputs: `tierFor` reads rankMu, rankedGames,
+   * rankSigma and rankedDuels, and all four have moved by record time — the
+   * relay writes seat 0 first, so seat 1's own recording sees an opponent that
+   * has already played the match. Caching the derived value is also what stops
+   * the two seats disagreeing about which band they met in.
+   */
+  band: string;
 }
 
 /** What a client is told when the room's match (re)starts. */

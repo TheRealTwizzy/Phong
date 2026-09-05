@@ -316,9 +316,19 @@ describe('server-owned mission state', () => {
 
   it('returns the advanced missions on the match result itself', () => {
     init('m_result', 'MissionResult');
-    const res = db.recordMatch(match('m_result'));
+    // The clock is PINNED and one advancing mission is dealt by hand, for the
+    // reason the test above already carries: the hand is a seeded shuffle of
+    // (playerId, dayKey), so on the wall clock this asserted whatever today's
+    // shuffle happened to deal -- and on a day whose three regular slots hold
+    // nothing a solo win advances, it failed. What it exists to hold is that
+    // the RESULT carries the advanced missions, not that a random hand
+    // contains an advanceable one.
+    const day = new Date('2026-08-21T12:00:00Z');
+    db.getMissions('m_result', day);
+    dealInto('m_result', day, 0, 'mission_games');
+    const res = db.recordMatch(match('m_result'), {}, day);
     expect(res.missions).toHaveLength(REGULAR_SLOTS + ELITE_SLOTS);
-    expect(res.missions.some((m) => m.current > 0)).toBe(true);
+    expect(res.missions.some((m) => m.id === 'mission_games' && m.current > 0)).toBe(true);
   });
 });
 

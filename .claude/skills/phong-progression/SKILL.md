@@ -39,6 +39,10 @@ The coupling is arithmetic, not thematic, and it is invisible from either end.
 - **Never negative, and levels never regress.** `XP_FLOOR` (`:426`) is 45 and survives
   underneath everything, including fatigue: fatigue attacks the multiplier, never the floor.
   A loss used to pay the bare floor — about 25 losses to a level, which reads as nothing.
+  The claim is about what a MATCH can do, and it is exact: nothing on the record path can
+  lower a level. The one exception is a DEPLOYMENT event — `progress_reset_v1` cleared every
+  earned thing once, before the play-bots were allowed onto the ladder — and it is stamped so
+  it cannot recur. A second reset means a new key and a release note, never a softening here.
 - **Never add a route that takes an XP amount from the client.** `phong-persistence` owns the
   write path and states this too; the reason is worth carrying here because it is the constraint
   that shapes every reward you might want to add. Missions were once claimed via a client-chosen
@@ -64,9 +68,34 @@ reaches it, and Cyber Overlord is only ever reached through PvP** — and becaus
 under 37 is one even duel away from the apex (measured: Legend by solo match 41-49, the cap by
 73-84, Overlord off the second duel), the apex also asks for `OVERLORD_MIN_DUELS` (25) ranked
 duels. `tierFor` takes the count as a REQUIRED fourth argument so a caller cannot forget it,
-`duelsShortOf` is the one predicate the UI asks, `players.rankedDuels` is counted only for a
-result that is PvP and `ranksThisMatch`, and tier trophies read the DERIVED tier so
+`duelsShortOf` is the one predicate the UI asks, and tier trophies read the DERIVED tier so
 `tier_overlord` cannot fire while the badge says Legend.
+
+**`players.rankedDuels` is counted for a result that is PvP, `ranksThisMatch` AND not
+hard-capped** — the third clause is `advancesLadder`, which a saturation cap makes different from
+`ranksThisMatch` — **and against a BOT a human may bank at most `BOT_DUEL_CREDITS_PER_DAY` (5) a
+UTC day**. That cap is a qualification counter and NOT a saturation layer: it multiplies no mu and
+no sigma, and the 6th bot duel of a day rates exactly like the 5th. Spell its guard
+`!selfIsBot && oppIsBot` and never `oppIsBot` alone — in bot-vs-bot every participant's opponent
+is a bot, so the looser spelling throttles a BOT's own credits and bot-vs-bot stops progressing
+like the equivalent human duel.
+
+**A match against a play-bot is worth less, and repeating it is worth nothing.**
+`participantWeights` (`src/playbotRating.ts`) is the ONE predicate; nothing else may re-derive a
+weight. The human side of human-vs-bot takes ×0.70 on mu in both directions and ×0.70 sigma, on
+BOTH estimators, and that base weight is **unconditional on eligibility** — a Casual bot duel
+moves no visible rank and its hidden update still carries the ×0.70. Three saturation ladders
+compose on top (same pair, same bot rank band, all bot matches today), each ending in a hard cap
+that zeroes mu AND sigma and increments neither counter. Eligibility for all of it is exactly
+`ranksThisMatch`, REUSED — the near-copy `ranked && venueRates && !forceUnrankedLadder` drops the
+solo arm. XP is untouched everywhere, hard caps included.
+
+**A bot's own strength is a persistent TRAIT and never its rating.** That is the reversal from the
+solo AI, which derives competence from the player's mu so the ladder adapts; derived from its own
+results a bot's strength would chase them and the rating would stop measuring anything. Creation
+may seed and nothing after it may steer — there is no `UPDATE bot_accounts` anywhere in the
+server, and a test asserts that absence rather than the trait module's shape, because the module
+has no writer precisely BECAUSE the database owns the write.
 
 **Adaptation is asymmetric on purpose** (`AI_ADAPT_STRENGTH` 0.6 up, `AI_ADAPT_DOWN_STRENGTH`
 0.85 down, `:114`/`:126`), and it has been wrong in BOTH directions, so read the numbers before

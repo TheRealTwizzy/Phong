@@ -4,7 +4,7 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { DATA_DIR, db, RecordMatchContext } from './server/db';
+import { DATA_DIR, db, isBotAccount, RecordMatchContext } from './server/db';
 import { BOT_ROSTER } from './server/bots';
 import {
   clearSessionCookie,
@@ -67,6 +67,12 @@ import {
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
+import {
+  PlaybotSupervisor,
+  liveStateFrom,
+  bandCentreFor,
+  OPEN_VENUES,
+} from './server/playbotSupervisor';
 import {
   DEFAULT_VENUE_ROOM,
   MATCHMAKING_ROOM,
@@ -530,6 +536,11 @@ function queueCandidate(entry: QueueEntry): Candidate | null {
     sigma: rating.sigma,
     joinedAt: entry.joinedAt,
     rttMs: entry.rttMs,
+    // From bot_accounts (D26), never from the id. This is the one call site
+    // `Candidate.isBot` being REQUIRED exists to catch: optional, it would
+    // default to false here and every play-bot would pair as a human, which
+    // is precisely the type-blind matcher §4.12 replaces.
+    isBot: isBotAccount(entry.deviceId),
   };
 }
 
@@ -960,6 +971,8 @@ function duelStartRatings(room: Room): Array<SeatRating | null> {
       return {
         mmr: { mu: p.mmrMu, sigma: p.mmrSigma },
         rank: { mu: p.rankMu, sigma: p.rankSigma },
+        // Derived HERE, once, and cached with the ratings it belongs beside.
+        band: p.tier,
       };
     };
     room.startRatings = [sample(0), sample(1)];
@@ -1041,6 +1054,11 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
   const matchKey = duelMatchKey(room.id, room.matchSeq);
   const rules = room.config.rules;
   const ratingBefore = duelStartRatings(room);
+  // ONE anchor for both seats, so the two read the identical rolling window in
+  // the anti-farming store and can never sit at different points on the same
+  // ladder. A per-seat `new Date()` would differ by however long the first
+  // seat's ~30 queries take.
+  const decidedAt = new Date();
   const recorded: Array<{
     seat: 0 | 1;
     player: NonNullable<Room['players'][0]>;
@@ -1090,6 +1108,17 @@ function recordRoomMatch(room: Room, opts: { winnerSeat?: 0 | 1; forgivenLoss?: 
     if (oppRating) {
       context.opponentRating = oppRating.mmr;
       context.opponentRankRating = oppRating.rank;
+      // The band the opponent was in when the match STARTED, never re-derived.
+      context.opponentBand = oppRating.band;
+    }
+    // The verified device id and NOT `them.playerId`, which is whatever the
+    // client sent on create_room/join_room: keyed on that, a farming client
+    // sends a fresh id every match and never leaves the first band. Absent for
+    // a cookieless opponent, which is right — there is no account to key on,
+    // so no exposure row forms.
+    if (them.deviceId) {
+      context.opponentId = them.deviceId;
+      context.decidedAt = decidedAt;
     }
     // Only the LEAVER's copy is spared the ladder by a forgiven abandon; the
     // survivor's win rates on its own merits either way.
@@ -1567,7 +1596,18 @@ async function startServer() {
       tables.push({
         id: room.id,
         hostName: room.players[0]?.playerName ?? null,
+        // Seat 0 alone, which is what "host" means and is why it is not the
+        // answer to "is anybody here". A table outlives its host (§1): seat 0
+        // empties, seat 1 stays, and the row then lists a live table with a
+        // null host. `seatedIds` says who is actually sitting at it.
         hostId: room.players[0]?.playerId ?? null,
+        // Everybody holding a PLAYING seat on a live socket, in seat order.
+        //
+        // The same `seated` list the "has a live player" filter above is built
+        // from, so the row cannot name somebody the listing does not count.
+        // No wider a disclosure than `hostId` beside it — the same field, for
+        // the other chair, on a table that is public by definition.
+        seatedIds: seated.map((p) => p!.playerId),
         // The CPU counts as an occupant HERE, and deliberately not below.
         // The two fields answer different questions and only one of them
         // changed when the machine learned to give up its chair.
@@ -2256,6 +2296,47 @@ async function startServer() {
           context.forceUnranked = true;
           if (!payload.matchKey) {
             payload.matchKey = `unvouched:${req.deviceId}:${seq ?? 'x'}`;
+          }
+        } else {
+          // A vouched payload has a TRUSTED opponent, and this path never said
+          // so — which quietly took the anti-farming ladders off every duel
+          // this POST happened to record first.
+          //
+          // The relay normally wins that race and files the exposure rows
+          // itself, because a relayed duel decides inside `point_scored` and
+          // this POST needs a round trip. A P2P duel has no such ordering: the
+          // deciding `match_sync` travels the WebSocket while this travels
+          // HTTP, and CLAUDE.md §5 documents the winner's own report
+          // legitimately arriving first. Whichever lands first is the one that
+          // PAYS — the other is answered by the ledger — so a pair replaying
+          // P2P duels never accumulated a pair count and never reached the
+          // human pair band at all.
+          //
+          // The four clauses above are exactly what §4.4 asks for: a live seat
+          // this caller holds, an opponent in the other one, and a sequence
+          // naming a match this room started after they sat down. So the id
+          // comes from the ROOM, never from the payload, and it is the
+          // verified DEVICE id for the reason recordRoomMatch gives — a
+          // client-chosen one is a fresh id every match and never leaves band
+          // one. Absent for a cookieless opponent, which is right: no account,
+          // no row.
+          const them = room.players[seat === 0 ? 1 : 0];
+          if (them?.deviceId) {
+            context.opponentId = them.deviceId;
+            // The band the relay would have used: the START-of-match tier off
+            // the room's own cache, never re-derived here (§4.3 — by now both
+            // ratings have moved and `tierFor` reads counters that have moved
+            // with them).
+            const band = duelStartRatings(room)[seat === 0 ? 1 : 0]?.band;
+            if (band) context.opponentBand = band;
+            // `decidedAt` is deliberately left to default. The relay stamps
+            // the match's own decided-at and both its rows share it; here the
+            // two seats can be paid by different paths, so an anchor from this
+            // one would differ from the relay's by the width of the race that
+            // caused it — a few hundred ms against a 24-hour window, on rows
+            // that are otherwise identical. Sharing it would mean a new
+            // per-PAIR field on Room and an entry in resetTableForNextPair
+            // (§5's bug class) to buy nothing measurable.
           }
         }
       }
@@ -4388,6 +4469,128 @@ async function startServer() {
     }
   });
 
+  /**
+   * The play-bot population, and it starts with the process (§7 step 22).
+   *
+   * OFF unless `PLAYBOT_ROSTER_SIZE` says otherwise, which is §5's rule about
+   * the population being a tunable with a measured ceiling rather than a
+   * constant: nothing ships a default before step 27 has run the load test,
+   * and a roster of 0 provisions nothing and burns no usernames. The size is
+   * passed IN rather than gating the construction, so ONE place decides
+   * whether there is a population and it is `start()` — gated in both, that
+   * guard is unreachable and a mutation removing it reddens nothing.
+   *
+   * It talks to this same process over `127.0.0.1` — the ordinary HTTP and WS
+   * doors, every gate included. Loopback is rate-limit exempt by design
+   * (CLAUDE.md §5), so this needs no exemption of its own, and there is
+   * deliberately no privileged in-process shortcut: that would be a second
+   * door past `requireActiveSession` and the WS upgrade.
+   */
+  const playbots = new PlaybotSupervisor({
+    base: `http://127.0.0.1:${PORT}`,
+    wsUrl: `ws://127.0.0.1:${PORT}/ws`,
+    rosterSize: Number(process.env.PLAYBOT_ROSTER_SIZE) || 0,
+    tickMs: Number(process.env.PLAYBOT_TICK_MS) || undefined,
+    // The SERVER's own db handle, so a marker row and the `isBotAccount` cache
+    // that reads it move together. A separate connection would write the row
+    // and leave this process still classifying that account as a human —
+    // rating it at full stakes, badging it as a person, counting it in a
+    // human's ladder lane — with nothing anywhere to see.
+    store: {
+      load: () => db.playbotAccounts(),
+      save: (botId, cookie, traits) => db.rememberPlaybot(botId, cookie, traits),
+      // Both sides on the MATCHMAKER's own estimator, which is the one that
+      // decides whether the pair this preference is about could happen at all
+      // (`queueCandidate` reads the same pair). Reading self on the visible
+      // ladder and the candidates on the hidden one would be §7's
+      // each-estimator-against-its-own-counterpart rule broken in a place
+      // nothing renders, so it comes back from one call.
+      pairingView: (selfId, ids) => ({
+        self: db.matchmakingRating(selfId) ?? newRating(),
+        candidates: ids.map((id) => {
+          const seen = db.pairHistory(selfId, id);
+          return {
+            id,
+            isBot: isBotAccount(id),
+            ...(db.matchmakingRating(id) ?? newRating()),
+            recentPairCount: seen.count,
+            lastPlayedAt: seen.lastAt,
+          };
+        }),
+      }),
+    },
+    live: () => {
+      // Built ONCE and read twice — by the demand count and by the band centre
+      // below — so the table the controller is told about and the player it
+      // ranks the roster against can never be two different people.
+      //
+      // A public table with one playing seat filled is somebody waiting for an
+      // opponent, which is unmet demand of the same kind an odd queue is — and
+      // it is counted only when that somebody is a HUMAN. The population's own
+      // empty tables are not demand: counted, a roster that prefers hosting
+      // reads its own parked tables as people to serve and activates more bots
+      // to open more of them.
+      //
+      // Demand and the search have to name the SAME venues, or the count asks
+      // for bots the dispatch cannot spend. `openTable` looks in OPEN_VENUES
+      // and nowhere else, so a human hosting in `intermediate` was counted
+      // here, a bot was activated to serve them, it searched two rooms it was
+      // never in, found nothing and opened a table of its own — while that
+      // human went on waiting. Narrowed here rather than widened there,
+      // deliberately: the other brackets gate who may PLAY, so a bot walking
+      // into one has to clear `roomEntryVerdict` on its own tier, and the
+      // search would have to carry that judgement. Counting only what the
+      // population can actually serve is the honest half.
+      const openTables = [...rooms.values()].filter((r) => {
+        const seated = r.players.filter(Boolean);
+        return (
+          r.visibility === 'public' &&
+          OPEN_VENUES.includes(r.venueRoomId) &&
+          seated.length === 1 &&
+          !isBotAccount(seated[0]!.playerId) &&
+          // A human playing the MACHINE has one real player at their table, so
+          // it read as somebody waiting for an opponent — and mid-match the
+          // machine's chair is not claimable, so the bot activated to serve
+          // them could not join and hosted a table of its own instead. Enough
+          // concurrent CPU players would activate the whole roster as though
+          // all of them were waiting, which is the fading population bound
+          // defeated by people who are not waiting at all.
+          //
+          // The same predicate the LISTING asks, so the row a bot can tap and
+          // the demand that sends it there cannot disagree — the rule the
+          // venue filter below is already an instance of.
+          (!r.config.cpu || cpuSeatClaimable(r))
+        );
+      });
+      return liveStateFrom({
+        connectedIds: [...liveSockets].map((e) => e.deviceId),
+        queue: queue.map((e) => ({ playerId: e.playerId, joinedAt: e.joinedAt })),
+        // The VENUE of each rather than only how many there are, and one entry
+        // per table so its length IS the count and the two answers cannot
+        // disagree.
+        openTableVenues: openTables.map((r) => r.venueRoomId),
+        now: Date.now(),
+        isBot: (id) => isBotAccount(id),
+        bandCentre: bandCentreFor({
+          queue,
+          // The same list the demand count is built from, one entry per lone
+          // occupant — see `bandCentreFor` for why the queue outranks it.
+          tables: openTables.map((r) => ({
+            playerId: r.players.filter(Boolean)[0]!.playerId,
+            waitingSince: r.soloSince ?? r.lastActive,
+          })),
+          isBot: (id) => isBotAccount(id),
+          ratingOf: (id) => db.matchmakingRating(id)?.mu ?? null,
+        }),
+      });
+    },
+  });
+  // Never fatal: a population that cannot start is a server with no bots in
+  // it, which is exactly what every deployment ran until now.
+  void playbots.start().catch((e: any) => {
+    console.warn('[playbot] population did not start:', e?.message ?? e);
+  });
+
   // Render stops the old instance on every deploy of a disk-backed service;
   // close sockets and the listener cleanly instead of dying mid-request.
   const shutdown = (signal: string, code = 0) => {
@@ -4397,6 +4600,11 @@ async function startServer() {
     if (shuttingDown) return;
     // Before a single socket is closed: every close below runs vacateSeat.
     shuttingDown = true;
+    // Stop the population's clock first, so nothing reconnects into a server
+    // that is closing. Its drivers' sockets are closed by the loop below like
+    // any other client, and `shuttingDown` is what stops those closes being
+    // charged as abandons.
+    void playbots.stop();
     console.log(`${signal} received, shutting down`);
     for (const client of wss.clients) {
       client.close(1001, 'Server restarting');

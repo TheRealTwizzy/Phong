@@ -43,6 +43,7 @@ import {
   PADDLE_HEIGHT,
   PADDLE_WIDTH_RATIO,
   BALL_BASE_RADIUS,
+  BALL_ENTRY_Y,
   BASE_BALL_SPEED,
   physicsSubsteps,
   bounceOffReturnLine,
@@ -2260,7 +2261,7 @@ export default function App() {
         const inc = msg.ball;
         setBall({
           x: inc.x,
-          y: 0.02,
+          y: BALL_ENTRY_Y,
           vx: inc.vx,
           vy: inc.vy,
           radius: ballRadiusRef.current,
@@ -3461,7 +3462,7 @@ export default function App() {
             // Spawn ball on unseen Opponent AI's half court
             setOppBall({
               x: Math.max(0.02, Math.min(0.98, 1 - b.x)),
-              y: 0.02,
+              y: BALL_ENTRY_Y,
               vx: -b.vx,
               vy: Math.abs(b.vy),
               radius: b.radius,
@@ -3595,7 +3596,7 @@ export default function App() {
           // Re-emerge onto player's half court at top net!
           setBall({
             x: Math.max(0.02, Math.min(0.98, 1 - ob.x)),
-            y: 0.02,
+            y: BALL_ENTRY_Y,
             vx: -ob.vx,
             vy: Math.abs(ob.vy),
             // Mirrored, the same as every other crossing. This literal had no

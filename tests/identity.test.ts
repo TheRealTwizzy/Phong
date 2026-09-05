@@ -305,6 +305,17 @@ describe('moving an account', () => {
     db.recordMatch({ ...win(from), mode: 'solo', difficulty: 'rookie', matchKey: 'move:solo:1' } as never);
     db.recordAbandon(from); // daily_abandons
     db.recordPractice(from, { bestStreak: 4, earnedStreak: 4, endStreak: 4 }); // daily_practice
+    // competitive_exposure: written per participant per eligible match. Its
+    // OTHER identity-bearing column, `oppId`, is not covered by this list and
+    // is asserted separately — the list can only see `playerId`.
+    db.recordExposure({
+      playerId: from,
+      oppId: 'dev_aaaaaaaaaaaaaaaa39',
+      matchKey: 'move:exposure:1',
+      at: new Date(),
+      oppIsBot: false,
+      oppBand: 'ace',
+    });
     // The two tables nothing above reaches deterministically (mission
     // progress only advances for tasks the dealt hand happens to hold, and an
     // elite completion needs a finished elite task) get their rows by hand.
@@ -355,6 +366,66 @@ describe('moving an account', () => {
     } finally {
       raw.close();
     }
+  });
+
+  it('carries pair history from BOTH directions, so the anti-farm ladder continues', () => {
+    // competitive_exposure is the first table here with TWO identity-bearing
+    // columns, and PLAYER_KEYED_TABLES can only see one of them. Rows where
+    // the moved account is `playerId` travel the normal loop; rows where it is
+    // `oppId` have to be rewritten explicitly.
+    //
+    // Steps 3 and 5 are separate assertions on purpose: rewriting the rows and
+    // still resetting the counter look IDENTICAL at the schema level. If the
+    // opponent's rows are missed the pair reads brand new, and the same-pair
+    // ladder restarts at match #1 — a free anti-farm reset available to anyone
+    // willing to sign in on a second browser.
+    const opponent = 'dev_aaaaaaaaaaaaaaaa41';
+    const from = 'dev_aaaaaaaaaaaaaaaa42';
+    const to = 'dev_aaaaaaaaaaaaaaaa43';
+    init(opponent, 'PairStays');
+    init(from, 'PairMoves');
+    const at = new Date();
+    const counts = () =>
+      db.exposureCounts({
+        playerId: opponent, oppId: to, matchKey: 'pair:next',
+        at, oppBand: 'ace', humanVsBot: false,
+      }).priorPairCount;
+
+    // Four matches between them, each writing one row per seat.
+    for (let i = 0; i < 4; i += 1) {
+      const key = `pair:move:${i}`;
+      const when = new Date(at.getTime() - (i + 1) * 60_000);
+      db.recordExposure({ playerId: opponent, oppId: from, matchKey: key, at: when, oppIsBot: false, oppBand: 'ace' });
+      db.recordExposure({ playerId: from, oppId: opponent, matchKey: key, at: when, oppIsBot: false, oppBand: 'ace' });
+    }
+    // Before the move the pair is four deep from the side that is NOT moving.
+    expect(
+      db.exposureCounts({
+        playerId: opponent, oppId: from, matchKey: 'pair:next',
+        at, oppBand: 'ace', humanVsBot: false,
+      }).priorPairCount
+    ).toBe(4);
+
+    const code = db.getProfile(from).recoveryCode!;
+    expect(db.signInWithCode(code, to)).not.toBeNull();
+
+    const raw = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      const stale = raw
+        .prepare('SELECT COUNT(*) AS n FROM competitive_exposure WHERE playerId = ? OR oppId = ?')
+        .get(from, from) as { n: number };
+      expect(stale.n).toBe(0);
+      const moved = raw
+        .prepare('SELECT COUNT(*) AS n FROM competitive_exposure WHERE playerId = ? OR oppId = ?')
+        .get(to, to) as { n: number };
+      expect(moved.n).toBe(8);
+    } finally {
+      raw.close();
+    }
+
+    // The next match between the same two people is their FIFTH, not their
+    // first. This is the assertion the rewrite exists for.
+    expect(counts()).toBe(4);
   });
 
   it('still pays a moved account exactly once per match', () => {
@@ -418,6 +489,17 @@ describe('deleting an account', () => {
       difficulty: 'rookie', isWinner: true, matchKey: 'delete:solo:1',
     } as never);
     db.recordPractice(device, { bestStreak: 4, earnedStreak: 4, endStreak: 4 });
+    // One row where this account is the player, one where it is the OPPONENT:
+    // the second is invisible to PLAYER_KEYED_TABLES and is the one that
+    // survives a delete unless deleteAccount asks for it by name.
+    db.recordExposure({
+      playerId: device, oppId: 'dev_aaaaaaaaaaaaaaaa44', matchKey: 'delete:exp:1',
+      at: new Date(), oppIsBot: false, oppBand: 'ace',
+    });
+    db.recordExposure({
+      playerId: 'dev_aaaaaaaaaaaaaaaa44', oppId: device, matchKey: 'delete:exp:1',
+      at: new Date(), oppIsBot: false, oppBand: 'ace',
+    });
     // Held tasks, a reroll allowance row, a day-keyed abandon: the day-keyed
     // working state a live account accumulates without being asked.
     db.getMissions(device);
@@ -442,6 +524,14 @@ describe('deleting an account', () => {
       const links = raw.prepare('SELECT COUNT(*) AS n FROM device_links WHERE deviceId = ? OR playerId = ?')
         .get(device, device) as { n: number };
       expect(links.n).toBe(0);
+      // Both identity-bearing columns, not only the one the loop above walks.
+      // Deleting UNDER-counts a survivor's pair history, which errs toward
+      // leniency and self-heals inside the 48h prune window — the safe
+      // direction, and the reason this is a delete rather than a rewrite.
+      const exposure = raw
+        .prepare('SELECT COUNT(*) AS n FROM competitive_exposure WHERE playerId = ? OR oppId = ?')
+        .get(device, device) as { n: number };
+      expect(exposure.n).toBe(0);
     } finally {
       raw.close();
     }

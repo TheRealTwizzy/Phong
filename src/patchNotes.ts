@@ -35,6 +35,19 @@ export interface PatchNote {
 export const PATCH_NOTES: PatchNote[] = [
   {
     version: APP_VERSION,
+    date: '2026-09-05',
+    lines: [
+      'Everyone starts the new ladder from zero: rank, level, XP, stats, match history, achievements and the themes and titles they unlocked.',
+      'Your account is untouched \u2014 same name, same avatar, same sign-in. Only what was earned resets.',
+      'The ladder has players on it around the clock. Quick Match finds you a game even when nobody else is online.',
+      'They are real opponents with real records \u2014 they win, lose, level up and climb past you while you sleep.',
+      'A match against one counts for rank, at about two thirds of what the same result against a person would move.',
+      'Play the same one again and again and it counts for less each time, then stops. Nobody can farm a tier out of it.',
+      'Tap their name anywhere and their profile opens like anyone else\u2019s, marked BOT, with the record they earned.',
+    ],
+  },
+  {
+    version: '1.1.0',
     date: '2026-09-03',
     lines: [
       'Cyber Overlord now takes 25 ranked duels as well as the rating. Until then you hold Legend, and your profile counts the way there.',

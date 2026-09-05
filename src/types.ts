@@ -438,7 +438,11 @@ export interface PublicProfile {
   cosmetic?: CosmeticId;
   /** The title the owner wears, shown beside their name. */
   title?: TitleId;
-  dailyStreak: number;
+  /**
+   * Consecutive active days — omitted entirely for a bot, which has no habit
+   * to describe (§4.11). Absent rather than 0, so nothing renders a value.
+   */
+  dailyStreak?: number;
   // Tier only — a public profile never exposes raw mu/sigma numbers.
   tier: Tier;
   /**
@@ -565,6 +569,24 @@ export interface MatchRecord {
    * and render as un-ranked.
    */
   ranked?: number | null;
+  /**
+   * 1 = this match ACTUALLY MOVED the visible ladder, 0 = it did not.
+   *
+   * The same question as `ranked` until an anti-farming ladder could zero an
+   * update: a hard-capped match keeps its real ranked classification here and
+   * moves nothing. null marks a row from before the column existed.
+   */
+  advancedLadder?: number | null;
+  /**
+   * 1 = this match credited a `rankedDuel`, 0 = it did not.
+   *
+   * NOT derivable from `advancedLadder`, which is the whole reason it exists:
+   * a human's 6th bot duel of a UTC day really did move the visible ladder and
+   * still credited nothing, so a recount over that column over-counts by
+   * exactly the capped duels — and the recount applies its result with MAX, so
+   * the over-count would be permanent.
+   */
+  rankedDuelCredited?: number | null;
 }
 
 export interface LeaderboardEntry {

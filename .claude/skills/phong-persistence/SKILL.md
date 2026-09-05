@@ -61,7 +61,9 @@ moved. Make that a decision.
 ## 3. A one-shot migration is flagged, and a wipe re-stamps everything
 
 Non-destructive fixes (`placement_sigma_v1`, `tasks_reset_v1`, `ranked_backfill_v1`,
-`chaos_relabel_v1`) and destructive wipes (`wipe_v1`…`wipe_v4`) are keyed in the `meta` table
+`chaos_relabel_v1`, `shutout_recount_v1`, `bot_accounts_backfill_v1`,
+`advanced_ladder_backfill_v1`, `ranked_duel_credited_backfill_v1`), the destructive
+`progress_reset_v1`, and destructive wipes (`wipe_v1`…`wipe_v4`) are keyed in the `meta` table
 so each runs at most once per database.
 
 The mechanism has one sharp edge: **every wipe clears `meta`, so every wipe must re-stamp ALL
@@ -78,7 +80,42 @@ Two more things about migrations here:
   safety net, but the backfill is what makes the data true.
 
 Each migration gets a suite: `db-wipe`, `taskReset`, `placementRescue`, `rankedBackfill`,
-`chaosRelabel`.
+`chaosRelabel`, `shutoutRecount`, `rankedDuelsBackfill`, `advancedLadder` (which covers both of
+the history-column backfills), `botIdentity` (`bot_accounts_backfill_v1`), `progressReset`.
+
+**A destructive one-shot that is not a wipe still erases every legacy fixture in the suite.**
+`progress_reset_v1` clears everything a player EARNED — both rating pairs, every counter, XP and
+level, achievements, the equipped cosmetic and title, `elite_completions`, `matches`,
+`recorded_matches`, `competitive_exposure` and the day-keyed tables — while keeping the row, the
+username, the avatar, the recovery code and `device_links`, so nobody is signed out. It runs LAST
+in `migrateSchema`, after every backfill. That ordering is right in production and lethal in a
+test: four suites hand-build a pre-migration database (`chaosRelabel`, `rankedBackfill`,
+`rankedDuelsBackfill`, `shutoutRecount`), and until they stamped `progress_reset_v1` alongside the
+wipe flags their migration ran correctly and its result was deleted before a single assertion.
+**A legacy fixture stamps every DESTRUCTIVE key, not just the wipes** — and the failure looks
+exactly like a broken migration, which is why it belongs here rather than in a comment.
+
+**A one-shot is INVISIBLE to any test that does not un-stamp it and re-import.** Its key is
+already in `meta` by the time a suite runs, so nothing drives it and a mutation to its SQL
+reddens nothing — measured. Clear the key, `vi.resetModules()`, re-import `server/db`, and assert
+the repair actually happened.
+
+**`playerId` is not the only identity-bearing column, and the live-schema walk cannot see the
+others.** `competitive_exposure` names TWO accounts (`playerId` and `oppId`): the first moves
+through `PLAYER_KEYED_TABLES` and the second is rewritten explicitly by `moveAccount` and deleted
+by `deleteAccount`. Rewriting the SQL correctly and still resetting the counter look identical at
+the schema level, so assert the CONTINUITY — the same pair's rolling count carries across a
+move — and not just the absence of the old id. `bot_accounts` is the mirror case: its column is
+`botId` deliberately, because a bot has no browser to be moved to and naming it `playerId` would
+force the roster into a list that carries rows onto a human's new device.
+
+**`bot_accounts` is the sole authoritative RUNTIME CLASSIFIER of bot identity, and it is cached.**
+`isBotAccount` reads an in-memory `Set`; the `bot-` prefix decides nothing and survives only where
+code reasons about the identifier NAMESPACE (the insert naming guard, the legacy backfill,
+`isLinkableId`). The cache is derived state with a lifecycle rule: after any COMMITTED mutation it
+must equal the table, so mutate it AFTER the transaction and never inside one. A rollback that
+left an id in the Set makes an ordinary human classify as a bot — reduced stakes on somebody
+else's rating — and because the table is the SOLE classifier, nothing downstream can notice.
 
 **`meta` is not only for migration flags.** Three rows hold the backup schedule —
 `backup_attempt_at`, `backup_ok_at`, `backup_upload_ok_at` — and they are there rather than in

@@ -28,6 +28,18 @@ import {
   DELETED_PLAYER_NAME,
 } from '../src/profileRules';
 import { isRankedRules, isShutout, SHUTOUT_MIN_POINTS, WINNING_SCORES } from '../src/matchRules';
+import {
+  normalizeTraits,
+  TRAIT_KEYS,
+  type PlaybotTraits,
+} from './playbotTraits';
+import {
+  BOT_DUEL_CREDITS_PER_DAY,
+  pairKindFor,
+  participantWeights,
+  type ExposureCounts,
+  type ParticipantWeights,
+} from '../src/playbotRating';
 
 /**
  * The most points a single match can legitimately put on either side: the
@@ -158,6 +170,43 @@ export interface RecordMatchContext {
    * a way for a losing player to keep their rating.
    */
   forceUnrankedLadder?: boolean;
+  /**
+   * The OPPONENT's account id, for the anti-farming exposure store.
+   *
+   * Supplied only by server code holding a live room, the rule `venueRoomId`
+   * and `forceUnranked` above already obey. `MatchEndPayload.opponentId` is
+   * client-supplied and is deliberately not used: keyed on it, a farming
+   * client sends a fresh id every match and never leaves band 1.
+   *
+   * Absent means no pair classification is performed AT ALL — not a defaulted
+   * one. That costs nothing, because an unvouched `multiplayer` payload is
+   * already `forceUnranked` with a device-scoped key, so it moves no rating
+   * for anti-farming to protect. Solo never sets it.
+   *
+   * There is deliberately no `opponentIsBot` beside it, here or on the wire:
+   * a boolean that travels is a boolean that can be wrong, and here wrong
+   * means a client claiming a human opponent to escape the reduced stakes, or
+   * a bot one to dodge a human pair's wider thresholds. It is derived from
+   * this id at the moment of use.
+   */
+  opponentId?: string;
+  /**
+   * The opponent's tier at MATCH START, from the room's own `duelStartRatings`
+   * cache — never re-derived at record time, where the opponent's rating has
+   * already moved (the relay writes seat 0 first) and `tierFor`'s other inputs
+   * have moved with it. Caching the derived string is also what stops the two
+   * seats disagreeing about the band.
+   */
+  opponentBand?: string;
+  /**
+   * The MATCH's decided-at, supplied once for both seats.
+   *
+   * Both exposure rows carry the identical anchor, so the two seats read the
+   * same rolling window and can never sit at different points on the same
+   * ladder. A per-seat `new Date()` is within milliseconds of it in the
+   * ordinary case and comes apart at exactly the boundary worth farming.
+   */
+  decidedAt?: Date;
 }
 
 // Overridable so production can point at a persistent volume (e.g. /data on
@@ -195,6 +244,45 @@ const WIPE_V3_KEY = 'wipe_v3';
 // — and the thresholds moved under them in the same release. There is no
 // conversion that would be honest, so the slate is cleared.
 const WIPE_V4_KEY = 'wipe_v4';
+
+/**
+ * The ladder is cleared before the play-bot population is let onto it.
+ *
+ * A ladder that bots and humans share has to start from one line, and every
+ * rating on disk was earned in a game whose only opponents were people and the
+ * solo AI. So ranks, career statistics, mode statistics, match history, XP,
+ * levels, achievements and the permanent unlocks those gate all go.
+ *
+ * IT IS NOT A WIPE, and the difference is the whole design. `wipe_v1`..`v4`
+ * DROP every table and clear `meta`, which retires every device cookie and
+ * makes every player re-onboard and re-pick a username — a released name can
+ * be taken by somebody else on the way back. Here IDENTITY SURVIVES: the
+ * account, the username, the avatar, the recovery code and every browser
+ * signed in to it are untouched, so a player opens the game and is still
+ * themselves, standing at the bottom of a ladder that has been reset. That
+ * also means this must NOT clear `meta` and must NOT re-stamp the wipe keys;
+ * the alternating-wipe hazard those carry does not apply to a migration that
+ * leaves the flag table alone.
+ *
+ * Two consequences are accepted rather than worked around. It BREAKS "levels
+ * never regress" (§7), which is an invariant enforced everywhere else and is
+ * broken here once, by instruction, at a moment chosen for it. And relocking
+ * achievements RELOCKS CONTENT — the AI ladder above Rookie, the longer
+ * winning scores, the earned cosmetics and titles — which needs no new code
+ * because `playableDifficulty`/`playableWinningScore` already clamp a stored
+ * setting down to what the profile has earned, and because the equipped
+ * cosmetic and title are cleared here rather than left painting a look the
+ * picker no longer offers.
+ *
+ * The CURATED ROSTER is exempt. Its rows are leaderboard furniture whose stats
+ * were seeded rather than earned, `bot_roster_v1` is already stamped so
+ * nothing would re-seed them, and zeroing them would leave the board showing
+ * accounts with nothing on them — worse than either keeping or removing them.
+ * A bot's record is not a player's progress. It runs AFTER `claimPrefixedBots`
+ * for exactly that reason: the exemption reads `bot_accounts`, so the roster
+ * has to be in it first or the exemption matches nobody.
+ */
+const PROGRESS_RESET_V1_KEY = 'progress_reset_v1';
 
 /**
  * The oldest a reported result may claim to be, for ordering purposes.
@@ -242,6 +330,25 @@ const WIPE_KEYS = [WIPE_V1_KEY, WIPE_V2_KEY, WIPE_V3_KEY, WIPE_V4_KEY];
  * short enough that the table stays small.
  */
 const RECORDED_MATCH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * The rolling window §2.3's same-pair count and §2.4's bot-rank-band count
+ * are measured over. Not the daily counters, which are a UTC CALENDAR day.
+ */
+const EXPOSURE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long an exposure row is kept.
+ *
+ * The horizon is set by the ROLLING windows plus a safety margin, so a row
+ * cannot be swept immediately before a boundary-sensitive pair or band
+ * lookup. The UTC-day counters query only the CURRENT calendar day, so every
+ * row they read is necessarily younger than 24 hours and fits inside this
+ * with room to spare -- that is a consequence, not the derivation. If any
+ * future counter looks at PRIOR days, this has to be revisited before it
+ * ships.
+ */
+const EXPOSURE_TTL_MS = 48 * 60 * 60 * 1000;
 
 /**
  * A daily-task slot whose tier has nothing fresh left to deal today. Matches
@@ -305,8 +412,39 @@ export interface ReportRow {
   readAt: string | null;
 }
 
+/**
+ * Every id in `bot_accounts`, held in memory because this is a hot path --
+ * every recordMatch and every leaderboard row asks it.
+ *
+ * The TABLE is the authority and this is only a cache, so after any COMMITTED
+ * mutation the two must be equal. That is not automatic: a cache written
+ * before its INSERT lands leaves an id the cache calls a bot and the table has
+ * never heard of, and because this is the sole classifier nothing downstream
+ * can notice. So every write here happens AFTER the row is committed, never
+ * before -- see `insertBot`, and `tests/botIdentity.test.ts` for the reachable
+ * form of that failure (a roster name a human already holds throws, and the
+ * skipped bot must not be cached).
+ */
+const botAccountIds = new Set<string>();
+
+/**
+ * Is this account a bot? The one question, answered in one place.
+ *
+ * Deliberately NOT `id.startsWith('bot-')`. The prefix survives as a naming
+ * convention that `insertBot` enforces on what may be WRITTEN; it decides
+ * nothing about what an account IS.
+ */
+export function isBotAccount(id: string | null | undefined): boolean {
+  return typeof id === 'string' && botAccountIds.has(id);
+}
+
 export const PLAYER_KEYED_TABLES = [
   'avatars',
+  // competitive_exposure carries a SECOND identity-bearing column, `oppId`,
+  // which this list cannot see: membership here moves and deletes the rows
+  // where the account is `playerId`, and the opponent-side rows are handled
+  // explicitly beside it.
+  'competitive_exposure',
   'player_mode_stats',
   'daily_missions',
   'daily_mission_slots',
@@ -440,8 +578,27 @@ interface PlayerRow {
  * 'overlord' while the board refuses to list it, and numbering a row nobody
  * can see it beside is how the badge and the Ranks page come to disagree.
  */
+/**
+ * Whether this row is given a ladder position at all — ELIGIBILITY, and not
+ * the same question as who is counted above it (see `ladderPosition`).
+ *
+ * There is deliberately NO bot clause here. A play-bot is a persistent
+ * participant with a real record that beats people and climbs past them, so
+ * "cannot have a number" was never the right meaning for bot identity: what a
+ * bot must not do is occupy or shift the ordinal a HUMAN sees, and that is a
+ * property of the lane it is counted in rather than of whether it has one.
+ * Removing the clause is §4.9's change; RE-SPELLING it against `bot_accounts`
+ * — which is what step 5 left in place — keeps every bot numberless and is the
+ * contradiction that section was written to resolve.
+ *
+ * The other two clauses stay and are load-bearing. The tier gate is the board's
+ * own membership test rather than just a rating, or a row the board refuses to
+ * print still gets a number — an uninitialized profile is placed and rated like
+ * any other row, takes 'overlord' from `tierFor`, and would be handed #1 for a
+ * ladder it does not appear on.
+ */
 function onLadder(p: PlayerProfile): boolean {
-  return p.tier === 'overlord' && Boolean(p.initializedAt) && !p.id.startsWith('bot-');
+  return p.tier === 'overlord' && Boolean(p.initializedAt);
 }
 
 function rowToProfile(row: PlayerRow): PlayerProfile {
@@ -594,12 +751,26 @@ class GameDatabase {
         mode TEXT NOT NULL,
         difficulty TEXT,
         timestamp TEXT NOT NULL,
-        -- 1 = this match actually moved the visible ladder (ranksThisMatch at
-        -- record time), 0 = it did not. Rows from before the column existed
+        -- 1 = this match was PLAYED under ranked conditions (ranksThisMatch at
+        -- record time), 0 = it was not. It used to say "actually moved the
+        -- visible ladder", which was the same thing until an anti-farming
+        -- ladder could zero an update: a hard-capped match keeps its real
+        -- classification here and moves nothing, which is what History's
+        -- Ranked filter is about. Rows from before the column existed
         -- were classified once by ranked_backfill_v1 from mode + difficulty
         -- (rules assumed stock — see backfillMatchRanked); a NULL still reads
         -- as un-ranked everywhere, as the safety net for any straggler.
-        ranked INTEGER
+        ranked INTEGER,
+        -- 1 = this match ACTUALLY MOVED the visible ladder. The same question as
+        -- ranked until an anti-farming ladder could zero an update; filled on
+        -- legacy rows by advanced_ladder_backfill_v1, which copies ranked.
+        advancedLadder INTEGER,
+        -- 1 = this match credited a rankedDuel. A THIRD question, and the one
+        -- backfillRankedDuels recounts from: §2.7's daily allowance means a
+        -- human's 6th bot duel of a day advanced the ladder and credited
+        -- nothing, so a recount over advancedLadder over-counts by exactly the
+        -- capped duels -- permanently, since the recount applies MAX.
+        rankedDuelCredited INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_matches_p1 ON matches(player1Id);
       CREATE INDEX IF NOT EXISTS idx_matches_p2 ON matches(player2Id);
@@ -841,6 +1012,100 @@ class GameDatabase {
       -- The support CLI reads newest-first and filters on unread; both are
       -- this index.
       CREATE INDEX IF NOT EXISTS idx_reports_created ON reports (createdAt DESC);
+
+      -- WHAT MAKES AN ACCOUNT A BOT. The bot- id prefix is a naming
+      -- convention and nothing else: a row here is the authority, and every
+      -- functional check asks isBotAccount rather than the id.
+      --
+      -- The column is botId and emphatically NOT playerId, which is
+      -- load-bearing rather than cosmetic. tests/identity.test.ts walks the
+      -- LIVE schema for any table carrying a playerId column and requires it
+      -- in PLAYER_KEYED_TABLES -- whose move test then populates every listed
+      -- table and asserts it arrives on the new device. A bot has no browser,
+      -- so it is never moved between devices and never deleted by a player;
+      -- naming the column playerId would force this table into a list it must
+      -- not be in, and a sign-in would start carrying roster rows onto a
+      -- human's new device.
+      --
+      -- The trait columns are what one bot IS, as opposed to what its results
+      -- have made of it. Seeded at creation from the id and NEVER written
+      -- again: a controller may choose which existing bots play and where, and
+      -- may not assign a rank, clamp one toward a target, or retune competence
+      -- to manufacture a ladder distribution. Nullable with defaults, so a
+      -- roster row from before traits existed reads as an ordinary bot.
+      --
+      -- Separate columns rather than a JSON blob because the population
+      -- controller filters on them, and a blob would make every such question
+      -- a scan plus a parse.
+      CREATE TABLE IF NOT EXISTS bot_accounts (
+        botId TEXT PRIMARY KEY,
+        createdAt TEXT NOT NULL,
+        -- The device cookie this play-bot holds, so a restart comes back to the
+        -- SAME account instead of minting a new one. A play-bot's id is ISSUED
+        -- (it onboards through the ordinary doors), so it cannot be
+        -- re-derived: without this every boot burns another username out of the
+        -- pool for good and strands the previous account's rating and history.
+        --
+        -- NULL for the curated roster, which holds no credential and is not
+        -- drivable -- that is exactly what separates the two kinds of row here.
+        deviceCookie TEXT,
+        skill REAL,
+        volatility REAL,
+        aggression REAL,
+        spinRead REAL,
+        rankedBias REAL,
+        queueAppetite REAL,
+        hostAppetite REAL,
+        joinAppetite REAL,
+        rematchAppetite REAL
+      );
+
+      -- WHAT THE THREE ANTI-FARMING LADDERS COUNT. One row per PARTICIPANT
+      -- per eligible match, never one row per match: all four counters are
+      -- then single-column-prefix index scans on one table, and each seat
+      -- reads its own history without a self-join.
+      --
+      -- Deliberately not counted from matches, which insertMatch trims to
+      -- the newest 500 rows per player: a bot playing continuously exceeds
+      -- 500 a day, so the window would silently lose rows for exactly the
+      -- accounts the safeguard is for.
+      --
+      -- at is the MATCH's decided-at, supplied once by the vouching room
+      -- and identical on both seats' rows, so the two read the same window
+      -- and can never be at different points on the same ladder.
+      --
+      -- oppBand is the opponent's tier at MATCH START, on EVERY row and
+      -- every pair kind. There is no sentinel -- not NULL, not '', not
+      -- 'human' -- because a column meaning "the opponent's start tier" on
+      -- some rows and "which kind of thing this was" on others is a column
+      -- that gets read wrong the first time a second query wants it, and
+      -- oppIsBot already answers the kind question. Only §2.4's human-vs-bot
+      -- band saturation consumes it today; the meaning is uniform anyway.
+      --
+      -- duelCredited is the LIVE half of the ranked-duel credit decision,
+      -- for today's allowance only. The durable copy is matches.rankedDuelCredited:
+      -- this table is pruned at 48h, so it is not a reconstruction source.
+      CREATE TABLE IF NOT EXISTS competitive_exposure (
+        playerId     TEXT NOT NULL,
+        oppId        TEXT NOT NULL,
+        matchKey     TEXT NOT NULL,
+        at           TEXT NOT NULL,
+        day          TEXT NOT NULL,
+        oppIsBot     INTEGER NOT NULL,
+        oppBand      TEXT NOT NULL,
+        duelCredited INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playerId, matchKey)
+      );
+      CREATE INDEX IF NOT EXISTS idx_exposure_pair
+        ON competitive_exposure (playerId, oppId, at);
+      CREATE INDEX IF NOT EXISTS idx_exposure_band
+        ON competitive_exposure (playerId, oppIsBot, oppBand, at);
+      CREATE INDEX IF NOT EXISTS idx_exposure_day
+        ON competitive_exposure (playerId, oppIsBot, day);
+      -- The sweep, which runs on every recorded match and must find nothing
+      -- rather than scan the table -- the reason recorded_matches has one.
+      CREATE INDEX IF NOT EXISTS idx_exposure_at
+        ON competitive_exposure (at);
     `);
   }
 
@@ -854,6 +1119,84 @@ class GameDatabase {
     this.applyWipe(WIPE_V2_KEY, 'wipe_v2: cleared all player data for the rebalanced AI ladder (0 players)');
     this.applyWipe(WIPE_V3_KEY, 'wipe_v3: cleared all player data for the progression overhaul (0 players)');
     this.applyWipe(WIPE_V4_KEY, 'wipe_v4: cleared all player data for the rally-streak rework (0 players)');
+  }
+
+  /**
+   * `progress_reset_v1` — see the key's own comment for what this is and, more
+   * importantly, for what it deliberately is NOT.
+   */
+  private applyProgressReset(): void {
+    if (this.getMeta(PROGRESS_RESET_V1_KEY)) return;
+    const fresh = newRating();
+    const opening = calculateLevelFromXp(0);
+    // Everything a PLAYER earned, and nothing a player IS.
+    const NOT_A_BOT = 'NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = players.id)';
+    this.sql.exec('BEGIN');
+    try {
+      this.sql
+        .prepare(
+          `UPDATE players SET
+             level = ?, xp = 0, xpNext = ?,
+             mmrMu = ?, mmrSigma = ?, rankMu = ?, rankSigma = ?,
+             rankedGames = 0, rankedDuels = 0,
+             matchesPlayed = 0, matchesWon = 0, matchesLost = 0,
+             highestRally = 0, totalPointsScored = 0, totalAces = 0,
+             multiplayerWins = 0, winStreak = 0, bestWinStreak = 0,
+             shutoutsWon = 0, rookieWins = 0, proWins = 0, eliteWins = 0,
+             cyberWins = 0, chaosWins = 0, abandons = 0,
+             -- A run of consecutive active days is a statistic like any other,
+             -- and it is what daily_3 / streak_7 / daily_30 / daily_100 read.
+             -- '' rather than NULL because the column is NOT NULL, and it is
+             -- what updatePlayerStreak already treats as "never seen".
+             dailyStreak = 1, lastDailyDate = '',
+             achievements = '[]',
+             -- Cosmetics and titles are EARNED, so they go with the
+             -- achievements that gate them. Left equipped, a look the picker
+             -- no longer offers would go on painting the whole app.
+             cosmetic = NULL, title = NULL
+           WHERE ${NOT_A_BOT}`
+        )
+        .run(opening.level, opening.xpNext, fresh.mu, fresh.sigma, fresh.mu, fresh.sigma);
+
+      // History goes wholesale rather than per player: every seat files its
+      // own row, so a surviving row would be one account's record of a match
+      // the other account no longer has, against a career that no longer
+      // counts it. The roster has none.
+      this.sql.exec('DELETE FROM matches');
+      // The idempotency ledger, or a replayed report is answered
+      // `alreadyRecorded` for a match this account is no longer credited with.
+      this.sql.exec('DELETE FROM recorded_matches');
+      // A 48h rolling store about matches that no longer exist.
+      this.sql.exec('DELETE FROM competitive_exposure');
+      // Day-keyed state that describes a career being reset underneath it:
+      // mission progress, the reroll spend, today's abandon forgiveness, the
+      // practice XP cap and the solo fatigue count. `recent_missions` is the
+      // one that is deliberately NOT day-keyed and would otherwise carry a
+      // deal memory across the reset.
+      for (const table of [
+        'daily_missions', 'daily_mission_slots', 'daily_rerolls', 'daily_abandons',
+        'daily_practice', 'daily_solo', 'recent_missions',
+      ]) {
+        this.sql.exec(`DELETE FROM ${table}`);
+      }
+      // Per-mode stats and the permanent elite ledger are player-keyed, so
+      // they take the exemption too -- a play-bot on a later database keeps
+      // its own record for the same reason the roster keeps its own stats.
+      const notABotById = 'NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = playerId)';
+      this.sql.exec(`DELETE FROM player_mode_stats WHERE ${notABotById}`);
+      // Not day-keyed, so a surviving row hands back a theme or a title the
+      // achievements no longer gate.
+      this.sql.exec(`DELETE FROM elite_completions WHERE ${notABotById}`);
+      this.setMeta(PROGRESS_RESET_V1_KEY, new Date().toISOString());
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    console.log(
+      'progress_reset_v1: cleared every rank, statistic and unlock for the play-bot ladder ' +
+        '(accounts, usernames and avatars kept)'
+    );
   }
 
   private applyWipe(key: string, message: string): void {
@@ -872,6 +1215,11 @@ class GameDatabase {
       this.sql.exec('DROP TABLE IF EXISTS daily_practice');
       this.sql.exec('DROP TABLE IF EXISTS daily_solo');
       this.sql.exec('DROP TABLE IF EXISTS recorded_matches');
+      // Rows keyed on BOTH a playerId and an oppId, so a survivor points at
+      // two accounts that no longer exist -- the device_links mistake, whose
+      // whole lesson was that this list is hand-written and a new table is
+      // not added to it by anything.
+      this.sql.exec('DROP TABLE IF EXISTS competitive_exposure');
       this.sql.exec('DROP TABLE IF EXISTS released_devices');
       // Added with the multi-browser rework and missed here at the time. A
       // surviving device_links row points at a playerId that no longer exists,
@@ -888,6 +1236,11 @@ class GameDatabase {
       // And reports, for the reason device_links is here: a surviving row
       // points at a playerId that no longer exists.
       this.sql.exec('DROP TABLE IF EXISTS reports');
+      // The roster is re-seeded onto every fresh database, so the table goes
+      // with the players it describes. The in-memory cache is cleared below,
+      // outside the transaction, because a cache emptied here and a ROLLBACK
+      // afterwards would leave every bot reading as a human.
+      this.sql.exec('DROP TABLE IF EXISTS bot_accounts');
       this.sql.exec('DELETE FROM meta');
       this.sql.exec('COMMIT');
     } catch (e) {
@@ -895,6 +1248,16 @@ class GameDatabase {
       throw e;
     }
     this.ensureBaseSchema();
+    // After the COMMIT, for the reason the drop above states: a cache emptied
+    // INSIDE the transaction with a ROLLBACK behind it would leave every bot
+    // reading as a human, and this is the sole classifier so nothing
+    // downstream could notice.
+    //
+    // Redundant today and kept deliberately: `migrateSchema` reloads the Set
+    // too and runs after every wipe in the constructor, so removing this line
+    // reddens no test — measured. What it buys is that the coherence of the
+    // cache does not silently depend on that ORDER, which nothing else states.
+    this.reloadBotAccounts();
     // EVERY wipe flag is re-stamped, earlier and later alike. Stamping only
     // the keys up to this one used to be enough with two of them, but each
     // wipe clears `meta`: with three keys, a wipe that forgot to re-stamp a
@@ -956,6 +1319,38 @@ class GameDatabase {
       .all() as unknown as Array<{ name: string }>;
     if (matchCols.length && !matchCols.some((c) => c.name === 'ranked')) {
       this.sql.exec('ALTER TABLE matches ADD COLUMN ranked INTEGER');
+    }
+    // ...and whether it MOVED that ladder, which stopped being the same
+    // question the moment an anti-farming ladder could zero an update. Both
+    // nullable for the same reason `ranked` is: a row from before the column
+    // carries no honest answer, and each is filled once by its own one-shot
+    // backfill from the column it used to be indistinguishable from.
+    // bot_accounts grew its trait columns when a roster stopped being eight
+    // identical opponents. All nullable, so an existing row reads as the
+    // unremarkable default rather than as an extreme.
+    const botCols = this.sql
+      .prepare('PRAGMA table_info(bot_accounts)')
+      .all() as unknown as Array<{ name: string }>;
+    if (botCols.length) {
+      for (const key of TRAIT_KEYS) {
+        if (!botCols.some((c) => c.name === key)) {
+          this.sql.exec(`ALTER TABLE bot_accounts ADD COLUMN ${key} REAL`);
+        }
+      }
+      // ...and the credential a play-bot comes back on, added the same way. A
+      // roster row keeps NULL and stays undrivable, which is correct.
+      if (!botCols.some((c) => c.name === 'deviceCookie')) {
+        this.sql.exec('ALTER TABLE bot_accounts ADD COLUMN deviceCookie TEXT');
+      }
+    }
+    if (matchCols.length && !matchCols.some((c) => c.name === 'advancedLadder')) {
+      this.sql.exec('ALTER TABLE matches ADD COLUMN advancedLadder INTEGER');
+    }
+    // ...and whether it credited a rankedDuel, which is a THIRD question. The
+    // daily allowance (§2.7) breaks the last equivalence: a human's 6th bot
+    // duel of a day is ranked = 1 and advancedLadder = 1 and credited nothing.
+    if (matchCols.length && !matchCols.some((c) => c.name === 'rankedDuelCredited')) {
+      this.sql.exec('ALTER TABLE matches ADD COLUMN rankedDuelCredited INTEGER');
     }
 
     addColumn('recoveryCode', 'recoveryCode TEXT');
@@ -1036,9 +1431,26 @@ class GameDatabase {
     this.backfillMatchRanked();
     this.relabelChaosMatches();
     this.recountShutouts();
+    // Strictly ordered: each copies the column the one before it filled.
+    // backfillMatchRanked classifies `ranked`; advanced_ladder copies that;
+    // ranked_duel_credited copies advancedLadder for duels only; and the
+    // recount reads that last column.
+    this.backfillAdvancedLadder();
+    this.backfillRankedDuelCredited();
     // After backfillMatchRanked, which classifies legacy rows' `ranked` — a
     // duel judged before that reads NULL and is not counted.
     this.backfillRankedDuels();
+    // Migrates the old prefix convention into the authoritative table, then
+    // fills the cache from it. Both must run before anything asks
+    // isBotAccount, or the first boot after this change reads every bot as a
+    // human — which would put the whole roster on the human ladder.
+    this.claimPrefixedBots();
+    this.reloadBotAccounts();
+    // LAST, and after the roster is in `bot_accounts`: this reads that table
+    // to exempt the curated bots, and it clears the counters every backfill
+    // above spent its run deriving. Both orders end in the same state; last
+    // is the one that is obvious rather than merely equivalent.
+    this.applyProgressReset();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -1224,6 +1636,57 @@ class GameDatabase {
    * before that column existed — judged first, a legacy duel reads NULL and is
    * missed. `player1Id` alone, since each seat files its own row.
    */
+  /**
+   * One-shot: legacy rows advanced the ladder exactly when they were ranked.
+   *
+   * Before an anti-farming ladder could zero an update the two questions had
+   * one answer, so the copy is exact for history and the new behaviour applies
+   * only forward. Runs AFTER ranked_backfill_v1, which is what classifies a
+   * legacy row into `ranked` in the first place -- a row judged before that
+   * reads NULL, and NULL stays NULL here, since it cannot be reconstructed
+   * honestly and already reads as un-ranked everywhere.
+   */
+  private backfillAdvancedLadder(): void {
+    const KEY = 'advanced_ladder_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        'UPDATE matches SET advancedLadder = ranked WHERE advancedLadder IS NULL'
+      )
+      .run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`advanced_ladder_backfill_v1: classified ${rows.changes} match row(s)`);
+    }
+  }
+
+  /**
+   * One-shot: legacy rows credited a rankedDuel exactly when they advanced the
+   * ladder AND were duels.
+   *
+   * §2.7's daily allowance is what breaks that equivalence, and it applies
+   * only forward -- every row predating it credited whenever it advanced. The
+   * `mode = 'multiplayer'` clause is load-bearing rather than an optimisation:
+   * a SOLO match can advance the visible ladder (at an earned difficulty) and
+   * never credited a duel, so copying unconditionally would invent one for
+   * every earned-rung solo match in history -- and backfillRankedDuels reads
+   * this column with MAX, so the invented credits would be permanent.
+   *
+   * Runs after advanced_ladder_backfill_v1, whose answer it copies.
+   */
+  private backfillRankedDuelCredited(): void {
+    const KEY = 'ranked_duel_credited_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `UPDATE matches SET rankedDuelCredited = advancedLadder
+          WHERE rankedDuelCredited IS NULL AND mode = 'multiplayer'`
+      )
+      .run();
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`ranked_duel_credited_backfill_v1: classified ${rows.changes} duel row(s)`);
+    }
+  }
+
   private backfillRankedDuels(): void {
     const KEY = 'ranked_duels_backfill_v1';
     if (this.getMeta(KEY)) return;
@@ -1232,13 +1695,55 @@ class GameDatabase {
            SELECT COUNT(*) FROM matches m
             WHERE m.player1Id = players.id
               AND m.mode = 'multiplayer'
-              AND m.ranked = 1))`
+              -- rankedDuelCredited, never ranked and never advancedLadder:
+              -- a human's 6th bot duel of a UTC day is ranked AND advanced the
+              -- ladder and credited nothing, so either of the other two
+              -- over-counts by exactly the capped duels -- and this is a MAX,
+              -- so the over-count would be permanent.
+              AND m.rankedDuelCredited = 1))`
       )
       .run();
     this.setMeta(KEY, new Date().toISOString());
     if (rows.changes) {
       console.log(`ranked_duels_backfill_v1: counted ranked duels for ${rows.changes} player(s)`);
     }
+  }
+
+  /**
+   * The ONE legitimate reading of the `bot-` prefix left in the codebase: a
+   * one-time migration of the old convention into the authoritative table.
+   *
+   * Before this, the prefix WAS the classifier, so every existing roster row
+   * is a bot by the only definition that existed when it was written. After
+   * it, the prefix decides nothing and a prefixed id inserted later is an
+   * ordinary account — which `tests/botIdentity.test.ts` asserts directly,
+   * because that is the whole of what D26 changes.
+   */
+  private claimPrefixedBots(): void {
+    const KEY = 'bot_accounts_backfill_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `INSERT OR IGNORE INTO bot_accounts (botId, createdAt)
+         SELECT id, ? FROM players WHERE id LIKE 'bot-%'`
+      )
+      .run(new Date().toISOString());
+    this.setMeta(KEY, new Date().toISOString());
+    if (rows.changes) {
+      console.log(`bot_accounts_backfill_v1: claimed ${rows.changes} roster bot(s)`);
+    }
+  }
+
+  /**
+   * Rebuild the cache from the table. The cache is derived state, so this has
+   * to reproduce the table exactly — a restart that changed who is a bot
+   * would move accounts between the two ladder lanes with nothing to see.
+   */
+  public reloadBotAccounts(): void {
+    const rows = this.stmt('SELECT botId FROM bot_accounts').all() as unknown as Array<{
+      botId: string;
+    }>;
+    botAccountIds.clear();
+    for (const r of rows) botAccountIds.add(r.botId);
   }
 
   /**
@@ -1402,8 +1907,9 @@ class GameDatabase {
   private insertMatch(m: MatchRecord): void {
     this.stmt(
         `INSERT INTO matches (id, player1Id, player1Name, player2Id, player2Name, winnerId, winnerName,
-           scoreP1, scoreP2, maxRally, mode, difficulty, timestamp, ranked)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           scoreP1, scoreP2, maxRally, mode, difficulty, timestamp, ranked,
+           advancedLadder, rankedDuelCredited)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         m.id,
@@ -1419,7 +1925,9 @@ class GameDatabase {
         m.mode,
         m.difficulty ?? null,
         m.timestamp,
-        m.ranked ?? null
+        m.ranked ?? null,
+        m.advancedLadder ?? null,
+        m.rankedDuelCredited ?? null
       );
     // Keep the newest 500 rows PER PLAYER — history is "an accurate timeline
     // of every match played on this profile", and the global cap this
@@ -2814,6 +3322,7 @@ class GameDatabase {
   public getPublicProfile(id: string): PublicProfile | null {
     const p = this.readProfile(id);
     if (!p || !p.initializedAt) return null;
+    const isBot = isBotAccount(p.id);
     return {
       id: p.id,
       username: p.username,
@@ -2834,7 +3343,18 @@ class GameDatabase {
       // OWNER's cosmetic, so the owner's choice has to leave the server.
       cosmetic: p.cosmetic,
       title: p.title,
-      dailyStreak: p.dailyStreak,
+      // A bot's card is the same card, and this is the ONE field neutralised
+      // out of it (§4.11/D27) -- individually, rather than by withholding the
+      // profile, because a play-bot is a persistent participant with a real
+      // record. "Consecutive active days" is a claim about a HABIT, and a
+      // scheduled process does not have one: for the roster it is whatever
+      // insertBot seeded and nothing will ever advance it, and for a play-bot
+      // recordMatch goes through getProfile like any account, so the number is
+      // real and measures the deployment rather than a person.
+      //
+      // Absent rather than zero: a 0 is still a value, and the flame tile
+      // would print it. The client renders the tile only when it is there.
+      dailyStreak: isBot ? undefined : p.dailyStreak,
       tier: p.tier,
       // A position, not a rating. It is the one rank number that is already
       // public — the leaderboard prints it for everybody — so a stranger reads
@@ -2845,7 +3365,7 @@ class GameDatabase {
       achievements: p.achievements,
       hasAvatar: p.hasAvatar,
       avatarVersion: p.avatarVersion,
-      isBot: p.id.startsWith('bot-') || undefined,
+      isBot: isBot || undefined,
     };
   }
 
@@ -2856,7 +3376,13 @@ class GameDatabase {
    * automatically since the wipe_v1 fresh launch.
    */
   public insertBot(
-    bot: Partial<PlayerProfile> & { id: string; username: string; mu?: number }
+    bot: Partial<PlayerProfile> & {
+      id: string;
+      username: string;
+      mu?: number;
+      /** Seeded at creation and never written again — see server/playbotTraits.ts. */
+      traits?: Partial<PlaybotTraits>;
+    }
   ): PlayerProfile {
     if (!bot.id.startsWith('bot-')) {
       throw new Error('Bot ids must start with "bot-"');
@@ -2906,7 +3432,20 @@ class GameDatabase {
       usernameChangedAt: now,
       hasAvatar: false,
     };
+    // The players row FIRST. `upsertProfile` throws on a username a human
+    // already holds (the unique index), and seedBotRoster catches that per
+    // bot — so anything cached before this line would leave an id the cache
+    // calls a bot with no row behind it, invisibly, since bot_accounts is the
+    // sole classifier. Row, then table, then cache; never the other order.
     this.upsertProfile(full);
+    const traits = normalizeTraits(bot.traits);
+    this.stmt(
+        `INSERT OR IGNORE INTO bot_accounts
+           (botId, createdAt, ${TRAIT_KEYS.join(', ')})
+         VALUES (?, ?, ${TRAIT_KEYS.map(() => '?').join(', ')})`
+      )
+      .run(bot.id, now, ...TRAIT_KEYS.map((k) => traits[k]));
+    botAccountIds.add(bot.id);
     return this.readProfile(bot.id)!;
   }
 
@@ -3075,16 +3614,6 @@ class GameDatabase {
       // the player would chase them upward without bound.
       cap: soloMuCap(difficulty),
     };
-    if (ranked) {
-      const nextMmr = updateRating(
-        myMmr,
-        oppRating,
-        isWin,
-        isPvp ? { ...PVP_UPDATE, performance } : soloOpts
-      );
-      profile.mmrMu = nextMmr.mu;
-      profile.mmrSigma = nextMmr.sigma;
-    }
 
     // The visible ladder moves on a duel, and on a solo match at a difficulty
     // the player had to EARN. Rookie is the tutorial rung — placing against it
@@ -3118,383 +3647,511 @@ class GameDatabase {
       venueRates &&
       !context.forceUnrankedLadder &&
       (isPvp || (soloCountsForRank(difficulty) && !soloOutgrown));
-    // Sampled before the update so the overlay can say which way the ladder
-    // went. Only the DIRECTION ever leaves the server — the mu itself is not
-    // something the client renders (see src/components/ui/RankBadge.tsx).
-    const rankMuBefore = profile.rankMu;
-    if (ranksThisMatch) {
-      // While still unplaced, a ranked match sheds uncertainty faster — the
-      // whole point of placement matches, and what makes the profile screen's
-      // "N/PLACEMENT_GAMES" the truth rather than the first of two conditions.
-      const placing = profile.rankedGames < PLACEMENT_GAMES;
-      const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
-      const rankOpts = isPvp
-        ? { ...placementOpts, performance }
-        : {
-            // Lighter on mu than a duel — beating an AI says less than beating
-            // a person — and held under the same ceiling every solo result is,
-            // so farming a rung converges on it and stops.
-            k: SOLO_UPDATE.k,
-            cap: soloMuCap(difficulty),
-            // Sigma converges at the SAME rate as a duel's, deliberately:
-            // placement counts observations, not opponents. Shrinking it
-            // slower would land a solo player on "5/5" and still unranked —
-            // the exact trap placement was just fixed for.
-            sigmaScale: placementOpts.sigmaScale,
-          };
-      // The ladder rates against the LADDER. `oppRating` above is the hidden
-      // estimator: it predicts the match and moves the hidden pair, and the
-      // two genuinely diverge — a solo match moves mmrMu and never rankMu, and
-      // SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other — so using
-      // it here measured the standardised margin across two different scales.
-      // Absent (a solo match, or a caller with no room to sample from) falls
-      // back to an even ladder match against ourselves, the same shape
-      // `oppRating`'s own fallback takes, and never to the hidden pair, which
-      // is the bug.
-      const oppRankRating: Rating = isPvp
-        ? opponentRankRating || { mu: profile.rankMu, sigma: profile.rankSigma }
-        : oppRating;
-      const nextRank = updateRating(
-        { mu: profile.rankMu, sigma: profile.rankSigma },
-        oppRankRating,
-        isWin,
-        rankOpts
-      );
-      profile.rankMu = nextRank.mu;
-      profile.rankSigma = nextRank.sigma;
-      profile.rankedGames += 1;
-      // The duels apart from the games: what the apex is gated on. Counted
-      // only when the match rated, so a Casual duel or one on party rules is
-      // a duel played and not a duel that tested the rating.
-      if (isPvp) profile.rankedDuels += 1;
-    }
-    profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma, profile.rankedDuels);
-    // And the position with it, for the same reason the line above exists: this
-    // object was loaded BEFORE the match was applied and is handed straight
-    // back as MatchEndResult.profile, which the client installs verbatim and
-    // the relay pushes as `match_recorded`. Left to readProfile alone it would
-    // be the pre-match number — and the win that carries somebody into the top
-    // 100 is the exact moment anyone is looking at it.
-    profile.ladderPosition = onLadder(profile)
-      ? this.ladderPosition(profile.id, profile.rankMu) ?? undefined
-      : undefined;
-    // 'none' is both "did not rate" and "rated and did not move" — from the
-    // player's side those are the same fact, and the overlay says so with one
-    // glyph rather than distinguishing a difference nobody can act on.
-    // Direction and size come off ONE delta sharing one epsilon, so they cannot
-    // disagree about whether anything happened — an arrow with no direction, or
-    // a direction with no arrows, is not a state either field can reach alone.
-    const rankDelta = ranksThisMatch ? profile.rankMu - rankMuBefore : 0;
-    const rankDirection: RankDirection =
-      rankDelta > RANK_MOVE_EPSILON ? 'up' : rankDelta < -RANK_MOVE_EPSILON ? 'down' : 'none';
-    const rankMagnitude: RankMagnitude = rankMoveSize(rankDelta);
-
-    // 3. Update Match Statistics
-    profile.matchesPlayed += 1;
-    if (isWin) {
-      profile.matchesWon += 1;
-    } else {
-      profile.matchesLost += 1;
-    }
-    profile.totalPointsScored += payload.playerScore;
-    // Aces were a stored column nothing ever incremented, so `ace_sniper` was
-    // unobtainable. Self-reported like every other solo stat, and bounded by
-    // the achievements being once-only.
-    profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
-    if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
-    // The same result, kept per mode as well as pooled — written down in the
-    // transaction below rather than here. It is the one write in this function
-    // with no ceiling of its own: mission progress caps at its target and the
-    // profile is upserted whole, but matchesPlayed and the rest only ever add,
-    // so a bump that landed while the match went unstamped would be counted
-    // again by the retry, and again by the one after that.
-    const modeDelta = {
-      played: 1,
-      won: isWin,
-      pointsScored: payload.playerScore,
-      aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
-      bestStreak: payload.bestStreak,
-      endStreak,
-      // How long ago this match ended, by the reporting device's own clock —
-      // the gap between the whistle and the moment this attempt went out. A
-      // result that queued through a replay therefore says so and does not
-      // land back on top of a newer one. Absent (an older client, or a payload
-      // the relay built itself) means "just now".
-      ageMs: resultAgeMs(payload),
-      // This browser's own chain position, for the writes the age cannot
-      // order — see the note beside `stamp` in bumpModeStats.
-      chainId: payload.chainId,
-      runSeq: payload.runSeq,
-    };
-    // Streaks, shutouts and per-difficulty wins are derived here and only
-    // here, from the result the server just accepted — a client can report a
-    // match, never a total.
-    profile.winStreak = isWin ? profile.winStreak + 1 : 0;
-    if (profile.winStreak > profile.bestWinStreak) profile.bestWinStreak = profile.winStreak;
-    // One definition, shared with the daily tasks and quoted by the copy —
-    // this was three identical expressions with the 5-point floor written
-    // down nowhere a player could read it. Declared here and reused by the
-    // achievement triggers below rather than computed a second time.
-    const shutOut = isShutout({
-      isWinner: isWin,
-      playerScore: payload.playerScore,
-      opponentScore: payload.opponentScore,
-    });
-    // ------------------------------------------------------------------
-    // Counters that gate a PERMANENT unlock only advance on ranked-legal
-    // rules.
-    //
-    // `ranked` gated the two rating updates and nothing else, so a match on
-    // `paddleScale: 1.6` + `ballScale: 1.8` + `ballSpeedMax: 1.0` — correctly
-    // refused a rating, and correctly paid XP, which is the documented trade —
-    // still moved every one of these. That bought `rally_150` (900 XP),
-    // `perpetual-blue` and `quantum-gold` off a 160% paddle; the whole shutout
-    // chain and `flawless-white` off a clean sheet nobody had to earn; and,
-    // worst of the three because it is the game's own pacing, the Elite and
-    // Cyber unlocks — `ai_pro_10` then `ai_elite_10` — so the ladder CLAUDE.md
-    // §7 calls "walked, not jumped" could be walked on a 160% paddle.
-    //
-    // XP is not on this list and must not join it: paying for unranked play is
-    // the deliberate trade, and levels never regress. What a permanent unlock
-    // is, though, is the reward ITSELF, and handing one over for a feat the
-    // rules performed is the same mistake as rating the match would have been.
-    //
-    // The line is drawn at counters a permanent unlock reads, not at every
-    // career stat: `aces` and `totalPointsScored` keep counting on any rules,
-    // because they answer "how much have you played" and freezing them would
-    // make a profile under-report matches the player really did play.
-    if (ranked) {
-      if (shutOut) profile.shutoutsWon += 1;
-      if (isWin && payload.mode === 'solo') {
-        if (difficulty === 'rookie') profile.rookieWins += 1;
-        else if (difficulty === 'pro') profile.proWins += 1;
-        else if (difficulty === 'elite') profile.eliteWins += 1;
-        else if (difficulty === 'cyber') profile.cyberWins += 1;
-        else if (difficulty === 'chaos') profile.chaosWins += 1;
-      }
-      // The career best rally STREAK — this player's own consecutive returns,
-      // never the opponent's, and never a whole point's worth of both.
-      if (payload.bestStreak > profile.highestRally) {
-        profile.highestRally = payload.bestStreak;
-      }
-    }
-    profile.lastActive = new Date().toISOString();
-
-    // 4. Check & Unlock Achievements
-    const newAchievements: Achievement[] = [];
-    // Achievements that mean "you beat something" are worth what that something
-    // was actually worth. The AI adapts to the player, so a flat reward would
-    // pay a mu-40 player the same for a Cyber win they take often as a mu-25
-    // player for one they take rarely. Same multiplier the match XP uses, so
-    // there is still no per-difficulty table anywhere.
-    const achievementMultiplier = surpriseMultiplier(winProb, isWin);
-    let achievementBudget = achievementXpCap(profile.level);
-    // Tree rule, strictly: a child cannot be earned before its parent, and the
-    // parent is never granted implicitly. Auto-granting ancestors seemed
-    // helpful until the data showed it handing out `ai_rookie` for beating
-    // Pro — a difficulty the player had never beaten. Where one result really
-    // does satisfy a whole chain (a 50-hit rally is also a 25 and a 10), the
-    // triggers below fire in order and each rung opens the next.
-    // Gates are measured against the profile as it stands when the batch
-    // lands — after this match's own XP and tier update, the same instant the
-    // achievement budget is measured at.
-    const progress = { level: profile.level, tier: profile.tier };
-    const unlock = (achId: string) => {
-      if (!isUnlockable(achId, profile.achievements, progress)) return;
-      grant(achId);
-    };
-
-    const grant = (achId: string) => {
-      if (!profile.achievements.includes(achId)) {
-        profile.achievements.push(achId);
-        const meta = achievementById(achId);
-        if (meta) {
-          const scaled = meta.scaled
-            ? Math.max(1, Math.round(meta.xpReward * achievementMultiplier))
-            : meta.xpReward;
-          // Never hand over most of a level — see the cap's note in rating.ts.
-          // The budget is for everything this match unlocks, so several
-          // achievements landing together cannot stack into a free level. It
-          // is measured against the level the player is on as the batch lands,
-          // which is after this match's own XP has been applied.
-          const awardedXp = Math.max(0, Math.min(scaled, achievementBudget));
-          achievementBudget -= awardedXp;
-          newAchievements.push({ ...meta, unlockedAt: new Date().toISOString(), awardedXp });
-          profile.xp += awardedXp;
-        }
-      }
-    };
-
-    // Achievement triggers
-    const solo = payload.mode === 'solo';
-    const pvp = payload.mode === 'multiplayer';
-    const placed = isPlaced(profile.rankedGames, profile.rankSigma);
-
-    // Foundation
-    // Finishing a match at all. This used to read `payload.maxRally >= 1`,
-    // which under the shared counter was true of anyone who had touched the
-    // ball once. A streak is one player's own returns now, so a player who
-    // never returns a single ball has a best streak of zero — and first_serve
-    // is what opens `mode:multiplayer`, so keying it on that would have left
-    // them unable to reach a duel at all.
-    unlock('first_serve');
-    if (isWin) unlock('first_win');
-    // Keyed on the COUNTER, not on the match in hand, so a clean sheet earned
-    // before the counter existed still opens the Dominion branch on the next
-    // match played. Same shape as `shutout_5`/`shutout_15` below, and the same
-    // reason the rally rungs read `profile.highestRally`: a feat performed
-    // before its gate could open is banked, not lost.
-    if (profile.shutoutsWon >= 1) unlock('shutout');
-    if (profile.matchesPlayed >= 10) unlock('veteran_10');
-    if (profile.matchesPlayed >= 50) unlock('veteran_50');
-    if (profile.matchesPlayed >= 200) unlock('veteran_200');
-    if (profile.matchesPlayed >= 500) unlock('veteran_500');
-    if (profile.matchesPlayed >= 1000) unlock('veteran_1000');
-    if (profile.level >= 5) unlock('level_5');
-
-    // Rally. Measured on the profile's banked best, not this match's rally,
-    // so a feat performed before a gate opened is not lost — the rung lands
-    // on the first match after the gate is met.
-    // Rescaled by 0.72 with the counting change: a rally number is one
-    // player's own consecutive returns now rather than a whole point's worth
-    // of both players', which measures about 0.72x the old figure across the
-    // ladder and both winning scores. These rungs are therefore as far away as
-    // they always were.
-    if (profile.highestRally >= 7) unlock('rally_10');
-    if (profile.highestRally >= 18) unlock('rally_25');
-    if (profile.highestRally >= 36) unlock('rally_50');
-    if (profile.highestRally >= 72) unlock('rally_100');
-    if (profile.highestRally >= 108) unlock('rally_150');
-    if (profile.highestRally >= 144) unlock('rally_200');
-    if (profile.highestRally >= 216) unlock('rally_300');
-
-    // Ladder. The rungs fire in order so a single result can climb a chain
-    // it genuinely satisfies, and each one opens the next.
-    if (isWin && solo && difficulty === 'rookie') unlock('ai_rookie');
-    if (profile.rookieWins >= 10) unlock('ai_rookie_10');
-    if (isWin && solo && difficulty === 'pro') unlock('ai_pro');
-    if (profile.proWins >= 10) unlock('ai_pro_10');
-    if (isWin && solo && difficulty === 'elite') unlock('ai_elite');
-    if (profile.eliteWins >= 10) unlock('ai_elite_10');
-    if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
-    if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
-    if (profile.cyberWins >= 10) unlock('cyber_10');
-    if (profile.cyberWins >= 25) unlock('cyber_25');
-    if (isWin && solo && difficulty === 'chaos') unlock('ai_chaos');
-    if (shutOut && solo && difficulty === 'chaos') unlock('chaos_shutout');
-    if (profile.chaosWins >= 10) unlock('chaos_10');
-    if (profile.chaosWins >= 25) unlock('chaos_25');
-    if (profile.chaosWins >= 50) unlock('chaos_50');
-
-    // Duel
-    if (pvp) unlock('first_duel');
-    if (isWin && pvp) unlock('multiplayer_champ');
-    if (shutOut && pvp) unlock('duel_shutout');
-    if (profile.multiplayerWins >= 10) unlock('duel_10');
-    if (profile.multiplayerWins >= 25) unlock('duel_25');
-    if (profile.multiplayerWins >= 50) unlock('duel_50');
-    if (profile.multiplayerWins >= 100) unlock('duel_100');
-
-    // Craft
-    if (profile.totalAces >= 1) unlock('first_ace');
-    if (profile.totalAces >= 5) unlock('ace_sniper');
-    if (profile.totalAces >= 25) unlock('ace_25');
-    if (profile.totalAces >= 100) unlock('ace_100');
-    if (profile.totalAces >= 250) unlock('ace_250');
-    if (profile.totalPointsScored >= 100) unlock('points_100');
-    if (profile.totalPointsScored >= 500) unlock('points_500');
-    if (profile.totalPointsScored >= 2000) unlock('points_2000');
-    if (profile.totalPointsScored >= 5000) unlock('points_5000');
-    if (profile.totalPointsScored >= 10000) unlock('points_10000');
-
-    // Ascent — the ranked ladder, concealed until a first duel has happened.
-    // Keyed on the DERIVED tier rather than on rankMu, because the apex is no
-    // longer a rating threshold alone: it asks for OVERLORD_MIN_DUELS ranked
-    // duels, and a trophy reading the mu would fire while the badge still said
-    // Legend. One rule for all seven rungs, so none can drift from the badge —
-    // `profile.tier` was re-derived above, after this match's rating moved.
-    const holdsTier = (t: Tier): boolean => TIER_ORDER.indexOf(profile.tier) >= TIER_ORDER.indexOf(t);
-    if (placed) unlock('placed');
-    if (holdsTier('vanguard')) unlock('tier_vanguard');
-    if (holdsTier('ace')) unlock('tier_ace');
-    if (holdsTier('master')) unlock('master_tier');
-    if (holdsTier('grandmaster')) unlock('tier_grandmaster');
-    if (holdsTier('legend')) unlock('legend_tier');
-    if (holdsTier('overlord')) unlock('tier_overlord');
-    if (profile.rankedDuels >= OVERLORD_MIN_DUELS) unlock('duels_25');
-    if (profile.rankedDuels >= 100) unlock('duels_100');
-
-    // Dominion — winning, and winning without giving anything back.
-    if (profile.bestWinStreak >= 3) unlock('streak_3');
-    if (profile.bestWinStreak >= 5) unlock('streak_5');
-    if (profile.bestWinStreak >= 10) unlock('streak_10');
-    if (profile.bestWinStreak >= 20) unlock('streak_20');
-    if (profile.bestWinStreak >= 30) unlock('streak_30');
-    if (profile.shutoutsWon >= 5) unlock('shutout_5');
-    if (profile.shutoutsWon >= 15) unlock('shutout_15');
-    if (profile.shutoutsWon >= 50) unlock('shutout_50');
-
-    // Devotion — the long haul, concealed until level 5.
-    if (profile.level >= 10) unlock('level_10');
-    if (profile.level >= 25) unlock('level_25');
-    if (profile.level >= 50) unlock('level_50');
-    if (profile.level >= 75) unlock('level_75');
-    if (profile.level >= 100) unlock('level_100');
-    if (profile.dailyStreak >= 3) unlock('daily_3');
-    if (profile.dailyStreak >= 7) unlock('streak_7');
-    if (profile.dailyStreak >= 30) unlock('daily_30');
-    if (profile.dailyStreak >= 100) unlock('daily_100');
-
-    // Daily mission progress rides the same server-verified match record, so
-    // it can never be reported independently of an actual game — and it is
-    // advanced INSIDE the transaction below, not here. See the note there.
-
-    // Achievement XP can push the profile over a level threshold too
-    const finalLevel = calculateLevelFromXp(profile.xp);
-    profile.level = finalLevel.level;
-    profile.xpNext = finalLevel.xpNext;
-
-    // 5. Store match record
-    const matchRecord: MatchRecord = {
-      id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      player1Id: payload.playerId,
-      player1Name: profile.username,
-      player2Id: payload.opponentId || (payload.mode === 'solo' ? `AI-${difficulty}` : 'Player 2'),
-      player2Name: payload.opponentName || (payload.mode === 'solo' ? `AI (${difficulty})` : 'Opponent'),
-      winnerId: isWin ? payload.playerId : (payload.opponentId || 'opponent'),
-      winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
-      scoreP1: payload.playerScore,
-      scoreP2: payload.opponentScore,
-      maxRally: payload.bestStreak,
-      mode: payload.mode,
-      difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
-      timestamp: new Date().toISOString(),
-      // Persisted so history can tell Ranked from Un-Ranked later: this is
-      // ranksThisMatch — the match actually moved the visible ladder — not
-      // merely "the rules sat in the ranked bands". A stock-rules Rookie solo
-      // stores 0, because it rated nothing, whatever its rules were.
-      ranked: ranksThisMatch ? 1 : 0,
-    };
-
-    const result: MatchEndResult = {
-      profile,
-      earnedXp,
-      leveledUp,
-      winProbability: winProb,
-      previousTier: ranksThisMatch ? previousTier : null,
-      tier: ranksThisMatch ? profile.tier : null,
-      tierChanged: ranksThisMatch && profile.tier !== previousTier,
-      ranked,
-      rankDirection,
-      rankMagnitude,
-      newAchievements,
-      // Filled from inside the transaction below, after the progress it
-      // reports has actually been written.
-      missions: [],
-    };
-
+    // §2.9: a match that was not eligible to move competitive rating consumes
+    // no pair, band or daily count. That question is EXACTLY the one above,
+    // reused rather than re-derived, so every exclusion it already makes is
+    // inherited unchanged — the venue, the rules, the sonar, `forceUnranked`,
+    // `forceUnrankedLadder`, and the solo arm. A partial reconstruction such
+    // as `ranked && venueRates && !forceUnrankedLadder` reads as equivalent
+    // and silently drops that last one; the alias exists to say the reuse is
+    // deliberate rather than incidental.
+    const competitivelyEligible = ranksThisMatch;
     this.sql.exec('BEGIN');
     try {
+      // ONE trusted-pairing object, or null. Every bot-identity lookup and the
+      // only `pairKindFor` call live inside this branch, so with no trusted
+      // `context.opponentId` nothing is consulted and nothing can be
+      // misclassified — solo and unvouched payloads keep the repository's
+      // existing behaviour untouched.
+      //
+      // `selfIsBot` is computed INSIDE, not above, and that placement is the
+      // whole point: hoisted for readability it runs on every solo match and
+      // every unvouched payload, and reaching `pairKindFor` with a defaulted
+      // `oppIsBot` would let a bot's own solo result classify as `human-bot` —
+      // a wrong answer that happens to weight ×1.00 today and stops being
+      // harmless the moment any rule keys on the kind.
+      //
+      // One object, built once, read by both the weights and (later) the
+      // credit decision, so the two cannot disagree about who played whom.
+      const pairing = context.opponentId
+        ? (() => {
+            const selfIsBot = isBotAccount(profile.id);
+            const oppIsBot = isBotAccount(context.opponentId!);
+            return {
+              selfIsBot,
+              oppIsBot,
+              kind: pairKindFor(selfIsBot, oppIsBot),
+              // Exposure COUNTING is gated on eligibility. The opponent-type
+              // WEIGHT below is not: it is a fact about who was played, so it
+              // applies to every estimator that legitimately updates.
+              counts: competitivelyEligible
+                ? this.recordAndCountExposure(profile.id, context, matchKey, now)
+                : null,
+            };
+          })()
+        : null;
+
+      const w: ParticipantWeights = pairing
+        ? participantWeights({
+            kind: pairing.kind,
+            selfIsBot: pairing.selfIsBot,
+            won: isWin,
+            counts: pairing.counts,
+          })
+        : { mu: 1, sigma: 1, hardCapped: false, cappedBy: null };
+
+      // Whether the visible ladder actually MOVED, which is not the same
+      // question as whether the match was played under ranked conditions: a
+      // hard-capped match keeps its real classification in History, pays its
+      // normal XP, and moves nothing.
+      const advancesLadder = competitivelyEligible && !w.hardCapped;
+      // Decided inside the ladder block below and read by the match row, so
+      // the history column and the counter are one boolean rather than two.
+      let duelCredited = false;
+
+      // A hard cap zeroes BOTH estimators — the two must not diverge because
+      // of bot participation — so it gates this block as well as the ladder.
+      if (ranked && !w.hardCapped) {
+        const nextMmr = updateRating(
+          myMmr,
+          oppRating,
+          isWin,
+          // The weights ride the PvP branch alone. A solo match has no trusted
+          // opponent, so `w` is ×1.00 there anyway; keeping `soloOpts`
+          // untouched is what makes §2.10's "SoloAI is excluded by
+          // construction" structural rather than a consequence.
+          isPvp
+            ? {
+                ...PVP_UPDATE,
+                performance,
+                k: PVP_UPDATE.k * w.mu,
+                sigmaScale: PVP_UPDATE.sigmaScale * w.sigma,
+              }
+            : soloOpts
+        );
+        profile.mmrMu = nextMmr.mu;
+        profile.mmrSigma = nextMmr.sigma;
+      }
+      // Sampled before the update so the overlay can say which way the ladder
+      // went. Only the DIRECTION ever leaves the server — the mu itself is not
+      // something the client renders (see src/components/ui/RankBadge.tsx).
+      const rankMuBefore = profile.rankMu;
+      if (advancesLadder) {
+        // While still unplaced, a ranked match sheds uncertainty faster — the
+        // whole point of placement matches, and what makes the profile screen's
+        // "N/PLACEMENT_GAMES" the truth rather than the first of two conditions.
+        const placing = profile.rankedGames < PLACEMENT_GAMES;
+        const placementOpts = placing ? PLACEMENT_UPDATE : PVP_UPDATE;
+        const rankOpts = isPvp
+          ? {
+              ...placementOpts,
+              performance,
+              // Same weights as the hidden update above: the two estimators
+              // must not diverge because of bot participation (§2.1).
+              k: placementOpts.k * w.mu,
+              sigmaScale: placementOpts.sigmaScale * w.sigma,
+            }
+          : {
+              // Lighter on mu than a duel — beating an AI says less than beating
+              // a person — and held under the same ceiling every solo result is,
+              // so farming a rung converges on it and stops.
+              k: SOLO_UPDATE.k,
+              cap: soloMuCap(difficulty),
+              // Sigma converges at the SAME rate as a duel's, deliberately:
+              // placement counts observations, not opponents. Shrinking it
+              // slower would land a solo player on "5/5" and still unranked —
+              // the exact trap placement was just fixed for.
+              sigmaScale: placementOpts.sigmaScale,
+            };
+        // The ladder rates against the LADDER. `oppRating` above is the hidden
+        // estimator: it predicts the match and moves the hidden pair, and the
+        // two genuinely diverge — a solo match moves mmrMu and never rankMu, and
+        // SOLO_MU_CAPS caps one while AI_ADAPT_BAND moves the other — so using
+        // it here measured the standardised margin across two different scales.
+        // Absent (a solo match, or a caller with no room to sample from) falls
+        // back to an even ladder match against ourselves, the same shape
+        // `oppRating`'s own fallback takes, and never to the hidden pair, which
+        // is the bug.
+        const oppRankRating: Rating = isPvp
+          ? opponentRankRating || { mu: profile.rankMu, sigma: profile.rankSigma }
+          : oppRating;
+        const nextRank = updateRating(
+          { mu: profile.rankMu, sigma: profile.rankSigma },
+          oppRankRating,
+          isWin,
+          rankOpts
+        );
+        profile.rankMu = nextRank.mu;
+        profile.rankSigma = nextRank.sigma;
+        profile.rankedGames += 1;
+        // The duels apart from the games: what the apex is gated on. Counted
+        // only when the match rated, so a Casual duel or one on party rules is
+        // a duel played and not a duel that tested the rating.
+        //
+        // §2.7 caps what a HUMAN may bank from BOT play in one UTC day. The
+        // condition is `!selfIsBot && oppIsBot` and never `oppIsBot` alone: in
+        // bot-vs-bot every participant's opponent is a bot, so the looser
+        // spelling throttles a bot's OWN credits to five a day and bot-vs-bot
+        // stops progressing like the equivalent human duel. Human-vs-human,
+        // bot-vs-human and bot-vs-bot are all uncapped.
+        //
+        // A qualification counter and NOT a saturation layer: it withholds no
+        // mu and no sigma, so the 6th bot duel of a day rates exactly like the
+        // 5th. XP, history and rankedGames are untouched too.
+        const creditIsCapped = !!pairing && !pairing.selfIsBot && pairing.oppIsBot;
+        const creditAllowed =
+          !creditIsCapped ||
+          this.botDuelCreditsToday(profile.id, context.decidedAt ?? now, matchKey) <
+            BOT_DUEL_CREDITS_PER_DAY;
+        duelCredited = isPvp && creditAllowed;
+        if (duelCredited) {
+          profile.rankedDuels += 1;
+          // Stamped after the allowance is read, per §4.5's ordering. The
+          // read's own `matchKey <> ?` exclusion is what actually stops a
+          // match consuming its own allowance -- measured, moving this line
+          // above the read changes nothing -- so the order is here because it
+          // is normative and because it makes the exclusion's job legible,
+          // not because it is load-bearing on its own.
+          this.creditExposureDuel(profile.id, matchKey);
+        }
+      }
+      profile.tier = tierFor(profile.rankMu, profile.rankedGames, profile.rankSigma, profile.rankedDuels);
+      // And the position with it, for the same reason the line above exists: this
+      // object was loaded BEFORE the match was applied and is handed straight
+      // back as MatchEndResult.profile, which the client installs verbatim and
+      // the relay pushes as `match_recorded`. Left to readProfile alone it would
+      // be the pre-match number — and the win that carries somebody into the top
+      // 100 is the exact moment anyone is looking at it.
+      profile.ladderPosition = onLadder(profile)
+        ? this.ladderPosition(profile.id, profile.rankMu) ?? undefined
+        : undefined;
+      // 'none' is both "did not rate" and "rated and did not move" — from the
+      // player's side those are the same fact, and the overlay says so with one
+      // glyph rather than distinguishing a difference nobody can act on.
+      // Direction and size come off ONE delta sharing one epsilon, so they cannot
+      // disagree about whether anything happened — an arrow with no direction, or
+      // a direction with no arrows, is not a state either field can reach alone.
+      const rankDelta = advancesLadder ? profile.rankMu - rankMuBefore : 0;
+      const rankDirection: RankDirection =
+        rankDelta > RANK_MOVE_EPSILON ? 'up' : rankDelta < -RANK_MOVE_EPSILON ? 'down' : 'none';
+      const rankMagnitude: RankMagnitude = rankMoveSize(rankDelta);
+
+      // 3. Update Match Statistics
+      profile.matchesPlayed += 1;
+      if (isWin) {
+        profile.matchesWon += 1;
+      } else {
+        profile.matchesLost += 1;
+      }
+      profile.totalPointsScored += payload.playerScore;
+      // Aces were a stored column nothing ever incremented, so `ace_sniper` was
+      // unobtainable. Self-reported like every other solo stat, and bounded by
+      // the achievements being once-only.
+      profile.totalAces += Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0)));
+      if (isWin && payload.mode === 'multiplayer') profile.multiplayerWins += 1;
+      // The same result, kept per mode as well as pooled — written down in the
+      // transaction below rather than here. It is the one write in this function
+      // with no ceiling of its own: mission progress caps at its target and the
+      // profile is upserted whole, but matchesPlayed and the rest only ever add,
+      // so a bump that landed while the match went unstamped would be counted
+      // again by the retry, and again by the one after that.
+      const modeDelta = {
+        played: 1,
+        won: isWin,
+        pointsScored: payload.playerScore,
+        aces: Math.max(0, Math.min(payload.playerScore, Math.round(payload.aces || 0))),
+        bestStreak: payload.bestStreak,
+        endStreak,
+        // How long ago this match ended, by the reporting device's own clock —
+        // the gap between the whistle and the moment this attempt went out. A
+        // result that queued through a replay therefore says so and does not
+        // land back on top of a newer one. Absent (an older client, or a payload
+        // the relay built itself) means "just now".
+        ageMs: resultAgeMs(payload),
+        // This browser's own chain position, for the writes the age cannot
+        // order — see the note beside `stamp` in bumpModeStats.
+        chainId: payload.chainId,
+        runSeq: payload.runSeq,
+      };
+      // Streaks, shutouts and per-difficulty wins are derived here and only
+      // here, from the result the server just accepted — a client can report a
+      // match, never a total.
+      profile.winStreak = isWin ? profile.winStreak + 1 : 0;
+      if (profile.winStreak > profile.bestWinStreak) profile.bestWinStreak = profile.winStreak;
+      // One definition, shared with the daily tasks and quoted by the copy —
+      // this was three identical expressions with the 5-point floor written
+      // down nowhere a player could read it. Declared here and reused by the
+      // achievement triggers below rather than computed a second time.
+      const shutOut = isShutout({
+        isWinner: isWin,
+        playerScore: payload.playerScore,
+        opponentScore: payload.opponentScore,
+      });
+      // ------------------------------------------------------------------
+      // Counters that gate a PERMANENT unlock only advance on ranked-legal
+      // rules.
+      //
+      // `ranked` gated the two rating updates and nothing else, so a match on
+      // `paddleScale: 1.6` + `ballScale: 1.8` + `ballSpeedMax: 1.0` — correctly
+      // refused a rating, and correctly paid XP, which is the documented trade —
+      // still moved every one of these. That bought `rally_150` (900 XP),
+      // `perpetual-blue` and `quantum-gold` off a 160% paddle; the whole shutout
+      // chain and `flawless-white` off a clean sheet nobody had to earn; and,
+      // worst of the three because it is the game's own pacing, the Elite and
+      // Cyber unlocks — `ai_pro_10` then `ai_elite_10` — so the ladder CLAUDE.md
+      // §7 calls "walked, not jumped" could be walked on a 160% paddle.
+      //
+      // XP is not on this list and must not join it: paying for unranked play is
+      // the deliberate trade, and levels never regress. What a permanent unlock
+      // is, though, is the reward ITSELF, and handing one over for a feat the
+      // rules performed is the same mistake as rating the match would have been.
+      //
+      // The line is drawn at counters a permanent unlock reads, not at every
+      // career stat: `aces` and `totalPointsScored` keep counting on any rules,
+      // because they answer "how much have you played" and freezing them would
+      // make a profile under-report matches the player really did play.
+      if (ranked) {
+        if (shutOut) profile.shutoutsWon += 1;
+        if (isWin && payload.mode === 'solo') {
+          if (difficulty === 'rookie') profile.rookieWins += 1;
+          else if (difficulty === 'pro') profile.proWins += 1;
+          else if (difficulty === 'elite') profile.eliteWins += 1;
+          else if (difficulty === 'cyber') profile.cyberWins += 1;
+          else if (difficulty === 'chaos') profile.chaosWins += 1;
+        }
+        // The career best rally STREAK — this player's own consecutive returns,
+        // never the opponent's, and never a whole point's worth of both.
+        if (payload.bestStreak > profile.highestRally) {
+          profile.highestRally = payload.bestStreak;
+        }
+      }
+      profile.lastActive = new Date().toISOString();
+
+      // 4. Check & Unlock Achievements
+      const newAchievements: Achievement[] = [];
+      // Achievements that mean "you beat something" are worth what that something
+      // was actually worth. The AI adapts to the player, so a flat reward would
+      // pay a mu-40 player the same for a Cyber win they take often as a mu-25
+      // player for one they take rarely. Same multiplier the match XP uses, so
+      // there is still no per-difficulty table anywhere.
+      const achievementMultiplier = surpriseMultiplier(winProb, isWin);
+      let achievementBudget = achievementXpCap(profile.level);
+      // Tree rule, strictly: a child cannot be earned before its parent, and the
+      // parent is never granted implicitly. Auto-granting ancestors seemed
+      // helpful until the data showed it handing out `ai_rookie` for beating
+      // Pro — a difficulty the player had never beaten. Where one result really
+      // does satisfy a whole chain (a 50-hit rally is also a 25 and a 10), the
+      // triggers below fire in order and each rung opens the next.
+      // Gates are measured against the profile as it stands when the batch
+      // lands — after this match's own XP and tier update, the same instant the
+      // achievement budget is measured at.
+      const progress = { level: profile.level, tier: profile.tier };
+      const unlock = (achId: string) => {
+        if (!isUnlockable(achId, profile.achievements, progress)) return;
+        grant(achId);
+      };
+
+      const grant = (achId: string) => {
+        if (!profile.achievements.includes(achId)) {
+          profile.achievements.push(achId);
+          const meta = achievementById(achId);
+          if (meta) {
+            const scaled = meta.scaled
+              ? Math.max(1, Math.round(meta.xpReward * achievementMultiplier))
+              : meta.xpReward;
+            // Never hand over most of a level — see the cap's note in rating.ts.
+            // The budget is for everything this match unlocks, so several
+            // achievements landing together cannot stack into a free level. It
+            // is measured against the level the player is on as the batch lands,
+            // which is after this match's own XP has been applied.
+            const awardedXp = Math.max(0, Math.min(scaled, achievementBudget));
+            achievementBudget -= awardedXp;
+            newAchievements.push({ ...meta, unlockedAt: new Date().toISOString(), awardedXp });
+            profile.xp += awardedXp;
+          }
+        }
+      };
+
+      // Achievement triggers
+      const solo = payload.mode === 'solo';
+      const pvp = payload.mode === 'multiplayer';
+      const placed = isPlaced(profile.rankedGames, profile.rankSigma);
+
+      // Foundation
+      // Finishing a match at all. This used to read `payload.maxRally >= 1`,
+      // which under the shared counter was true of anyone who had touched the
+      // ball once. A streak is one player's own returns now, so a player who
+      // never returns a single ball has a best streak of zero — and first_serve
+      // is what opens `mode:multiplayer`, so keying it on that would have left
+      // them unable to reach a duel at all.
+      unlock('first_serve');
+      if (isWin) unlock('first_win');
+      // Keyed on the COUNTER, not on the match in hand, so a clean sheet earned
+      // before the counter existed still opens the Dominion branch on the next
+      // match played. Same shape as `shutout_5`/`shutout_15` below, and the same
+      // reason the rally rungs read `profile.highestRally`: a feat performed
+      // before its gate could open is banked, not lost.
+      if (profile.shutoutsWon >= 1) unlock('shutout');
+      if (profile.matchesPlayed >= 10) unlock('veteran_10');
+      if (profile.matchesPlayed >= 50) unlock('veteran_50');
+      if (profile.matchesPlayed >= 200) unlock('veteran_200');
+      if (profile.matchesPlayed >= 500) unlock('veteran_500');
+      if (profile.matchesPlayed >= 1000) unlock('veteran_1000');
+      if (profile.level >= 5) unlock('level_5');
+
+      // Rally. Measured on the profile's banked best, not this match's rally,
+      // so a feat performed before a gate opened is not lost — the rung lands
+      // on the first match after the gate is met.
+      // Rescaled by 0.72 with the counting change: a rally number is one
+      // player's own consecutive returns now rather than a whole point's worth
+      // of both players', which measures about 0.72x the old figure across the
+      // ladder and both winning scores. These rungs are therefore as far away as
+      // they always were.
+      if (profile.highestRally >= 7) unlock('rally_10');
+      if (profile.highestRally >= 18) unlock('rally_25');
+      if (profile.highestRally >= 36) unlock('rally_50');
+      if (profile.highestRally >= 72) unlock('rally_100');
+      if (profile.highestRally >= 108) unlock('rally_150');
+      if (profile.highestRally >= 144) unlock('rally_200');
+      if (profile.highestRally >= 216) unlock('rally_300');
+
+      // Ladder. The rungs fire in order so a single result can climb a chain
+      // it genuinely satisfies, and each one opens the next.
+      if (isWin && solo && difficulty === 'rookie') unlock('ai_rookie');
+      if (profile.rookieWins >= 10) unlock('ai_rookie_10');
+      if (isWin && solo && difficulty === 'pro') unlock('ai_pro');
+      if (profile.proWins >= 10) unlock('ai_pro_10');
+      if (isWin && solo && difficulty === 'elite') unlock('ai_elite');
+      if (profile.eliteWins >= 10) unlock('ai_elite_10');
+      if (isWin && solo && difficulty === 'cyber') unlock('cyber_slayer');
+      if (shutOut && solo && difficulty === 'cyber') unlock('cyber_shutout');
+      if (profile.cyberWins >= 10) unlock('cyber_10');
+      if (profile.cyberWins >= 25) unlock('cyber_25');
+      if (isWin && solo && difficulty === 'chaos') unlock('ai_chaos');
+      if (shutOut && solo && difficulty === 'chaos') unlock('chaos_shutout');
+      if (profile.chaosWins >= 10) unlock('chaos_10');
+      if (profile.chaosWins >= 25) unlock('chaos_25');
+      if (profile.chaosWins >= 50) unlock('chaos_50');
+
+      // Duel
+      if (pvp) unlock('first_duel');
+      if (isWin && pvp) unlock('multiplayer_champ');
+      if (shutOut && pvp) unlock('duel_shutout');
+      if (profile.multiplayerWins >= 10) unlock('duel_10');
+      if (profile.multiplayerWins >= 25) unlock('duel_25');
+      if (profile.multiplayerWins >= 50) unlock('duel_50');
+      if (profile.multiplayerWins >= 100) unlock('duel_100');
+
+      // Craft
+      if (profile.totalAces >= 1) unlock('first_ace');
+      if (profile.totalAces >= 5) unlock('ace_sniper');
+      if (profile.totalAces >= 25) unlock('ace_25');
+      if (profile.totalAces >= 100) unlock('ace_100');
+      if (profile.totalAces >= 250) unlock('ace_250');
+      if (profile.totalPointsScored >= 100) unlock('points_100');
+      if (profile.totalPointsScored >= 500) unlock('points_500');
+      if (profile.totalPointsScored >= 2000) unlock('points_2000');
+      if (profile.totalPointsScored >= 5000) unlock('points_5000');
+      if (profile.totalPointsScored >= 10000) unlock('points_10000');
+
+      // Ascent — the ranked ladder, concealed until a first duel has happened.
+      // Keyed on the DERIVED tier rather than on rankMu, because the apex is no
+      // longer a rating threshold alone: it asks for OVERLORD_MIN_DUELS ranked
+      // duels, and a trophy reading the mu would fire while the badge still said
+      // Legend. One rule for all seven rungs, so none can drift from the badge —
+      // `profile.tier` was re-derived above, after this match's rating moved.
+      const holdsTier = (t: Tier): boolean => TIER_ORDER.indexOf(profile.tier) >= TIER_ORDER.indexOf(t);
+      if (placed) unlock('placed');
+      if (holdsTier('vanguard')) unlock('tier_vanguard');
+      if (holdsTier('ace')) unlock('tier_ace');
+      if (holdsTier('master')) unlock('master_tier');
+      if (holdsTier('grandmaster')) unlock('tier_grandmaster');
+      if (holdsTier('legend')) unlock('legend_tier');
+      if (holdsTier('overlord')) unlock('tier_overlord');
+      if (profile.rankedDuels >= OVERLORD_MIN_DUELS) unlock('duels_25');
+      if (profile.rankedDuels >= 100) unlock('duels_100');
+
+      // Dominion — winning, and winning without giving anything back.
+      if (profile.bestWinStreak >= 3) unlock('streak_3');
+      if (profile.bestWinStreak >= 5) unlock('streak_5');
+      if (profile.bestWinStreak >= 10) unlock('streak_10');
+      if (profile.bestWinStreak >= 20) unlock('streak_20');
+      if (profile.bestWinStreak >= 30) unlock('streak_30');
+      if (profile.shutoutsWon >= 5) unlock('shutout_5');
+      if (profile.shutoutsWon >= 15) unlock('shutout_15');
+      if (profile.shutoutsWon >= 50) unlock('shutout_50');
+
+      // Devotion — the long haul, concealed until level 5.
+      if (profile.level >= 10) unlock('level_10');
+      if (profile.level >= 25) unlock('level_25');
+      if (profile.level >= 50) unlock('level_50');
+      if (profile.level >= 75) unlock('level_75');
+      if (profile.level >= 100) unlock('level_100');
+      if (profile.dailyStreak >= 3) unlock('daily_3');
+      if (profile.dailyStreak >= 7) unlock('streak_7');
+      if (profile.dailyStreak >= 30) unlock('daily_30');
+      if (profile.dailyStreak >= 100) unlock('daily_100');
+
+      // Daily mission progress rides the same server-verified match record, so
+      // it can never be reported independently of an actual game — and it is
+      // advanced INSIDE the transaction below, not here. See the note there.
+
+      // Achievement XP can push the profile over a level threshold too
+      const finalLevel = calculateLevelFromXp(profile.xp);
+      profile.level = finalLevel.level;
+      profile.xpNext = finalLevel.xpNext;
+
+      // 5. Store match record
+      const matchRecord: MatchRecord = {
+        id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        player1Id: payload.playerId,
+        player1Name: profile.username,
+        player2Id: payload.opponentId || (payload.mode === 'solo' ? `AI-${difficulty}` : 'Player 2'),
+        player2Name: payload.opponentName || (payload.mode === 'solo' ? `AI (${difficulty})` : 'Opponent'),
+        winnerId: isWin ? payload.playerId : (payload.opponentId || 'opponent'),
+        winnerName: isWin ? profile.username : (payload.opponentName || 'Opponent'),
+        scoreP1: payload.playerScore,
+        scoreP2: payload.opponentScore,
+        maxRally: payload.bestStreak,
+        mode: payload.mode,
+        difficulty: payload.mode === 'solo' ? difficulty : payload.difficulty,
+        timestamp: new Date().toISOString(),
+        // Persisted so history can tell Ranked from Un-Ranked later: this is
+        // ranksThisMatch — this match was PLAYED under ranked conditions —
+        // and deliberately not `advancesLadder`, which is whether the ladder
+        // moved. The two are the same today and part company the moment an
+        // anti-farming ladder can zero an update: a hard-capped match keeps
+        // its real classification in History while moving nothing.
+        // Not
+        // merely "the rules sat in the ranked bands". A stock-rules Rookie solo
+        // stores 0, because it rated nothing, whatever its rules were.
+        ranked: ranksThisMatch ? 1 : 0,
+        advancedLadder: advancesLadder ? 1 : 0,
+        // The SAME boolean the counter was incremented on, never a second
+        // derivation: the live twin (competitive_exposure.duelCredited) and
+        // this are two copies of one decision, pruned on different schedules,
+        // so a recalculation here would surface its disagreement long after
+        // the match.
+        rankedDuelCredited: duelCredited ? 1 : 0,
+      };
+
+      const result: MatchEndResult = {
+        profile,
+        earnedXp,
+        leveledUp,
+        winProbability: winProb,
+        previousTier: advancesLadder ? previousTier : null,
+        tier: advancesLadder ? profile.tier : null,
+        tierChanged: advancesLadder && profile.tier !== previousTier,
+        ranked,
+        rankDirection,
+        rankMagnitude,
+        newAchievements,
+        // Filled from inside the transaction below, after the progress it
+        // reports has actually been written.
+        missions: [],
+      };
+
       this.bumpModeStats(profile.id, payload.mode, modeDelta);
       // Mission progress is a WRITE with no ceiling of its own — a target
       // clamps a mission at its own goal, but nothing stops the same match
@@ -3537,12 +4194,14 @@ class GameDatabase {
       // key claimed and the XP never awarded.
       if (matchKey) this.stampRecordedMatch(payload.playerId, matchKey, result, now);
       this.sql.exec('COMMIT');
+      // Returned from INSIDE the try, because `result` is built in here now:
+      // the transaction opens above the rating updates, so the exposure row
+      // and the profile move it describes commit as one act.
+      return result;
     } catch (e) {
       this.sql.exec('ROLLBACK');
       throw e;
     }
-
-    return result;
   }
 
   /**
@@ -3608,6 +4267,317 @@ class GameDatabase {
     // growing for the life of the database.
     const cutoff = new Date(now.getTime() - RECORDED_MATCH_TTL_MS).toISOString();
     this.stmt('DELETE FROM recorded_matches WHERE recordedAt < ?').run(cutoff);
+  }
+
+  // ---- Competitive exposure ----------------------------------------------
+  //
+  // What the three anti-farming ladders count. Reading and writing only; the
+  // policy that turns these counts into weights is src/playbotRating.ts, and
+  // the decision about whether a match writes a row at all belongs to
+  // recordMatch's own eligibility predicate.
+
+  /** One participant's account of one completed, competitively eligible match. */
+  public recordExposure(row: {
+    playerId: string;
+    oppId: string;
+    matchKey: string;
+    /** The MATCH's decided-at. Identical on both seats' rows -- see below. */
+    at: Date;
+    oppIsBot: boolean;
+    /** The opponent's tier at MATCH START, never re-derived at record time. */
+    oppBand: string;
+  }): void {
+    const at = row.at.toISOString();
+    // ON CONFLICT DO NOTHING, so a replayed matchKey advances nothing: the
+    // primary key is what makes the unit one completed match rather than one
+    // point, one rally or one round.
+    this.stmt(
+        `INSERT INTO competitive_exposure
+           (playerId, oppId, matchKey, at, day, oppIsBot, oppBand, duelCredited)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+         ON CONFLICT(playerId, matchKey) DO NOTHING`
+      )
+      .run(row.playerId, row.oppId, row.matchKey, at, at.slice(0, 10), row.oppIsBot ? 1 : 0, row.oppBand);
+    this.pruneExposure(row.at);
+  }
+
+  /**
+   * Sweep rows past the retention horizon.
+   *
+   * Measured from the MATCH's own decided-at rather than the wall clock: a
+   * match parked on a device and replayed days later carries an old anchor,
+   * and pruning relative to the clock could take out rows its own window is
+   * about to read. Relative to its anchor the sweep can only ever delete
+   * less, which is the safe direction.
+   */
+  public pruneExposure(now: Date): void {
+    const cutoff = new Date(now.getTime() - EXPOSURE_TTL_MS).toISOString();
+    this.stmt('DELETE FROM competitive_exposure WHERE at < ?').run(cutoff);
+  }
+
+  /**
+   * How this bot plays. Defaults for an id the roster does not name, so a
+   * caller never has to branch on whether a row exists.
+   *
+   * There is deliberately no setter beside this. Traits are seeded at creation
+   * and never written again (§4.13): a controller selects which existing bots
+   * play and where, and the curve is the population it already has — if a band
+   * is thin and no bot suits it, the answer is seeding more bots, not retuning
+   * one that is already playing.
+   */
+  /**
+   * Remember a play-bot the supervisor has just provisioned: the marker row
+   * that MAKES it a bot, the credential it comes back on, and its traits.
+   *
+   * The marker is the one step with no HTTP route behind it, deliberately —
+   * a client that could declare itself a bot could take the reduced stakes
+   * with it (§4.7). Traits are written ONCE, here, at creation: §4.13's rule
+   * is that creation may seed and nothing after it may steer, which is why
+   * there is no UPDATE of this table anywhere in the server.
+   */
+  public rememberPlaybot(botId: string, deviceCookie: string, traits: PlaybotTraits): void {
+    const t = normalizeTraits(traits);
+    this.stmt(
+        `INSERT OR IGNORE INTO bot_accounts
+           (botId, createdAt, deviceCookie, ${TRAIT_KEYS.join(', ')})
+         VALUES (?, ?, ?, ${TRAIT_KEYS.map(() => '?').join(', ')})`
+      )
+      .run(botId, new Date().toISOString(), deviceCookie, ...TRAIT_KEYS.map((k) => t[k]));
+    botAccountIds.add(botId);
+  }
+
+  /**
+   * Every play-bot account this process can drive: a marker row that carries a
+   * credential, with the username and earned rating selection needs.
+   *
+   * The curated roster is excluded by the `deviceCookie IS NOT NULL` test
+   * rather than by an id shape — those rows are leaderboard furniture with no
+   * credential and no driver, and asking about the prefix here would be the
+   * classifier D26 retired.
+   */
+  public playbotAccounts(): Array<{
+    botId: string;
+    username: string;
+    deviceCookie: string;
+    traits: PlaybotTraits;
+    mu: number;
+    recentMatches: number;
+    /**
+     * What the bracket gate judges, carried here rather than looked up later.
+     *
+     * A bot's venue eligibility was never modelled at all, and its symptoms
+     * were patched one at a time: a host refused `VENUE_LOCKED` fell back, and
+     * then a JOIN refused the same way had nowhere to fall back TO and simply
+     * retried the forbidden table on every tick while the human it was sent to
+     * serve went on waiting. `chooseVenue`'s own doc says `allowed` is the set
+     * the gate says it may enter, supplied by the caller — so the caller has
+     * to be able to ask, and asking costs four more columns on a query it was
+     * already running.
+     */
+    level: number;
+    tier: Tier;
+  }> {
+    // `mu` is the MATCHMAKER's estimator and not the visible ladder's, because
+    // the only thing the controller compares it against is a waiting human's
+    // `matchmakingRating` (`bandCentre`, server.ts). §7's rule is that each
+    // estimator is read against its own counterpart, and these two diverge BY
+    // DESIGN for a bot: a Casual table pays XP and moves hidden MMR and never
+    // the visible tier, so a bot whose `rankedBias` sends it to Casual
+    // accumulates mmr with `rankMu` frozen at START_MU. Ranked on `rankMu`
+    // every such bot sat at the same distance from every band centre, and the
+    // controller passed over the one whose real rating suited the person
+    // waiting -- then the matcher refused the pairing it did make.
+    const rows = this.stmt(
+        `SELECT b.botId AS botId, p.username AS username, b.deviceCookie AS deviceCookie,
+                p.mmrMu AS mu, p.rankMu AS rankMu,
+                p.matchesPlayed AS recentMatches, p.level AS level,
+                p.rankSigma AS rankSigma, p.rankedGames AS rankedGames, p.rankedDuels AS rankedDuels,
+                ${TRAIT_KEYS.map((k) => `b.${k} AS ${k}`).join(', ')}
+           FROM bot_accounts b
+           JOIN players p ON p.id = b.botId
+          WHERE b.deviceCookie IS NOT NULL AND p.initializedAt IS NOT NULL
+          ORDER BY b.createdAt, b.botId`
+      )
+      .all() as unknown as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      botId: String(r.botId),
+      username: String(r.username),
+      deviceCookie: String(r.deviceCookie),
+      traits: normalizeTraits(r as Partial<PlaybotTraits>),
+      mu: Number(r.mu),
+      recentMatches: Number(r.recentMatches) || 0,
+      level: Number(r.level) || 1,
+      // Derived exactly as `rowToProfile` derives it, so a bot is judged by
+      // the same tier the relay will judge it by — which means the VISIBLE
+      // ladder's rating and emphatically not `mu` above, however alike the two
+      // columns look here. A tier read off the hidden estimator would decide
+      // venue eligibility by a number no badge ever shows, and the relay would
+      // then refuse the very rooms `venuesFor` had just said were open.
+      tier: tierFor(
+        Number(r.rankMu),
+        Number(r.rankedGames) || 0,
+        Number(r.rankSigma),
+        Number(r.rankedDuels) || 0
+      ),
+    }));
+  }
+
+  public botTraits(botId: string): PlaybotTraits {
+    const row = this.stmt(`SELECT ${TRAIT_KEYS.join(', ')} FROM bot_accounts WHERE botId = ?`)
+      .get(botId) as Partial<PlaybotTraits> | undefined;
+    return normalizeTraits(row ?? null);
+  }
+
+  /**
+   * §2.7's allowance: how many `rankedDuels` credits this HUMAN has already
+   * been GRANTED from bot play today, excluding the match in hand.
+   *
+   * Granted rather than attempted, which is what `duelCredited = 0` on insert
+   * buys: a refused attempt spends nothing, so it cannot push a later duel out
+   * of the allowance, and the current row cannot consume its own.
+   *
+   * Asked ONLY for a participant satisfying `!selfIsBot && oppIsBot`. The
+   * `oppIsBot = 1` filter reads as "my bot matches" for a human and would read
+   * as "all my matches" for a bot, so the guard is what keeps this a human's
+   * allowance rather than a cap on bot-vs-bot -- which would throttle a bot's
+   * own qualification to five a day and stop bot-vs-bot progressing like the
+   * equivalent human duel.
+   */
+  private botDuelCreditsToday(playerId: string, at: Date, matchKey: string): number {
+    return (
+      this.stmt(
+          `SELECT COALESCE(SUM(duelCredited), 0) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppIsBot = 1 AND day = ? AND matchKey <> ?`
+        )
+        .get(playerId, at.toISOString().slice(0, 10), matchKey) as { n: number }
+    ).n;
+  }
+
+  /**
+   * Stamp the credit onto this participant's exposure row.
+   *
+   * Set for EVERY granted credit whatever the pair kind -- a human-human duel
+   * and a bot's bot-vs-bot duel both stamp 1 -- because it is the live twin of
+   * the durable decision. Only the ALLOWANCE is human-vs-bot; the RECORD of a
+   * credit is universal.
+   */
+  private creditExposureDuel(playerId: string, matchKey: string): void {
+    this.stmt('UPDATE competitive_exposure SET duelCredited = 1 WHERE playerId = ? AND matchKey = ?')
+      .run(playerId, matchKey);
+  }
+
+  /**
+   * §4.5 steps 2 and 3, in that order: write this participant's row, then read
+   * what came BEFORE it.
+   *
+   * Insert-first is what lets both seats read the same window from the same
+   * anchor; the `matchKey` exclusion inside `exposureCounts` is what keeps it
+   * honest. Split into two public methods so each half is testable on its own,
+   * and paired here so no caller can get the order wrong.
+   */
+  private recordAndCountExposure(
+    playerId: string,
+    context: RecordMatchContext,
+    matchKey: string,
+    now: Date
+  ): ExposureCounts {
+    const oppId = context.opponentId!;
+    const at = context.decidedAt ?? now;
+    // DERIVED from the trusted id, never carried on a payload or the wire.
+    const oppIsBot = isBotAccount(oppId);
+    const oppBand = context.opponentBand ?? 'unranked';
+    this.recordExposure({ playerId, oppId, matchKey, at, oppIsBot, oppBand });
+    return this.exposureCounts({
+      playerId,
+      oppId,
+      matchKey,
+      at,
+      oppBand,
+      // §2.4 and §2.5 are the HUMAN's alone, and only against a bot. A bot
+      // keeps its ×1.00 progression and its own counters, subject only to the
+      // same-pair band — so those two queries are not even asked for it.
+      humanVsBot: !isBotAccount(playerId) && oppIsBot,
+    });
+  }
+
+  /**
+   * How much of a PAIR has already been played, and when it last was.
+   *
+   * The same rolling window and the same table the same-pair saturation ladder
+   * counts over, asked forward rather than at record time: §2.11's diversity
+   * preference is about who a bot would RATHER play, so it has to be
+   * answerable before the match rather than after it. A read, and only a read
+   * — nothing here writes an exposure row.
+   */
+  public pairHistory(
+    playerId: string,
+    oppId: string,
+    now: Date = new Date()
+  ): { count: number; lastAt: number | null } {
+    const since = new Date(now.getTime() - EXPOSURE_WINDOW_MS).toISOString();
+    const row = this.stmt(
+        `SELECT COUNT(*) AS n, MAX(at) AS last FROM competitive_exposure
+          WHERE playerId = ? AND oppId = ? AND at >= ?`
+      )
+      .get(playerId, oppId, since) as unknown as { n: number; last: string | null };
+    const lastAt = row?.last ? Date.parse(row.last) : NaN;
+    return { count: Number(row?.n) || 0, lastAt: Number.isFinite(lastAt) ? lastAt : null };
+  }
+
+  /**
+   * The PRIOR counts this participant's match is judged on -- never including
+   * the match being recorded.
+   *
+   * The row for the current match is inserted BEFORE this runs, which is what
+   * lets both seats read the same window from the same anchor; the `matchKey`
+   * exclusion is the only thing keeping that honest. The rolling windows are
+   * therefore `at <= anchor` and deliberately not `at < anchor`: with the
+   * strict comparison the exclusion would be redundant, so a test that
+   * removed it would still pass and the guard would rot unnoticed.
+   *
+   * `humanVsBot` is false for every participant §2.4 and §2.5 do not apply to
+   * -- a bot in any match, and a human facing a human -- and those two
+   * queries are then not asked at all. Their `oppIsBot = 1` filter reads as
+   * "my bot matches" for a human and would read as "all my matches" for a
+   * bot, so the guard is what keeps them the human's ladders.
+   */
+  public exposureCounts(q: {
+    playerId: string;
+    oppId: string;
+    matchKey: string;
+    /** The match's decided-at. Both seats pass the same value. */
+    at: Date;
+    oppBand: string;
+    humanVsBot: boolean;
+  }): ExposureCounts {
+    const at = q.at.toISOString();
+    const since = new Date(q.at.getTime() - EXPOSURE_WINDOW_MS).toISOString();
+    const priorPairCount = (
+      this.stmt(
+          `SELECT COUNT(*) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppId = ? AND at >= ? AND at <= ? AND matchKey <> ?`
+        )
+        .get(q.playerId, q.oppId, since, at, q.matchKey) as { n: number }
+    ).n;
+    if (!q.humanVsBot) {
+      return { priorPairCount, priorBotBandCount: 0, priorBotDailyCount: 0 };
+    }
+    const priorBotBandCount = (
+      this.stmt(
+          `SELECT COUNT(*) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppIsBot = 1 AND oppBand = ?
+              AND at >= ? AND at <= ? AND matchKey <> ?`
+        )
+        .get(q.playerId, q.oppBand, since, at, q.matchKey) as { n: number }
+    ).n;
+    const priorBotDailyCount = (
+      this.stmt(
+          `SELECT COUNT(*) AS n FROM competitive_exposure
+            WHERE playerId = ? AND oppIsBot = 1 AND day = ? AND matchKey <> ?`
+        )
+        .get(q.playerId, at.slice(0, 10), q.matchKey) as { n: number }
+    ).n;
+    return { priorPairCount, priorBotBandCount, priorBotDailyCount };
   }
 
   // ---- Device sessions ---------------------------------------------------
@@ -3760,6 +4730,16 @@ class GameDatabase {
         this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(newDeviceId);
         this.stmt(`UPDATE ${table} SET playerId = ? WHERE playerId = ?`).run(newDeviceId, fromId);
       }
+      // The SECOND identity-bearing column, which PLAYER_KEYED_TABLES cannot
+      // see: an exposure row names both participants, so the loop above has
+      // carried only the rows where this account was the player. Missed, the
+      // pair reads brand new from the OPPONENT's side and the same-pair
+      // anti-farm ladder restarts at match #1 — a free reset for anyone
+      // willing to sign in on a second browser. There is no collision to
+      // clear first, since the key is (playerId, matchKey) and this touches
+      // neither.
+      this.stmt('UPDATE competitive_exposure SET oppId = ? WHERE oppId = ?')
+        .run(newDeviceId, fromId);
       // Everything already pointed at the account follows it, and both ends of
       // the move are members from here on.
       this.stmt('UPDATE device_links SET playerId = ? WHERE playerId = ?').run(newDeviceId, fromId);
@@ -3835,6 +4815,13 @@ class GameDatabase {
       for (const table of PLAYER_KEYED_TABLES) {
         this.stmt(`DELETE FROM ${table} WHERE playerId = ?`).run(playerId);
       }
+      // The opponent side, invisible to the loop above for the same reason
+      // moveAccount has to rewrite it by hand. Deleted rather than scrubbed:
+      // it UNDER-counts a survivor's pair history, which errs toward leniency
+      // and self-heals inside the 48h prune window — the safe direction, and
+      // unlike `matches` there is no second player's record of the game here
+      // to preserve, since each seat files its own row.
+      this.stmt('DELETE FROM competitive_exposure WHERE oppId = ?').run(playerId);
       this.stmt('DELETE FROM players WHERE id = ?').run(playerId);
       // Both directions, and every browser: the rows naming this account, and
       // any naming one of the browsers that belonged to it.
@@ -3902,7 +4889,7 @@ class GameDatabase {
             AND xp = 0
             AND rankedGames = 0
             AND lastActive < ?
-            AND id NOT LIKE 'bot-%'
+            AND NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = id)
             AND id NOT IN (SELECT deviceId FROM device_links)
             AND id NOT IN (SELECT playerId FROM device_links)
             AND id NOT IN (SELECT deviceId FROM released_devices)
@@ -3996,6 +4983,16 @@ class GameDatabase {
   /** Hard ceiling on one board query — a bound, not the public page size. */
   private static readonly MAX_BOARD_ROWS = 1000;
 
+  /**
+   * "this row is not a bot", in SQL, correlated on the authoritative table.
+   *
+   * Assumes the players table is aliased `p`, which every call site here does.
+   * A shared fragment rather than seven copies because the whole point of D26
+   * is that one thing answers this question.
+   */
+  private static readonly NOT_A_BOT =
+    'NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)';
+
   private static readonly LADDER_TIEBREAK = 'p.id ASC';
 
   /**
@@ -4034,11 +5031,24 @@ class GameDatabase {
    * compile-time values, so the text stays constant.
    */
   private ladderPosition(id: string, rankMu: number): number | null {
+    // THE COUNTED SET, which is the other half of §4.9 and the reason the two
+    // clauses cannot be collapsed into one.
+    //
+    // A HUMAN's position counts qualified non-bot players above them, so bots
+    // never occupy or shift the ordinal a person is shown — the number is
+    // identical with bots absent, present, shown or hidden. A BOT's counts
+    // qualified players of ALL kinds, because it really is behind the people
+    // above it.
+    //
+    // The accepted consequence (D15): a bot and a human can display the same
+    // number. They are counted in different lanes, so a collision is intended
+    // rather than a bug.
+    const subjectIsBot = isBotAccount(id);
     const row = this.stmt(
         `SELECT COUNT(*) AS above
            FROM players p
           WHERE p.initializedAt IS NOT NULL
-            AND p.id NOT LIKE 'bot-%'
+            ${subjectIsBot ? '' : 'AND NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)'}
             AND p.id <> ?
             AND p.rankedGames >= ${PLACEMENT_GAMES}
             AND p.rankSigma <= ${PLACEMENT_SIGMA}
@@ -4103,7 +5113,7 @@ class GameDatabase {
     // is emitted too, so `take` bounds the result either way and no over-fetch
     // is needed. The output is identical — humanRank only ever counted
     // non-bots, so removing rows that never incremented it changes nothing.
-    const botClause = includeBots ? '' : " AND p.id NOT LIKE 'bot-%'";
+    const botClause = includeBots ? '' : ` AND ${GameDatabase.NOT_A_BOT}`;
     // LIMIT in the SQL, not just in the loop. Without it every eligible row
     // was materialized as p.* and run through rowToProfile (which JSON.parses
     // the achievements column) before the loop threw all but `take` away —
@@ -4113,7 +5123,7 @@ class GameDatabase {
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
           WHERE p.initializedAt IS NOT NULL
-            AND (${progress} OR p.id LIKE 'bot-%')${botClause}
+            AND (${progress} OR EXISTS (SELECT 1 FROM bot_accounts b2 WHERE b2.botId = p.id))${botClause}
           ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
           LIMIT ?`
       )
@@ -4125,7 +5135,7 @@ class GameDatabase {
     let humanRank = 0;
     for (const row of rows) {
       if (out.length >= take) break;
-      const isBot = row.id.startsWith('bot-');
+      const isBot = isBotAccount(row.id);
       if (isBot && !includeBots) continue;
       if (!isBot) humanRank++;
       const p = rowToProfile(row);
@@ -4241,7 +5251,7 @@ class GameDatabase {
     // the initialized non-bot count actually distinguishes "empty" from
     // "populated".
     const human = this.stmt(
-      "SELECT COUNT(*) AS n FROM players WHERE initializedAt IS NOT NULL AND id NOT LIKE 'bot-%'"
+      `SELECT COUNT(*) AS n FROM players p WHERE p.initializedAt IS NOT NULL AND ${GameDatabase.NOT_A_BOT}`
     ).get() as { n: number };
     return { file: path.resolve(DB_FILE), bytes, players: row.n, humans: human.n };
   }
