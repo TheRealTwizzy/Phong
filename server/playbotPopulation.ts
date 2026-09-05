@@ -112,7 +112,18 @@ export function unmetHumanDemand(s: Pick<PopulationSnapshot, 'queuedHumans' | 'o
 export function impatientDemand(
   s: Pick<PopulationSnapshot, 'longestWaitMs' | 'queuedHumans'>
 ): number {
-  return s.longestWaitMs >= PATIENCE_MS && s.queuedHumans > 0 ? 1 : 0;
+  if (s.queuedHumans <= 0 || s.longestWaitMs < PATIENCE_MS) return 0;
+  // ...and only when the PARITY slot has not already covered them. An odd
+  // queue's odd one out is precisely the person who has been waiting, so
+  // counting both spent two bots on one human: on a busy server, where the
+  // idle baseline is zero, a single waiting player activated two and
+  // dispatched both to the queue, one of which could only take a later
+  // arrival's game.
+  //
+  // Even is the case this exists for: parity says everybody is theoretically
+  // matched, and somebody has waited anyway because the band has not opened
+  // far enough to pair them.
+  return s.queuedHumans % 2 === 0 ? 1 : 0;
 }
 
 export function targetActiveCount(s: PopulationSnapshot): number {

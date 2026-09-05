@@ -79,7 +79,24 @@ describe('humans are never displaced', () => {
     // The patience rule is one function read by both, because a rule copied
     // into two places is one that drifts — and the copy in `targetActivation`
     // had no test at all until the coverage floor said so.
-    expect(impatientDemand({ longestWaitMs: PATIENCE_MS, queuedHumans: 1 })).toBe(1);
+    // Asserted as the COMPOSED answer, because that is the question: how many
+    // bots does one waiting human get. The raw function used to answer 1 for a
+    // queue of ONE, and `(queuedHumans % 2)` had already counted that same
+    // person -- so a single waiting player activated TWO bots and dispatched
+    // both to the queue, where only one of them could serve anybody.
+    //
+    // Impatience supplements an EVEN queue now: parity covers the odd one out,
+    // and impatience covers the case where parity says everybody is matched
+    // and somebody has waited anyway because the band has not opened far
+    // enough to pair them.
+    const demandAt = (queuedHumans: number, longestWaitMs: number) => {
+      const at = { queuedHumans, longestWaitMs, openTables: 0 };
+      return unmetHumanDemand(at) + impatientDemand(at);
+    };
+    for (const q of [1, 2, 3, 4, 5]) {
+      expect(demandAt(q, PATIENCE_MS), `${q} queued, all waiting`).toBe(1);
+    }
+    expect(demandAt(0, PATIENCE_MS)).toBe(0);
     expect(impatientDemand({ longestWaitMs: PATIENCE_MS, queuedHumans: 0 })).toBe(0);
     expect(impatientDemand({ longestWaitMs: 0, queuedHumans: 4 })).toBe(0);
     const t = targetActivation(
