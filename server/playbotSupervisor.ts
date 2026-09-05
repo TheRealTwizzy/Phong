@@ -471,6 +471,13 @@ export class PlaybotSupervisor {
     // Claim the slot BEFORE the await, or two ticks in flight dispatch the
     // same bot twice.
     m.dispatchedAt = Date.now();
+    // A driver whose socket has died is not a driver. Rebuilt rather than
+    // reused, because `resume`/`connect` set up the message pump and the tick
+    // together and every `send` on the dead one goes nowhere.
+    if (m.driver && !m.driver.isConnected()) {
+      m.driver.close();
+      m.driver = null;
+    }
     if (!m.driver) {
       const driver = new PlaybotDriver({
         base: this.opts.base,
@@ -585,7 +592,7 @@ export class PlaybotSupervisor {
  * the brackets exist to sort HUMANS by tier rather than to be filled by the
  * population.
  */
-const OPEN_VENUES = ['casual', 'beginner'];
+export const OPEN_VENUES = ['casual', 'beginner'];
 
 /**
  * The nth name the population asks for.

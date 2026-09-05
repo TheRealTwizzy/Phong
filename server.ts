@@ -67,7 +67,7 @@ import {
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
-import { PlaybotSupervisor, liveStateFrom } from './server/playbotSupervisor';
+import { PlaybotSupervisor, liveStateFrom, OPEN_VENUES } from './server/playbotSupervisor';
 import {
   DEFAULT_VENUE_ROOM,
   MATCHMAKING_ROOM,
@@ -4494,10 +4494,24 @@ async function startServer() {
         // population's own empty tables are not demand: counted, a roster that
         // prefers hosting reads its own parked tables as people to serve and
         // activates more bots to open more of them.
+        // Demand and the search have to name the SAME venues, or the count
+        // asks for bots the dispatch cannot spend. `openTable` looks in
+        // OPEN_VENUES and nowhere else, so a human hosting in `intermediate`
+        // was counted here, a bot was activated to serve them, it searched two
+        // rooms it was never in, found nothing and opened a table of its own —
+        // while that human went on waiting.
+        //
+        // Narrowed here rather than widened there, deliberately: the other
+        // brackets gate who may PLAY, so a bot walking into one has to clear
+        // `roomEntryVerdict` on its own tier, and the search would have to
+        // carry that judgement. Counting only what the population can actually
+        // serve is the honest half; serving bracketed tables is a design step
+        // and is not this fix.
         openTables: [...rooms.values()].filter((r) => {
           const seated = r.players.filter(Boolean);
           return (
             r.visibility === 'public' &&
+            OPEN_VENUES.includes(r.venueRoomId) &&
             seated.length === 1 &&
             !isBotAccount(seated[0]!.playerId)
           );

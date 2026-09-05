@@ -330,6 +330,28 @@ describe('what the composition has to pass along', () => {
     expect(call![1]).toMatch(/bandCentre:/);
   });
 
+  it('counts as demand only the venues the dispatch will search', () => {
+    // `openTable` looks in OPEN_VENUES and nowhere else, while the demand
+    // count took every public room — so a human hosting in `intermediate`
+    // activated a bot that searched two rooms it was never in, found nothing,
+    // and opened a table of its own while that human went on waiting.
+    // Narrowed at the count rather than widened at the search: the other
+    // brackets gate who may PLAY, so serving them needs the bot's own tier
+    // judged, which is a design step and not this fix.
+    const call = /liveStateFrom\(\{([\s\S]*?)\n      \}\)/.exec(read('server.ts'));
+    expect(call![1]).toMatch(/OPEN_VENUES\.includes\(r\.venueRoomId\)/);
+  });
+
+  it('clamps a bot’s return into the match’s own speed band', () => {
+    // `checkPaddleCollision` can return a pace BELOW a raised `ballSpeedMin`
+    // once spin has scrubbed it, and App.tsx clamps at the equivalent
+    // contact — so without this the two halves of one rally obey different
+    // speed rules, and the rules are a term of the match rather than of the
+    // court. Read rather than driven: reaching it needs a spin-scrubbed
+    // contact under a raised floor, which no fixture produces reliably.
+    expect(read('server/playbotDriver.ts')).toMatch(/clampBallSpeed\(hit\.speed, this\.rules\)/);
+  });
+
   it('prefers a human’s table when a bot goes to join one', () => {
     // A bot dispatched to serve a human waiting at a public table took the
     // FIRST free listing entry, so it could walk up to another bot's table and

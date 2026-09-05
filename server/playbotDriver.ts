@@ -28,6 +28,7 @@ import {
   BALL_BASE_RADIUS,
   BOT_MAX_COMPETENCE,
   BASE_BALL_SPEED,
+  clampBallSpeed,
   OpponentAI,
   PADDLE_WIDTH_RATIO,
   PADDLE_Y,
@@ -237,6 +238,31 @@ export class PlaybotDriver {
       ws.once('open', () => resolve());
       ws.once('error', reject);
     });
+    // A socket can die without anybody asking it to -- a relay restart, a
+    // reaped room, a transient network fault. With no handler the timer kept
+    // running and the phase stayed `queued`/`lobby`/`rally`, so `engaged()`
+    // went on counting a driver whose every `send` was going nowhere and the
+    // supervisor never rebuilt it: repeated disconnects drained the effective
+    // population until the process restarted.
+    //
+    // It goes back to `idle` and drops its seat state, which is what makes the
+    // next tick see a bot that is not engaged and dispatch it again.
+    ws.on('close', () => {
+      if (this.ws !== ws) return;
+      if (this.timer) clearInterval(this.timer);
+      this.timer = null;
+      this.ws = null;
+      this.phase = 'idle';
+      this.roomId = null;
+      this.seat = null;
+      this.opponentPresent = false;
+      this.ball = null;
+    });
+    // `ws` raises socket faults as an 'error' emit, and an EventEmitter
+    // 'error' with no listener THROWS -- from an I/O callback outside any
+    // try/catch, which is the same fault §5 records taking the whole relay
+    // down. The `once` above is spent by the connect promise.
+    ws.on('error', () => {});
     ws.on('message', (raw) => {
       let msg: WSServerMessage;
       try {
@@ -272,6 +298,22 @@ export class PlaybotDriver {
     this.send({ type: 'join_room', roomId, playerId: this.botId });
   }
 
+  /**
+   * Drop the socket the way a relay restart would, for a test.
+   *
+   * `close()` tears the driver down deliberately; this severs the transport
+   * and leaves the driver to notice, which is the case the close handler
+   * exists for and the only way to reach it without a second process.
+   */
+  public dropSocketForTest(): void {
+    this.ws?.terminate();
+  }
+
+  /** Whether this driver still holds a live socket. */
+  public isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === this.ws.OPEN;
+  }
+
   /** Whether somebody is sitting opposite. A lobby with nobody in it is a wait. */
   public hasOpponent(): boolean {
     return this.opponentPresent;
@@ -293,6 +335,16 @@ export class PlaybotDriver {
    */
   public standDown(): void {
     this.standingDown = true;
+    // A bot WAITING is not a bot playing, so there is no whistle to wait for
+    // -- and `queued` is an ENGAGED phase, so a driver left in it is counted
+    // active forever and the supervisor's reap can never close it. It stayed
+    // in matchmaking indefinitely and could be seated into a match after it
+    // had been chosen for deactivation.
+    if (this.phase === 'queued') {
+      this.send({ type: 'queue_cancel' });
+      this.phase = 'idle';
+      return;
+    }
     if (this.phase === 'idle' || this.phase === 'over' || this.phase === 'lobby') this.leave();
   }
 
@@ -584,8 +636,14 @@ export class PlaybotDriver {
           this.rules
         );
         if (hit.hit && hit.angle !== undefined && hit.speed !== undefined) {
-          ball.vx = Math.sin(hit.angle) * hit.speed;
-          ball.vy = -Math.abs(Math.cos(hit.angle) * hit.speed);
+          // The match's own band, the same call App.tsx makes at the
+          // equivalent contact. `checkPaddleCollision` can return a pace BELOW
+          // a raised `ballSpeedMin` once spin has scrubbed it, so without this
+          // the two halves of one rally obey different speed rules -- and the
+          // rules are a term of the match, not of the court.
+          const paced = clampBallSpeed(hit.speed, this.rules);
+          ball.vx = Math.sin(hit.angle) * paced;
+          ball.vy = -Math.abs(Math.cos(hit.angle) * paced);
           ball.spin = hit.spin ?? 0;
           ball.y = PADDLE_Y - radius - 0.001;
           // No 4% here: `hit.speed` already carries it, and this field is

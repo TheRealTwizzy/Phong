@@ -203,4 +203,58 @@ describe('a deactivated bot waits for the whistle', () => {
     host.close();
     guest.close();
   }, 90_000);
+
+  it('leaves the QUEUE when it is stood down', async () => {
+    // `queued` is an ENGAGED phase, so a driver left sitting in it is counted
+    // active forever and the supervisor's reap -- `retiring && !engaged` --
+    // can never close it. `standDown` handled idle, over and lobby and not
+    // this one, so a bot chosen for deactivation stayed in matchmaking
+    // indefinitely and could be seated into a match afterwards.
+    //
+    // There is no whistle to wait for here: a bot WAITING is not a bot
+    // playing, so the request is granted at once.
+    relay = await startRelay('playbot-lifecycle');
+    const r = relay;
+    const bot = await bootBot(r, 'queuer');
+
+    bot.queue();
+    await until('the bot to be queued', () => bot.phase === 'queued');
+
+    bot.standDown();
+    expect(bot.phase).toBe('idle');
+    // And the relay agrees: it answers a cancel, which it would not for a
+    // socket it had never queued.
+    await sleep(500);
+    expect(bot.phase).toBe('idle');
+
+    bot.close();
+  }, 60_000);
+
+  it('goes back to idle when its socket dies under it', async () => {
+    // A socket can die without anybody asking -- a relay restart, a reaped
+    // room, a transient fault. With no `close` handler the timer kept running
+    // and the phase stayed whatever it was, so `engaged()` went on counting a
+    // driver whose every send was going nowhere, and the supervisor's
+    // `if (!m.driver)` never rebuilt it: repeated disconnects drained the
+    // effective population until the process restarted.
+    relay = await startRelay('playbot-lifecycle');
+    const r = relay;
+    const bot = await bootBot(r, 'dropper');
+
+    bot.host({ winningScore: 3 });
+    await until('a table', () => bot.roomId !== null);
+    expect(bot.isConnected()).toBe(true);
+
+    // Killed from underneath, the way a relay restart would.
+    bot.dropSocketForTest();
+    // Waited on the PHASE, not on `isConnected()`: `terminate()` flips
+    // readyState synchronously while the 'close' event is delivered a turn
+    // later, so a wait on the socket would race the handler under test and
+    // assert against a driver that has not heard yet (vacuity shape 13).
+    await until('the driver to notice', () => bot.phase === 'idle');
+    expect(bot.isConnected()).toBe(false);
+    expect(bot.roomId).toBeNull();
+
+    bot.close();
+  }, 60_000);
 });
