@@ -420,20 +420,19 @@ export class PlaybotDriver {
     return asked ?? { isBot: false, recentPairCount: 0 };
   }
 
-  private opponentIsBot(): boolean {
-    return this.opponentFacts().isBot;
-  }
-
   /**
    * §2.11, through the one function that owns it.
    *
    * A standing-down bot never wants one: it is waiting for this whistle in
    * order to leave, and `standDown`'s whole promise is that it does not walk
    * out of a match in progress.
+   *
+   * Takes the facts rather than always reading them, so a caller that has
+   * already asked (the whistle, which needs `isBot` first) spends one database
+   * read instead of two, on one consistent answer.
    */
-  private wantsRematch(): boolean {
+  private wantsRematch(facts = this.opponentFacts()): boolean {
     if (this.standingDown) return false;
-    const facts = this.opponentFacts();
     return acceptsRematch({
       traits: this.opts.traits,
       fromHuman: !facts.isBot,
@@ -627,13 +626,16 @@ export class PlaybotDriver {
           this.phase = 'over';
           this.ball = null;
           if (this.standingDown) this.leave();
-          // Two bots have nobody to wait on, so one of them has to ask or the
-          // rematch never happens and `rematchAppetite` decides nothing. A
-          // HUMAN is never asked: their Play Again is theirs to press, and a
-          // vote cast before they have decided commits a bot to a table it may
-          // be about to be stood down from.
-          else if (this.opponentIsBot() && this.wantsRematch()) {
-            this.send({ type: 'rematch_request' });
+          else {
+            // Two bots have nobody to wait on, so one of them has to ask or
+            // the rematch never happens and `rematchAppetite` decides nothing.
+            // A HUMAN is never asked: their Play Again is theirs to press, and
+            // a vote cast before they have decided commits a bot to a table it
+            // may be about to be stood down from.
+            const facts = this.opponentFacts();
+            if (facts.isBot && this.wantsRematch(facts)) {
+              this.send({ type: 'rematch_request' });
+            }
           }
         } else {
           this.beginPoint(msg.nextServer === this.seat);
