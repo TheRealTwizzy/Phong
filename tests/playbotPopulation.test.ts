@@ -537,4 +537,47 @@ describe('a bot only ONE kind of demand can use', () => {
     };
     expect(targetActivation(snapshot, 25).activate).toEqual([{ id: 'both', action: 'queue' }]);
   });
+
+  it('serves the SCARCE venue rather than two of the plentiful one', () => {
+    // `openTableVenues` is one entry per table, so a candidate tested against
+    // the union passes on any of them: with a Casual table and a Beginner
+    // table waiting, two Casual-only bots both passed, both were activated,
+    // and the one bot Beginner would admit stayed dormant while that host
+    // waited another tick with roster capacity to spare.
+    const snapshot = {
+      humansOnline: 4,
+      queuedHumans: 0,
+      longestWaitMs: 0,
+      openTableVenues: ['casual', 'beginner'],
+      activeBotIds: [],
+      roster: [
+        bot('casual-a', 25, ['casual']),
+        bot('casual-b', 24, ['casual']),
+        bot('beginner-only', 19, ['casual', 'beginner']),
+      ],
+    };
+    const activate = targetActivation(snapshot, 25).activate;
+    expect(activate.filter((a) => a.action === 'join').map((a) => a.id).sort()).toEqual([
+      'beginner-only',
+      'casual-a',
+    ]);
+  });
+
+  it('yields the least table-useful bot when it has to yield at all', () => {
+    // Everything free is reserved, so the queue's fallback decides which bot
+    // it takes -- and taking the best-ranked one hands it the only bot that
+    // could have entered Beginner, when the Casual-only bot would have served
+    // the queue just as well.
+    const snapshot = {
+      humansOnline: 2,
+      queuedHumans: 1,
+      longestWaitMs: 0,
+      openTableVenues: ['casual', 'beginner'],
+      activeBotIds: [],
+      roster: [bot('both', 25, ['casual', 'beginner']), bot('casual-only', 24, ['casual'])],
+    };
+    const activate = targetActivation(snapshot, 25).activate;
+    expect(activate.find((a) => a.action === 'queue')?.id).toBe('casual-only');
+    expect(activate.find((a) => a.action === 'join')?.id).toBe('both');
+  });
 });

@@ -285,10 +285,21 @@ export function targetActivation(
     const slots = demand.table - activate.filter((a) => a.action === 'join').length;
     return eligible.length <= slots ? new Set(eligible.map((b) => b.id)) : new Set();
   };
+  //
+  // And when it must yield, it yields the LEAST table-useful bot rather than
+  // the best-ranked one: with a Casual and a Beginner table waiting and only a
+  // dual-venue bot and a Casual-only bot free, everything is reserved, so the
+  // fallback decides — and handing the queue the dual-venue bot leaves
+  // Beginner unservable when the Casual-only bot would have served the queue
+  // just as well.
+  const tableUsefulness = (b: PopulationBot): number =>
+    new Set(s.openTableVenues.filter((v) => b.venues.includes(v))).size;
   for (let i = 0; i < demand.queue && hasRoom(); i += 1) {
     const reserved = neededForTable();
     const free = available.filter((b) => !spent.has(b.id));
-    const bot = free.find((b) => !reserved.has(b.id)) ?? free[0];
+    const bot =
+      free.find((b) => !reserved.has(b.id)) ??
+      free.slice().sort((a, b) => tableUsefulness(a) - tableUsefulness(b))[0];
     if (!bot) break;
     take(bot, 'queue');
   }
@@ -308,12 +319,31 @@ export function targetActivation(
   // Ordering is untouched: this filters the candidates, so where several are
   // eligible the band preference still decides between them. A slot no bot can
   // fill is left unspent rather than sent to a door that will not open.
-  for (let i = 0; i < demand.table && hasRoom(); i += 1) {
-    const bot = available.find(
-      (b) => !spent.has(b.id) && s.openTableVenues.some((v) => b.venues.includes(v))
-    );
-    if (!bot) break;
-    take(bot, 'join');
+  //
+  // Matched per SLOT rather than against the union of the venues, and the most
+  // constrained slot first. `openTableVenues` is one entry per table, so a
+  // candidate tested with `some` passes on any of them: with a Casual table
+  // and a Beginner table waiting, two Casual-only bots both passed, both were
+  // activated, and the one bot Beginner would admit stayed dormant while that
+  // host waited another tick with roster capacity to spare.
+  //
+  // Greedy, most-constrained-first — not maximum-cardinality matching, which
+  // is §4.14's own deferral one level down and would be a great deal of
+  // machinery for sets this size. It answers every case with a uniquely
+  // eligible bot, which is what the failure above is made of.
+  const slots = s.openTableVenues.slice(0, demand.table);
+  while (slots.length > 0 && hasRoom()) {
+    const free = available.filter((b) => !spent.has(b.id));
+    const byScarcity = slots
+      .map((venue, idx) => ({ idx, eligible: free.filter((b) => b.venues.includes(venue)) }))
+      .filter((x) => x.eligible.length > 0)
+      .sort((a, b) => a.eligible.length - b.eligible.length);
+    const pick = byScarcity[0];
+    // Every remaining slot is one no available bot can enter. Left unspent
+    // rather than sent to a door that will not open.
+    if (!pick) break;
+    take(pick.eligible[0]!, 'join');
+    slots.splice(pick.idx, 1);
   }
 
   // Whatever room is left goes to bots playing for their own sake, on their
