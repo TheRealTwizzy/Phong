@@ -247,6 +247,27 @@ describe('activation and deactivation', () => {
     expect(both.activate.slice(0, 2).map((a) => a.action)).toEqual(['queue', 'join']);
   });
 
+  it('serves a newly queued human even while every active bot is busy', () => {
+    // `want` is a target for how many bots are ACTIVE and `keep` fills it with
+    // the ones already on -- all of which are, by construction, unavailable:
+    // `activeBotIds` is built from the same `engaged()` predicate `dispatch`
+    // asks. So with one bot mid-rally and one human newly queued, `want` was
+    // 1, the busy bot satisfied it, and NOBODY was activated -- the queued
+    // player waited out an unrelated match while dormant compatible bots sat
+    // in the roster.
+    //
+    // Many humans online, so the idle baseline is 0 and the only thing that
+    // can activate anybody is the demand itself.
+    const t = targetActivation(
+      snap({ humansOnline: 30, queuedHumans: 1, activeBotIds: ['bot-0'] }),
+      25
+    );
+    expect(t.activate).toHaveLength(1);
+    expect(t.activate[0].action).toBe('queue');
+    // And the busy bot is not stood down to pay for it.
+    expect(t.deactivate).not.toContain('bot-0');
+  });
+
   it('splits demand without changing how much of it there is', () => {
     // targetActiveCount reads the TOTAL, so the split may not move it --
     // otherwise the population would grow or shrink as a side effect of
@@ -294,10 +315,19 @@ describe('activation and deactivation', () => {
         bands[hour % bands.length]
       );
       active = active.filter((id) => !t.deactivate.includes(id)).concat(t.activate.map((a) => a.id));
-      // Never more bots switched on than the target asked for.
-      expect(active.length).toBeLessThanOrEqual(targetActiveCount(
-        snap({ humansOnline: humans, queuedHumans: humans % 5, roster: pool })
-      ));
+      // Never more bots switched on than the target asked for, PLUS the
+      // demand the target could not serve.
+      //
+      // The bare target used to be the bound and it stopped being one
+      // deliberately: `keep` fills `want` with bots that are already active
+      // and therefore unavailable, so demand needs slots of its own or a
+      // human who queues while one bot is mid-rally activates nobody. The
+      // bound is still tight -- `kept <= want`, so the total can never exceed
+      // `want + demand` -- and it is not the roster size, which would assert
+      // nothing.
+      const s = snap({ humansOnline: humans, queuedHumans: humans % 5, roster: pool });
+      const d = demandSplit(s);
+      expect(active.length).toBeLessThanOrEqual(targetActiveCount(s) + d.queue + d.table);
     }
     expect(JSON.stringify(pool)).toBe(before);
     // Over the evening the set that played spans the ladder rather than one rung.

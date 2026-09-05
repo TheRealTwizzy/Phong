@@ -204,6 +204,51 @@ describe('a deactivated bot waits for the whistle', () => {
     guest.close();
   }, 90_000);
 
+  it('does NOT walk out of a lobby somebody is sitting in', async () => {
+    // A bot that joins a human's table stops that table counting as
+    // `openTables`, so the very NEXT population tick can select it for
+    // deactivation -- and `standDown` treated an occupied lobby exactly like
+    // an empty one and left. The human, who had not pressed Start yet, was
+    // abandoned before their match began, repeatedly.
+    //
+    // The host is a HUMAN deliberately: a bot host readies and starts at once,
+    // so the lobby window it would leave is a few milliseconds wide and the
+    // case cannot be reproduced with two bots. A person deciding when to press
+    // Start is the whole of it.
+    relay = await startRelay('playbot-lifecycle');
+    const r = relay;
+    const human = await r.newDevice('LobbySitter');
+    const phone = await r.openPhone(human);
+    phone.send({
+      type: 'create_room',
+      playerId: human.id,
+      config: { winningScore: 15, rules: {} },
+      visibility: 'public',
+    });
+    const created = (await phone.await('room_created')) as { roomId: string };
+
+    const bot = await bootBot(r, 'stayer');
+    bot.join(created.roomId);
+    await until('the bot to be seated', () => bot.hasOpponent());
+    expect(bot.phase).toBe('lobby');
+
+    // Start is never pressed. The bot is stood down anyway.
+    bot.standDown();
+    await sleep(500);
+    expect(bot.roomId).toBe(created.roomId);
+    expect(bot.phase).toBe('lobby');
+
+    // ...while an EMPTY lobby is still given up at once, which is what the
+    // clause has to leave working.
+    phone.send({ type: 'leave_room' });
+    await until('the bot to be alone', () => !bot.hasOpponent());
+    bot.standDown();
+    expect(bot.roomId).toBeNull();
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
   it('leaves the QUEUE when it is stood down', async () => {
     // `queued` is an ENGAGED phase, so a driver left sitting in it is counted
     // active forever and the supervisor's reap -- `retiring && !engaged` --

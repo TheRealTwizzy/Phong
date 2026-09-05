@@ -345,6 +345,15 @@ export class PlaybotDriver {
       this.phase = 'idle';
       return;
     }
+    // An OCCUPIED lobby is somebody waiting to press Start, and walking out of
+    // it is the same abandonment the whistle rule exists to prevent -- one
+    // step earlier, and worse, because it repeats: a bot that joins a human's
+    // table stops that table counting as `openTables`, so the very next tick
+    // can select it for deactivation, and it left before the human had a
+    // chance to start. It waits for the whistle here too; if the human leaves
+    // instead, `opponent_left` puts it in `over` and the supervisor's reap
+    // closes it.
+    if (this.phase === 'lobby' && this.opponentPresent) return;
     if (this.phase === 'idle' || this.phase === 'over' || this.phase === 'lobby') this.leave();
   }
 

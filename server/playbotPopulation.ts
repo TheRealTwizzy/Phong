@@ -43,7 +43,16 @@ export interface PopulationSnapshot {
   longestWaitMs: number;
   /** Public tables sitting with a free playing seat. */
   openTables: number;
-  /** Bots already playing or seated. */
+  /**
+   * Bots already playing or seated, and therefore UNAVAILABLE.
+   *
+   * The two readings coincide by construction and that is load-bearing: the
+   * supervisor builds this from `engaged()`, which is the same predicate
+   * `dispatch` asks before sending a bot anywhere — and which deliberately
+   * answers FALSE for a bot parked at a table nobody joined while a human is
+   * unserved. So an available bot is already absent from this list, and
+   * counting its length is counting what cannot serve new demand.
+   */
   activeBotIds: string[];
   /** Every bot that could be switched on. */
   roster: PopulationBot[];
@@ -187,9 +196,25 @@ export function targetActivation(
   const keep = ordered.filter((b) => active.has(b.id)).slice(0, want);
   const kept = new Set(keep.map((b) => b.id));
 
+  // Demand gets its OWN slots, on top of what is kept.
+  //
+  // `want` is a target for how many bots are ACTIVE and `keep` fills it with
+  // the ones already on — so with one bot mid-rally and one human newly
+  // queued, `want` was 1, the busy bot satisfied it, and nobody was activated:
+  // the queued player waited out an unrelated match while dormant compatible
+  // bots sat in the roster. Every kept bot is by construction UNAVAILABLE
+  // (`activeBotIds` is built from the same `engaged()` predicate `dispatch`
+  // asks), so none of them can serve that human.
+  //
+  // Applied to the activation bound alone and NOT to `want`: folding it into
+  // the target would let busy bots justify their own existence, so the
+  // population could never shrink — measured, a fixture with thirty humans
+  // online and six bots mid-match stopped standing any of them down.
+  const room = Math.max(want, kept.size + demand.queue + demand.table);
+
   const activate: PopulationTarget['activate'] = [];
   for (const bot of ordered) {
-    if (kept.size + activate.length >= want) break;
+    if (kept.size + activate.length >= room) break;
     if (active.has(bot.id)) continue;
     const n = activate.length;
     const action: PopulationAction =
