@@ -35,6 +35,13 @@ const FLOORS = {
   // injects downstream of it (measured — it scrolls a `touch-action: none`
   // element), so the browser layer can prove the wiring and never the rules.
   'src/gestures.ts': { statements: 95, branches: 95 },
+  // The play-bot weight tables and the three saturation ladders. Every number
+  // in here is a product decision with a rating consequence, and the whole
+  // module is pure arithmetic over four literal tables — so there is no honest
+  // reason for a branch in it to go unexercised, and an unexercised one is a
+  // ladder rung nobody has checked. Floored at the top because the cost of
+  // holding it there is one `it.each` row.
+  'src/playbotRating.ts': { statements: 100, branches: 100 },
   'src/game/physics.ts': { statements: 90, branches: 88 },
   'src/game/cosmetics.ts': { statements: 95, branches: 95 },
   // Forty lines of arithmetic that the contrast and distinctness floors both
@@ -62,6 +69,31 @@ const FLOORS = {
   // Pairing rules, pure for the same reason room.ts is: who the queue puts
   // together is worth arguing about in a test rather than on a live server.
   'server/matchmaking.ts': { statements: 95, branches: 92 },
+  // What one play-bot IS: nine traits, their bands, and a deterministic seed
+  // from the id. Floored at the top for the reason src/playbotRating.ts is —
+  // pure arithmetic over literal tables, so an unexercised branch is a trait
+  // band nobody has checked, and a bot's strength is not somewhere to find
+  // that out. The seeder is also the one place the population curve is
+  // decided, and it is decided ONCE, at creation.
+  'server/playbotTraits.ts': { statements: 100, branches: 100 },
+  // What an autonomous bot chooses, and what it cannot. Pure over what it is
+  // handed — no clock, no random source, no database — so every branch is
+  // reachable from a fixture, and the ones that are not are the ones that
+  // would let a preference become a refusal.
+  'server/playbotPolicy.ts': { statements: 100, branches: 95 },
+  // Which existing bots play and where — pure over an injected snapshot, so
+  // every branch is a demand shape a fixture can build. The uncovered one
+  // would be a rule about when humans get displaced, which is not somewhere to
+  // find out later.
+  'server/playbotPopulation.ts': { statements: 100, branches: 95 },
+  // NO FLOOR for server/playbotDriver.ts or server/playbotSupervisor.ts, and
+  // the absence is deliberate rather than an oversight. Both are exercised
+  // only by suites that boot a real server in a CHILD process, where V8 cannot
+  // see them — the same reason TESTING.md gives for `server.ts` and every
+  // `.tsx` reading 0%. A floor over them would either fail on that or be set
+  // low enough to measure nothing. What IS floored is the pure logic they call
+  // (the four modules above) and the one pure function the supervisor exports
+  // for it, `liveStateFrom`, which is where its only arguable rule lives.
   'server/db.ts': { statements: 90, branches: 88 },
   // The cookie and session layer — the one file where a regression is somebody
   // losing their account. The STATEMENT number is low and honest about why:

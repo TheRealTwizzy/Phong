@@ -52,8 +52,11 @@ interface ReportRow {
 
 const find = (needle: string): PlayerRow | undefined => {
   const rows = db
-    .prepare('SELECT id, username FROM players WHERE id NOT LIKE ?')
-    .all('bot-%') as unknown as PlayerRow[];
+    .prepare(
+      `SELECT p.id, p.username FROM players p
+        WHERE NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = p.id)`
+    )
+    .all() as unknown as PlayerRow[];
   return (
     rows.find((p) => p.id === needle) ||
     rows.find((p) => p.username.toLowerCase() === needle.toLowerCase())

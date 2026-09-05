@@ -92,8 +92,17 @@ src/patchNotes.ts  a new entry at the TOP, version: APP_VERSION
 ```
 
 If a change genuinely has nothing player-facing, label the PR `no-release-note` — and label it
-**before** CI runs, or `verify` goes red on a rule the label has already answered. GitHub reads
-a step's `if:` at job start and does not re-trigger on `labeled`; re-run the job or push again.
+**before the `pull_request` event fires**, or `verify` goes red on a rule the label has already
+answered. **A re-run will NOT clear it.** The step's condition reads
+`github.event.pull_request.labels`, which is the frozen event payload rather than the PR's live
+state, and the default `pull_request` trigger does not fire on `labeled` — so a re-run replays the
+same payload and never sees the label. Measured: two attempts on one `head_sha`, label present for
+the second, same failure both times. The only remedy is a **push** of a real change, which fires a
+fresh event carrying current labels. (Never an empty commit to kick CI.)
+
+A red `verify` from this cause has tested nothing: the release-note step sits above `npm ci`, so
+install, typecheck, coverage and build are all skipped behind it and the job dies in ~9 seconds.
+Read the failing STEP before assuming the build is broken.
 
 The lockfile is the one people forget, and it drifted through two releases before a test
 read it: `npm ci` tolerates a mismatched top-level version, so nothing failed. `npm install`

@@ -62,6 +62,11 @@ const SUITES = [
   { name: 'history', ownsServer: false },
   { name: 'delete', ownsServer: false },
   { name: 'report', ownsServer: false },
+  // Its server is started with the play-bot population ON, which is the whole
+  // point of the suite: a human plays a bot the SERVER started, not one a test
+  // file drives. Off everywhere else, per §5 — the size is a tunable with a
+  // measured ceiling and nothing ships a default.
+  { name: 'playbot', ownsServer: false, env: { PLAYBOT_ROSTER_SIZE: '3', PLAYBOT_TICK_MS: '1500' } },
   { name: 'eject', ownsServer: true },
   { name: 'load', ownsServer: false, needsBrowser: false },
   { name: 'build-id', ownsServer: true, needsBrowser: false },
@@ -236,6 +241,10 @@ async function runSuite(suite) {
     E2E_PORT: String(port),
     DATA_DIR: dataDir,
     PORT: String(port),
+    // A suite may ask for extra server environment — a feature flag it is the
+    // only one that wants on. It goes to the suite process too, which is
+    // harmless and lets the suite read back what it asked for.
+    ...(suite.env ?? {}),
   };
 
   let server = null;

@@ -15,7 +15,7 @@ process.env.DATA_DIR = TMP;
 const DB_FILE = path.join(TMP, 'phong.db');
 
 // A database the #58 deployment would have left behind: the pre-column
-// matches schema, rows from every mode, and the wipe flags stamped so the
+// matches schema, rows from every mode, and the destructive one-shots stamped so the
 // boot-time wipes know this data has already survived them.
 function seedLegacyDatabase() {
   const sql = new DatabaseSync(DB_FILE);
@@ -41,7 +41,12 @@ function seedLegacyDatabase() {
   insert.run('m_rookie', 'AI-rookie', 'AI (rookie)', 'solo', 'rookie', now);
   insert.run('m_wall', 'wall', 'Practice Wall', 'practice', null, now);
   const stamp = sql.prepare('INSERT INTO meta VALUES (?, ?)');
-  for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4']) stamp.run(key, now);
+  // Every DESTRUCTIVE one-shot is stamped, or it erases the legacy history this
+  // fixture exists to migrate. progress_reset_v1 deletes `matches` outright and
+  // zeroes every career counter, and it runs LAST, so without this the migration
+  // under test runs correctly and its result is wiped before a single assertion.
+  for (const key of ['wipe_v1', 'wipe_v2', 'wipe_v3', 'wipe_v4', 'progress_reset_v1'])
+    stamp.run(key, now);
   sql.close();
 }
 

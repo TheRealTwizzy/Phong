@@ -92,6 +92,39 @@ describe('the table browser', () => {
     phone.close();
   });
 
+  it('names everybody seated, not just whoever opened the table', async () => {
+    // A table outlives its host (CLAUDE.md §1), so seat 0 empties and seat 1
+    // stays -- and `hostId` is `players[0]` alone, so that table lists with a
+    // NULL host while a person is sitting at it. Anything reading the row to
+    // ask "is a human waiting here" therefore could not see them: the play-bot
+    // population's own table search reads exactly this row, and a bot
+    // dispatched to serve that person walked past them to a bot's table.
+    const host = await relay.newDevice('BrowseHostE');
+    const guest = await relay.newDevice('BrowseGuestE');
+    const hp = await relay.openPhone(host);
+    hp.send({ type: 'create_room', playerId: host.id, venueRoomId: 'casual', visibility: 'public' } as never);
+    const code = (await hp.await('room_created')).roomId;
+    const gp = await relay.openPhone(guest);
+    gp.send({ type: 'join_room', roomId: code, playerId: guest.id } as never);
+    await gp.await('room_joined');
+
+    const both = (await listTables('casual')).body.tables.find((t: { id: string }) => t.id === code);
+    expect(both.seatedIds).toEqual([host.id, guest.id]);
+
+    // No match has started, so this costs nobody an abandon -- it is just the
+    // host going back to the menu.
+    hp.send({ type: 'leave_room' });
+    await sleep(200);
+
+    const row = (await listTables('casual')).body.tables.find((t: { id: string }) => t.id === code);
+    // Still listed: it has a live player. And the seat-0 field cannot say who.
+    expect(row).toBeTruthy();
+    expect(row.hostId).toBeNull();
+    expect(row.seatedIds).toEqual([guest.id]);
+    hp.close();
+    gp.close();
+  });
+
   it('refuses to list a room nobody may browse', async () => {
     // The queue's room is excluded as DATA (listable: false), not by a special
     // case in the route — so asking for it is a 404, not an empty list that

@@ -107,8 +107,18 @@ if (absent.length) fail(`picker is missing free cosmetics: ${absent}`);
 if (await owner.$(`#cosmetic-btn-${LOCKED}`)) {
   fail(`locked cosmetic ${LOCKED} is present in the DOM`);
 }
-const body = await owner.textContent('body');
-if (/void.?runner/i.test(body || '')) fail('a locked cosmetic is named somewhere on the page');
+// Scoped to the PICKER, not the page body, and that is a repair rather than a
+// weakening. Six elite TASKS are named after the TITLE they pay -- Wallbreaker,
+// Cold Steel, Unbroken, Scoreboard, Sniper, Clutch -- so a body-wide regex
+// cannot tell a locked reward's chip from a task tile legitimately naming the
+// task. The hand is a seeded shuffle of (playerId, dayKey) and this suite's
+// account is fresh every run, so it reddened on about one run in eight, on CI,
+// with nothing in the diff to point at. Scoped, the check says what it means
+// and can afford to name all six.
+const pickerText = (sel) => owner.textContent(sel).then((t) => t || '');
+if (/void.?runner/i.test(await pickerText('#cosmetic-picker'))) {
+  fail('a locked cosmetic is named in the picker');
+}
 ok(`picker lists the ${FREE.length} owned cosmetics and no trace of the locked ones`);
 
 // ---- 1b. Titles obey the same rule, and a fresh account owns none --------
@@ -124,7 +134,10 @@ const noneEquipped = await owner.getAttribute('#title-btn-none', 'data-equipped'
 if (noneEquipped !== 'true') fail(`None is not the equipped title on a fresh account (${noneEquipped})`);
 const ownedCount = await owner.textContent('#title-owned-count');
 if (!/\b0\b/.test(ownedCount || '')) fail(`title count reads "${ownedCount}", expected 0 unlocked`);
-if (/wallbreaker|cold steel/i.test(body || '')) fail('a locked title is named somewhere on the page');
+const titleText = await pickerText('#title-picker');
+for (const name of ['wallbreaker', 'cold steel', 'unbroken', 'scoreboard', 'sniper', 'clutch']) {
+  if (new RegExp(name, 'i').test(titleText)) fail(`a locked title is named in the picker: ${name}`);
+}
 ok('the title picker lists no titles on a fresh account and only None is equipped');
 
 // ---- 2. Equipping repaints the shell, and it sticks ---------------------

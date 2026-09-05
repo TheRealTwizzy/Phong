@@ -58,10 +58,16 @@ coverage number.
 | `spectators` | The four-seat table: watching, the fan-out, seat swapping, against a real server |
 | `seatGate` | The bracket on the THIRD door into a playing seat, against a real server: a watcher cannot promote past a gate `spectate_room` never asked, one who passes it still can, a private table is not bracketed (an invitation is not a bracket), and a player already seated is not re-judged. Plus the ORDERING that makes a refusal free: a `VENUE_LOCKED` join leaves the machine in its chair, because `join_room`'s eviction used to run above the gate and a refused arrival took the CPU with it |
 | `cpuTable` | A machine in a playing seat, against a real server: that Start needs no second person, that Play Again works with one voter, that the rung is clamped at BOTH doors, that a machine is never seated on top of a person, the four-clause vouch behind the watched-table ranked rule, and the `cpu_frame` fan-out against an **asymmetric** fixture (`watched_*` raw, `opponent_*` mirrored — identical at 0.5, which is why a centred fixture proves nothing). Plus the window: a joiner is refused at a machine table mid-match **with no `cpu_frame` ever sent**, which is the shape a watcher-gated stream makes ordinary and the pre-existing case could not reach, since it manufactures `inPlay` by hand. Plus the DOOR into one — that both listing routes report it joinable exactly when `join_room` would take the chair (before the first match, mid-match, after the whistle, and with two humans), which had never been asserted at all in either claimable state and is how the row and the relay came to disagree for two releases. Plus the OTHER door — a watcher taking that chair through `swap_seat`: refused mid-match as `SEATS_LOCKED` rather than `SEAT_TAKEN` (the fact a watcher can act on), taken once the whistle goes, and still refused outright to a PLAYER, which is the wedge the occupancy check was written for and is pinned so widening it cannot quietly take that with it. Plus the END of such a table: that its one player leaving deletes it and closes its watchers (a different `vacateSeat` path from the two-human one — the machine is not in `players`, so the FIRST leave empties both seats), that a terminal frame is what makes `spectator_sync` say `matchOver`, and that a rematch reaches the watchers and not just the host. Those three drive `cpu_frame` by HAND and so pin the wire, not the client — the client's half of all three had shipped broken with this file's relay assertions green, which is why `spectate` carries them too |
-| `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) |
+| `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) — including the three pair classes and the demand-sized fallback reservation. Two of its cases were vacuous as written: pair-class ties with every seat at the same mu resolved to queue order, so a type-blind matcher satisfied them, and no case discriminated pass 2 from pass 3, because the reservation empties pass 3 whenever an unpaired human is compatible with a bot |
+| `playbotRating` | What a match against a bot is worth: every cell of the three saturation ladders, that the ×0.70 lands on the HUMAN and never the bot, that a hard cap zeroes mu AND sigma, and the neutrality identity `0.5·w·gain + 0.5·w·loss === 0` — which fails against the rejected ×0.70/×0.50 and is the whole argument for the symmetric weight |
+| `playbotTraits` | What one bot IS, and the rule that nothing after creation may steer it. The trait module alone cannot hold that rule — it has no writer BECAUSE the database owns the write — so the assertion reads every server file for an `UPDATE bot_accounts` and names the enclosing METHOD of each trait-carrying INSERT |
+| `playbotPolicy` `playbotPopulation` | What an autonomous bot chooses, and which existing bots should be playing (both pure, both floored at 100/95). The coverage floor found a duplicated rule rather than an untested line: the patience clause existed in two places, and one copy had no test |
+| `exposure` `exposureRelay` | The anti-farming store: both seats reading one window, one persisted match counting once however long it ran, the prior/current off-by-one pinned on BOTH sides of every band transition, and retention asserted apart from eligibility — a row can be retained and eligible for nothing, which is the normal state of the back half of the window |
+| `playbotRecord` `advancedLadder` | The weights inside `recordMatch`, the three history columns, and the trust/eligibility separation — which takes three cases because "is the opponent trusted" and "is this match eligible" are independent questions |
+| `playbotDuel` `playbotLifecycle` `playbotSupervisor` | The driver and the population against a real server: two bots playing a duel end to end, a SIGTERM mid-duel charging nobody an abandon, a stand-down waiting for the whistle, and the population starting with the process and coming back to its own accounts across a restart, the reap letting go of a driver the controller has stopped naming, and the bot's own half streaming its live ball — asserted in the SENDER's frame, since a mirror applied on the way out is invisible to every other check the sample could carry |
 | `queue` | Joining, pairing, seating and starting, against a real server |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `seatGate` `p2pParity` `headers` | Twelve suites that boot the real server (see §4) |
-| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` `rankedDuelsBackfill` | The one-shot migrations |
+| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` `rankedDuelsBackfill` `advancedLadder` `botIdentity` | The one-shot migrations. **A one-shot is invisible to a test that does not un-stamp it and re-import** — its key is already in `meta`, so nothing drives it and a mutation to its SQL reddens nothing. Clear the key, `vi.resetModules()`, re-import, then assert the repair |
 | `sigv4` | The request signing offsite backups upload with. Hand-rolled, so it is pinned against fixtures generated by **botocore** — the AWS CLI's own signer — with `canonicalRequest`, `stringToSign` and `signature` asserted SEPARATELY, since one `Authorization` comparison is one bit and says nothing about where it broke |
 | `backupSchedule` | When a backup is due, whether it has anywhere to go, and whether `BACKUP_DIR` is on the same filesystem as `DATA_DIR` — the check that catches an unmounted volume, which a path comparison cannot |
 | `backupTick` | The orchestration, with the child runner and the uploader injected: that a failed upload does not suppress the local success, that a rejecting child leaves the tick resolved, and that no logged path carries the secret |
@@ -130,6 +136,68 @@ history while passing solo, a starved timeout reading as a flake) shares nothing
 suites but the CPU, and `E2E_CONCURRENCY=1` is exactly the old one-at-a-time run.
 `npm run build` is therefore a precondition. Chromium resolves from `CHROMIUM_PATH`, else a
 Playwright download, else system Chrome.
+
+### The vacuity catalogue
+
+Sixteen fixtures in one feature were **true for a reason other than the one they named**, and a
+mutation check caught every one where review caught none. The shapes repeat, so they are worth
+recognising rather than rediscovering:
+
+1. **Seats indistinguishable on the axis under test** — every candidate at the same mu, a bot with
+   no history in the band being counted, a forged id the relay had already discarded upstream.
+2. **A guard defended by a second guard upstream** — the payload id the context already overrode,
+   the roster size gated in two places, the deterministic username that made a missing account
+   load look harmless.
+3. **The subject not over the threshold** — a bot below the apex human, a solo decay re-seeded
+   before every match, a `matchOver` that was never reached.
+4. **A tiebreak whose fixture ids sort alphabetically the way the rule does**, so removing the rule
+   changes nothing. Three separate times. Name them so alphabetical order OPPOSES the answer.
+5. **An expected value GUESSED rather than derived**, where the "failure" is the code being right.
+6. **A mutation that does not COMPILE**, which proves nothing and looks exactly like success.
+7. **Reported and banked are two numbers** — asserting a returned figure and never the account.
+8. **A missing precondition**, so the fixture exercises the empty case.
+9. **Vacuous by arithmetic** — a value equal to the boundary, so both branches agree.
+10. **An assertion inside the noise** of a stochastic quantity. Assert the MARGIN.
+11. **A one-shot migration nothing un-stamped**, so it never ran at all.
+12. **A DESTRUCTIVE one-shot nothing stamped** — the mirror of 11, and it takes out fixtures that
+    are not testing it. `progress_reset_v1` runs LAST in `migrateSchema` and deletes `matches`
+    and every earned counter, so the four suites that hand-build a pre-migration database
+    (`chaosRelabel`, `rankedBackfill`, `rankedDuelsBackfill`, `shutoutRecount`) migrated
+    correctly and had the result erased before their first assertion. It reads exactly like a
+    broken migration. **A legacy fixture stamps every destructive key, not just the wipes.**
+13. **A behavioural test whose failure is invisible at the surface it watches** — the odd one
+    out, because it is not a fixture true for the wrong reason but a behavioural test that
+    cannot exist. Round nine's re-entrancy guard (`Managed.dispatching`) is held by a source
+    read whose comment called a behavioural version a bet on timing. One was built anyway: the
+    dispatch grace was made injectable so it could be turned off, two ticks fired in a single
+    macrotask so the second landed mid-dispatch, and the guard removed. It passed three runs
+    out of three, and a probe of the table listing showed one table either way — because the
+    second dispatch REPLACES the driver, so something is always there to count, and the orphan
+    loses its session to the winner's own `resume` and never opens a table. The seam went back
+    out with the test. **A production option whose only consumer is a test that proves nothing
+    is worse than no test at all**, and the difference between "a behavioural test would be
+    hard" and "there is nothing to observe" is whether anybody ran it.
+
+The standing habit: **before writing an assertion, name the mutation it should redden, then check
+that the mutation compiles and that it does.**
+
+And where a shape is known, **write the guard against it into the test itself**. Shape 9 is the one
+that repays this: a new test asserting `speedMultiplier === hypot(vx, vy) / BASE_BALL_SPEED` on a
+relayed crossing carries a second assertion that at least one sampled crossing left at a speed
+clearly ≠ the base — because at the base speed the accumulated value it replaced would satisfy the
+identity too. That guard FIRED, on a slower run where only one crossing arrived and it happened to
+land within 2% of the base. It cost a fixture change (the serve speed is measured, not picked) and
+it is the difference between a test that holds the rule and one that passes for a reason it does
+not name.
+
+And where two assertions cover two properties, **check that each mutation reddens only its own** —
+a pair that fails together is one assertion wearing two names. Round eleven's reap needed both a
+condition change and a move, so it carries a behavioural test for the condition and a source read
+for the position. The source read first anchored on the predicate text, so changing the condition
+reddened it too: two failures, neither of which said which of the two things had moved. Anchored on
+`m.driver.close()` instead — the thing the test is actually about — each mutation now reddens
+exactly one. Naming the mutation is only half the habit; the other half is naming what should
+STAY GREEN.
 
 ## 3. Reading a coverage report honestly
 
