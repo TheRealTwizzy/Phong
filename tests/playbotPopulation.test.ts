@@ -464,8 +464,21 @@ describe('a table slot goes to a bot that can sit at the table', () => {
     const s = snap({
       humansOnline: 30,
       openTableVenues: ['beginner'],
-      roster: [bot('placed', { mu: 25, venues: ['casual'] })],
+      // Appetite pinned to hosting, so a `join` here could only be the demand
+      // speaking. Left on the defaults this passes on whatever `actionFor`
+      // happens to answer for them, which is a fixture true for a reason other
+      // than the one it names.
+      roster: [
+        bot('placed', {
+          mu: 25,
+          venues: ['casual'],
+          traits: { ...DEFAULT_TRAITS, hostAppetite: 1, joinAppetite: 0, queueAppetite: 0 },
+        }),
+      ],
     });
-    expect(targetActivation(s, 25).activate.some((a) => a.action === 'join')).toBe(false);
+    const target = targetActivation(s, 25);
+    expect(target.activate.some((a) => a.action === 'join')).toBe(false);
+    // It is still switched on, for its own sake, on its own appetite.
+    expect(target.activate).toEqual([{ id: 'placed', action: 'host' }]);
   });
 });

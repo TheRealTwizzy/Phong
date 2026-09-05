@@ -358,6 +358,62 @@ describe('oppBand', () => {
   });
 });
 
+describe('the pair history a preference reads FORWARD', () => {
+  // `exposureCounts` answers "what is this match judged on", asked at record
+  // time with the match's own row already inserted. `pairHistory` asks the
+  // other direction -- "how much of this pair has been played, and when" --
+  // because §2.11's diversity preference decides who a bot walks up to BEFORE
+  // there is a match to judge. Same table, same rolling window, no writes.
+
+  it('counts the pair inside the window and reports when it last was', () => {
+    const me = nextPlayer();
+    const them = nextPlayer();
+    const recent = ago(2 * HOUR);
+    put({ playerId: me, oppId: them, at: ago(20 * HOUR) });
+    put({ playerId: me, oppId: them, at: recent });
+    // Outside the 24h window: retained for the pruner, invisible to this.
+    put({ playerId: me, oppId: them, at: ago(30 * HOUR) });
+
+    const seen = db.pairHistory(me, them, ANCHOR);
+    expect(seen.count).toBe(2);
+    expect(seen.lastAt).toBe(recent.getTime());
+  });
+
+  it('is about ONE pair, not about either player’s other matches', () => {
+    // The failure this guards is a query missing its `oppId`: a bot with a
+    // busy evening would then look like somebody it had played all night, and
+    // the preference would send it away from the one opponent it had not met.
+    const me = nextPlayer();
+    const them = nextPlayer();
+    const other = nextPlayer();
+    put({ playerId: me, oppId: other, at: ago(1 * HOUR) });
+    put({ playerId: other, oppId: them, at: ago(1 * HOUR) });
+
+    expect(db.pairHistory(me, them, ANCHOR)).toEqual({ count: 0, lastAt: null });
+  });
+
+  it('is DIRECTED, because a row names its own participant', () => {
+    // Every participant files their own row, so `(me, them)` is my record of
+    // us and `(them, me)` is theirs. A preference asks about the pair from the
+    // seat that is choosing.
+    const me = nextPlayer();
+    const them = nextPlayer();
+    put({ playerId: them, oppId: me, at: ago(1 * HOUR) });
+    expect(db.pairHistory(me, them, ANCHOR).count).toBe(0);
+    expect(db.pairHistory(them, me, ANCHOR).count).toBe(1);
+  });
+
+  it('reports a pair never played as never played, not as just now', () => {
+    // `lastAt` feeds a sort where "longer ago" wins, so a null read as 0 would
+    // make a stranger the LEAST preferred opponent in the room -- the exact
+    // reverse of the rule.
+    expect(db.pairHistory(nextPlayer(), nextPlayer(), ANCHOR)).toEqual({
+      count: 0,
+      lastAt: null,
+    });
+  });
+});
+
 describe('retention and eligibility', () => {
   it('are different questions, and a retained row can be eligible for nothing', () => {
     // Retention is set by the rolling windows plus a margin; eligibility is
