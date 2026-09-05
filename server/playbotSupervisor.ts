@@ -430,12 +430,6 @@ export class PlaybotSupervisor {
     for (const { id, action } of target.activate) {
       const m = this.managed.find((x) => x.botId === id);
       if (!m) continue;
-      m.retiring = false;
-      // The DRIVER's own latch too, not just the controller's flag. A bot told
-      // to stand down and then wanted again went on leaving at every whistle
-      // and refusing every rematch, because nothing ever told it the decision
-      // had been reversed.
-      m.driver?.backInService();
       void this.dispatch(m, action);
     }
     for (const id of target.deactivate) {
@@ -443,6 +437,30 @@ export class PlaybotSupervisor {
       if (!m?.driver) continue;
       m.retiring = true;
       m.driver.standDown();
+    }
+
+    // A stand-down is DERIVED from the controller's answer, never latched.
+    //
+    // The flag and the driver's own latch used to be cleared in the activate
+    // loop, which reads as covering every way a stand-down is reversed and
+    // covers one of them: `targetActivation` returns `activate` and
+    // `deactivate` and nothing else, and `activate` is built from the bots
+    // that are NOT active. So a bot asked to stand down during an occupied
+    // lobby or a rally, and wanted again before the whistle, is named by
+    // NEITHER array -- it is simply KEPT, and nothing ever told it the
+    // decision had been reversed. It went on giving up a table the controller
+    // had just decided to keep, and refusing the human's rematch, which §2.11
+    // says nothing may do.
+    //
+    // Below both loops, so what stands afterwards is exactly what the
+    // controller just said. A bot dispatched this tick is covered too: a
+    // driver it REUSES (`dispatchInner` keeps a connected one) is the same
+    // object that may be carrying the latch, and a rebuilt one starts clear.
+    const askedToStandDown = new Set(target.deactivate);
+    for (const m of this.managed) {
+      if (askedToStandDown.has(m.botId)) continue;
+      m.retiring = false;
+      m.driver?.backInService();
     }
 
     // Reap LAST, and on the DRIVER rather than on the request.

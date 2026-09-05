@@ -11,7 +11,8 @@ import {
 import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import { MIN_AI_COMPETENCE } from '../src/game/physics';
 import { PATIENCE_MS, targetActivation } from '../server/playbotPopulation';
-import { sleep, startRelay, type Relay } from './helpers/relay';
+import { START_MU } from '../src/rating';
+import { Phone, sleep, startRelay, type Relay } from './helpers/relay';
 
 // Step 22's other half: "the population starts with the process".
 //
@@ -696,4 +697,190 @@ describe('a driver the controller has stopped naming', () => {
     expect(sup.connectedBotIds()).toHaveLength(0);
     await sup.stop();
   }, 60_000);
+});
+
+/**
+ * One bot hosting one table, a human seated opposite, and a match under way.
+ *
+ * Returned with the knob the two tests below turn: `crowd(true)` puts twenty
+ * humans online, so the idle baseline rounds to zero, the target is zero, and
+ * the controller names the bot for deactivation. `crowd(false)` puts the
+ * server back to empty, where the target is six and the bot is KEPT.
+ */
+const seatedAgainstOneBot = async (
+  label: string
+): Promise<{
+  sup: PlaybotSupervisor;
+  phone: Awaited<ReturnType<Relay['openPhone']>>;
+  botId: string;
+  crowd: (on: boolean) => void;
+  seat: 'p1' | 'p2';
+}> => {
+  relay = await startRelay(label);
+  const rows = new Map<string, ReturnType<PlaybotAccountStore['load']>[number]>();
+  let crowded = false;
+  const sup = new PlaybotSupervisor({
+    base: relay.base,
+    wsUrl: relay.wsUrl,
+    rosterSize: 1,
+    tickMs: 3_600_000,
+    traitsFor: (u) => ({
+      ...seedTraits(u),
+      skill: MIN_AI_COMPETENCE,
+      // One table, in one venue, so the listing below finds it in one place:
+      // `chooseVenue` picks on `rankedBias` against an independent roll, and a
+      // bias of 0 makes `roll < bias` false at every roll.
+      rankedBias: 0,
+      hostAppetite: 1,
+      joinAppetite: 0,
+      queueAppetite: 0,
+    }),
+    store: {
+      load: () => [...rows.values()],
+      save: (botId, deviceCookie, traits) => {
+        rows.set(botId, {
+          botId,
+          username: botId,
+          deviceCookie,
+          traits,
+          mu: 25,
+          recentMatches: 0,
+          level: 1,
+          tier: 'unranked' as const,
+        });
+      },
+      pairingView: flatPairingView,
+    },
+    live: () => ({
+      humansOnline: crowded ? 20 : 0,
+      queuedHumans: 0,
+      longestWaitMs: 0,
+      openTableVenues: [],
+    }),
+  });
+  await sup.start();
+
+  sup.tick();
+  for (let i = 0; i < 60 && sup.connectedBotIds().length === 0; i++) await sleep(250);
+  expect(sup.connectedBotIds()).toHaveLength(1);
+
+  let roomId: string | null = null;
+  for (let i = 0; i < 60 && !roomId; i++) {
+    const body = await (await fetch(`${relay.base}/api/rooms/casual/tables`)).json();
+    roomId = ((body?.tables ?? []) as Array<{ id: string }>)[0]?.id ?? null;
+    if (!roomId) await sleep(250);
+  }
+  expect(roomId).not.toBeNull();
+
+  const human = await relay.newDevice(`${label.slice(0, 10)}Human`);
+  const phone = await relay.openPhone(human);
+  phone.send({ type: 'join_room', roomId: roomId!, playerId: human.id });
+  const joined = await phone.await('room_joined');
+  phone.send({ type: 'player_ready', ready: true });
+  await phone.await('game_start', 20_000);
+
+  return {
+    sup,
+    phone,
+    botId: sup.connectedBotIds()[0],
+    crowd: (on: boolean) => {
+      crowded = on;
+    },
+    seat: joined.playerIndex === 0 ? 'p1' : 'p2',
+  };
+};
+
+/** Three points from the human's own seat, which is the whistle. */
+const playOut = async (phone: Phone, seat: 'p1' | 'p2'): Promise<void> => {
+  for (let i = 1; i <= 3; i += 1) {
+    phone.send({ type: 'point_scored', scorer: seat });
+    await phone.awaitCount('score_update', i);
+  }
+};
+
+describe('a stand-down is derived from the controller, never latched', () => {
+  it('puts a RETAINED bot back in service, not only a re-activated one', async () => {
+    // The fourteenth round's fix reached one of the two paths and read as
+    // though it reached both. `backInService` was called from the ACTIVATE
+    // loop, and `targetActivation` builds `activate` out of the bots that are
+    // NOT active (`available = ordered.filter((b) => !active.has(b.id))`) --
+    // so a bot asked to stand down during an occupied lobby or a rally, and
+    // wanted again before the whistle, is named by NEITHER array. It is
+    // simply KEPT: its latch never cleared, it goes on leaving at the final
+    // score, and it refuses the human's rematch, which §2.11 says nothing may
+    // do -- while the controller has just decided to keep it.
+    //
+    // Driven through the SUPERVISOR and not the driver, because the driver's
+    // half is already right and already covered: `tests/playbotDuel.test.ts`
+    // calls `standDown` and `backInService` by hand and passes whatever the
+    // supervisor does. What is under test here is whether anything ever makes
+    // the second call.
+    //
+    // The stand-down lands MID-MATCH rather than in the occupied lobby the
+    // report names. Both are the same retention path and the same latch, and
+    // a rally is the half with no race in it: `standDown`'s lobby arm turns on
+    // the driver's own `opponentPresent`, which is set by a message still in
+    // flight when the human's `room_joined` returns, so a lobby fixture could
+    // stand the bot down from what it still believed was an EMPTY lobby --
+    // which leaves at once, and would be a green test of a different rule.
+    const { sup, phone, botId, crowd, seat } = await seatedAgainstOneBot('playbot-retain');
+
+    // Demand falls. The precondition is asserted rather than assumed: a
+    // fixture in which the controller never asked for a stand-down would pass
+    // with nothing cleared and nothing to clear.
+    crowd(true);
+    expect(targetActivation(sup.snapshot(), START_MU).deactivate).toEqual([botId]);
+    sup.tick();
+
+    // Demand recovers, and the bot is KEPT -- named by neither array, which is
+    // the path under test. Asserted too, because a fixture that quietly
+    // re-ACTIVATED it would be exercising the loop that was already right.
+    crowd(false);
+    const target = targetActivation(sup.snapshot(), START_MU);
+    expect([target.deactivate, target.activate.map((a) => a.id)]).toEqual([[], []]);
+    sup.tick();
+
+    await playOut(phone, seat);
+
+    // A latched stand-down leaves inside the handler that sees the whistle, so
+    // this reddens first and names the bug; the rematch below is the half that
+    // costs a person a game.
+    await sleep(500);
+    expect(phone.last('opponent_left')).toBeUndefined();
+
+    phone.send({ type: 'rematch_request' });
+    await phone.awaitCount('game_start', 2, 20_000);
+
+    phone.close();
+    await sup.stop();
+  }, 90_000);
+
+  it('leaves a bot the controller DID name standing down', async () => {
+    // The other half of the same rule, and the guard it pins is one nothing
+    // else in the suite could see: the clearing pass runs BELOW the
+    // deactivation loop, so without `askedToStandDown` it would take back
+    // every stand-down in the tick that requested it and deactivation would
+    // silently stop working -- the population unable to shrink, and a bot
+    // holding its seat for the life of the process.
+    //
+    // Nothing caught that. `tests/playbotLifecycle.test.ts` drives
+    // `standDown()` on the driver by hand, which is the right layer for what
+    // it owns and cannot observe a supervisor that undoes its own request:
+    // measured, dropping the guard left all 23 tests across both suites green.
+    const { sup, phone, botId, crowd, seat } = await seatedAgainstOneBot('playbot-standdown');
+
+    crowd(true);
+    expect(targetActivation(sup.snapshot(), START_MU).deactivate).toEqual([botId]);
+    sup.tick();
+
+    // Still mid-match, so the request is granted at the whistle and not before
+    // -- an abandon is a real ranked loss for a bot that did nothing.
+    expect(phone.last('opponent_left')).toBeUndefined();
+
+    await playOut(phone, seat);
+    await phone.await('opponent_left', 20_000);
+
+    phone.close();
+    await sup.stop();
+  }, 90_000);
 });
