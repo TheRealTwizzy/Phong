@@ -419,6 +419,34 @@ describe('what the composition has to pass along', () => {
     expect(reaped).toBeGreaterThan(dispatched);
   });
 
+  it('resets a return at the same paddle edge the browser does', () => {
+    // The driver put the ball back at `PADDLE_Y - radius - 0.001` where the
+    // browser uses `PADDLE_Y - PADDLE_HEIGHT / 2 - radius`, so every bot return
+    // started 0.011 court units FARTHER from the net than the same contact on a
+    // phone -- a longer run at it, and at a steep angle up to 0.021 of court
+    // width of drift by the time it crossed, which is enough to change which
+    // wall it finds first.
+    //
+    // A source read because the divergence never reaches the wire: a crossing
+    // carries `x`, `vx`, `vy`, `spin` and `speedMultiplier` and no `y` at all,
+    // so there is no message in which the two courts disagree. What is
+    // assertable is that both files spell the reset the same way.
+    //
+    // Comments are stripped for the same reason `tests/legal.test.ts` strips
+    // them: prose is not code, and the note beside the fix quotes the old
+    // expression to say what it replaced. Unstripped, the absence check below
+    // fails on the explanation of the very thing it is checking is gone.
+    const strip = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const drv = strip(read('server/playbotDriver.ts'));
+    const app = strip(read('src/App.tsx'));
+    expect(app).toContain('PADDLE_Y - PADDLE_HEIGHT / 2 - b.radius');
+    expect(drv).toContain('PADDLE_Y - PADDLE_HEIGHT / 2 - radius');
+    // And the old spelling is gone rather than merely joined: left in place
+    // beside the new one this would pass with the divergence still shipping.
+    expect(drv).not.toContain('PADDLE_Y - radius - 0.001');
+  });
+
   it('refreshes that bracket state on every roster read', () => {
     // The half the fifth round's own fix left open, and the note beside it
     // said the opposite: `roster()` reloads the store every tick and took `mu`

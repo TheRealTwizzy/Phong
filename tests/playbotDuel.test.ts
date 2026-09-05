@@ -251,6 +251,78 @@ describe('a bot at a table with a human', () => {
     bot.close();
   }, 90_000);
 
+  it('streams the live ball, so the far half is not dark on the sonar', async () => {
+    // The driver sent `paddle_move` and never `ball_pos`. Everything a human
+    // reads about the OPPONENT'S half is fed by that second stream, so against
+    // a bot all of it went dark for exactly the half it exists to describe:
+    // the Ball indicator -- a ranked-legal device preference that is ON BY
+    // DEFAULT, so this reached every human who ever played a bot -- and the
+    // opponent SONAR, which is the sharper one, because that is a match RULE a
+    // player gives up their ladder to switch on (§12) and it then showed them
+    // nothing during the bot's exchanges.
+    //
+    // Read at the WIRE as `opponent_ball`, which is where the divergence
+    // actually lives: only the bot sends anything here, since the phone below
+    // is a raw socket that never reports a ball of its own.
+    const bot = await bootBot('SonarHost', 0.6);
+    bot.host({ winningScore: 15 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+
+    const human = await relay.newDevice('SonarHuman');
+    const phone = await relay.openPhone(human);
+    phone.send({ type: 'join_room', roomId: bot.roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    phone.send({ type: 'player_ready', ready: true });
+    await phone.await('game_start');
+
+    // The crossing is the end of the bot's own half-flight, so by here the
+    // whole of that flight has been streamed or none of it has.
+    await phone.await('ball_incoming', 30_000);
+    const samples = phone.all('opponent_ball').map((m) => ({ x: m.x, y: m.y }));
+
+    expect(samples.length).toBeGreaterThan(0);
+    // In the SENDER's frame and unmirrored (§5), so they are ordinary court
+    // coordinates rather than anything transformed on the way.
+    for (const s of samples) {
+      expect(s.x).toBeGreaterThanOrEqual(0);
+      expect(s.x).toBeLessThanOrEqual(1);
+      expect(s.y).toBeGreaterThanOrEqual(0);
+      expect(s.y).toBeLessThanOrEqual(1);
+    }
+    // Not one frozen sample repeated: a radar fed a single position is still a
+    // dark radar, and a one-shot send would satisfy the count alone.
+    expect(new Set(samples.map((s) => `${s.x},${s.y}`)).size).toBeGreaterThan(1);
+
+    // And the FRAME, which is the assertion the range check above cannot make
+    // and the one §1 warns is invisible against a symmetric fixture. In the
+    // sender's own frame the bot serves from its paddle at y≈0.88 and the ball
+    // runs toward the net at y=0, so y falls across the flight. Mirrored on the
+    // way -- the mistake this convention keeps inviting, since the RECEIVER is
+    // what applies `1 - y` -- these would start near 0.12 and rise instead, and
+    // every assertion above would still pass.
+    expect(samples[0].y).toBeGreaterThan(0.5);
+    expect(samples[0].y).toBeGreaterThan(samples[samples.length - 1].y);
+
+    // And the SILENCE is the other half of the rule: once the ball has left
+    // this half the stream stops, which is what lets the far radar go dark
+    // rather than freeze on the last thing it was told. The phone never
+    // returns the ball, so the bot has nothing to report from here.
+    //
+    // Named rather than counted, because it is catalogue shape 2 -- a guard
+    // defended by guards upstream. The crossing sets `ball.active = false`,
+    // nulls `this.ball` AND moves the phase to `waiting`, and the emission is
+    // behind all three, so no single mutation reddens this. It is kept for the
+    // invariant it states, not as cover for the line above it: a later change
+    // that streamed from a cached ball to smooth the radar is what it would
+    // catch, and that is the shape this whole feature keeps producing.
+    const before = phone.all('opponent_ball').length;
+    await sleep(500);
+    expect(phone.all('opponent_ball').length).toBe(before);
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
   it('waits out the match-start countdown before serving', async () => {
     // `game_start` arms a three-second countdown in every browser client and
     // App.tsx blocks its own serves under it -- aimed, automatic and the space

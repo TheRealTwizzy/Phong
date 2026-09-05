@@ -30,6 +30,7 @@ import {
   BASE_BALL_SPEED,
   clampBallSpeed,
   OpponentAI,
+  PADDLE_HEIGHT,
   PADDLE_WIDTH_RATIO,
   PADDLE_Y,
   aiServeAim,
@@ -48,6 +49,15 @@ export const TICK_MS = 16;
 
 /** Paddle positions go out on movement, at about the rate a browser coalesces. */
 const PADDLE_SEND_EPSILON = 0.004;
+
+/**
+ * How often the live ball goes out, matching `src/App.tsx`'s own ~20Hz.
+ *
+ * The bot sent `paddle_move` and never `ball_pos`, so everything a human
+ * reads about the OPPONENT'S half went dark the moment the ball was on it --
+ * which is the only half either of those features exists to describe.
+ */
+const BALL_POS_INTERVAL_MS = 50;
 
 /**
  * Where this bot serves, given where the opponent is standing IN THIS HALF'S
@@ -120,6 +130,8 @@ export class PlaybotDriver {
   private startCountdown = 0;
   private oppPaddleX = 0.5;
   private sentPaddleX = 0.5;
+  /** Last `ball_pos` send, so the sonar feed is throttled like a client's. */
+  private lastBallPosAt = 0;
   private opponentPresent = false;
   /** A `create_room` whose venue may still be refused. Cleared once answered. */
   private pendingHost: { config: Partial<RoomMatchConfig> } | null = null;
@@ -604,6 +616,33 @@ export class PlaybotDriver {
     }
     if (this.phase !== 'rally' || !this.ball?.active) return;
     this.stepBall(dt, paddleWidth);
+
+    // Stream the live ball in OUR frame, exactly as a browser does -- the
+    // receiver applies the head-to-head mirror itself (§5: `ball_pos` is
+    // relayed, never stored, in the sender's frame).
+    //
+    // The driver sent `paddle_move` and never this, so against a bot the
+    // opponent CHEVRON tracked fine while everything describing the ball on
+    // the far half stayed dark: the Ball indicator, which is a ranked-legal
+    // device preference and ON BY DEFAULT, so this reached every human who
+    // ever played one -- and the opponent SONAR, which is the sharper half,
+    // because that is a match RULE a player gives up their ladder to switch
+    // on (§12) and it then showed them nothing during the exchanges it exists
+    // for.
+    //
+    // The silence once the ball has left is what lets the far radar go dark
+    // rather than freeze on the last position it was told about -- but that is
+    // enforced UPSTREAM, not here: `stepBall` nulls `this.ball` and moves the
+    // phase to `waiting` on both of its exits, the crossing and the baseline.
+    // So the null check is what this needs and `active` merely spells the same
+    // condition the client spells. Stated rather than assumed, because
+    // `tests/playbotDuel.test.ts` asserts that silence and no single mutation
+    // can redden it -- catalogue shape 2, named there so it is not read as
+    // cover for this line.
+    if (this.ball?.active && now - this.lastBallPosAt > BALL_POS_INTERVAL_MS) {
+      this.lastBallPosAt = now;
+      this.send({ type: 'ball_pos', x: this.ball.x, y: this.ball.y });
+    }
   }
 
   private serve(): void {
@@ -693,7 +732,13 @@ export class PlaybotDriver {
           ball.vx = Math.sin(hit.angle) * paced;
           ball.vy = -Math.abs(Math.cos(hit.angle) * paced);
           ball.spin = hit.spin ?? 0;
-          ball.y = PADDLE_Y - radius - 0.001;
+          // The paddle's own half-height, the same term `src/App.tsx` uses at
+          // the equivalent contact. A bare `PADDLE_Y - radius - 0.001` puts the
+          // ball 0.011 court units FARTHER from the net than a browser would,
+          // so the bot's half gave every return a longer run at it -- and at a
+          // steep angle that is up to 0.021 of court width by the time it
+          // crosses, which is enough to change which wall it finds first.
+          ball.y = PADDLE_Y - PADDLE_HEIGHT / 2 - radius;
           // No 4% here: `hit.speed` already carries it, and this field is
           // derived rather than accumulated.
           ball.speedMultiplier = Math.hypot(ball.vx, ball.vy) / BASE_BALL_SPEED;
