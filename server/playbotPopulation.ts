@@ -32,6 +32,17 @@ export interface PopulationBot {
   mu: number;
   /** Matches it has played in the recent window, for spreading participation. */
   recentMatches: number;
+  /**
+   * The venues the bracket gate would actually let it into, as the caller
+   * judges them — the same `allowed` list `chooseVenue` is handed.
+   *
+   * SELECTION again, never tuning: this does not decide how good a bot is or
+   * where it belongs, it reports which doors are open to the rating it has
+   * already earned. Without it a table slot was spent on whoever sat nearest
+   * the band centre, the relay refused the join, and the human that
+   * activation existed for went on waiting.
+   */
+  venues: string[];
 }
 
 export interface PopulationSnapshot {
@@ -41,8 +52,21 @@ export interface PopulationSnapshot {
   queuedHumans: number;
   /** How long the longest-waiting human has waited, ms. */
   longestWaitMs: number;
-  /** Public tables sitting with a free playing seat. */
-  openTables: number;
+  /**
+   * Public tables sitting with a free playing seat — ONE ENTRY PER TABLE,
+   * naming the venue it is in.
+   *
+   * A count and a venue set as two fields is a pair that can disagree, and the
+   * disagreement is silent: a fixture saying "one table" and "nowhere" reads
+   * as demand no bot is eligible for. The list is both answers at once — its
+   * length is how many there are — so the illegal state is unrepresentable,
+   * which is the same reason a socket's seat is one union rather than two
+   * nullables (CLAUDE.md §1).
+   *
+   * The venue matters because a bracketed room refuses a BOT on its own tier
+   * exactly as it refuses a player on theirs.
+   */
+  openTableVenues: string[];
   /**
    * Bots already playing or seated, and therefore UNAVAILABLE.
    *
@@ -86,8 +110,10 @@ const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.m
  * the displacement rule as arithmetic: a bot is only ever activated for the
  * REMAINDER, so it can never take a seat a person would have had.
  */
-export function unmetHumanDemand(s: Pick<PopulationSnapshot, 'queuedHumans' | 'openTables'>): number {
-  return (s.queuedHumans % 2) + Math.max(0, s.openTables);
+export function unmetHumanDemand(
+  s: Pick<PopulationSnapshot, 'queuedHumans' | 'openTableVenues'>
+): number {
+  return (s.queuedHumans % 2) + s.openTableVenues.length;
 }
 
 /**
@@ -185,7 +211,7 @@ function actionFor(t: PlaybotTraits): PopulationAction {
 export function demandSplit(s: PopulationSnapshot): { queue: number; table: number } {
   return {
     queue: (s.queuedHumans % 2) + impatientDemand(s),
-    table: Math.max(0, s.openTables),
+    table: s.openTableVenues.length,
   };
 }
 
@@ -224,17 +250,54 @@ export function targetActivation(
   const room = Math.max(want, kept.size + demand.queue + demand.table);
 
   const activate: PopulationTarget['activate'] = [];
-  for (const bot of ordered) {
-    if (kept.size + activate.length >= room) break;
-    if (active.has(bot.id)) continue;
-    const n = activate.length;
-    const action: PopulationAction =
-      n < demand.queue
-        ? 'queue'
-        : n < demand.queue + demand.table
-          ? 'join'
-          : actionFor(bot.traits);
+  const spent = new Set<string>();
+  const available = ordered.filter((b) => !active.has(b.id));
+  const hasRoom = (): boolean => kept.size + activate.length < room;
+  const take = (bot: PopulationBot, action: PopulationAction): void => {
+    spent.add(bot.id);
     activate.push({ id: bot.id, action });
+  };
+
+  // The queue is not narrowed: matchmaking seats its pair in the hidden
+  // `_queue` room, which gates nobody, so a bot the brackets refuse is still a
+  // legitimate opponent there. Narrowing it too would take supply away from
+  // people in the queue in order to reserve it for a table.
+  for (let i = 0; i < demand.queue && hasRoom(); i += 1) {
+    const bot = available.find((b) => !spent.has(b.id));
+    if (!bot) break;
+    take(bot, 'queue');
+  }
+
+  // A table slot may only be spent on a bot the bracket would actually let in.
+  //
+  // Ranked purely on mu, this handed the slot to whoever sat nearest the band
+  // centre and then labelled it `join`: at a Beginner table — tierMax
+  // Contender — a bot whose own results had carried it past that searched
+  // venues it could not enter, hosted in Casual instead, became spare, and was
+  // chosen again on the very next tick, because nothing about it had changed.
+  // The human at that table was never served. And it needs no unusual state:
+  // the band centre is the longest-waiting QUEUED human's rating, a lone table
+  // host is in no queue, so the fallback is START_MU — which is the Ace floor,
+  // above Beginner's ceiling.
+  //
+  // Ordering is untouched: this filters the candidates, so where several are
+  // eligible the band preference still decides between them. A slot no bot can
+  // fill is left unspent rather than sent to a door that will not open.
+  for (let i = 0; i < demand.table && hasRoom(); i += 1) {
+    const bot = available.find(
+      (b) => !spent.has(b.id) && s.openTableVenues.some((v) => b.venues.includes(v))
+    );
+    if (!bot) break;
+    take(bot, 'join');
+  }
+
+  // Whatever room is left goes to bots playing for their own sake, on their
+  // own appetite — the baseline that keeps the ladder moving when nobody is
+  // about.
+  for (const bot of available) {
+    if (!hasRoom()) break;
+    if (spent.has(bot.id)) continue;
+    take(bot, actionFor(bot.traits));
   }
 
   return {

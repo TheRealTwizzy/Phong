@@ -522,6 +522,6 @@ describe('what the composition has to pass along', () => {
     // a pure chooser can see.
     const src = read('server/playbotSupervisor.ts');
     expect(src).toMatch(/return preferHumanTable\(free, /);
-    expect(src).toMatch(/free\.push\(\{ id: t\.id, hostId: t\.hostId \}\)/);
+    expect(src).toMatch(/free\.push\(\{ id: t\.id, seatedIds \}\)/);
   });
 });

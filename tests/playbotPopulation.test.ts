@@ -26,6 +26,9 @@ const bot = (id: string, over: Partial<PopulationBot> = {}): PopulationBot => ({
   traits: DEFAULT_TRAITS,
   mu: 25,
   recentMatches: 0,
+  // Both ungated rooms unless a case says otherwise — what an unplaced bot,
+  // which is every new one, is actually allowed into.
+  venues: ['casual', 'beginner'],
   ...over,
 });
 
@@ -36,7 +39,7 @@ const snap = (over: Partial<PopulationSnapshot> = {}): PopulationSnapshot => ({
   humansOnline: 0,
   queuedHumans: 0,
   longestWaitMs: 0,
-  openTables: 0,
+  openTableVenues: [],
   activeBotIds: [],
   roster: roster(20),
   ...over,
@@ -47,24 +50,32 @@ describe('humans are never displaced', () => {
     // The displacement rule as arithmetic. Two queued humans are a match; the
     // third is the one who needs a bot. A controller that activated one per
     // queued human would take a seat a person would have had.
-    expect(unmetHumanDemand({ queuedHumans: 0, openTables: 0 })).toBe(0);
-    expect(unmetHumanDemand({ queuedHumans: 1, openTables: 0 })).toBe(1);
-    expect(unmetHumanDemand({ queuedHumans: 2, openTables: 0 })).toBe(0);
-    expect(unmetHumanDemand({ queuedHumans: 3, openTables: 0 })).toBe(1);
-    expect(unmetHumanDemand({ queuedHumans: 8, openTables: 0 })).toBe(0);
+    expect(unmetHumanDemand({ queuedHumans: 0, openTableVenues: [] })).toBe(0);
+    expect(unmetHumanDemand({ queuedHumans: 1, openTableVenues: [] })).toBe(1);
+    expect(unmetHumanDemand({ queuedHumans: 2, openTableVenues: [] })).toBe(0);
+    expect(unmetHumanDemand({ queuedHumans: 3, openTableVenues: [] })).toBe(1);
+    expect(unmetHumanDemand({ queuedHumans: 8, openTableVenues: [] })).toBe(0);
   });
 
   it('counts a human sitting at an open table as demand', () => {
     // "A bot may not give a person a game" is the misreading this guards
     // against: serving demand is most of what the controller is for.
-    expect(unmetHumanDemand({ queuedHumans: 0, openTables: 3 })).toBe(3);
-    expect(unmetHumanDemand({ queuedHumans: 3, openTables: 2 })).toBe(3);
+    expect(unmetHumanDemand({ queuedHumans: 0, openTableVenues: ['casual', 'casual', 'beginner'] })).toBe(3);
+    expect(unmetHumanDemand({ queuedHumans: 3, openTableVenues: ['casual', 'beginner'] })).toBe(3);
   });
 
-  it('reads a nonsense table count as no demand rather than negative demand', () => {
-    // Defensive: the snapshot is assembled from live relay state, and a
-    // negative here would SUBTRACT from a waiting human's claim on a bot.
-    expect(unmetHumanDemand({ queuedHumans: 3, openTables: -5 })).toBe(1);
+  it('counts each named table once, and nothing else', () => {
+    // This replaced a clamp test. The count used to be its own `openTables`
+    // number beside the venues, so it could be NEGATIVE -- which would have
+    // SUBTRACTED from a waiting human's claim on a bot -- and, worse, it could
+    // disagree with the venues silently: a snapshot saying "one table" and
+    // "nowhere" reads as demand no bot is eligible for, which is a fixture
+    // that lies rather than a guard that fires. One list is both answers, so
+    // neither state is representable and there is nothing left to clamp.
+    expect(unmetHumanDemand({ queuedHumans: 3, openTableVenues: [] })).toBe(1);
+    const two = { queuedHumans: 3, openTableVenues: ['casual', 'beginner'] };
+    expect(unmetHumanDemand(two)).toBe(3);
+    expect(demandSplit(snap(two)).table).toBe(two.openTableVenues.length);
   });
 
   it('does not conjure a bot for a long wait nobody is having', () => {
@@ -90,7 +101,7 @@ describe('humans are never displaced', () => {
     // and somebody has waited anyway because the band has not opened far
     // enough to pair them.
     const demandAt = (queuedHumans: number, longestWaitMs: number) => {
-      const at = { queuedHumans, longestWaitMs, openTables: 0 };
+      const at = { queuedHumans, longestWaitMs, openTableVenues: [] };
       return unmetHumanDemand(at) + impatientDemand(at);
     };
     for (const q of [1, 2, 3, 4, 5]) {
@@ -135,8 +146,8 @@ describe('the target responds to each input', () => {
   });
 
   it('rises with open tables', () => {
-    const none = targetActiveCount(snap({ humansOnline: 30, openTables: 0 }));
-    const some = targetActiveCount(snap({ humansOnline: 30, openTables: 5 }));
+    const none = targetActiveCount(snap({ humansOnline: 30, openTableVenues: [] }));
+    const some = targetActiveCount(snap({ humansOnline: 30, openTableVenues: Array(5).fill('casual') }));
     expect(some).toBeGreaterThan(none);
   });
 
@@ -149,7 +160,9 @@ describe('the target responds to each input', () => {
   });
 
   it('never asks for more bots than exist', () => {
-    expect(targetActiveCount(snap({ roster: roster(2), queuedHumans: 9, openTables: 9 }))).toBe(2);
+    expect(
+      targetActiveCount(snap({ roster: roster(2), queuedHumans: 9, openTableVenues: Array(9).fill('casual') }))
+    ).toBe(2);
   });
 });
 
@@ -250,7 +263,7 @@ describe('activation and deactivation', () => {
     const pool = Array.from({ length: 8 }, (_, i) => bot(`bot-${i}`, { traits: hostish }));
 
     const table = targetActivation(
-      snap({ roster: pool, openTables: 1, humansOnline: 1, queuedHumans: 0 }),
+      snap({ roster: pool, openTableVenues: ['casual'], humansOnline: 1, queuedHumans: 0 }),
       25
     );
     expect(table.activate[0].action).toBe('join');
@@ -258,7 +271,7 @@ describe('activation and deactivation', () => {
     // A queued human still gets the queue, and both kinds at once get one of
     // each -- queue first, since that human's band is still widening.
     const both = targetActivation(
-      snap({ roster: pool, openTables: 1, queuedHumans: 1, humansOnline: 2 }),
+      snap({ roster: pool, openTableVenues: ['casual'], queuedHumans: 1, humansOnline: 2 }),
       25
     );
     expect(both.activate.slice(0, 2).map((a) => a.action)).toEqual(['queue', 'join']);
@@ -292,7 +305,11 @@ describe('activation and deactivation', () => {
     for (const q of [0, 1, 2, 3]) {
       for (const tables of [0, 1, 3]) {
         for (const waited of [0, PATIENCE_MS]) {
-          const s = snap({ queuedHumans: q, openTables: tables, longestWaitMs: waited });
+          const s = snap({
+            queuedHumans: q,
+            openTableVenues: Array(tables).fill('casual'),
+            longestWaitMs: waited,
+          });
           const d = demandSplit(s);
           expect(d.queue + d.table).toBe(unmetHumanDemand(s) + impatientDemand(s));
         }
@@ -375,5 +392,80 @@ describe('what this module cannot do', () => {
     expect(code).not.toContain("from '../src/rating'");
     expect(code).not.toContain('Date.now');
     expect(code).not.toContain('Math.random');
+  });
+});
+
+describe('a table slot goes to a bot that can sit at the table', () => {
+  it('passes over the nearest bot when the bracket would refuse it', () => {
+    // `beginner` carries a tierMax of Contender, so a bot whose own results
+    // have carried it past that cannot enter — and the activation ranked
+    // purely on distance from the band centre, then labelled the winner
+    // `join`. The bot went, `venuesFor` removed `beginner` from what it could
+    // search, it hosted in Casual instead, became spare, and the very same
+    // nearest-mu bot was chosen again on the next tick: the human at that
+    // table was never served, for as long as they sat there.
+    //
+    // Nothing about it needs a rare state. The band centre is the longest
+    // WAITING QUEUED human's rating and a lone table host is in no queue, so
+    // the fallback is START_MU — mu 25, which is the Ace floor, which is
+    // above Beginner's ceiling.
+    const s = snap({
+      humansOnline: 8,
+      openTableVenues: ['beginner'],
+      roster: [
+        bot('placed', { mu: 25, venues: ['casual'] }),
+        bot('eligible', { mu: 18, venues: ['casual', 'beginner'] }),
+      ],
+    });
+    // One slot, and it is the table's.
+    expect(targetActiveCount(s)).toBe(1);
+    expect(targetActivation(s, 25).activate).toEqual([{ id: 'eligible', action: 'join' }]);
+  });
+
+  it('still prefers the nearest bot when it CAN sit there', () => {
+    // The eligibility filter narrows the table slot and must not reorder it:
+    // with both bots allowed in, the band preference decides as it always did.
+    const s = snap({
+      humansOnline: 8,
+      openTableVenues: ['beginner'],
+      roster: [
+        bot('near', { mu: 25, venues: ['casual', 'beginner'] }),
+        bot('far', { mu: 18, venues: ['casual', 'beginner'] }),
+      ],
+    });
+    expect(targetActivation(s, 25).activate).toEqual([{ id: 'near', action: 'join' }]);
+  });
+
+  it('serves the QUEUE with a bot no table would have', () => {
+    // Queue slots are filled first and are not narrowed: a bot the brackets
+    // refuse can still be somebody's opponent in matchmaking, which places its
+    // own pair in the hidden `_queue` room. Narrowing both would take supply
+    // away from the queue to reserve it for a table.
+    const s = snap({
+      humansOnline: 8,
+      queuedHumans: 1,
+      openTableVenues: ['beginner'],
+      roster: [
+        bot('placed', { mu: 25, venues: ['casual'] }),
+        bot('eligible', { mu: 18, venues: ['casual', 'beginner'] }),
+      ],
+    });
+    expect(targetActivation(s, 25).activate).toEqual([
+      { id: 'placed', action: 'queue' },
+      { id: 'eligible', action: 'join' },
+    ]);
+  });
+
+  it('leaves the table slot unspent rather than sending somebody who is refused', () => {
+    // Nobody in the roster may enter the waiting venue, so the honest answer
+    // is that this demand cannot be served — never a bot dispatched to a door
+    // that will not open, which is what put the same bot on the same forbidden
+    // table on every tick.
+    const s = snap({
+      humansOnline: 30,
+      openTableVenues: ['beginner'],
+      roster: [bot('placed', { mu: 25, venues: ['casual'] })],
+    });
+    expect(targetActivation(s, 25).activate.some((a) => a.action === 'join')).toBe(false);
   });
 });

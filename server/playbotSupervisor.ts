@@ -48,8 +48,11 @@ export interface LiveState {
   queuedHumans: number;
   /** How long the longest-waiting HUMAN has waited, ms. */
   longestWaitMs: number;
-  /** Public tables sitting with a free playing seat. */
-  openTables: number;
+  /**
+   * Public tables sitting with a free playing seat, one entry per table,
+   * naming the venue — see `PopulationSnapshot.openTableVenues`.
+   */
+  openTableVenues: string[];
   /**
    * Where the ladder is thin, for `rankForActivation`'s preference. A
    * preference and never an assignment: no bot's rating moves because it was
@@ -231,7 +234,7 @@ const IDLE_LIVE: LiveState = {
   humansOnline: 0,
   queuedHumans: 0,
   longestWaitMs: 0,
-  openTables: 0,
+  openTableVenues: [],
 };
 
 export class PlaybotSupervisor {
@@ -298,7 +301,7 @@ export class PlaybotSupervisor {
       humansOnline: live.humansOnline,
       queuedHumans: live.queuedHumans,
       longestWaitMs: live.longestWaitMs,
-      openTables: live.openTables,
+      openTableVenues: live.openTableVenues,
       activeBotIds: this.engagedIds(urgencyOf(live)),
       roster: this.roster(),
     };
@@ -489,6 +492,11 @@ export class PlaybotSupervisor {
         // than a different rating on this one (§4.13).
         mu: row?.mu ?? START_MU,
         recentMatches: row?.recentMatches ?? 0,
+        // The same `allowed` list `chooseVenue` is handed, and for the same
+        // reason: an activation aimed at a table the relay would refuse this
+        // bot is an activation that serves nobody, and nothing about the bot
+        // changes when it is turned away, so the next tick picks it again.
+        venues: this.venuesFor(m),
       };
     });
   }
@@ -674,34 +682,31 @@ export class PlaybotSupervisor {
     /** The table this bot is already sitting at, if any — never a candidate. */
     ownRoomId: string | null
   ): Promise<string | null> {
-    const free: Array<{ id: string; hostId: string | null }> = [];
+    const free: FreeTable[] = [];
     for (const room of venue ? [venue, ...allowed] : allowed) {
       try {
         const res = await fetch(`${this.opts.base}/api/rooms/${encodeURIComponent(room)}/tables`);
         if (!res.ok) continue;
         const body = (await res.json()) as {
-          tables?: Array<{ id: string; isFull: boolean; hostId: string | null }>;
+          tables?: Array<{ id: string; isFull: boolean; seatedIds?: string[] }>;
         };
         for (const t of body.tables ?? []) {
-          // By ROOM ID and not only by host. A bot in seat 1 whose host has
-          // left holds a table that is still listed, with `hostId: null` --
-          // which is not `selfId`, so the host comparison kept it and the bot
+          const seatedIds = t.seatedIds ?? [];
+          // By ROOM ID and by SEAT, never by host. A bot in seat 1 whose host
+          // has left holds a table that is still listed with `hostId: null` --
+          // which is not `selfId`, so a host comparison kept it and the bot
           // could pick its OWN room as the fallback. `join_room` answers
           // ALREADY_AT_TABLE for the room a socket already sits in, the driver
           // does not transition on it, and the same room is chosen again on
           // every tick: a bot that has stopped playing anybody and cannot
           // recover without a restart.
-          if (t.isFull || t.hostId === selfId || t.id === ownRoomId) continue;
-          free.push({ id: t.id, hostId: t.hostId });
+          if (t.isFull || t.id === ownRoomId || seatedIds.includes(selfId)) continue;
+          free.push({ id: t.id, seatedIds });
         }
       } catch {
         // A listing that cannot be read is a listing with nothing in it.
       }
     }
-    // "One of MY OWN bots" rather than `isBotAccount`: the curated roster
-    // never hosts a table and the population is single-process by design, so
-    // `managed` is the complete set of bot-hosted tables and this needs no new
-    // dependency.
     return preferHumanTable(free, new Set(this.managed.map((m) => m.botId)));
   }
 }
@@ -717,6 +722,13 @@ export class PlaybotSupervisor {
  */
 export const OPEN_VENUES = ['casual', 'beginner'];
 
+/** A table with a playing seat going spare, as the listing describes it. */
+export interface FreeTable {
+  id: string;
+  /** Everybody holding a playing seat there, in seat order. */
+  seatedIds: string[];
+}
+
 /**
  * Which free table to walk up to: a HUMAN's, wherever it was found.
  *
@@ -726,15 +738,21 @@ export const OPEN_VENUES = ['casual', 'beginner'];
  * the preference applied within a venue and not across them, so the activation
  * that existed to serve that person served a bot instead.
  *
- * NOT the full `chooseOpponent` preference, which wants each candidate's
- * rating, pair count and last-played time where the listing carries an id and
- * a host. That is a design step rather than a fix.
+ * Judged over EVERY seat rather than over the host, which is the second shape
+ * of the same failure: a table outlives its host, so seat 0 empties, seat 1
+ * stays, and the listing then names a live table with a null host. Read as
+ * "hosted by a human" that person was invisible, and a bot activated to serve
+ * them walked past them to another bot's table.
+ *
+ * "One of MY OWN bots" rather than `isBotAccount`: the curated roster never
+ * hosts a table and the population is single-process by design, so `managed`
+ * is the complete set of bot-held tables and this needs no new dependency.
  */
 export function preferHumanTable(
-  free: ReadonlyArray<{ id: string; hostId: string | null }>,
+  free: ReadonlyArray<FreeTable>,
   botIds: ReadonlySet<string>
 ): string | null {
-  return free.find((t) => t.hostId && !botIds.has(t.hostId))?.id ?? free[0]?.id ?? null;
+  return free.find((t) => t.seatedIds.some((id) => !botIds.has(id)))?.id ?? free[0]?.id ?? null;
 }
 
 /**
@@ -771,8 +789,8 @@ export function liveStateFrom(a: {
   connectedIds: string[];
   /** The ranked queue, in whatever order it is held. */
   queue: Array<{ playerId: string; joinedAt: number }>;
-  /** Public tables with a free playing seat. */
-  openTables: number;
+  /** Public tables with a free playing seat, one entry per table, by venue. */
+  openTableVenues: string[];
   now: number;
   isBot: (id: string) => boolean;
   bandCentre?: number;
@@ -783,7 +801,7 @@ export function liveStateFrom(a: {
     humansOnline: a.connectedIds.filter((id) => !a.isBot(id)).length,
     queuedHumans: humanQueue.length,
     longestWaitMs,
-    openTables: Math.max(0, a.openTables),
+    openTableVenues: a.openTableVenues,
     bandCentre: a.bandCentre,
   };
 }

@@ -206,7 +206,7 @@ describe('a deactivated bot waits for the whistle', () => {
 
   it('does NOT walk out of a lobby somebody is sitting in', async () => {
     // A bot that joins a human's table stops that table counting as
-    // `openTables`, so the very NEXT population tick can select it for
+    // an open table, so the very NEXT population tick can select it for
     // deactivation -- and `standDown` treated an occupied lobby exactly like
     // an empty one and left. The human, who had not pressed Start yet, was
     // abandoned before their match began, repeatedly.

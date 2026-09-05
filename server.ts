@@ -1591,7 +1591,18 @@ async function startServer() {
       tables.push({
         id: room.id,
         hostName: room.players[0]?.playerName ?? null,
+        // Seat 0 alone, which is what "host" means and is why it is not the
+        // answer to "is anybody here". A table outlives its host (§1): seat 0
+        // empties, seat 1 stays, and the row then lists a live table with a
+        // null host. `seatedIds` says who is actually sitting at it.
         hostId: room.players[0]?.playerId ?? null,
+        // Everybody holding a PLAYING seat on a live socket, in seat order.
+        //
+        // The same `seated` list the "has a live player" filter above is built
+        // from, so the row cannot name somebody the listing does not count.
+        // No wider a disclosure than `hostId` beside it — the same field, for
+        // the other chair, on a table that is public by definition.
+        seatedIds: seated.map((p) => p!.playerId),
         // The CPU counts as an occupant HERE, and deliberately not below.
         // The two fields answer different questions and only one of them
         // changed when the machine learned to give up its chair.
@@ -4507,27 +4518,36 @@ async function startServer() {
         // carry that judgement. Counting only what the population can actually
         // serve is the honest half; serving bracketed tables is a design step
         // and is not this fix.
-        openTables: [...rooms.values()].filter((r) => {
-          const seated = r.players.filter(Boolean);
-          return (
-            r.visibility === 'public' &&
-            OPEN_VENUES.includes(r.venueRoomId) &&
-            seated.length === 1 &&
-            !isBotAccount(seated[0]!.playerId) &&
-            // A human playing the MACHINE has one real player at their table,
-            // so it read as somebody waiting for an opponent — and mid-match
-            // the machine's chair is not claimable, so the bot activated to
-            // serve them could not join and hosted a table of its own instead.
-            // Enough concurrent CPU players would activate the whole roster as
-            // though all of them were waiting, which is the fading population
-            // bound defeated by people who are not waiting at all.
-            //
-            // The same predicate the LISTING asks, so the row a bot can tap
-            // and the demand that sends it there cannot disagree — the rule
-            // the venue filter above is already an instance of.
-            (!r.config.cpu || cpuSeatClaimable(r))
-          );
-        }).length,
+        // The VENUE of each rather than only how many there are, and one entry
+        // per table so the two answers cannot disagree. A bracketed room
+        // refuses a BOT on its own tier exactly as it refuses a player on
+        // theirs, so an activation aimed at a table without asking that
+        // question is one the relay turns away — and nothing about the bot
+        // changes when it is, so the next tick picks the same one again.
+        openTableVenues: [...rooms.values()]
+          .filter((r) => {
+            const seated = r.players.filter(Boolean);
+            return (
+              r.visibility === 'public' &&
+              OPEN_VENUES.includes(r.venueRoomId) &&
+              seated.length === 1 &&
+              !isBotAccount(seated[0]!.playerId) &&
+              // A human playing the MACHINE has one real player at their
+              // table, so it read as somebody waiting for an opponent — and
+              // mid-match the machine's chair is not claimable, so the bot
+              // activated to serve them could not join and hosted a table of
+              // its own instead. Enough concurrent CPU players would activate
+              // the whole roster as though all of them were waiting, which is
+              // the fading population bound defeated by people who are not
+              // waiting at all.
+              //
+              // The same predicate the LISTING asks, so the row a bot can tap
+              // and the demand that sends it there cannot disagree — the rule
+              // the venue filter above is already an instance of.
+              (!r.config.cpu || cpuSeatClaimable(r))
+            );
+          })
+          .map((r) => r.venueRoomId),
         now: Date.now(),
         isBot: (id) => isBotAccount(id),
         // Where the population is needed, and it was never supplied — so

@@ -282,8 +282,24 @@ describe('which table to walk up to, and which venues may be tried', () => {
     // than passing on the order it happened to be given.
     const bots = new Set(['bot-a', 'bot-b']);
     const free = [
-      { id: 'CASU', hostId: 'bot-a' },
-      { id: 'BEGN', hostId: 'dev_human000000000001' },
+      { id: 'CASU', seatedIds: ['bot-a'] },
+      { id: 'BEGN', seatedIds: ['dev_human000000000001'] },
+    ];
+    expect(preferHumanTable(free, bots)).toBe('BEGN');
+  });
+
+  it('sees a human who is not in the host’s chair', () => {
+    // A table outlives its host, so seat 0 empties and seat 1 stays -- and the
+    // listing then names a live table whose `hostId` is null. Judged on the
+    // host, that person was invisible and the bot activated to serve them took
+    // the bot table listed above them instead. The bot table is FIRST for the
+    // same reason it is above: a first-match rule has to fail this.
+    const bots = new Set(['bot-a']);
+    const free = [
+      { id: 'CASU', seatedIds: ['bot-a'] },
+      // Exactly the row the relay produces for a table whose host has left:
+      // no seat 0, one human in seat 1.
+      { id: 'BEGN', seatedIds: ['dev_human000000000001'] },
     ];
     expect(preferHumanTable(free, bots)).toBe('BEGN');
   });
@@ -292,10 +308,10 @@ describe('which table to walk up to, and which venues may be tried', () => {
     // The preference is never a refusal — a bot with only bots to play plays
     // them, which is §2.11's rule one level down.
     const bots = new Set(['bot-a']);
-    expect(preferHumanTable([{ id: 'CASU', hostId: 'bot-a' }], bots)).toBe('CASU');
+    expect(preferHumanTable([{ id: 'CASU', seatedIds: ['bot-a'] }], bots)).toBe('CASU');
     expect(preferHumanTable([], bots)).toBeNull();
-    // A table with no host at all is not preferred as a human's.
-    expect(preferHumanTable([{ id: 'X', hostId: null }], bots)).toBe('X');
+    // A table nobody is sitting at is not preferred as a human's.
+    expect(preferHumanTable([{ id: 'X', seatedIds: [] }], bots)).toBe('X');
   });
 
   it('leaves every bot somewhere it may play, at every tier it can reach', () => {

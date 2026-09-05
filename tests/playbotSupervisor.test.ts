@@ -10,7 +10,7 @@ import {
 } from '../server/playbotSupervisor';
 import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import { MIN_AI_COMPETENCE } from '../src/game/physics';
-import { PATIENCE_MS } from '../server/playbotPopulation';
+import { PATIENCE_MS, targetActivation } from '../server/playbotPopulation';
 import { sleep, startRelay, type Relay } from './helpers/relay';
 
 // Step 22's other half: "the population starts with the process".
@@ -261,7 +261,7 @@ describe('what the supervisor tells the controller', () => {
         { playerId: 'bot_b', joinedAt: 0 },
         { playerId: 'human_1', joinedAt: 0 },
       ],
-      openTables: 0,
+      openTableVenues: [],
       now: 1000,
       isBot,
     });
@@ -282,7 +282,7 @@ describe('what the supervisor tells the controller', () => {
         { playerId: 'bot_a', joinedAt: 0 },
         { playerId: 'human_1', joinedAt: now - 1000 },
       ],
-      openTables: 0,
+      openTableVenues: [],
       now,
       isBot,
     });
@@ -296,7 +296,7 @@ describe('what the supervisor tells the controller', () => {
     const state = liveStateFrom({
       connectedIds: ['bot_a'],
       queue: [{ playerId: 'bot_a', joinedAt: 0 }],
-      openTables: 0,
+      openTableVenues: [],
       now: 10 * PATIENCE_MS,
       isBot,
     });
@@ -304,9 +304,90 @@ describe('what the supervisor tells the controller', () => {
     expect(state.longestWaitMs).toBe(0);
   });
 
-  it('never reports a negative table count', () => {
-    expect(liveStateFrom({ connectedIds: [], queue: [], openTables: -3, now: 0, isBot }).openTables)
-      .toBe(0);
+  it('carries the venue of every open table through, unchanged', () => {
+    // This replaced a "never reports a negative table count" clamp. The count
+    // was its own number, so it could be negative -- SUBTRACTING from a
+    // waiting human's claim on a bot -- and could disagree with the venues
+    // silently. It is one list now: its length is the count, so neither state
+    // exists, and what is left to assert is that the venues reach the
+    // controller, since it is the controller that has to ask whether any bot
+    // may enter them.
+    const state = liveStateFrom({
+      connectedIds: [],
+      queue: [],
+      openTableVenues: ['beginner', 'casual', 'beginner'],
+      now: 0,
+      isBot,
+    });
+    expect(state.openTableVenues).toEqual(['beginner', 'casual', 'beginner']);
+  });
+});
+
+describe('the roster the controller is shown', () => {
+  const row = (
+    botId: string,
+    over: { mu: number; level: number; tier: 'unranked' | 'ace' }
+  ) => ({
+    botId,
+    username: botId,
+    deviceCookie: `cookie-${botId}`,
+    traits: seedTraits(botId),
+    recentMatches: 0,
+    ...over,
+  });
+
+  it('tells it which venues each bot may actually enter', async () => {
+    // The controller has to spend a TABLE slot on somebody the relay will let
+    // in, and it can only do that if the roster it is shown says so. The pure
+    // side of that is tested next door; what can only be caught here is the
+    // composition -- `roster()` handing every bot the same raw list makes the
+    // filter true of everybody and the failure comes straight back, with the
+    // pure test still green.
+    //
+    // No relay: the store already holds the roster, so `start()` provisions
+    // nothing and `snapshot()` reaches no socket. The base URLs below are
+    // never dialled for the same reason.
+    const store: PlaybotAccountStore = {
+      // `ace` is above `beginner`'s tierMax of Contender, which is the state a
+      // bot reaches by winning -- and mu 25 is the Ace FLOOR, so this is also
+      // the bot sitting nearest a band centre that has fallen back to
+      // START_MU, which is what happens whenever the waiting human is at a
+      // table rather than in the queue.
+      load: () => [
+        row('bot-placed', { mu: 25, level: 10, tier: 'ace' }),
+        row('bot-open', { mu: 18, level: 1, tier: 'unranked' }),
+      ],
+      save: () => {
+        throw new Error('nothing in this test provisions');
+      },
+    };
+    const sup = new PlaybotSupervisor({
+      base: 'http://127.0.0.1:1',
+      wsUrl: 'ws://127.0.0.1:1',
+      rosterSize: 2,
+      tickMs: 3_600_000,
+      store,
+      live: () => ({
+        humansOnline: 8,
+        queuedHumans: 0,
+        longestWaitMs: 0,
+        openTableVenues: ['beginner'],
+      }),
+    });
+    await sup.start();
+    try {
+      const snapshot = sup.snapshot();
+      const venuesOf = (id: string) => snapshot.roster.find((b) => b.id === id)!.venues;
+      expect(venuesOf('bot-placed')).toEqual(['casual']);
+      expect(venuesOf('bot-open')).toEqual(['casual', 'beginner']);
+      // And therefore the one slot this demand buys goes to the bot that can
+      // sit down, not to the one nearest the band.
+      expect(targetActivation(snapshot, 25).activate).toEqual([
+        { id: 'bot-open', action: 'join' },
+      ]);
+    } finally {
+      await sup.stop();
+    }
   });
 });
 
@@ -382,7 +463,7 @@ describe('a bot plays more than one match', () => {
           });
         },
       },
-      live: () => ({ humansOnline: 0, queuedHumans: 0, longestWaitMs: 0, openTables: 0 }),
+      live: () => ({ humansOnline: 0, queuedHumans: 0, longestWaitMs: 0, openTableVenues: [] }),
     });
     await sup.start();
     // The usernames are issued names, so read them back off the accounts.
@@ -468,7 +549,7 @@ describe('a driver the controller has stopped naming', () => {
         humansOnline: crowded ? 20 : 0,
         queuedHumans: 0,
         longestWaitMs: 0,
-        openTables: 0,
+        openTableVenues: [],
       }),
     });
     await sup.start();
