@@ -111,7 +111,10 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({
               {profile.username}
             </span>
             {profile.isBot && (
-              <span className="flex items-center gap-0.5 rounded-chip border border-rank-steady/40 bg-rank-steady/25 px-1.5 py-0.5 text-2xs text-rank-steady">
+              <span
+                id="public-profile-bot-badge"
+                className="flex items-center gap-0.5 rounded-chip border border-rank-steady/40 bg-rank-steady/25 px-1.5 py-0.5 text-2xs text-rank-steady"
+              >
                 <Bot className="h-2.5 w-2.5" />
                 {t('board_bot', language)}
               </span>
