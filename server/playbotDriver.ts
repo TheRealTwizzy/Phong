@@ -27,7 +27,7 @@ import type { ServeAim } from '../src/game/physics';
 import {
   BALL_BASE_RADIUS,
   BOT_MAX_COMPETENCE,
-  MAX_BALL_SPEED,
+  BASE_BALL_SPEED,
   OpponentAI,
   PADDLE_WIDTH_RATIO,
   PADDLE_Y,
@@ -112,6 +112,8 @@ export class PlaybotDriver {
   private oppPaddleX = 0.5;
   private sentPaddleX = 0.5;
   private opponentPresent = false;
+  /** A `create_room` whose venue may still be refused. Cleared once answered. */
+  private pendingHost: { config: Partial<RoomMatchConfig> } | null = null;
   private standingDown = false;
 
   constructor(opts: PlaybotDriverOptions) {
@@ -251,6 +253,9 @@ export class PlaybotDriver {
   }
 
   public host(config: Partial<RoomMatchConfig> = {}, venueRoomId?: string): void {
+    // Remembered only so a bracket refusal can be answered once — see the
+    // VENUE_LOCKED arm below.
+    this.pendingHost = venueRoomId ? { config } : null;
     this.send({
       type: 'create_room',
       playerId: this.botId,
@@ -292,6 +297,14 @@ export class PlaybotDriver {
     this.roomId = null;
     this.seat = null;
     this.phase = 'idle';
+    // Who is sitting opposite is about the ROOM, so it goes with the room --
+    // the same rule `resetTableForNextPair` states one level up. Only
+    // `opponent_left` used to clear it, so after an ordinary final whistle it
+    // stayed TRUE for the life of the process: the supervisor's next `host`
+    // dispatch then opened an empty table that reported `hasOpponent()` true,
+    // `engaged()` never applied the idle-lobby window to it, and the bot was
+    // parked there permanently instead of coming free for the next demand.
+    this.opponentPresent = false;
   }
 
   public close(): void {
@@ -305,10 +318,35 @@ export class PlaybotDriver {
 
   private handle(msg: WSServerMessage): void {
     switch (msg.type) {
+      case 'error':
+        // The bracket gate is the relay's and it can refuse a room this bot
+        // aimed at: `beginner` carries a tierMax, so a bot that has CLIMBED
+        // past Contender is turned away from the very room its own rankedBias
+        // asked for. Nothing here can fix that verdict, and a bot that keeps
+        // asking is a bot that never plays — so the preference has been tried
+        // and answered, and it falls back to the ungated room once.
+        //
+        // Deliberately `casual` rather than no venue at all: a table with no
+        // venue lands in the hidden `_default` room, which is UNLISTED, so
+        // nobody could ever find it. An unranked table somebody can walk up to
+        // beats a ranked one nobody can see.
+        if (msg.code === 'VENUE_LOCKED' && this.pendingHost) {
+          const { config } = this.pendingHost;
+          this.pendingHost = null;
+          this.host(config, 'casual');
+        }
+        break;
       case 'room_created':
+        this.pendingHost = null;
         this.roomId = msg.roomId;
         this.seat = msg.playerIndex;
         this.phase = 'lobby';
+        // A table this bot has just opened has nobody at it. Cleared here as
+        // well as in `leave()` deliberately: the supervisor leaves only from
+        // 'over' or 'lobby', so a host dispatch from any other phase reaches
+        // `create_room` without one -- and a stale `true` parks the bot for
+        // good, which is worse than the redundancy.
+        this.opponentPresent = false;
         break;
       case 'room_joined':
         this.roomId = msg.roomId;
@@ -455,16 +493,28 @@ export class PlaybotDriver {
     this.phase = 'rally';
   }
 
+  /**
+   * One frame of this bot's own half, integrated the way the BROWSER does it.
+   *
+   * `speedMultiplier` is DERIVED display metadata and never a factor on the
+   * velocity: `src/App.tsx` computes it as `hypot(vx, vy) / BASE_BALL_SPEED`
+   * and integrates `vx`/`vy` straight, because the pace a paddle adds is
+   * already inside the velocity `checkPaddleCollision` returns. This applied
+   * it as a factor AND grew it 4% per contact on top of the 4% `hit.speed`
+   * already carried, so the same ball ran at roughly `speed x 1.04^n` on the
+   * bot's court and at `speed` on the human's -- distorted misses, distorted
+   * rallies, and a distorted number on the wire, since the crossing carries
+   * this field to the other half.
+   */
   private stepBall(dt: number, paddleWidth: number): void {
     const ball = this.ball!;
     const radius = BALL_BASE_RADIUS * this.rules.ballScale;
-    const speed = Math.hypot(ball.vx, ball.vy) * (ball.speedMultiplier || 1);
-    const steps = physicsSubsteps(speed, dt, radius);
+    const steps = physicsSubsteps(Math.hypot(ball.vx, ball.vy), dt, radius);
     const sub = dt / steps;
 
     for (let i = 0; i < steps; i += 1) {
-      ball.x += ball.vx * (ball.speedMultiplier || 1) * sub;
-      ball.y += ball.vy * (ball.speedMultiplier || 1) * sub;
+      ball.x += ball.vx * sub;
+      ball.y += ball.vy * sub;
 
       if (ball.x <= radius || ball.x >= 1 - radius) {
         const atLeft = ball.x <= radius;
@@ -484,7 +534,9 @@ export class PlaybotDriver {
             vx: ball.vx,
             vy: ball.vy,
             spin: ball.spin ?? 0,
-            speedMultiplier: ball.speedMultiplier ?? 1,
+            // Derived from the velocity at the moment it leaves, the same
+            // line App.tsx uses -- never a carried factor.
+            speedMultiplier: Math.hypot(ball.vx, ball.vy) / BASE_BALL_SPEED,
           },
         });
         ball.active = false;
@@ -507,10 +559,9 @@ export class PlaybotDriver {
           ball.vy = -Math.abs(Math.cos(hit.angle) * hit.speed);
           ball.spin = hit.spin ?? 0;
           ball.y = PADDLE_Y - radius - 0.001;
-          ball.speedMultiplier = Math.min(
-            MAX_BALL_SPEED,
-            (ball.speedMultiplier || 1) * 1.04
-          );
+          // No 4% here: `hit.speed` already carries it, and this field is
+          // derived rather than accumulated.
+          ball.speedMultiplier = Math.hypot(ball.vx, ball.vy) / BASE_BALL_SPEED;
           continue;
         }
       }

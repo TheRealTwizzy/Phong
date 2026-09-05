@@ -4,6 +4,7 @@ import path from 'path';
 import { DEFAULT_TRAITS, seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import {
   IDLE_BASELINE,
+  demandSplit,
   impatientDemand,
   PATIENCE_MS,
   rankForActivation,
@@ -217,6 +218,48 @@ describe('activation and deactivation', () => {
     expect(served.activate[0].action).toBe('queue');
     const idle = targetActivation(snap({ roster: pool, humansOnline: 0 }), 25);
     expect(idle.activate.every((a) => a.action === 'host')).toBe(true);
+  });
+
+  it('sends a bot activated for a table to the TABLE, not the queue', () => {
+    // The demand that made the activation decides where it goes, and the two
+    // humans are in different places. A lone host at a public table is not in
+    // the queue, so a bot dispatched there serves nobody -- and on a server
+    // busy enough for the fading idle baseline to reach zero, that ONE bot was
+    // the whole answer while the human stayed alone at their table.
+    //
+    // The appetites are pinned to hosting so the answer cannot come from them:
+    // 'join' here is the demand speaking, not the trait.
+    const hostish: PlaybotTraits = { ...DEFAULT_TRAITS, hostAppetite: 1, joinAppetite: 0, queueAppetite: 0 };
+    const pool = Array.from({ length: 8 }, (_, i) => bot(`bot-${i}`, { traits: hostish }));
+
+    const table = targetActivation(
+      snap({ roster: pool, openTables: 1, humansOnline: 1, queuedHumans: 0 }),
+      25
+    );
+    expect(table.activate[0].action).toBe('join');
+
+    // A queued human still gets the queue, and both kinds at once get one of
+    // each -- queue first, since that human's band is still widening.
+    const both = targetActivation(
+      snap({ roster: pool, openTables: 1, queuedHumans: 1, humansOnline: 2 }),
+      25
+    );
+    expect(both.activate.slice(0, 2).map((a) => a.action)).toEqual(['queue', 'join']);
+  });
+
+  it('splits demand without changing how much of it there is', () => {
+    // targetActiveCount reads the TOTAL, so the split may not move it --
+    // otherwise the population would grow or shrink as a side effect of
+    // knowing where to send a bot.
+    for (const q of [0, 1, 2, 3]) {
+      for (const tables of [0, 1, 3]) {
+        for (const waited of [0, PATIENCE_MS]) {
+          const s = snap({ queuedHumans: q, openTables: tables, longestWaitMs: waited });
+          const d = demandSplit(s);
+          expect(d.queue + d.table).toBe(unmetHumanDemand(s) + impatientDemand(s));
+        }
+      }
+    }
   });
 
   it('follows each appetite when a bot plays for its own sake', () => {

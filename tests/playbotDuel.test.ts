@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { seedTraits } from '../server/playbotTraits';
 import { PlaybotDriver, serveAimFor } from '../server/playbotDriver';
+import { BASE_BALL_SPEED } from '../src/game/physics';
 import { sleep, startRelay, type Relay } from './helpers/relay';
 
 // Two bots, a real relay, a real socket each, and a duel played out to a
@@ -191,6 +192,59 @@ describe('a bot at a table with a human', () => {
     }
     await phone.await('match_recorded');
     await until('the bot to see the match end', () => bot.phase === 'over');
+
+    phone.close();
+    bot.close();
+  }, 90_000);
+
+  it('sends a ball whose speedMultiplier matches the velocity it is sent with', async () => {
+    // `speedMultiplier` is DERIVED display metadata, not a factor: the browser
+    // computes it as `hypot(vx, vy) / BASE_BALL_SPEED` and integrates vx/vy
+    // straight, because the 4% a paddle adds is already inside the velocity
+    // `checkPaddleCollision` returns.
+    //
+    // The driver used to do BOTH -- multiply the integration by it AND grow it
+    // another 4% per contact -- so the bot's half ran at roughly
+    // `speed x 1.04^n` while the human's ran at `speed`, and the number on the
+    // wire had stopped describing the ball it travelled with. This is the
+    // wire's own account of that, which is the only place the divergence
+    // surfaces: the identity is exact on every crossing or it is broken.
+    // Skill 0.6 rather than the file's default 0.12, and the number is
+    // MEASURED rather than picked: the driver passes `skill` straight through
+    // as competence, and `aiServeAim`'s power rises with it, so at 0.12 the
+    // serve leaves between 0.92x and 1.06x the base speed -- which straddles
+    // 1, so a single crossing can land close enough to it that the old
+    // accumulated value of 1 would have satisfied the identity too. Over every
+    // paddle position at 0.6 the range is 1.073..1.318, clear of the guard
+    // below. Nobody has to win here, so a stronger server costs nothing.
+    const bot = await bootBot('SpeedHost', 0.6);
+    bot.host({ winningScore: 15 }, 'casual');
+    await until('a table', () => bot.roomId !== null);
+
+    const human = await relay.newDevice('SpeedHuman');
+    const phone = await relay.openPhone(human);
+    phone.send({ type: 'join_room', roomId: bot.roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    phone.send({ type: 'player_ready', ready: true });
+    await phone.await('game_start');
+
+    await phone.await('ball_incoming', 30_000);
+    await sleep(500);
+    const balls = phone.all('ball_incoming').map((m) => m.ball);
+    expect(balls.length).toBeGreaterThan(0);
+
+    for (const b of balls) {
+      const derived = Math.hypot(b.vx, b.vy) / BASE_BALL_SPEED;
+      expect(Math.abs(derived - b.speedMultiplier)).toBeLessThan(1e-6);
+    }
+
+    // ...and the identity cannot have held VACUOUSLY on a ball that happened
+    // to leave at exactly the base speed, where the old accumulated value of 1
+    // would have satisfied it too.
+    expect(
+      balls.some((b) => Math.abs(b.speedMultiplier - 1) > 0.02),
+      'every crossing left at the base speed, so this proves nothing'
+    ).toBe(true);
 
     phone.close();
     bot.close();

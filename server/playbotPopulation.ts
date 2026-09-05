@@ -136,15 +136,37 @@ export function rankForActivation(
   });
 }
 
-/** What this bot should go and do, from its own appetites. */
-function actionFor(t: PlaybotTraits, servingHuman: boolean): PopulationAction {
-  // A bot activated to serve waiting human demand goes to the QUEUE, which is
-  // where that human is. Its own appetite decides between hosting and joining
-  // only when it is playing for its own sake.
-  if (servingHuman) return 'queue';
+/** What this bot should go and do when it is playing for its own sake. */
+function actionFor(t: PlaybotTraits): PopulationAction {
   if (t.hostAppetite >= t.joinAppetite && t.hostAppetite >= t.queueAppetite) return 'host';
   if (t.joinAppetite >= t.queueAppetite) return 'join';
   return 'queue';
+}
+
+/**
+ * Unmet demand, split by WHERE the human waiting for it actually is.
+ *
+ * `unmetHumanDemand` adds the two together because `targetActiveCount` only
+ * needs the total, and that is right — but an activation has to go to the
+ * human, and the two humans are in different places. A queued human is served
+ * by a bot entering the queue; a lone host at a public table is served by a
+ * bot WALKING UP TO IT, and is not in the queue at all.
+ *
+ * Sending both to the queue is what shipped, and it makes §4.13's priority
+ * rule nominal rather than operative in exactly the case it exists for: on a
+ * server busy enough that the fading idle baseline reaches zero, the one
+ * activated bot sat in matchmaking while the human stayed alone at their table
+ * indefinitely.
+ *
+ * Queue demand is served first, deliberately: a queued human's band is still
+ * widening, so a bot arriving there may not even be needed, whereas the same
+ * bot spent on a table is spent. The totals are identical either way.
+ */
+export function demandSplit(s: PopulationSnapshot): { queue: number; table: number } {
+  return {
+    queue: (s.queuedHumans % 2) + impatientDemand(s),
+    table: Math.max(0, s.openTables),
+  };
 }
 
 /**
@@ -159,7 +181,7 @@ export function targetActivation(
 ): PopulationTarget {
   const want = targetActiveCount(s);
   const active = new Set(s.activeBotIds);
-  const urgent = unmetHumanDemand(s) + impatientDemand(s);
+  const demand = demandSplit(s);
 
   const ordered = rankForActivation(s.roster, bandCentre);
   const keep = ordered.filter((b) => active.has(b.id)).slice(0, want);
@@ -169,7 +191,14 @@ export function targetActivation(
   for (const bot of ordered) {
     if (kept.size + activate.length >= want) break;
     if (active.has(bot.id)) continue;
-    activate.push({ id: bot.id, action: actionFor(bot.traits, activate.length < urgent) });
+    const n = activate.length;
+    const action: PopulationAction =
+      n < demand.queue
+        ? 'queue'
+        : n < demand.queue + demand.table
+          ? 'join'
+          : actionFor(bot.traits);
+    activate.push({ id: bot.id, action });
   }
 
   return {

@@ -166,4 +166,41 @@ describe('a deactivated bot waits for the whistle', () => {
     host.close();
     guest.close();
   }, 120_000);
+
+  it('forgets its opponent when it gives up the room', async () => {
+    // `opponentPresent` is about the ROOM, not about the bot -- the same rule
+    // `resetTableForNextPair` states one level up -- and only `opponent_left`
+    // ever cleared it. After an ordinary whistle it therefore stayed TRUE for
+    // the life of the process, so the supervisor's next `host` dispatch opened
+    // an EMPTY table that still answered `hasOpponent()` true. `engaged()`
+    // reads exactly that to decide whether the idle-lobby window applies, so
+    // the bot was parked at a table nobody came to permanently, instead of
+    // coming free for the next demand.
+    //
+    // No match is played here on purpose: the defect is about the seat, not
+    // the result, and a duel would take a minute to say the same thing.
+    relay = await startRelay('playbot-lifecycle');
+    const r = relay;
+    const host = await bootBot(r, 'seata');
+    const guest = await bootBot(r, 'seatb');
+
+    host.host({ winningScore: 15 });
+    await until('a room', () => host.roomId !== null);
+    guest.join(host.roomId!);
+    await until('the host to see somebody opposite', () => host.hasOpponent());
+    expect(guest.hasOpponent()).toBe(true);
+
+    // Standing up is what clears it.
+    host.leave();
+    expect(host.hasOpponent()).toBe(false);
+
+    // And a table this bot opens next has nobody at it, which is the state
+    // the supervisor's idle-lobby window is judged against.
+    host.host({ winningScore: 15 });
+    await until('a fresh table', () => host.roomId !== null);
+    expect(host.hasOpponent()).toBe(false);
+
+    host.close();
+    guest.close();
+  }, 90_000);
 });

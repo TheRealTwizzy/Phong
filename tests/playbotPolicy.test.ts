@@ -165,6 +165,40 @@ describe('choosing a venue', () => {
   it('returns null when it may enter nowhere', () => {
     expect(chooseVenue({ traits: traits(), roll: 0.5, allowed: [] })).toBeNull();
   });
+
+  // The function above is right and was right throughout. What shipped wrong
+  // was the CALL SITE, which is why this pair exists and why one half of it
+  // reads source -- the same shape §12 uses for `unrankedReasons`, and for the
+  // same reason: an arm a caller can never reach is invisible to every test of
+  // the function that owns it.
+  it('cannot choose ranked at all when the roll IS the bias', () => {
+    // The arithmetic of the defect, stated so it can never come back quietly:
+    // the comparison is `roll < rankedBias`, so handing it the bias is `x < x`
+    // -- false at every appetite, including 1. Every table the population
+    // opened was therefore Casual, and a Casual table moves no visible ladder
+    // (RoomDef.ranked), so no table-based bot match could rate.
+    for (const bias of [0, 0.1, 0.5, 0.9, 1]) {
+      const v = chooseVenue({
+        traits: traits({ rankedBias: bias }),
+        roll: bias,
+        allowed: ['casual', 'beginner'],
+      });
+      expect(v, `rankedBias ${bias} passed as its own roll`).toBe('casual');
+    }
+  });
+
+  it('is not called with the bias as its own roll', () => {
+    // Mutation check: put `roll: m.traits.rankedBias` back and this reddens.
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'server', 'playbotSupervisor.ts'),
+      'utf8'
+    );
+    const call = /chooseVenue\(\{([\s\S]*?)\}\)/.exec(src);
+    expect(call, 'the supervisor no longer calls chooseVenue').toBeTruthy();
+    const roll = /roll:([^,\n]*)/.exec(call![1]);
+    expect(roll, 'the chooseVenue call passes no roll').toBeTruthy();
+    expect(roll![1]).not.toMatch(/rankedBias/);
+  });
 });
 
 describe('rematching', () => {

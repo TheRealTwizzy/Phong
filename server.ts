@@ -2281,6 +2281,47 @@ async function startServer() {
           if (!payload.matchKey) {
             payload.matchKey = `unvouched:${req.deviceId}:${seq ?? 'x'}`;
           }
+        } else {
+          // A vouched payload has a TRUSTED opponent, and this path never said
+          // so — which quietly took the anti-farming ladders off every duel
+          // this POST happened to record first.
+          //
+          // The relay normally wins that race and files the exposure rows
+          // itself, because a relayed duel decides inside `point_scored` and
+          // this POST needs a round trip. A P2P duel has no such ordering: the
+          // deciding `match_sync` travels the WebSocket while this travels
+          // HTTP, and CLAUDE.md §5 documents the winner's own report
+          // legitimately arriving first. Whichever lands first is the one that
+          // PAYS — the other is answered by the ledger — so a pair replaying
+          // P2P duels never accumulated a pair count and never reached the
+          // human pair band at all.
+          //
+          // The four clauses above are exactly what §4.4 asks for: a live seat
+          // this caller holds, an opponent in the other one, and a sequence
+          // naming a match this room started after they sat down. So the id
+          // comes from the ROOM, never from the payload, and it is the
+          // verified DEVICE id for the reason recordRoomMatch gives — a
+          // client-chosen one is a fresh id every match and never leaves band
+          // one. Absent for a cookieless opponent, which is right: no account,
+          // no row.
+          const them = room.players[seat === 0 ? 1 : 0];
+          if (them?.deviceId) {
+            context.opponentId = them.deviceId;
+            // The band the relay would have used: the START-of-match tier off
+            // the room's own cache, never re-derived here (§4.3 — by now both
+            // ratings have moved and `tierFor` reads counters that have moved
+            // with them).
+            const band = duelStartRatings(room)[seat === 0 ? 1 : 0]?.band;
+            if (band) context.opponentBand = band;
+            // `decidedAt` is deliberately left to default. The relay stamps
+            // the match's own decided-at and both its rows share it; here the
+            // two seats can be paid by different paths, so an anchor from this
+            // one would differ from the relay's by the width of the race that
+            // caused it — a few hundred ms against a 24-hour window, on rows
+            // that are otherwise identical. Sharing it would mean a new
+            // per-PAIR field on Room and an entry in resetTableForNextPair
+            // (§5's bug class) to buy nothing measurable.
+          }
         }
       }
 

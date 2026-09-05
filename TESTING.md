@@ -169,6 +169,15 @@ recognising rather than rediscovering:
 The standing habit: **before writing an assertion, name the mutation it should redden, then check
 that the mutation compiles and that it does.**
 
+And where a shape is known, **write the guard against it into the test itself**. Shape 9 is the one
+that repays this: a new test asserting `speedMultiplier === hypot(vx, vy) / BASE_BALL_SPEED` on a
+relayed crossing carries a second assertion that at least one sampled crossing left at a speed
+clearly ≠ the base — because at the base speed the accumulated value it replaced would satisfy the
+identity too. That guard FIRED, on a slower run where only one crossing arrived and it happened to
+land within 2% of the base. It cost a fixture change (the serve speed is measured, not picked) and
+it is the difference between a test that holds the rule and one that passes for a reason it does
+not name.
+
 ## 3. Reading a coverage report honestly
 
 V8 coverage measures **in-process execution only**. Two consequences that will mislead you:

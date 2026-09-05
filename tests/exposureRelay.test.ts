@@ -103,6 +103,64 @@ describe('the room supplies the pair', () => {
     duel.p2.close();
   }, 30_000);
 
+  it('writes a row for a duel the CLIENT\u2019s own POST recorded first', async () => {
+    // The relay is not the only path. A duel legitimately arrives up to three
+    // times and whichever lands FIRST is the one that pays; the others are
+    // answered by the ledger. For a relayed duel the relay always wins, since
+    // it decides inside `point_scored` while this POST needs a round trip \u2014
+    // but a P2P duel has no such ordering, and CLAUDE.md \u00a75 documents the
+    // winner's own report legitimately outrunning the deciding `match_sync`.
+    //
+    // On that path `server.ts` supplied the opponent's RATINGS and never its
+    // IDENTITY, so `pairing` was null: no exposure row, no saturation
+    // modifier, full unsaturated weight. A pair replaying P2P duels therefore
+    // never accumulated a pair count and never reached the human pair band at
+    // all \u2014 the anti-farming safeguard simply absent for that transport.
+    //
+    // The fixture is that race, at the wire: a real seated duel the relay has
+    // NOT decided (0-0, so the cross-check stands aside exactly as it does
+    // when the POST is ahead), recorded by the client alone.
+    const host = await newDevice('RaceHost');
+    const guest = await newDevice('RaceGuest');
+    placeAt(guest.id, 31.5);
+    const duel = await relay.seatDuel(host, guest, 3);
+
+    const body = {
+      playerId: host.id,
+      playerScore: 3,
+      opponentScore: 1,
+      isWinner: true,
+      mode: 'multiplayer',
+      maxRally: 4,
+      bestStreak: 4,
+      endStreak: 4,
+      earnedStreak: 4,
+      aces: 0,
+      durationMs: 30_000,
+      roomId: duel.roomId,
+      matchSeq: duel.matchSeq,
+    };
+    const res = await fetch(`${relay.base}/api/match/record`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: host.cookie },
+      body: JSON.stringify(body),
+    }).then((r) => r.json());
+    expect(res.alreadyRecorded).toBeFalsy();
+
+    const mine = exposureFor(host.id);
+    expect(mine).toHaveLength(1);
+    // From the ROOM's seat, never from the payload \u2014 which named no
+    // opponent at all here, so a row keyed on the payload could not exist.
+    expect(mine[0].oppId).toBe(guest.id);
+    // And the START-of-match band off the room's own cache, not re-derived
+    // after both ratings have moved.
+    expect(mine[0].oppBand).toBe('grandmaster');
+    expect(mine[0].oppIsBot).toBe(0);
+
+    duel.p1.close();
+    duel.p2.close();
+  }, 30_000);
+
   it('takes the opponent from the SEAT, never from the id the client sent', async () => {
     // The trust boundary, and the fixture had to be rebuilt to be about it.
     // Written with two cookie-holding devices sending forged playerIds it

@@ -90,20 +90,32 @@ const settle = async (dir: string, want: number): Promise<string[]> => {
   return playbots(dir);
 };
 
-/** Players sitting at a public table in the ungated room, over every table. */
-const seatedInCasual = async (base: string): Promise<number> => {
-  const body = await (await fetch(`${base}/api/rooms/casual/tables`)).json();
-  return ((body?.tables ?? []) as Array<{ playerCount: number }>).reduce(
-    (n, t) => n + t.playerCount,
-    0
-  );
+/**
+ * Players sitting at a public table, across EVERY venue a bot may open one in.
+ *
+ * Both rooms, deliberately: `chooseVenue` picks between them on the bot's own
+ * `rankedBias` against an independent roll, so a suite that counted `casual`
+ * alone would be measuring the coin flip. It read only `casual` while the
+ * roll was the bias itself and the answer was therefore always Casual —
+ * green for a reason it did not name, and red the moment the choice worked.
+ */
+const seatedAtTables = async (base: string): Promise<number> => {
+  let n = 0;
+  for (const room of ['casual', 'beginner']) {
+    const body = await (await fetch(`${base}/api/rooms/${room}/tables`)).json();
+    n += ((body?.tables ?? []) as Array<{ playerCount: number }>).reduce(
+      (t, x) => t + x.playerCount,
+      0
+    );
+  }
+  return n;
 };
 
 /** Wait for the population to actually be PLAYING, not merely to exist. */
 const waitForSeated = async (base: string, tries = 60): Promise<number> => {
   let seated = 0;
   for (let i = 0; i < tries; i++) {
-    seated = await seatedInCasual(base);
+    seated = await seatedAtTables(base);
     if (seated > 0) return seated;
     await sleep(500);
   }

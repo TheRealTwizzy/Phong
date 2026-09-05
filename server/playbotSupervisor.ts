@@ -104,6 +104,20 @@ export interface PlaybotSupervisorOptions {
    * whose matches are short enough to measure; production seeds from the id.
    */
   traitsFor?: (username: string) => PlaybotTraits;
+  /**
+   * The coin flip a venue choice is judged against, in [0,1).
+   *
+   * A SEPARATE draw from the trait it is compared to, and the separation is
+   * the whole of it: `chooseVenue` asks `roll < traits.rankedBias`, so handing
+   * it the bias itself makes that `x < x` — false for every bot at every
+   * appetite, so every table this population opened was Casual and no
+   * table-based bot match could move the visible ladder. The pure function was
+   * right and tested throughout; only the caller was wrong, which is why the
+   * test for this reads the CALL SITE (§12's `unrankedReasons` idiom).
+   *
+   * Injected only so a test can make the choice deterministic.
+   */
+  rollFor?: () => number;
 }
 
 export const DEFAULT_TICK_MS = 15_000;
@@ -454,7 +468,12 @@ export class PlaybotSupervisor {
     // choice did not work out.
     const gaveUpEmptyTable = m.driver.phase === 'lobby' && !m.driver.hasOpponent();
     m.dispatchedAt = Date.now();
-    const venue = chooseVenue({ traits: m.traits, roll: m.traits.rankedBias, allowed: OPEN_VENUES });
+    // An INDEPENDENT roll, never the bias itself — see `rollFor`.
+    const venue = chooseVenue({
+      traits: m.traits,
+      roll: (this.opts.rollFor ?? Math.random)(),
+      allowed: OPEN_VENUES,
+    });
     // JOIN means join. Mapping it to `host` looked harmless — a table somebody
     // can walk into is the same offer from the other side — and it is what
     // deadlocks the population: with nobody ever joining, every bot opens its
