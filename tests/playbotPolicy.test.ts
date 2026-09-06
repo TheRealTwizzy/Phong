@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'fs';
-import { OPEN_VENUES, humanTablesFirst } from '../server/playbotSupervisor';
+import { humanTablesFirst } from '../server/playbotSupervisor';
+import { OPEN_VENUES } from '../server/playbotPopulation';
 import { roomById, roomEntryVerdict } from '../src/venues';
 import { TIER_ORDER } from '../src/rating';
 import path from 'path';
@@ -392,15 +393,24 @@ describe('which table to walk up to, and which venues may be tried', () => {
     // property, over every tier a bot's own results can reach.
     for (const tier of TIER_ORDER) {
       for (const level of [1, 5, 20, 100]) {
-        const open = OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), { level, tier }).ok);
+        const open = OPEN_VENUES.filter((id: string) => roomEntryVerdict(roomById(id), { level, tier }).ok);
         expect(open, `${tier} at level ${level} may enter nowhere`).not.toHaveLength(0);
       }
     }
-    // And it genuinely NARROWS, or it is not a filter: a bot past Contender
-    // loses `beginner` and keeps `casual`.
+    // And it genuinely NARROWS, or it is not a filter. A Master loses both
+    // ends of the ladder — `beginner` (tierMax contender) below it and
+    // `elite`/`pro` (tierMin grandmaster/legend) above — and keeps the middle.
+    //
+    // This used to expect `['casual']`, which was the whole bug rather than
+    // the property: with OPEN_VENUES holding only the two ungated rooms, a bot
+    // past Contender kept nothing but the one room that cannot rate it. What
+    // is asserted now is that the filter still refuses in BOTH directions,
+    // which is what makes it a bracket rather than a floor.
     const climbed = OPEN_VENUES.filter(
-      (id) => roomEntryVerdict(roomById(id), { level: 20, tier: 'master' }).ok
+      (id: string) => roomEntryVerdict(roomById(id), { level: 20, tier: 'master' }).ok
     );
-    expect(climbed).toEqual(['casual']);
+    expect(climbed).toEqual(['casual', 'intermediate', 'advanced']);
+    expect(climbed).not.toContain('beginner');
+    expect(climbed).not.toContain('pro');
   });
 });

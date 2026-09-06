@@ -28,7 +28,6 @@
 import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
 import { chooseOpponent, chooseVenue, type PolicyCandidate } from './playbotPolicy';
-import { roomById, roomEntryVerdict } from '../src/venues';
 import type { Tier } from '../src/rating';
 import {
   impatientDemand,
@@ -37,6 +36,9 @@ import {
   type PopulationAction,
   type PopulationBot,
   type PopulationSnapshot,
+  OPEN_VENUES,
+  servableVenues,
+  venuesOpenTo,
 } from './playbotPopulation';
 import { START_MU } from '../src/rating';
 
@@ -883,8 +885,24 @@ export class PlaybotSupervisor {
    * `_default` room.
    */
   private venuesFor(m: Managed): string[] {
-    const who = { level: m.level, tier: m.tier };
-    return OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), who).ok);
+    return venuesOpenTo({ level: m.level, tier: m.tier });
+  }
+
+  /**
+   * The rooms this ROSTER can reach right now — what `server.ts` narrows the
+   * demand count to.
+   *
+   * Reads only the in-memory `level`/`tier` that `roster()` refreshes on every
+   * tick, so it costs no store read and is exactly as fresh as the roster the
+   * controller ranks. No recursion either: `roster()` never asks for the live
+   * state.
+   *
+   * Public because the alternative is `server.ts` holding its own copy of the
+   * rule, and a rule spelled twice is the thing this feature keeps being bitten
+   * by. Demand and the search have to be one predicate.
+   */
+  public servableVenues(): string[] {
+    return servableVenues(this.managed.map((m) => ({ level: m.level, tier: m.tier })));
   }
 
   /**
@@ -1010,17 +1028,6 @@ export class PlaybotSupervisor {
     return (pick && tableOf.get(pick.id)) ?? pool[0].id;
   }
 }
-
-/**
- * The venues a bot will open a table in.
- *
- * Deliberately the two ungated ones. A bracketed room refuses a host who may
- * not play there (`roomEntryVerdict`, enforced at `create_room`), so a bot
- * aiming at one would be turned away for a reason nothing here can fix, and
- * the brackets exist to sort HUMANS by tier rather than to be filled by the
- * population.
- */
-export const OPEN_VENUES = ['casual', 'beginner'];
 
 /** A table with a playing seat going spare, as the listing describes it. */
 export interface FreeTable {

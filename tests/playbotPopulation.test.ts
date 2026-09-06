@@ -14,6 +14,9 @@ import {
   type PopulationBot,
   type PopulationSnapshot,
 } from '../server/playbotPopulation';
+import { OPEN_VENUES, servableVenues, venuesOpenTo } from '../server/playbotPopulation';
+import { roomById, roomCountsForRank, roomEntryVerdict, roomsOf } from '../src/venues';
+import { TIER_ORDER, type Tier } from '../src/rating';
 
 // WHICH existing bots play, and where. Never how good they are.
 //
@@ -684,5 +687,101 @@ describe('supply already spent on the queue', () => {
     // says the same. The rule is about DOUBLE counting, not about capping.
     expect(demandSplit({ ...base, queuedHumans: 3, queuedBots: 0 }).queue).toBe(1);
     expect(demandSplit({ ...base, queuedHumans: 3, queuedBots: 1 }).queue).toBe(0);
+  });
+});
+
+describe('the rooms the population may play in', () => {
+  it('is every listable PvP room, derived rather than listed', () => {
+    // Derived so a bracket added to ROOMS cannot leave the population behind
+    // -- the same never-model-it-twice rule the venue filter, the ball entry
+    // and the CPU-seat predicate each arrived at from their own direction.
+    // `roomsOf` drops `listable: false`, which is what keeps `_queue` and
+    // `_default` out: the first is the matchmaker's own room and the second
+    // is where a table with no venue lands, and a bot hosting in either would
+    // be opening a table nobody can browse to.
+    expect(OPEN_VENUES).toEqual(roomsOf('pvp').map((r) => r.id));
+    expect(OPEN_VENUES).not.toContain('_queue');
+    expect(OPEN_VENUES).not.toContain('_default');
+  });
+
+  it('leaves every tier a room that RATES it', () => {
+    // The assertion the whole population rests on, and which nothing stated.
+    //
+    // `beginner` carries `tierMax: contender`, whose band ends at mu 22, so a
+    // bot that climbed past it was left with `['casual']` -- and Casual is the
+    // one room with `ranked: false`. Every bot that got good was therefore
+    // exiled to the only room that could not rate it, for the life of the
+    // account, and the ladder could never grow a top.
+    //
+    // Level 1 deliberately: `roomEntryVerdict` waives the level gate when the
+    // tier floor is met, and every bracket above `beginner` has a tierMin, so
+    // a bot's level can never be what keeps it out. If that stops being true
+    // this test is where it surfaces.
+    for (const tier of ['unranked', ...TIER_ORDER] as Tier[]) {
+      const rated = OPEN_VENUES.filter(
+        (id) => roomEntryVerdict(roomById(id), { level: 1, tier }).ok && roomCountsForRank(id)
+      );
+      expect({ tier, rated: rated.length > 0 }).toEqual({ tier, rated: true });
+    }
+  });
+
+  it('still leaves every tier SOMEWHERE, rated or not', () => {
+    // `chooseVenue` answers null for an empty list and `host` then makes a
+    // table with no venue at all, which lands in the unlisted `_default` room
+    // where nobody could find it. Casual gates nobody, which is what makes
+    // this hold -- and is why the floor under `rankedBias` stops short of 1.
+    for (const tier of ['unranked', ...TIER_ORDER] as Tier[]) {
+      const open = OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), { level: 1, tier }).ok);
+      expect({ tier, open: open.length > 0 }).toEqual({ tier, open: true });
+    }
+  });
+});
+
+describe('the venues the ROSTER can actually serve', () => {
+  const at = (tier: Tier, level = 1) => ({ level, tier });
+
+  it('is the union of what its own bots may enter, in room order', () => {
+    // `OPEN_VENUES` is what a bot MIGHT reach; this is what this roster can
+    // reach today. The two were the same constant while the list held only
+    // ungated rooms, and stopped being the same answer the moment it held
+    // bracketed ones.
+    // A Legend reaches `elite` as well as `pro` — its tierMax IS legend — so
+    // the union of an unplaced bot and a Legend is four rooms, not three.
+    expect(servableVenues([at('unranked'), at('legend')])).toEqual([
+      'casual',
+      'beginner',
+      'elite',
+      'pro',
+    ]);
+    // Order follows OPEN_VENUES rather than the roster, so the answer does not
+    // depend on which bot happened to be loaded first.
+    expect(servableVenues([at('legend'), at('unranked')])).toEqual(
+      servableVenues([at('unranked'), at('legend')])
+    );
+  });
+
+  it('is EMPTY for an empty roster, so demand narrows to nothing', () => {
+    // The direction that matters. Falling back to OPEN_VENUES here would
+    // count a human hosting in `advanced` as demand while no bot is Ace yet:
+    // `unmetHumanDemand` inflates `want`, the slot loop correctly finds nobody
+    // and breaks, and the surplus is spent by the baseline arm on a bot
+    // playing with itself -- the fading population bound defeated by somebody
+    // the population cannot serve.
+    expect(servableVenues([])).toEqual([]);
+  });
+
+  it('never names a room the bot itself would be refused', () => {
+    // Same predicate as the dispatch, so the count and the search cannot
+    // disagree -- which is the rule this feature has now had to restate at
+    // the venue filter, the ball entry, the CPU seat and the demand split.
+    for (const tier of ['unranked', ...TIER_ORDER] as Tier[]) {
+      for (const id of venuesOpenTo(at(tier))) {
+        expect({ tier, id, ok: roomEntryVerdict(roomById(id), at(tier)).ok }).toEqual({
+          tier,
+          id,
+          ok: true,
+        });
+      }
+    }
   });
 });

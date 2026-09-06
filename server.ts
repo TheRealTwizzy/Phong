@@ -71,7 +71,6 @@ import {
   PlaybotSupervisor,
   liveStateFrom,
   bandCentreFor,
-  OPEN_VENUES,
 } from './server/playbotSupervisor';
 import {
   DEFAULT_VENUE_ROOM,
@@ -4486,7 +4485,10 @@ async function startServer() {
    * deliberately no privileged in-process shortcut: that would be a second
    * door past `requireActiveSession` and the WS upgrade.
    */
-  const playbots = new PlaybotSupervisor({
+  // Annotated because `live` below reaches back for `playbots.servableVenues()`
+  // — a self-reference in the initializer, which tsc cannot infer a type
+  // through even though the call itself only happens later, from `tick()`.
+  const playbots: PlaybotSupervisor = new PlaybotSupervisor({
     base: `http://127.0.0.1:${PORT}`,
     wsUrl: `ws://127.0.0.1:${PORT}/ws`,
     // Bounded by the supervisor itself — see `normalizeRosterSize`. `Number`
@@ -4536,20 +4538,28 @@ async function startServer() {
       // to open more of them.
       //
       // Demand and the search have to name the SAME venues, or the count asks
-      // for bots the dispatch cannot spend. `openTable` looks in OPEN_VENUES
-      // and nowhere else, so a human hosting in `intermediate` was counted
-      // here, a bot was activated to serve them, it searched two rooms it was
-      // never in, found nothing and opened a table of its own — while that
-      // human went on waiting. Narrowed here rather than widened there,
-      // deliberately: the other brackets gate who may PLAY, so a bot walking
-      // into one has to clear `roomEntryVerdict` on its own tier, and the
-      // search would have to carry that judgement. Counting only what the
+      // for bots the dispatch cannot spend. `openTable` looks only where the
+      // dispatch will search, so a human hosting somewhere the population
+      // cannot go was counted here, a bot was activated to serve them, it
+      // searched rooms it was never in, found nothing and opened a table of
+      // its own — while that human went on waiting.
+      //
+      // `servableVenues()` and NOT the OPEN_VENUES constant, which is what a
+      // bot MIGHT enter rather than what these bots may enter today. Against
+      // the constant a human hosting in `advanced` counts as demand while no
+      // bot on the roster is Ace yet: `want` inflates, the slot loop correctly
+      // finds nobody eligible and breaks, and the surplus is spent by the
+      // baseline arm on a bot playing with itself. Counting only what the
       // population can actually serve is the honest half.
+      //
+      // Safe to reach `playbots` from inside its own constructor argument:
+      // `live` is a callback the supervisor invokes from `tick()`, long after
+      // the binding is initialised. Never call it during construction.
       const openTables = [...rooms.values()].filter((r) => {
         const seated = r.players.filter(Boolean);
         return (
           r.visibility === 'public' &&
-          OPEN_VENUES.includes(r.venueRoomId) &&
+          playbots.servableVenues().includes(r.venueRoomId) &&
           seated.length === 1 &&
           !isBotAccount(seated[0]!.playerId) &&
           // A human playing the MACHINE has one real player at their table, so

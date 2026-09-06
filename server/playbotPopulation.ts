@@ -19,6 +19,18 @@
 // have had*, never as *a bot may not give a person a game*.
 
 import type { PlaybotTraits } from './playbotTraits';
+import { roomById, roomEntryVerdict, roomsOf } from '../src/venues';
+
+/**
+ * Who a bracket judges — level and visible tier.
+ *
+ * Derived from `roomEntryVerdict`'s own parameter rather than naming `Tier`,
+ * so this module still imports nothing from `../src/rating`. That absence is
+ * asserted: the guard next door reads this file for a write path to a rating,
+ * and the cheapest way to keep it honest is to have no reason to reach for
+ * that module at all.
+ */
+type Bracketed = NonNullable<Parameters<typeof roomEntryVerdict>[1]>;
 
 /** One bot the controller could switch on. */
 export interface PopulationBot {
@@ -102,6 +114,69 @@ export interface PopulationTarget {
   activate: Array<{ id: string; action: PopulationAction; venue?: string }>;
   /** Bots that should stand down once their current match ends. */
   deactivate: string[];
+}
+
+/**
+ * The venues a bot may open a table in — every listable PvP room.
+ *
+ * This was `['casual', 'beginner']`, and the reasoning was the wrong way
+ * round: "the two ungated ones", because a bracketed room refuses a host who
+ * may not play there and the brackets exist to sort HUMANS by tier. But a
+ * play-bot IS a player on that ladder, and what keeps one out of a room it may
+ * not enter is `venuesOpenTo` below, which asks the relay's own
+ * `roomEntryVerdict` — not this constant, which was answering the same
+ * question a second time and answering it wrong.
+ *
+ * What the narrow list actually did: `beginner` carries `tierMax: contender`,
+ * whose band ends at mu 22, so the moment a bot's results carried it past
+ * Vanguard the answer was `['casual']` and nothing else, for the life of that
+ * account. Casual is the one room with `ranked: false`. Every bot that got
+ * good was therefore exiled to the only room that could not rate it, and the
+ * population could never grow a top — measured over 30 simulated days, a top
+ * rating of mu 30.0 and not one account past Grandmaster, with the highest
+ * SKILLED bot on the roster ending the month having played two ranked games.
+ *
+ * Derived rather than hand-listed, so a bracket added to ROOMS cannot leave
+ * the population behind — the never-model-it-twice rule this feature has
+ * arrived at from seven directions. `roomsOf` drops `listable: false`, which
+ * is what keeps `_queue` (the matchmaker's own room) and `_default` (where a
+ * venue-less table lands) out of reach: a bot hosting in either would open a
+ * table nobody can browse to.
+ *
+ * The ladder is continuous and therefore self-sequencing. Every bracket above
+ * `beginner` has a `tierMin`, and `roomEntryVerdict` waives the level gate
+ * once a tier floor is met, so a fresh bot still starts in casual/beginner and
+ * walks up as its own results place it. Nothing here chooses where it lands.
+ */
+export const OPEN_VENUES = roomsOf('pvp').map((r) => r.id);
+
+/** The rooms one bot may enter, judged by the predicate the relay asks. */
+export function venuesOpenTo(who: Bracketed): string[] {
+  return OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), who).ok);
+}
+
+/**
+ * The rooms THIS roster can reach, which is not the same question as
+ * OPEN_VENUES and stopped being the same answer when that list grew brackets.
+ *
+ * It exists because demand and supply must be judged by one predicate. The
+ * demand count reads every public table with a lone human at it; against the
+ * raw constant, a human hosting in `advanced` counts as somebody to serve
+ * while no bot on the roster is Ace yet — `unmetHumanDemand` inflates `want`,
+ * the slot loop correctly finds nobody eligible and breaks, and the surplus is
+ * spent by the baseline arm on a bot playing with itself. That is the fading
+ * population bound defeated by somebody the population cannot serve, which is
+ * the CPU-table finding wearing a third coat.
+ *
+ * Empty for an empty roster, deliberately: falling back to OPEN_VENUES there
+ * would restore exactly the over-count this removes.
+ *
+ * Ordered by OPEN_VENUES rather than by the roster, so the answer does not
+ * depend on which account happened to load first.
+ */
+export function servableVenues(bots: Bracketed[]): string[] {
+  const reach = new Set(bots.flatMap((b) => venuesOpenTo(b)));
+  return OPEN_VENUES.filter((id) => reach.has(id));
 }
 
 /**

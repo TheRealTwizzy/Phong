@@ -14,7 +14,7 @@ import {
 } from '../server/playbotSupervisor';
 import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import { MIN_AI_COMPETENCE } from '../src/game/physics';
-import { PATIENCE_MS, targetActivation } from '../server/playbotPopulation';
+import { OPEN_VENUES, PATIENCE_MS, targetActivation } from '../server/playbotPopulation';
 import { START_MU } from '../src/rating';
 import { Phone, sleep, startRelay, type Relay } from './helpers/relay';
 
@@ -128,7 +128,11 @@ const settle = async (dir: string, want: number): Promise<string[]> => {
  */
 const seatedAtTables = async (base: string): Promise<number> => {
   let n = 0;
-  for (const room of ['casual', 'beginner']) {
+  // Every room the population may open a table in, not the two it used to be
+  // limited to: a bot seated in a bracket is still a bot seated at a table,
+  // and counting a narrower list would let this pass while the dispatch had
+  // stopped working.
+  for (const room of OPEN_VENUES) {
     const body = await (await fetch(`${base}/api/rooms/${room}/tables`)).json();
     n += ((body?.tables ?? []) as Array<{ playerCount: number }>).reduce(
       (t, x) => t + x.playerCount,
@@ -405,7 +409,11 @@ describe('the roster the controller is shown', () => {
     try {
       const snapshot = sup.snapshot();
       const venuesOf = (id: string) => snapshot.roster.find((b) => b.id === id)!.venues;
-      expect(venuesOf('bot-placed')).toEqual(['casual']);
+      // An Ace is refused `beginner` (tierMax contender) and keeps the middle
+      // of the ladder; an unplaced bot sits below every tierMin and keeps the
+      // bottom. Neither list matters to the point below — what does is that
+      // they do not overlap on the venue the demand names.
+      expect(venuesOf('bot-placed')).toEqual(['casual', 'intermediate', 'advanced']);
       expect(venuesOf('bot-open')).toEqual(['casual', 'beginner']);
       // And therefore the one slot this demand buys goes to the bot that can
       // sit down, not to the one nearest the band.
@@ -586,8 +594,10 @@ describe('a bot plays more than one match', () => {
             mu: 25,
             recentMatches: 0,
             // A fresh account, which is what the bracket gate judges an
-            // unplayed bot as — and what makes every OPEN_VENUES room
-            // enterable, since `beginner` carries a ceiling and no floor.
+            // unplayed bot as: below every tierMin, so it reaches `casual` and
+            // `beginner` and nothing above them. (This used to say "every
+            // OPEN_VENUES room", which was true only while that list held the
+            // two ungated ones.)
             level: 1,
             tier: 'unranked' as const,
           });

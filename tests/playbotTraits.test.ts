@@ -467,14 +467,24 @@ describe('what the composition has to pass along', () => {
   });
 
   it('counts as demand only the venues the dispatch will search', () => {
-    // `openTable` looks in OPEN_VENUES and nowhere else, while the demand
-    // count took every public room — so a human hosting in `intermediate`
-    // activated a bot that searched two rooms it was never in, found nothing,
-    // and opened a table of its own while that human went on waiting.
-    // Narrowed at the count rather than widened at the search: the other
-    // brackets gate who may PLAY, so serving them needs the bot's own tier
-    // judged, which is a design step and not this fix.
-    expect(liveBlock()).toMatch(/OPEN_VENUES\.includes\(r\.venueRoomId\)/);
+    // `openTable` looks only in the venues the DISPATCH will search, while
+    // the demand count took every public room — so a human hosting in a room
+    // the population could not enter activated a bot that searched rooms it
+    // was never in, found nothing, and opened a table of its own while that
+    // human went on waiting.
+    //
+    // Narrowed at the count rather than widened at the search, and the
+    // narrowing is now the roster's OWN reach rather than the constant.
+    // `OPEN_VENUES` is every listable PvP room, which is what a bot MIGHT
+    // enter; `servableVenues()` is what these bots may enter today, judged by
+    // the same `roomEntryVerdict` the relay asks. Against the constant, a
+    // human hosting in `advanced` counts as demand while no bot is Ace yet:
+    // `want` inflates, the slot loop correctly finds nobody, and the surplus
+    // is spent by the baseline arm on a bot playing with itself.
+    expect(liveBlock()).toMatch(/servableVenues\(\)\.includes\(r\.venueRoomId\)/);
+    expect(liveBlock(), 'the demand count still reads the raw constant').not.toMatch(
+      /OPEN_VENUES\.includes/
+    );
   });
 
   it('clamps a bot’s return into the match’s own speed band', () => {
@@ -676,7 +686,12 @@ describe('what the composition has to pass along', () => {
     // filtered list now, which is the root the two fallbacks were patching.
     const src = read('server/playbotSupervisor.ts');
     expect(src).toMatch(/const allowed = this\.venuesFor\(m\)/);
-    expect(src).toMatch(/roomEntryVerdict\(roomById\(id\), who\)\.ok/);
+    // The filter itself now lives in the pure module, so both the dispatch and
+    // the demand count can ask one function rather than two spellings of it.
+    expect(src).toMatch(/venuesOpenTo\(\{ level: m\.level, tier: m\.tier \}\)/);
+    expect(read('server/playbotPopulation.ts')).toMatch(
+      /roomEntryVerdict\(roomById\(id\), who\)\.ok/
+    );
     // BOTH consumers, or the half that was left raw is the half that breaks.
     expect(src).toMatch(/chooseVenue\(\{[\s\S]*?allowed,[\s\S]*?\}\)/);
     expect(src).toMatch(/this\.openTable\(m, venue, allowed, assigned\)/);
