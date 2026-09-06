@@ -60,6 +60,26 @@ export const TRAIT_KEYS = [
 ] as const;
 
 /**
+ * The least of its play a bot seeks in a ranked bracket rather than Casual.
+ *
+ * The band was [0, 1], so half the population's table play landed in Casual —
+ * the one room with `ranked: false`, which pays XP and moves hidden MMR and
+ * never the visible tier. A ladder with players on it needs those players to
+ * be RATED, so the floor is raised rather than the mean nudged.
+ *
+ * 0.55 rather than something higher because Casual has to stay reachable: it
+ * is the one room an Overlord bot and an unranked human can share, and it is
+ * the only venue that can never refuse a bot, which is what stops `venuesFor`
+ * ever returning an empty list.
+ *
+ * `normalizeTraits` clamps everything read from the database into these
+ * ranges, so raising this floor repairs the population already on disk on the
+ * next boot — no migration, no write, and every other trait byte-identical,
+ * since `seedTraits` scales each key independently.
+ */
+export const RANKED_BIAS_FLOOR = 0.55;
+
+/**
  * What a bot with no traits recorded plays like.
  *
  * Mid-ladder and unremarkable on every axis, deliberately: a roster row from
@@ -72,15 +92,28 @@ export const DEFAULT_TRAITS: PlaybotTraits = {
   volatility: 0.05,
   aggression: 0.5,
   spinRead: 0.5,
-  rankedBias: 0.5,
+  // The middle of its own band, which is no longer the middle of [0,1] —
+  // `normalizeTraits` hands the default back UNCLAMPED, so a default under
+  // RANKED_BIAS_FLOOR would be a value the band says cannot exist, issued for
+  // every NULL column.
+  rankedBias: (RANKED_BIAS_FLOOR + 1) / 2,
   queueAppetite: 0.5,
   hostAppetite: 0.5,
   joinAppetite: 0.5,
   rematchAppetite: 0.5,
 };
 
-/** The band each trait is generated and clamped into. */
-const TRAIT_RANGE: Record<keyof PlaybotTraits, [number, number]> = {
+/**
+ * The band each trait is generated and clamped into.
+ *
+ * Exported so a test can assert what is NOT narrowed. Raising a floor here is
+ * a live edit to every stored bot, which is legitimate for an appetite like
+ * `rankedBias` — it decides where a bot plays, and the venue is not the
+ * rating — and forbidden for `skill`, which IS the rating's cause. That is
+ * the "creation may seed, nothing after creation may steer" rule at the one
+ * place it could be broken by a one-line change with every test still green.
+ */
+export const TRAIT_RANGE: Record<keyof PlaybotTraits, [number, number]> = {
   // Never below the competence floor: a bot that cannot return a ball is not
   // an opponent, it is a walkover, and the ladder would rate it as one.
   skill: [MIN_AI_COMPETENCE, 1],
@@ -89,7 +122,7 @@ const TRAIT_RANGE: Record<keyof PlaybotTraits, [number, number]> = {
   volatility: [0, 0.12],
   aggression: [0, 1],
   spinRead: [0, MAX_SPIN_READ],
-  rankedBias: [0, 1],
+  rankedBias: [RANKED_BIAS_FLOOR, 1],
   queueAppetite: [0, 1],
   hostAppetite: [0, 1],
   joinAppetite: [0, 1],

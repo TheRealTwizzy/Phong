@@ -833,10 +833,15 @@ export class PlaybotSupervisor {
     // simply retried the same forbidden table on every tick, while the human
     // it was dispatched to serve went on waiting.
     const allowed = this.venuesFor(m);
-    // An INDEPENDENT roll, never the bias itself — see `rollFor`.
+    // TWO independent draws, and neither is the bias itself — see `rollFor`.
+    // `roll` decides ranked-or-Casual and `pick` decides which room; sharing
+    // one number puts the tail of the ranked pool out of reach, which is the
+    // bias-as-its-own-roll defect wearing a different coat.
+    const draw = this.opts.rollFor ?? Math.random;
     const venue = chooseVenue({
       traits: m.traits,
-      roll: (this.opts.rollFor ?? Math.random)(),
+      roll: draw(),
+      pick: draw(),
       allowed,
     });
     // JOIN means join. Mapping it to `host` looked harmless — a table somebody

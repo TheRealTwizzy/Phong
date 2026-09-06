@@ -105,13 +105,26 @@ export function chooseOpponent(ctx: {
  *
  * `allowed` is the set of venues the bracket gate says it may enter, supplied
  * by the caller: this must never propose a room the relay would refuse, or a
- * bot spends its life being turned away. `roll` is injected for the same
+ * bot spends its life being turned away. The draws are injected for the same
  * reason nothing here reads a clock.
+ *
+ * TWO DRAWS, AND THEY ARE NOT INTERCHANGEABLE. `roll` answers "ranked or
+ * Casual" against the bot's own bias; `pick` answers "which ranked room".
+ * Spent as one number they are not independent, because a bot that wants
+ * ranked has by construction rolled BELOW its bias: the index can then only
+ * reach the first `ceil(bias * n)` entries of the pool, so with two brackets
+ * open and a bias of 0.4 the second is unreachable for that bot forever. That
+ * is the same shape as passing the bias as its own roll -- one arithmetic
+ * relationship between two numbers that should have had none -- and it was
+ * invisible for as long as OPEN_VENUES held one ranked room, because a pool of
+ * length 1 makes any index correct.
  */
 export function chooseVenue(a: {
   traits: PlaybotTraits;
-  /** [0,1). */
+  /** [0,1). Ranked or Casual. */
   roll: number;
+  /** [0,1). Which room within whichever pool `roll` chose. A SECOND draw. */
+  pick: number;
   allowed: string[];
 }): string | null {
   if (!a.allowed.length) return null;
@@ -119,7 +132,7 @@ export function chooseVenue(a: {
   const casual = a.allowed.filter((v) => v === 'casual');
   const wantsRanked = a.roll < a.traits.rankedBias;
   const pool = wantsRanked ? (ranked.length ? ranked : casual) : casual.length ? casual : ranked;
-  return pool[Math.floor(a.roll * pool.length) % pool.length];
+  return pool[Math.floor(a.pick * pool.length) % pool.length];
 }
 
 /**
