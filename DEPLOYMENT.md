@@ -16,13 +16,16 @@ The script was broken for a while and this note used to say so. It is repaired, 
 
 Off by default. `PLAYBOT_ROSTER_SIZE` is the number of bot accounts the server keeps; unset or `0` means no population at all, which is what every deployment ran before this existed.
 
-**The roster is a POOL, not a concurrency figure**, and reading it as one is the mistake to avoid. How many bots are *playing* at any moment is decided by the population controller, not by the roster:
+**The roster is a POOL, not a concurrency figure** — but it is a pool the controller now draws from *in proportion to its size*. How many bots are *playing* at any moment:
 
 ```
-active = max( unserved humans , round(6 / (1 + humans online)) )
+idle   = min( 24 , max( 6 , round(roster * 0.25) ) )
+active = max( unserved humans , round(idle / (1 + humans online)) )
 ```
 
-— so an empty server runs about **six** active bots however large the roster is, and a busy one runs roughly one per human the queue cannot pair by itself. A dormant bot is a `players` row and a `bot_accounts` row and nothing else: no socket, no timer, no cost. The roster's job is to give the controller *variety* — bots across rank bands to pick from — and the answer to a thin band is more bots at creation, never retuning one that is already playing.
+— so an empty server with the recommended roster of 60 runs about **fifteen** active bots, a roster of 20 runs six, and a busy server runs roughly one per human the queue cannot pair by itself. A dormant bot is a `players` row and a `bot_accounts` row and nothing else: no socket, no timer, no cost. The roster's job is to give the controller *variety* — bots across rank bands to pick from — and the answer to a thin band is more bots at creation, never retuning one that is already playing.
+
+**It was a flat six however large the roster was**, which is the same sentence as "a pool nobody is drawn from is a list": a deployment keeping sixty accounts ran six of them and the other fifty-four were two database rows apiece, which is what *most of the ranked bots aren't playing* looks like from outside. `IDLE_ACTIVE_MAX` (24) is the ceiling on the share and it is **load rather than taste** — the measurements below were taken with a roster of 200 and about six bots actually *active*, so the roster's cost was measured and the active count's was not. Twenty-four active is roughly twelve concurrent bot matches against a measured relay capacity of 150. Raising it is a measurement, not an edit: re-run the command below at the roster you intend and check the loss and p95 columns.
 
 Measured on the same 4-core / 16GB box, against `NODE_ENV=production node dist/server.cjs`:
 
@@ -36,12 +39,13 @@ node scripts/load-test.mjs 150 20 ws://127.0.0.1:4022/ws
 | 0 (off) | 179,573 paddle msgs | 0.00% | 2ms / 6ms | 0 |
 | 60 | 179,350 | 0.00% | 2ms / 8ms | 0 |
 | 200 | 179,248 | 0.00% | 2ms / 8ms | 0 |
+| 96, at the new share (24 active) | 179,987 | 0.00% | 1ms / 7ms | 0 |
 
-A roster of 200 provisions in **2 seconds** at boot and the process sits at **105MB RSS**. The population costs about **2ms at p95** under a full relay load, and that cost is the ~6 ACTIVE bots rather than the roster: 60 and 200 measure the same because 194 of the 200 are dormant.
+A roster of 200 provisions in **2 seconds** at boot and the process sits at **105MB RSS**. The population costs about **2ms at p95** under a full relay load, and that cost was the ~6 ACTIVE bots rather than the roster: 60 and 200 measured the same because 194 of the 200 were dormant. The first three rows predate the roster-proportional idle share above and were taken at about six ACTIVE bots. **The last row is that share measured**, at a roster of 96 — which saturates `IDLE_ACTIVE_MAX`, so twenty-four bots were playing under the same 150 concurrent human matches — and it is no worse than the six-active baseline. That is what the cap rests on, and raising it means re-running this command at the roster you intend and reading the loss and p95 columns, not editing the constant.
 
-**A starting value of `PLAYBOT_ROSTER_SIZE=60` is the recommendation**, and it is chosen for variety rather than for load — enough accounts for the controller to find one near a thin band, small enough that a new deployment's ladder is recognisable rather than a wall of strangers. Raise it if the ladder looks thin at some tier; there is headroom to 200 and beyond on this box, and the bound that matters is the active count above, which the roster does not change.
+**A starting value of `PLAYBOT_ROSTER_SIZE=60` is the recommendation**, and it is chosen for variety rather than for load — enough accounts for the controller to find one near a thin band, small enough that a new deployment's ladder is recognisable rather than a wall of strangers. Raise it if the ladder looks thin at some tier; there is headroom to 200 and beyond on this box. **The active count now moves with the roster** (it did not before, and that sentence used to say so), so raising this raises what is playing too, up to `IDLE_ACTIVE_MAX`.
 
-**There is also a FLOOR, and it is a different reason from variety: below about sixteen accounts the ladder cannot stratify at all.** The same-pair saturation ladder hard-caps at the 13th bot-involved match per pair per rolling 24 hours, and a hard cap zeroes mu *and* sigma and increments neither `rankedGames` nor `rankedDuels` — the match still happens and still pays XP, it simply stops being evidence. With N accounts drawn on, the population can therefore rate at most `C(N,2) × 13` matches a day, against the roughly 1,200–2,100 it actually plays at six active bots:
+**There is also a FLOOR, and it is a different reason from variety: below about sixteen accounts the ladder cannot stratify at all.** The same-pair saturation ladder hard-caps at the 13th bot-involved match per pair per rolling 24 hours, and a hard cap zeroes mu *and* sigma and increments neither `rankedGames` nor `rankedDuels` — the match still happens and still pays XP, it simply stops being evidence. With N accounts drawn on, the population can therefore rate at most `C(N,2) × 13` matches a day, against the roughly 1,200–2,100 it played at six active bots (about 3,000–5,000 at the fifteen a 60-roster now runs, which raises the floor with it):
 
 | roster | rated ceiling / day | against ~1,440 played |
 |---|---|---|
@@ -50,7 +54,7 @@ A roster of 200 provisions in **2 seconds** at boot and the process sits at **10
 | **16** | **1,560** | break-even |
 | 60 | 23,010 | 16× headroom |
 
-So a roster of six is not a small ladder, it is a ladder that barely moves: the bots play all day and almost none of it counts. 60 clears the floor comfortably and is why the recommendation does not need to change — but if anybody turns this down to save a few database rows, sixteen is the number below which the feature stops working rather than merely getting quieter. What a healthy population looks like after a week is a spread across every tier with a handful of accounts at or near the apex; a board where everybody sits within a couple of points of the starting rating means something upstream is flattening it, not that the roster is too small.
+So a roster of six is not a small ladder, it is a ladder that barely moves: the bots play all day and almost none of it counts. 60 clears the floor comfortably — with 16× headroom at six active, and about 6× at the fifteen it now runs — and is why the recommendation does not need to change — but if anybody turns this down to save a few database rows, sixteen is the number below which the feature stops working rather than merely getting quieter. What a healthy population looks like after a week is a spread across every tier with a handful of accounts at or near the apex; a board where everybody sits within a couple of points of the starting rating means something upstream is flattening it, not that the roster is too small.
 
 Two caveats, both making the real number lower rather than higher. The load generator competes for the same four cores, as above. And the bots' own matches DO end with profile writes — the exposure rows, the rating updates, the match rows — which the cookieless load generator never exercises; at six active bots that is a handful of writes a minute, but it scales with the active count and not with the roster.
 

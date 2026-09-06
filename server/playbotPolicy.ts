@@ -26,6 +26,7 @@
 // there is no surface through which any of it could be expressed.
 
 import { winProbability, type Rating } from '../src/rating';
+import { BOT_PAIR_FULL_VALUE } from '../src/playbotRating';
 import type { PlaybotTraits } from './playbotTraits';
 
 /** Somebody this bot could play, as the caller knows them. */
@@ -153,9 +154,21 @@ export function acceptsRematch(a: {
   roll: number;
 }): boolean {
   if (a.fromHuman) return true;
-  // Tapered to zero across the bot-involved pair ladder's own span, so a bot
-  // stops OFFERING at about the point the ladder stops rating — a preference
-  // that tracks the safeguard rather than duplicating it.
-  const taper = Math.max(0, 1 - a.recentPairCount / 12);
+  // Tapered to zero across the pair ladder's FULL-VALUE rung, so a bot stops
+  // offering at about the point the pair stops being full evidence.
+  //
+  // It ran to the ladder's hard CAP (12) on the reasoning that a bot should
+  // stop offering where the ladder stops rating. That is right about the
+  // rating and wrong about the ladder: placement is five ranked games and the
+  // first moves 4.21 mu, so a pair with a dozen rematches in it carries an
+  // account from unranked to Grandmaster without either side meeting anybody
+  // else — which is the ladder this population actually produced. Measured on
+  // a live roster of 96 with the queue's own diversity fix already in: the
+  // rotation was working, 46 of 96 accounts had played, and the busiest still
+  // had FOUR matches against ONE opponent, because two bots met at a table
+  // and then rematched each other. The queue was fixed and this was not.
+  //
+  // A HUMAN's request is untouched above and is accepted at any count.
+  const taper = Math.max(0, 1 - a.recentPairCount / BOT_PAIR_FULL_VALUE);
   return a.roll < a.traits.rematchAppetite * taper;
 }

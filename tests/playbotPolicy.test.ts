@@ -3,6 +3,8 @@ import fs from 'fs';
 import { humanTablesFirst } from '../server/playbotSupervisor';
 import { OPEN_VENUES } from '../server/playbotPopulation';
 import { roomById, roomEntryVerdict } from '../src/venues';
+import { BOT_PAIR_FULL_VALUE } from '../src/playbotRating';
+import { PLACEMENT_GAMES } from '../src/rating';
 import { TIER_ORDER } from '../src/rating';
 import path from 'path';
 import { DEFAULT_TRAITS, seedTraits, type PlaybotTraits } from '../server/playbotTraits';
@@ -298,6 +300,38 @@ describe('rematching', () => {
     const late = acceptsRematch({ traits: t, fromHuman: false, recentPairCount: 11, roll: 0.5 });
     expect(early).toBe(true);
     expect(late).toBe(false);
+  });
+
+  it('stops offering before a pair could cover a PLACEMENT', () => {
+    // The taper ran to the pair ladder's hard cap at 12, on the reasoning
+    // that a bot should stop offering at about the point the ladder stops
+    // rating. That is right about the RATING and wrong about the LADDER:
+    // placement is five ranked games and the first moves 4.21 mu, so a pair
+    // with a dozen rematches in it can carry a bot from unranked to
+    // Grandmaster without either of them meeting anybody else.
+    //
+    // Measured on a live roster of 96 after the queue fix: rotation was
+    // working -- 46 of 96 accounts had played -- and the busiest still had
+    // FOUR matches against ONE opponent, because they met at a table and
+    // then rematched. The queue path was fixed and this one was not.
+    //
+    // It tapers over the ladder's FULL-VALUE rung instead, so a pair plays
+    // about two and moves on, and five placement games need at least three
+    // opponents. Nothing about a HUMAN's request changes: that is accepted
+    // unconditionally at any count, which the case above pins.
+    const eager = traits({ rematchAppetite: 1 });
+    // Even maximum appetite is spent by the first rung, at every roll.
+    for (const roll of [0, 0.5, 0.99]) {
+      expect(
+        acceptsRematch({ traits: eager, fromHuman: false, recentPairCount: BOT_PAIR_FULL_VALUE, roll })
+      ).toBe(false);
+      // ...and a human still gets their game there.
+      expect(
+        acceptsRematch({ traits: eager, fromHuman: true, recentPairCount: BOT_PAIR_FULL_VALUE, roll })
+      ).toBe(true);
+    }
+    // The rung is well under what placement needs, which is the whole point.
+    expect(BOT_PAIR_FULL_VALUE).toBeLessThan(PLACEMENT_GAMES);
   });
 });
 

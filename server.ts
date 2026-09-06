@@ -4,7 +4,7 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { DATA_DIR, db, isBotAccount, RecordMatchContext } from './server/db';
+import { DATA_DIR, db, isBotAccount, pairKey, RecordMatchContext } from './server/db';
 import {
   clearSessionCookie,
   deviceIdentity,
@@ -682,8 +682,23 @@ function sweepQueue(now: number): void {
     candidates.push(candidate);
   }
 
+  // The bot ids in THIS sweep's list, captured before the loop drains it.
+  const botIds = candidates.filter((c) => c.isBot).map((c) => c.deviceId);
+  // Lazy and memoised for the whole sweep. Lazy because pass 3 is the only
+  // consumer, so a queue that never reaches it — which is every queue with a
+  // human in it, and every queue with fewer than two bots — costs no query at
+  // all; memoised because nothing writes an exposure row BETWEEN two pairings
+  // of one sweep (a seated pair records at the whistle), so the map cannot go
+  // stale inside the loop. That is the same reasoning `candidates` is built
+  // once and drained rather than rebuilt.
+  let pairs: Map<string, number> | null = null;
+  const playedTogether = (a: Candidate, b: Candidate): number => {
+    pairs ??= db.pairCountsAmong(botIds, new Date(now));
+    return pairs.get(pairKey(a.deviceId, b.deviceId)) ?? 0;
+  };
+
   for (;;) {
-    const pair = findPair(candidates, now);
+    const pair = findPair(candidates, now, botIds.length > 1 ? playedTogether : undefined);
     if (!pair) return;
     const a = byId.get(pair[0].deviceId)!;
     const b = byId.get(pair[1].deviceId)!;

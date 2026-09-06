@@ -285,6 +285,41 @@ const WIPE_V4_KEY = 'wipe_v4';
 const PROGRESS_RESET_V1_KEY = 'progress_reset_v1';
 
 /**
+ * `playbot_ladder_reset_v1` — the ladder the play-bot population built while
+ * five pieces of its own wiring were broken, cleared once.
+ *
+ * WHAT IT IS. The queue was blind to pair history, a bot's action was a
+ * lifelong constant, and the activation ranking read a career total under a
+ * doc that promised a window — so the account at the top of the board had
+ * placed off five games against ONE opponent, and placement moves 4.21 mu on
+ * the first of them. That number is not a measurement of anything, and fixing
+ * the wiring does not un-rank what it produced: the ratings have converged
+ * and there is nothing left to converge back toward.
+ *
+ * WHAT IT IS NOT, and it is the distinction `progress_reset_v1` already
+ * draws: not a `wipe_v*`. It does not clear `meta`, does not touch
+ * `auth_secret`, and retires nobody's device cookie — so no client is sent
+ * through `403 PROFILE_NOT_INITIALIZED`, no onboarding re-opens, and no
+ * on-device match queue is orphaned. It stamps itself in the ordinary way and
+ * is deliberately absent from `WIPE_KEYS`: a wipe re-fires it against an
+ * empty roster, which is a no-op.
+ *
+ * WHERE THE LINE IS. What decides where a bot STANDS goes; what records what
+ * it DID stays. XP, level, achievements, `matchesPlayed`, the win counters
+ * and the `matches` rows are the record of play that really happened, against
+ * real opponents, through a relay that vouched every result from room state
+ * it owned — and zeroing `matchesPlayed` beside a level of 5 would put
+ * "level 5 · 0 matches" on a public profile card. Tier trophies already
+ * unlocked stay earned, which is the call §7 makes for a solo-farmed Overlord
+ * held back to Legend by the duel count.
+ *
+ * The exposure rows go WITH the rating, because they are not history: they
+ * are the rolling windows the three saturation ladders read, and a survivor
+ * is a saturation count about a ladder that no longer exists.
+ */
+const PLAYBOT_LADDER_RESET_V1_KEY = 'playbot_ladder_reset_v1';
+
+/**
  * The oldest a reported result may claim to be, for ordering purposes.
  *
  * A nonsense age — a clock that jumped, a hand-written payload — should sort
@@ -336,6 +371,35 @@ const RECORDED_MATCH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
  * are measured over. Not the daily counters, which are a UTC CALENDAR day.
  */
 const EXPOSURE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The key two accounts share in `pairCountsAmong`'s result, order-independent.
+ *
+ * Exported because the map is built here and read at the queue sweep, and two
+ * spellings of "how do I look this pair up" is one spelling too many — the
+ * lookup would simply miss and every pair would read as unplayed, which is the
+ * preference silently switched off with nothing to see.
+ */
+export const pairKey = (a: string, b: string): string => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+/**
+ * How far back `playbotAccounts` looks when it answers "how much has this bot
+ * been playing lately".
+ *
+ * It is a WINDOW and it has to be one. The field it feeds is the primary key
+ * the population controller ranks on whenever nobody is waiting — with no
+ * band centre `rankForActivation` reads no rating at all, so this is the first
+ * thing it compares — and it was `p.matchesPlayed`, the lifetime career total,
+ * under a doc that already said "the recent window". The more a bot had ever
+ * played, the further back it went, so the account at the top of the ladder
+ * was by construction last in line and never defended it: round 21's own
+ * "WINNING IS WHAT TOOK A BOT OUT OF THE POPULATION", arriving a second time
+ * through the tiebreak that replaced the mu-attractor it removed.
+ *
+ * 24h, the same span the saturation ladders roll over, because that is the
+ * period over which "has this bot had its turn" is a fair question to ask.
+ */
+const PLAYBOT_ACTIVITY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * How long an exposure row is kept.
@@ -1122,6 +1186,61 @@ class GameDatabase {
   }
 
   /**
+   * `playbot_ladder_reset_v1` — see the key's own comment for what this
+   * clears, what it deliberately keeps, and why it is not a wipe.
+   */
+  private applyPlaybotLadderReset(): void {
+    if (this.getMeta(PLAYBOT_LADDER_RESET_V1_KEY)) return;
+    const fresh = newRating();
+    // A DRIVABLE play-bot: the marker row AND the credential. That is the
+    // schema's own discriminator between curated furniture and an account
+    // this process can drive, and never an id prefix, which is the classifier
+    // D26 retired. Furniture has no career to reset.
+    //
+    // Spelled once as a subquery so the UPDATE and the DELETE cannot drift
+    // into asking two different questions.
+    const drivable = (col: string) =>
+      `EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = ${col} AND b.deviceCookie IS NOT NULL)`;
+    this.sql.exec('BEGIN');
+    try {
+      this.sql
+        .prepare(
+          `UPDATE players SET
+             mmrMu = ?, mmrSigma = ?, rankMu = ?, rankSigma = ?,
+             rankedGames = 0, rankedDuels = 0
+           WHERE ${drivable('players.id')}`
+        )
+        .run(fresh.mu, fresh.sigma, fresh.mu, fresh.sigma);
+
+      // ONE-SIDED, and this is the part to get right. `playerId` only: the
+      // symmetric `OR oppId IN (...)` reads as the tidier spelling and would
+      // clear every HUMAN's same-pair count, bot-band count and daily count
+      // against the whole population — handing all of them fresh unsaturated
+      // weight against every bot on the server.
+      //
+      // The asymmetry that leaves is correct rather than tolerated:
+      // `exposureCounts` reads each seat's OWN rows, so afterwards a bot's
+      // count against a human is zero while that human's against the bot is
+      // not, which is precisely "this is the bot's reset, nobody else's".
+      this.sql.exec(`DELETE FROM competitive_exposure WHERE ${drivable('playerId')}`);
+
+      this.setMeta(PLAYBOT_LADDER_RESET_V1_KEY, new Date().toISOString());
+      this.sql.exec('COMMIT');
+    } catch (e) {
+      this.sql.exec('ROLLBACK');
+      throw e;
+    }
+    // No `reloadBotAccounts()`, and the ABSENCE is what reads like an
+    // oversight rather than the presence: `bot_accounts` is not written here
+    // at all, so the classifier cache still equals the table. That is the
+    // difference from `roster_retire_v1`, which deletes rows from it.
+    //
+    // And nothing writes a TRAIT either. Creation may seed and nothing after
+    // creation may steer, which `tests/playbotTraits.test.ts` holds by
+    // grepping this file for `UPDATE bot_accounts` and requiring zero.
+  }
+
+  /**
    * `progress_reset_v1` — see the key's own comment for what this is and, more
    * importantly, for what it deliberately is NOT.
    */
@@ -1456,6 +1575,13 @@ class GameDatabase {
     // above spent its run deriving. Both orders end in the same state; last
     // is the one that is obvious rather than merely equivalent.
     this.applyProgressReset();
+    // After it, and after every backfill above: this reads `bot_accounts` for
+    // the same reason `applyProgressReset` does, and `progress_reset_v1`
+    // EXEMPTS every bot — so the careers this clears are exactly the ones
+    // that survived it. The two are disjoint by construction and either order
+    // ends in the same state; last is the one that is obvious rather than
+    // merely equivalent.
+    this.applyPlaybotLadderReset();
 
     // Backfill codes for rows created before recovery codes existed
     const missing = this.stmt('SELECT id FROM players WHERE recoveryCode IS NULL')
@@ -4530,10 +4656,34 @@ class GameDatabase {
     // every such bot sat at the same distance from every band centre, and the
     // controller passed over the one whose real rating suited the person
     // waiting -- then the matcher refused the pairing it did make.
+    //
+    // `recentMatches` is counted over PLAYBOT_ACTIVITY_WINDOW_MS rather than
+    // read off `p.matchesPlayed`, and the constant's own comment says why.
+    // Two things about the shape of the count:
+    //
+    // `matches` and NOT `competitive_exposure`, although that table is the
+    // one built for rolling windows. Exposure rows are written only for a
+    // `competitivelyEligible` match, so a Casual duel writes none -- and
+    // `rankedBias` is floored at 0.55, so up to 45% of a bot's table play is
+    // Casual. Counted there, the bots that play Casual most would read as the
+    // idlest and be activated over everybody else: the same column-means-
+    // something-else failure one layer along. Every seat files its own row
+    // with itself as `player1`, so this counts everything that happened.
+    //
+    // A correlated subquery rather than a grouped `IN (<ids>)`, because the
+    // roster size varies and this class caches prepared statements by SQL
+    // TEXT: a built id list would compile a fresh statement for every roster
+    // size the process ever sees. One `idx_matches_p1` seek per bot per tick.
+    //
+    // The one hazard is `insertMatch`'s 500-row-per-player trim truncating
+    // the window from below -- which needs 500 matches by ONE bot inside 24h,
+    // against roughly 24 a day at realistic volume.
     const rows = this.stmt(
         `SELECT b.botId AS botId, p.username AS username, b.deviceCookie AS deviceCookie,
                 p.mmrMu AS mu, p.rankMu AS rankMu,
-                p.matchesPlayed AS recentMatches, p.level AS level,
+                (SELECT COUNT(*) FROM matches m
+                   WHERE m.player1Id = p.id AND m.timestamp >= ?) AS recentMatches,
+                p.level AS level,
                 p.rankSigma AS rankSigma, p.rankedGames AS rankedGames, p.rankedDuels AS rankedDuels,
                 ${TRAIT_KEYS.map((k) => `b.${k} AS ${k}`).join(', ')}
            FROM bot_accounts b
@@ -4541,7 +4691,9 @@ class GameDatabase {
           WHERE b.deviceCookie IS NOT NULL AND p.initializedAt IS NOT NULL
           ORDER BY b.createdAt, b.botId`
       )
-      .all() as unknown as Array<Record<string, unknown>>;
+      .all(new Date(Date.now() - PLAYBOT_ACTIVITY_WINDOW_MS).toISOString()) as unknown as Array<
+      Record<string, unknown>
+    >;
     return rows.map((r) => ({
       botId: String(r.botId),
       username: String(r.username),
@@ -4665,6 +4817,47 @@ class GameDatabase {
       .get(playerId, oppId, since) as unknown as { n: number; last: string | null };
     const lastAt = row?.last ? Date.parse(row.last) : NaN;
     return { count: Number(row?.n) || 0, lastAt: Number.isFinite(lastAt) ? lastAt : null };
+  }
+
+  /**
+   * How much of each PAIR among these accounts has been played in the window,
+   * keyed `lo|hi` with the two ids sorted.
+   *
+   * One query for the whole set rather than `pairHistory` per pair, because
+   * the caller is `sweepQueue` on the relay's own event loop: N candidates is
+   * O(N^2) point lookups every two seconds, on the same loop that relays
+   * `paddle_move` for every live match.
+   *
+   * Both directional rows exist for an ordinary match, and the two are folded
+   * with `Math.max` rather than summed or averaged: a pair whose seats
+   * disagree — one recorded, one not, which a partial write can produce — is
+   * then preferred AGAINST one match early rather than one match late, and
+   * the caller's own widening fallback makes being early free.
+   *
+   * Served by idx_exposure_pair (playerId, oppId, at).
+   */
+  public pairCountsAmong(ids: string[], now: Date = new Date()): Map<string, number> {
+    const out = new Map<string, number>();
+    // An empty IN list is not valid SQL, and a caller with nothing to ask
+    // about should cost nothing at all.
+    if (!ids.length) return out;
+    const marks = ids.map(() => '?').join(', ');
+    const since = new Date(now.getTime() - EXPOSURE_WINDOW_MS).toISOString();
+    const rows = this.stmt(
+        `SELECT playerId, oppId, COUNT(*) AS n FROM competitive_exposure
+          WHERE at >= ? AND playerId IN (${marks}) AND oppId IN (${marks})
+          GROUP BY playerId, oppId`
+      )
+      .all(since, ...ids, ...ids) as unknown as Array<{
+      playerId: string;
+      oppId: string;
+      n: number;
+    }>;
+    for (const r of rows) {
+      const key = pairKey(String(r.playerId), String(r.oppId));
+      out.set(key, Math.max(out.get(key) ?? 0, Number(r.n) || 0));
+    }
+    return out;
   }
 
   /**

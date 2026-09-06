@@ -5,6 +5,7 @@ import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import type { MatchEndPayload } from '../src/types';
 import { isPlaced, PLACEMENT_GAMES, PLACEMENT_SIGMA } from '../src/rating';
+import { DEFAULT_TRAITS } from '../server/playbotTraits';
 
 // The opponent-type weight and the saturation ladders, as `recordMatch`
 // actually applies them.
@@ -21,9 +22,13 @@ const DB_FILE = path.join(TMP, 'phong.db');
 
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 let db: typeof import('../server/db').db;
+// Off the DYNAMIC import, never a static one: `process.env.DATA_DIR` is set at
+// the top of this file and a hoisted `import` would open the real database
+// before that line runs.
+let pairKey: typeof import('../server/db').pairKey;
 
 beforeAll(async () => {
-  ({ db } = await import('../server/db'));
+  ({ db, pairKey } = await import('../server/db'));
 });
 
 afterAll(() => {
@@ -982,5 +987,130 @@ describe('XP is untouched by bot participation', () => {
     // ...and the level-gated achievement really fired, rather than the number
     // moving with nothing reading it.
     expect(after.achievements).toContain('first_win');
+  });
+});
+
+describe('the activation key the controller ranks on', () => {
+  /**
+   * `PopulationBot.recentMatches` decides who gets a socket, and on an idle
+   * server it is the PRIMARY key rather than a tiebreak: `bandCentreFor`
+   * answers undefined with nobody waiting, so `rankForActivation` skips the
+   * rating comparison entirely and this is the first thing it reads.
+   *
+   * It was `p.matchesPlayed` — the LIFETIME career total — under a doc that
+   * said "matches it has played in the recent window". There was no window.
+   * So the more a bot had ever played the further back it went, and the #1
+   * bot, which by definition has played most, was last in line until the whole
+   * roster caught up: winning is what took a bot out of the population, which
+   * is round 21's own finding arriving through the tiebreak that replaced the
+   * mu-attractor it removed.
+   *
+   * This is the only layer that can see it. The three `rankForActivation`
+   * cases in `tests/playbotPopulation.test.ts` set `recentMatches` on the
+   * fixture directly, so every one of them passes under either source.
+   */
+  const drivable = (name: string): string => {
+    const id = human();
+    db.rememberPlaybot(id, `cookie-${id}`, DEFAULT_TRAITS);
+    return id;
+  };
+
+  const played = (id: string, n: number, agoMs: number): void => {
+    const raw = new DatabaseSync(DB_FILE);
+    try {
+      const stmt = raw.prepare(
+        `INSERT INTO matches (id, player1Id, player1Name, player2Id, player2Name,
+           winnerId, winnerName, scoreP1, scoreP2, maxRally, mode, difficulty, timestamp)
+         VALUES (?, ?, 'x', 'opp', 'y', ?, 'x', 3, 1, 4, 'multiplayer', NULL, ?)`
+      );
+      for (let i = 0; i < n; i += 1) {
+        seq += 1;
+        stmt.run(`m:${id}:${seq}`, id, id, new Date(Date.now() - agoMs).toISOString());
+      }
+    } finally {
+      raw.close();
+    }
+  };
+
+  it('counts a rolling WINDOW, not a career', () => {
+    const veteran = drivable('veteran');
+    const newcomer = drivable('newcomer');
+
+    // A long career with nothing played lately, against a short one played
+    // entirely today. The lifetime totals order these the opposite way round,
+    // which is what makes the fixture able to tell the two sources apart.
+    const raw = new DatabaseSync(DB_FILE);
+    try {
+      raw.prepare('UPDATE players SET matchesPlayed = ? WHERE id = ?').run(400, veteran);
+      raw.prepare('UPDATE players SET matchesPlayed = ? WHERE id = ?').run(3, newcomer);
+    } finally {
+      raw.close();
+    }
+    played(veteran, 5, 40 * 60 * 60 * 1000); // 40h ago — outside the window
+    played(newcomer, 30, 60 * 60 * 1000); //     1h ago — inside it
+
+    const by = new Map(db.playbotAccounts().map((b) => [b.botId, b.recentMatches]));
+    expect(by.get(veteran)).toBe(0);
+    expect(by.get(newcomer)).toBe(30);
+    // And the ordering that falls out of it, which is the point: the account
+    // that has been playing sorts BEHIND the one that has not.
+    expect(by.get(veteran)!).toBeLessThan(by.get(newcomer)!);
+  });
+});
+
+describe('what the queue asks about a pair', () => {
+  /**
+   * `pairCountsAmong` is what makes §2.11's diversity preference reachable
+   * from `sweepQueue` — the one bot-vs-bot pairing path that never asked.
+   * One query for the whole set, because `pairHistory` per pair is O(N^2)
+   * point lookups every two seconds on the loop that also relays every live
+   * match's `paddle_move`.
+   */
+  it('answers the same number `pairHistory` does, in one query', () => {
+    const a = bot();
+    const b = bot();
+    const c = bot();
+    for (let i = 0; i < 4; i += 1) {
+      seq += 1;
+      db.recordMatch(
+        { ...duel(a), matchKey: `pc:${seq}` } as MatchEndPayload,
+        {
+          opponentId: b, opponentBand: 'ace', decidedAt: ANCHOR,
+          opponentRating: { mu: 25, sigma: 3 }, opponentRankRating: { mu: 25, sigma: 3 },
+        } as never
+      );
+    }
+    const counts = db.pairCountsAmong([a, b, c], ANCHOR);
+    expect(counts.get(pairKey(a, b))).toBe(db.pairHistory(a, b, ANCHOR).count);
+    expect(counts.get(pairKey(a, b))).toBe(4);
+    // Order-independent, or the lookup misses and every pair reads as
+    // unplayed — the preference switched off with nothing to see.
+    expect(counts.get(pairKey(b, a))).toBe(4);
+    // A pair that has never met is absent rather than zero, which is why the
+    // call site reads it with `?? 0`.
+    expect(counts.get(pairKey(a, c))).toBeUndefined();
+  });
+
+  it('costs nothing when there is nobody to ask about', () => {
+    // An empty IN list is not valid SQL, and the sweep reaches this on every
+    // queue with fewer than two bots in it — which is most of them.
+    expect(db.pairCountsAmong([], ANCHOR).size).toBe(0);
+  });
+
+  it('counts only inside the rolling window', () => {
+    const a = bot();
+    const b = bot();
+    seq += 1;
+    db.recordMatch(
+      { ...duel(a), matchKey: `pc:old:${seq}` } as MatchEndPayload,
+      {
+        opponentId: b, opponentBand: 'ace', decidedAt: ANCHOR,
+        opponentRating: { mu: 25, sigma: 3 }, opponentRankRating: { mu: 25, sigma: 3 },
+      } as never
+    );
+    // Asked from far enough in the future that the row is outside the window.
+    const later = new Date(ANCHOR.getTime() + 40 * 60 * 60 * 1000);
+    expect(db.pairCountsAmong([a, b], ANCHOR).get(pairKey(a, b))).toBe(1);
+    expect(db.pairCountsAmong([a, b], later).get(pairKey(a, b))).toBeUndefined();
   });
 });

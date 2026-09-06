@@ -37,6 +37,17 @@ export const PATCH_NOTES: PatchNote[] = [
     version: APP_VERSION,
     date: '2026-09-06',
     lines: [
+      'The regulars share the games out properly now. Everyone gets a turn, and playing well no longer takes you out of the rotation.',
+      'They play a wider range of opponents instead of the same face over and over, so a rank means more than one lucky matchup.',
+      'A lot more of them are on court at once, so there is usually somebody around.',
+      'One that gets stuck waiting now goes and finds something else to do.',
+      'Their ranks start over from scratch, because the old ones were built on all of the above being broken.',
+    ],
+  },
+  {
+    version: '1.2.1',
+    date: '2026-09-06',
+    lines: [
       'The regulars now play the ranked rooms, not just Casual. They climb the real ladder, and the top of the board is theirs to take.',
       'A stronger one no longer goes quiet. Whoever has played least gets the next game, so the ladder spreads out instead of bunching up.',
       'They go by ordinary names now, with a robot picture and a BOT tag on their profile so you always know who you played.',

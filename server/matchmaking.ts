@@ -1,4 +1,5 @@
 import { Rating, winProbability } from '../src/rating';
+import { BOT_PAIR_CAP } from '../src/playbotRating';
 
 // Skill-based matchmaking: who to pair, and how hard to insist on it.
 //
@@ -207,7 +208,26 @@ function freeBots(humans: Candidate[], bots: Candidate[]): Candidate[] {
  * so a class can be left with legal pairs unmade. Precedence is the guarantee;
  * cardinality is not.
  */
-export function findPair(queue: Candidate[], now: number): [Candidate, Candidate] | null {
+export function findPair(
+  queue: Candidate[],
+  now: number,
+  /**
+   * How many times these two have already played, in the rolling window the
+   * same-pair ladder counts over. Supplied by the caller — this module reaches
+   * for no database, exactly as it reaches for no clock.
+   *
+   * Consulted on pass 3 ALONE. Never on pass 2: a person's game is never
+   * refused or deprioritised for a rating reason, which is `acceptsRematch`'s
+   * own first line and D25, and threading it into the human-bot pass would
+   * leave a lone human staring at an empty queue beside the one bot they were
+   * compatible with.
+   *
+   * Omitted, this function is byte-equivalent to what it always was — which is
+   * also the hazard, since every existing caller and most of the suite omits
+   * it. See `tests/matchmaking.test.ts`.
+   */
+  pairCount?: (a: Candidate, b: Candidate) => number
+): [Candidate, Candidate] | null {
   const humans = queue.filter((c) => !c.isBot);
   const bots = queue.filter((c) => c.isBot);
 
@@ -221,5 +241,36 @@ export function findPair(queue: Candidate[], now: number): [Candidate, Candidate
   const hb = bestPairAmong(queue, now, (a, b) => a.isBot !== b.isBot);
   if (hb) return hb;
 
-  return bestPairAmong(freeBots(humans, bots), now);
+  const spare = freeBots(humans, bots);
+  if (!pairCount) return bestPairAmong(spare, now);
+
+  // §2.11's diversity preference, at the one bot-vs-bot pairing path that
+  // never asked for it. The other three are covered — `pickTable` runs
+  // `chooseOpponent`, `acceptsRematch` tapers to zero across the pair ladder,
+  // and `rotate` spreads concurrent joins — and this one knew nothing about
+  // pair history at all, so two bots at similar ratings paired every sweep
+  // for as long as both were active. That is how the account at the top of
+  // the ladder came to have played one opponent exclusively: it is the
+  // closest to a coin flip, so the scoring picks it, every time.
+  //
+  // A RELAXING THRESHOLD and never a refusal, which is `chooseOpponent`'s own
+  // rule — low population is a legitimate reason to repeat an opponent, and
+  // the same refuse-then-widen shape `openTable`'s assigned venue and
+  // `targetActivation`'s reservation already use.
+  //
+  //   1              somebody they have not met in the window at all. This is
+  //                  the rung that matters: placement is five games, so it is
+  //                  what makes those five five different opponents.
+  //   BOT_PAIR_CAP   somebody the ladder would still rate. Past it the match
+  //                  moves nothing, so pairing there spends a slot on no
+  //                  evidence.
+  //   Infinity       the opponent they HAVE. A capped match still happens and
+  //                  still pays XP, and this arm is what stops a preference
+  //                  becoming a queue that gives up on bots entirely once the
+  //                  population has been round once.
+  for (const limit of [1, BOT_PAIR_CAP, Infinity]) {
+    const pair = bestPairAmong(spare, now, (a, b) => pairCount(a, b) < limit);
+    if (pair) return pair;
+  }
+  return null;
 }
