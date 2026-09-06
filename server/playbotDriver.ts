@@ -160,6 +160,19 @@ export class PlaybotDriver {
   /** Last `ball_pos` send, so the sonar feed is throttled like a client's. */
   private lastBallPosAt = 0;
   private opponentPresent = false;
+  /**
+   * When somebody sat down opposite, ms epoch, or 0 for an empty seat.
+   *
+   * On the DRIVER and not the supervisor, for the reason `finishedAt` is:
+   * `engaged()` is a predicate asked on every tick and may not record
+   * anything. And it is when they SAT DOWN rather than when this bot was
+   * dispatched — a bot hosting for four minutes before a person walks up
+   * would otherwise be released a minute later, which is the abandonment the
+   * window exists to bound arriving through the window itself.
+   *
+   * About the PAIR, so it is cleared wherever `opponentPresent` is.
+   */
+  public opponentSince = 0;
   /** The account opposite, for the rematch rule. Null until one arrives. */
   private opponentId: string | null = null;
   /** A `create_room` whose venue may still be refused. Cleared once answered. */
@@ -305,6 +318,7 @@ export class PlaybotDriver {
       this.roomId = null;
       this.seat = null;
       this.opponentPresent = false;
+      this.opponentSince = 0;
       this.ball = null;
     });
     // `ws` raises socket faults as an 'error' emit, and an EventEmitter
@@ -366,6 +380,17 @@ export class PlaybotDriver {
   /** Whether somebody is sitting opposite. A lobby with nobody in it is a wait. */
   public hasOpponent(): boolean {
     return this.opponentPresent;
+  }
+
+  /**
+   * Who is sitting opposite, for the supervisor's own bot-or-person question.
+   *
+   * The DRIVER cannot answer that — it is written as a client and a client
+   * cannot tell a person from a bot, which is the reason `opponentFacts` is
+   * injected. This hands over the id and lets the caller decide.
+   */
+  public opponentAccountId(): string | null {
+    return this.opponentId;
   }
 
   public queue(): void {
@@ -478,6 +503,7 @@ export class PlaybotDriver {
     // `engaged()` never applied the idle-lobby window to it, and the bot was
     // parked there permanently instead of coming free for the next demand.
     this.opponentPresent = false;
+    this.opponentSince = 0;
     this.opponentId = null;
   }
 
@@ -521,6 +547,7 @@ export class PlaybotDriver {
         // `create_room` without one -- and a stale `true` parks the bot for
         // good, which is worse than the redundancy.
         this.opponentPresent = false;
+        this.opponentSince = 0;
         this.opponentId = null;
         break;
       case 'room_joined':
@@ -528,6 +555,7 @@ export class PlaybotDriver {
         this.seat = msg.playerIndex;
         this.phase = 'lobby';
         this.opponentPresent = true;
+        this.opponentSince = Date.now();
         this.opponentId = msg.opponentId;
         // A guest's half of the lobby handshake. The host cannot start
         // without it, so a bot that never readied would seat itself and wait
@@ -537,6 +565,7 @@ export class PlaybotDriver {
         break;
       case 'opponent_joined':
         this.opponentPresent = true;
+        this.opponentSince = Date.now();
         this.opponentId = msg.opponentId;
         // A NEWCOMER at a table this bot is still holding is a fresh lobby.
         //
@@ -700,6 +729,7 @@ export class PlaybotDriver {
         this.finishedAt = Date.now();
         this.ball = null;
         this.opponentPresent = false;
+        this.opponentSince = 0;
         // Who was sitting opposite is about the PAIR, so it goes when they do
         // -- the same rule `resetTableForNextPair` states one level up, and
         // the same one `leave()` already follows. Left standing it is a

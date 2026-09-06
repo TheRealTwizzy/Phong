@@ -62,8 +62,9 @@ moved. Make that a decision.
 
 Non-destructive fixes (`placement_sigma_v1`, `tasks_reset_v1`, `ranked_backfill_v1`,
 `chaos_relabel_v1`, `shutout_recount_v1`, `bot_accounts_backfill_v1`,
-`advanced_ladder_backfill_v1`, `ranked_duel_credited_backfill_v1`), the destructive
-`progress_reset_v1`, and destructive wipes (`wipe_v1`…`wipe_v4`) are keyed in the `meta` table
+`advanced_ladder_backfill_v1`, `ranked_duel_credited_backfill_v1`, `playbot_names_v1`,
+`playbot_ladder_reset_v1`), the destructive `progress_reset_v1`, the narrow
+`roster_retire_v1`, and destructive wipes (`wipe_v1`…`wipe_v4`) are keyed in the `meta` table
 so each runs at most once per database.
 
 The mechanism has one sharp edge: **every wipe clears `meta`, so every wipe must re-stamp ALL
@@ -81,7 +82,8 @@ Two more things about migrations here:
 
 Each migration gets a suite: `db-wipe`, `taskReset`, `placementRescue`, `rankedBackfill`,
 `chaosRelabel`, `shutoutRecount`, `rankedDuelsBackfill`, `advancedLadder` (which covers both of
-the history-column backfills), `botIdentity` (`bot_accounts_backfill_v1`), `progressReset`.
+the history-column backfills), `botIdentity` (`bot_accounts_backfill_v1`), `progressReset`,
+`playbotRename`, `rosterRetire`, `playbotLadderReset`.
 
 **A destructive one-shot that is not a wipe still erases every legacy fixture in the suite.**
 `progress_reset_v1` clears everything a player EARNED — both rating pairs, every counter, XP and
@@ -94,6 +96,10 @@ test: four suites hand-build a pre-migration database (`chaosRelabel`, `rankedBa
 wipe flags their migration ran correctly and its result was deleted before a single assertion.
 **A legacy fixture stamps every DESTRUCTIVE key, not just the wipes** — and the failure looks
 exactly like a broken migration, which is why it belongs here rather than in a comment.
+`roster_retire_v1` is on that list too and it bites differently: it DELETES every cookieless
+`bot_accounts` row, so a fixture whose whole point is a curated-furniture row — which is how
+`playbotLadderReset` proves it keys on the credential rather than an id prefix — loses the row
+it is asserting about, and the failure reads as the selector being wrong.
 
 **A one-shot is INVISIBLE to any test that does not un-stamp it and re-import.** Its key is
 already in `meta` by the time a suite runs, so nothing drives it and a mutation to its SQL

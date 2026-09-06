@@ -46,7 +46,20 @@ export interface PopulationBot {
    * `matchmakingRating` — and the two estimators diverge by design.
    */
   mu: number;
-  /** Matches it has played in the recent window, for spreading participation. */
+  /**
+   * Matches it has played in the recent window — `db.playbotAccounts` counts
+   * them over `PLAYBOT_ACTIVITY_WINDOW_MS` and that is the only correct source.
+   *
+   * Note what this is, because the sentence "for spreading participation"
+   * undersells it: with no `bandCentre` the sort below reads no rating at all,
+   * so on an IDLE SERVER — the server the population exists for — this is the
+   * PRIMARY key, not a tiebreak. It was fed `p.matchesPlayed`, the lifetime
+   * career total, under this same "recent window" wording, which made the
+   * account at the top of the ladder last in line by construction: it has
+   * played most, so it waited for the whole roster to catch up and never
+   * defended its rank. A career total here is the mu-attractor round 21
+   * removed, wearing a different column.
+   */
   recentMatches: number;
   /**
    * When it was last SENT somewhere, ms epoch, or 0 for never.
@@ -190,12 +203,56 @@ export function servableVenues(bots: Bracketed[]): string[] {
 }
 
 /**
- * How many bots keep the ladder moving when nobody is playing.
+ * The FLOOR under how many bots keep the ladder moving when nobody is playing.
  *
  * The simulated population has to progress while humans are offline — that is
  * the whole point of it — and it has to get out of the way when they are not.
+ *
+ * A floor and no longer the answer, which is the whole of what changed here:
+ * it was the answer, so a deployment keeping sixty accounts ran six of them
+ * and the other fifty-four were two database rows apiece. The roster is
+ * documented as a POOL rather than a concurrency figure, and that was true in
+ * the sense that mattered for LOAD and false in the sense that mattered for
+ * the ladder — a pool nobody is drawn from is a list. `idleBaseline` is the
+ * answer now and this is what it can never go below.
  */
 export const IDLE_BASELINE = 6;
+
+/**
+ * The share of a configured roster that plays on an empty server.
+ *
+ * A fraction rather than a bigger constant, because the question an operator
+ * answers with `PLAYBOT_ROSTER_SIZE` is how big a population they want, and a
+ * second constant would mean the answer stopped scaling with it at some size
+ * nobody chose. A quarter puts the recommended roster of 60 at fifteen.
+ */
+export const IDLE_ROSTER_SHARE = 0.25;
+
+/**
+ * And the ceiling on it, which is LOAD rather than taste.
+ *
+ * DEPLOYMENT.md's relay measurements — 0% loss, p95 8ms — were taken with a
+ * roster of 200 and about SIX bots actually active, so the roster's cost was
+ * measured and the active count's was not. Twenty-four active is about twelve
+ * concurrent bot matches against a measured capacity of 150, which is inside
+ * what has been observed; fifty is not, and an unbounded share would reach it
+ * from one environment variable.
+ *
+ * Raising it is a measurement, not an edit: see DEPLOYMENT.md for the command.
+ */
+export const IDLE_ACTIVE_MAX = 24;
+
+/**
+ * How many bots keep the ladder moving on an empty server, for THIS roster.
+ *
+ * Reads `roster.length` rather than a new snapshot field because `start()`
+ * already slices the store load to the configured size, so the roster IS that
+ * size — which is round thirteen's "the size bounds the LOAD" fix, and reading
+ * anything else here would be the same rule spelled a second way.
+ */
+export function idleBaseline(rosterSize: number): number {
+  return Math.min(IDLE_ACTIVE_MAX, Math.max(IDLE_BASELINE, Math.round(rosterSize * IDLE_ROSTER_SHARE)));
+}
 
 /** A human waiting this long has plainly not found anybody. */
 export const PATIENCE_MS = 30_000;
@@ -218,9 +275,11 @@ export function unmetHumanDemand(
 /**
  * How many bots should be playing at all.
  *
- * Unmet human demand first, always served. Then a baseline that FADES as
- * humans arrive: more human supply reduces unnecessary bot participation, and
- * an empty server keeps its ladder alive.
+ * Unmet human demand first, always served. Then a baseline that scales with
+ * the roster (`idleBaseline`) and FADES as humans arrive: more human supply
+ * reduces unnecessary bot participation, and an empty server keeps its ladder
+ * alive. The fade still reaches zero — the share raises the ceiling and must
+ * never put a floor under it.
  */
 /**
  * A human who has waited past the point of patience gets a bot even if the
@@ -253,7 +312,7 @@ export function impatientDemand(
 
 export function targetActiveCount(s: PopulationSnapshot): number {
   const urgent = unmetHumanDemand(s) + impatientDemand(s);
-  const idle = Math.round(IDLE_BASELINE / (1 + s.humansOnline));
+  const idle = Math.round(idleBaseline(s.roster.length) / (1 + s.humansOnline));
   return clamp(Math.max(urgent, idle), 0, s.roster.length);
 }
 
@@ -296,8 +355,12 @@ export function targetActiveCount(s: PopulationSnapshot): number {
  * pairing cut rated volume 60% without raising the top). Pairing quality has a
  * home already: `chooseOpponent`'s COMPARABLE_BAND and the queue's own band.
  *
- * Ties break on who has played LEAST, then on who was SENT least recently, so
+ * Then who has played least LATELY, then who was SENT least recently, so
  * participation spreads rather than falling on the same handful every evening.
+ * "Ties break on" is how this line used to read and it undersold both keys:
+ * with no centre there is nothing above them, so the recent-play count is the
+ * primary and the dispatch time is its tiebreak. Both are windows or clocks
+ * and neither is a career total — see `PopulationBot.recentMatches`.
  */
 export function rankForActivation(
   roster: PopulationBot[],
@@ -315,10 +378,48 @@ export function rankForActivation(
   });
 }
 
-/** What this bot should go and do when it is playing for its own sake. */
-function actionFor(t: PlaybotTraits): PopulationAction {
-  if (t.hostAppetite >= t.joinAppetite && t.hostAppetite >= t.queueAppetite) return 'host';
-  if (t.joinAppetite >= t.queueAppetite) return 'join';
+/**
+ * What this bot should go and do when it is playing for its own sake.
+ *
+ * A WEIGHTED DRAW over the three appetites, and emphatically never an argmax.
+ * The argmax made a bot's action a LIFELONG CONSTANT: the appetites are
+ * seeded once from the username and never written again, so a queue-bot
+ * always queued and a host-bot always hosted. The subset of the roster that
+ * could ever appear in the queue was therefore fixed for the life of the
+ * deployment — and with a handful of bots active that subset is one or two
+ * accounts, which the queue then paired with each other every sweep, which is
+ * how the top of the ladder came to be an account that had played one
+ * opponent exclusively.
+ *
+ * That is `chooseVenue`'s bias-as-its-own-roll defect one level up, and it is
+ * worth naming as a shape: a seeded bias describes a TENDENCY, and collapsing
+ * it into a deterministic outcome turns it into a ROLE. `rankedBias` is
+ * spent against a draw; these three were not.
+ *
+ * The roll is INJECTED for the reason `chooseVenue`'s two draws are: this
+ * module reads no clock and no random source of its own, and
+ * `tests/playbotPopulation.test.ts` holds that absence by reading the source.
+ * One draw PER BOT at the call site, never one per tick — shared, every bot
+ * activated on a tick would draw the same-shaped action, which is the
+ * constant again with a longer period.
+ */
+export function actionFor(t: PlaybotTraits, roll: number): PopulationAction {
+  const weights: Array<[PopulationAction, number]> = [
+    ['host', t.hostAppetite],
+    ['join', t.joinAppetite],
+    ['queue', t.queueAppetite],
+  ];
+  const total = weights.reduce((n, [, w]) => n + Math.max(0, w), 0);
+  // Three zero appetites is a bot with no preference, not one that cannot
+  // play. Falling back to the argmax here would quietly reinstate the
+  // constant for exactly the bots that express no bias at all.
+  if (!(total > 0)) return weights[Math.min(2, Math.floor(roll * 3))][0];
+  let x = roll * total;
+  for (const [action, w] of weights) {
+    x -= Math.max(0, w);
+    if (x < 0) return action;
+  }
+  // Float residue at the very top of the interval only.
   return 'queue';
 }
 
@@ -367,7 +468,17 @@ export function demandSplit(s: PopulationSnapshot): { queue: number; table: numb
  */
 export function targetActivation(
   s: PopulationSnapshot,
-  bandCentre?: number
+  bandCentre: number | undefined,
+  /**
+   * [0,1). One draw PER BOT — see `actionFor`.
+   *
+   * REQUIRED, with no default, and both halves matter. A `= Math.random`
+   * default would put that literal in this file, which the suite's own source
+   * read forbids; and a required argument is the forcing function
+   * `Candidate.isBot` already uses, so every call site is a compile error
+   * until it supplies one rather than silently inheriting a shared roll.
+   */
+  draw: () => number
 ): PopulationTarget {
   const want = targetActiveCount(s);
   const active = new Set(s.activeBotIds);
@@ -513,7 +624,7 @@ export function targetActivation(
   for (const bot of available) {
     if (!hasRoom()) break;
     if (spent.has(bot.id)) continue;
-    take(bot, actionFor(bot.traits));
+    take(bot, actionFor(bot.traits, draw()));
   }
 
   return {

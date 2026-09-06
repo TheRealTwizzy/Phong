@@ -29,6 +29,7 @@ import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
 import { defaultPlaybotName } from './playbotNames';
 import { chooseOpponent, chooseVenue, type PolicyCandidate } from './playbotPolicy';
+import { BAND_OPEN_MS } from './matchmaking';
 import { newRating } from '../src/rating';
 import type { Tier } from '../src/rating';
 import {
@@ -155,6 +156,16 @@ export interface PlaybotSupervisorOptions {
   /** Overrides REMATCH_GRACE_MS, so a suite can drive both sides of it. */
   rematchGraceMs?: number;
   /**
+   * Override QUEUE_PATIENCE_MS / LOBBY_STALL_HUMAN_MS / LOBBY_STALL_BOT_MS.
+   *
+   * The same seam `idleLobbyMs` is and for the same reason: a suite has to
+   * drive BOTH sides of each window, and production values would make one
+   * test cost three and a half minutes of CI. Production uses the constants.
+   */
+  queuePatienceMs?: number;
+  lobbyStallHumanMs?: number;
+  lobbyStallBotMs?: number;
+  /**
    * The traits a NEW account is seeded with. Creation may seed and nothing
    * after it may steer (§4.13), so this is reachable exactly once per account
    * and there is no path that reaches an existing one — which is what makes it
@@ -226,6 +237,15 @@ interface Managed {
  * a bot plays exactly ONE match for the life of the process — and a human who
  * queues while every bot is mid-match waits forever, because the controller
  * counts them all active and activates nobody.
+ *
+ * **Membership here is a FLOOR and not the answer**, and reading it as the
+ * answer is what left two of these unbounded for the life of a process.
+ * `engaged()` bounds three of the five with a window before it ever consults
+ * this set — an empty lobby, an occupied one, and a queue place — because
+ * "waiting for a match" stops being true at some point and only `serving`,
+ * `rally` and `waiting` are self-limiting. Anything added to this set needs
+ * the same question asked of it: what ends this state if nothing external
+ * happens?
  */
 const ENGAGED = new Set(['queued', 'lobby', 'serving', 'rally', 'waiting']);
 
@@ -297,6 +317,62 @@ const IDLE_LOBBY_JITTER_MS = 12_000;
  * the controller rather than to one choosing for itself.
  */
 const REMATCH_GRACE_MS = 20_000;
+
+/**
+ * How long a bot may sit in the QUEUE before it counts as spare again.
+ *
+ * `queued` is an ENGAGED phase and nothing bounded it, so a bot alone in the
+ * queue with nobody to pair with held one of the active slots for the life of
+ * the process — and it never recorded a match, so its recent-play count
+ * stayed at zero, so `rankForActivation` sorted it FIRST and kept it there.
+ * A permanent slot leak that grows by one with every cohort; at six active
+ * slots, one or two of these is most of the population.
+ *
+ * DERIVED from the queue's own band rather than chosen: past `BAND_OPEN_MS`
+ * the window has stopped widening, so a wait that has not paired by then will
+ * not pair from waiting longer. Releasing earlier would take a bot away from
+ * a human whose band was still opening toward it — the very supply
+ * `freeBots` reserves.
+ *
+ * Deliberately NO `urgent > 0` escape, unlike the idle-lobby and rematch
+ * arms, and copying that shape here would be a defect: a bot in the queue IS
+ * the supply a queued human needs, so yanking it out the instant somebody
+ * hosts a table takes it from the person it is one sweep away from meeting.
+ *
+ * What makes the release TERMINATE is the weighted draw in `actionFor`. Under
+ * the argmax this bounded a stall and created a churn instead — a bot whose
+ * appetite said queue re-queued on every dispatch, forever. Drawing a fresh
+ * action each time is what turns "released" into "goes and does something
+ * else". The two fixes interlock and neither is complete alone.
+ */
+const QUEUE_PATIENCE_MS = BAND_OPEN_MS + 30_000;
+
+/**
+ * How long a bot sits in an OCCUPIED lobby that never starts, opposite a
+ * PERSON.
+ *
+ * Long, and it has to be: round four's finding is that a bot must not walk
+ * out on somebody about to press Start, and choosing a winning score is what
+ * a pre-match lobby is FOR. `standDown` refuses to leave one and that is
+ * left exactly as it was — but then nothing released it either, so the bot
+ * held a socket and a seat until the process restarted. Nothing in the
+ * product puts a timer on a person's decision, so the only thing a
+ * five-minute lobby can mean is that they have gone.
+ *
+ * Reaping it is safe rather than merely tolerable: the abandon predicate is
+ * `bothSeated && room.inPlay && !room.matchOver`, and a lobby has `inPlay`
+ * false, so nobody is charged anything.
+ */
+const LOBBY_STALL_HUMAN_MS = 300_000;
+
+/**
+ * ...and opposite another BOT, where there is nobody to disappoint.
+ *
+ * A bot host readies and starts at once, so a bot-bot lobby that survives
+ * this window at all is a handshake that failed — the empty-lobby deadlock
+ * wearing a second occupant, and it deserves the empty lobby's own window.
+ */
+const LOBBY_STALL_BOT_MS = IDLE_LOBBY_MS;
 
 /**
  * The same list, started at a per-bot offset.
@@ -400,6 +476,18 @@ export class PlaybotSupervisor {
   }
 
   /**
+   * The bots sitting in the matchmaking QUEUE right now.
+   *
+   * A third question from the two below, and a test needs it: provisioning
+   * and the connect are round trips, so a driver reads `idle` for seconds
+   * after the tick that dispatched it — and a suite that starts its clock at
+   * the tick measures DISPATCH_GRACE_MS and calls it the patience window.
+   */
+  public queuedBotIds(): string[] {
+    return this.managed.filter((m) => m.driver?.phase === 'queued').map((m) => m.botId);
+  }
+
+  /**
    * The bots still HOLDING a driver, engaged or not.
    *
    * Deliberately a different question from `activeBotIds`, and the gap between
@@ -452,6 +540,29 @@ export class PlaybotSupervisor {
     if (this.inRematchGrace(m)) {
       if (urgent > 0) return false;
       return true;
+    }
+    // A queue place nobody was ever going to fill — see QUEUE_PATIENCE_MS,
+    // including why this one carries no `urgent` escape.
+    if (m.driver.phase === 'queued') {
+      return Date.now() - m.dispatchedAt < (this.opts.queuePatienceMs ?? QUEUE_PATIENCE_MS);
+    }
+    // An OCCUPIED lobby that never starts. Measured from when they SAT DOWN
+    // and never from the dispatch: see LOBBY_STALL_HUMAN_MS.
+    if (m.driver.phase === 'lobby' && m.driver.hasOpponent()) {
+      const since = m.driver.opponentSince;
+      // A stamp we do not have is a person we cannot judge, so: engaged. The
+      // same direction `opponentFacts` fails in when its read throws.
+      if (!since) return true;
+      const opp = m.driver.opponentAccountId();
+      // "One of MY OWN bots" rather than `isBotAccount`: the population is
+      // single-process by design, so `managed` is the complete set of
+      // bot-held seats and this needs no new dependency — the reasoning
+      // `humanTablesFirst` already records.
+      const mine = opp !== null && this.managed.some((x) => x.botId === opp);
+      const window = mine
+        ? (this.opts.lobbyStallBotMs ?? LOBBY_STALL_BOT_MS)
+        : (this.opts.lobbyStallHumanMs ?? LOBBY_STALL_HUMAN_MS);
+      return Date.now() - since < window;
     }
     if (ENGAGED.has(m.driver.phase)) return true;
     // A dispatch still in flight counts, or the next tick sends it twice.
@@ -589,7 +700,14 @@ export class PlaybotSupervisor {
     // controller can see, which is an answer — see `rankForActivation`. The
     // substitution made the idle server a homeostat around mu 25 and was the
     // dominant reason the population never grew a top.
-    const target = targetActivation(this.snapshotFrom(live), live.bandCentre);
+    // The draw `actionFor` needs, through the seam the venue rolls already
+    // use. One call per bot happens inside — this hands over the source, not
+    // a number.
+    const target = targetActivation(
+      this.snapshotFrom(live),
+      live.bandCentre,
+      this.opts.rollFor ?? Math.random
+    );
 
     for (const { id, action, venue } of target.activate) {
       const m = this.managed.find((x) => x.botId === id);

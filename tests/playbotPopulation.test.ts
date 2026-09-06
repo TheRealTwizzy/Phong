@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { DEFAULT_TRAITS, seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import {
+  IDLE_ACTIVE_MAX,
   IDLE_BASELINE,
   demandSplit,
   impatientDemand,
@@ -38,6 +39,13 @@ const bot = (id: string, over: Partial<PopulationBot> = {}): PopulationBot => ({
 
 const roster = (n: number, at = 25): PopulationBot[] =>
   Array.from({ length: n }, (_, i) => bot(`bot-${i}`, { mu: at }));
+
+/**
+ * The draw `targetActivation` requires, for the cases that do not care which
+ * action a bot is given. A fixed value rather than `Math.random`, so a case
+ * about activation COUNTS never fails because a bot drew a different job.
+ */
+const HALF = () => 0.5;
 
 const snap = (over: Partial<PopulationSnapshot> = {}): PopulationSnapshot => ({
   humansOnline: 0,
@@ -117,7 +125,8 @@ describe('humans are never displaced', () => {
     expect(impatientDemand({ longestWaitMs: 0, queuedHumans: 4 })).toBe(0);
     const t = targetActivation(
       snap({ humansOnline: 30, queuedHumans: 2, longestWaitMs: PATIENCE_MS }),
-      25
+      25,
+      HALF
     );
     expect(t.activate).toHaveLength(1);
     expect(t.activate[0].action).toBe('queue');
@@ -135,13 +144,49 @@ describe('humans are never displaced', () => {
 
 describe('the target responds to each input', () => {
   it('keeps the ladder moving with nobody online', () => {
-    expect(targetActiveCount(snap({ humansOnline: 0 }))).toBe(IDLE_BASELINE);
+    // A SMALL roster still answers the floor, which is what it always did.
+    expect(targetActiveCount(snap({ roster: roster(20), humansOnline: 0 }))).toBe(IDLE_BASELINE);
+  });
+
+  it('keeps a share of a BIG roster moving, not a fixed six', () => {
+    // The vacuity trap, and it is worth naming because it was live: `snap()`
+    // defaults to a roster of 20, where `max(6, round(20 * 0.25))` is 6 --
+    // so every existing case above passes against the unscaled constant and
+    // says nothing whatever about this. The fixture has to sit ABOVE the
+    // crossover before it can see the rule.
+    //
+    // What it is for: a fixed six meant that however many accounts a
+    // deployment kept, six of them played and the rest were rows. The owner
+    // of a sixty-bot roster reported the symptom directly -- most ranked bots
+    // were not playing -- and it was the design rather than a defect.
+    expect(targetActiveCount(snap({ roster: roster(60), humansOnline: 0 }))).toBe(15);
+    expect(targetActiveCount(snap({ roster: roster(60), humansOnline: 0 }))).toBeGreaterThan(
+      IDLE_BASELINE
+    );
+  });
+
+  it('never runs more of the population than the relay was measured for', () => {
+    // A ceiling, because the share is a fraction of a number an operator sets
+    // and DEPLOYMENT.md's measurements were taken at about six active. It is
+    // load, not taste.
+    expect(targetActiveCount(snap({ roster: roster(400), humansOnline: 0 }))).toBe(IDLE_ACTIVE_MAX);
   });
 
   it('gets out of the way as humans arrive', () => {
-    const busy = targetActiveCount(snap({ humansOnline: 20 }));
-    const quiet = targetActiveCount(snap({ humansOnline: 0 }));
+    // Asserted on a roster ABOVE the crossover, so the fade is measured
+    // against the SCALED figure rather than against a number that happens to
+    // equal the floor.
+    const big = { roster: roster(60) };
+    const busy = targetActiveCount(snap({ ...big, humansOnline: 20 }));
+    const quiet = targetActiveCount(snap({ ...big, humansOnline: 0 }));
+    expect(quiet).toBe(15);
     expect(busy).toBeLessThan(quiet);
+  });
+
+  it('still fades all the way to nobody', () => {
+    // The share raises the ceiling and must not put a floor under the fade:
+    // a server busy enough to need no bots still gets none.
+    expect(targetActiveCount(snap({ roster: roster(60), humansOnline: 60 }))).toBe(0);
   });
 
   it('rises with queue demand', () => {
@@ -258,7 +303,7 @@ describe('selection, not tuning', () => {
     const pool = [bot('bot-x', { mu: 24, traits: seedTraits('bot-x') })];
     const snapshot = snap({ roster: pool, queuedHumans: 5, humansOnline: 5 });
     const before = JSON.stringify(pool);
-    targetActivation(snapshot, 33);
+    targetActivation(snapshot, 33, HALF);
     targetActiveCount(snapshot);
     rankForActivation(pool, 33);
     expect(JSON.stringify(pool)).toBe(before);
@@ -267,14 +312,14 @@ describe('selection, not tuning', () => {
 
 describe('activation and deactivation', () => {
   it('activates up to the target and no further', () => {
-    const t = targetActivation(snap({ humansOnline: 0, roster: roster(20) }), 25);
+    const t = targetActivation(snap({ humansOnline: 0, roster: roster(20) }), 25, HALF);
     expect(t.activate).toHaveLength(IDLE_BASELINE);
     expect(t.deactivate).toHaveLength(0);
   });
 
   it('stands bots down when demand falls', () => {
     const active = ['bot-0', 'bot-1', 'bot-2', 'bot-3', 'bot-4', 'bot-5'];
-    const t = targetActivation(snap({ humansOnline: 30, activeBotIds: active }), 25);
+    const t = targetActivation(snap({ humansOnline: 30, activeBotIds: active }), 25, HALF);
     expect(t.activate).toHaveLength(0);
     expect(t.deactivate.length).toBeGreaterThan(0);
     // What is kept is a SUBSET of what was active — nothing is stood down and
@@ -285,7 +330,8 @@ describe('activation and deactivation', () => {
   it('keeps a bot already playing rather than churning the set', () => {
     const t = targetActivation(
       snap({ humansOnline: 0, activeBotIds: ['bot-9', 'bot-10'], roster: roster(20) }),
-      25
+      25,
+      HALF
     );
     expect(t.deactivate).toHaveLength(0);
     expect(t.activate.map((a) => a.id)).not.toContain('bot-9');
@@ -297,9 +343,9 @@ describe('activation and deactivation', () => {
     // joining only when it is playing for its own sake.
     const hostish: PlaybotTraits = { ...DEFAULT_TRAITS, hostAppetite: 1, joinAppetite: 0, queueAppetite: 0 };
     const pool = Array.from({ length: 8 }, (_, i) => bot(`bot-${i}`, { traits: hostish }));
-    const served = targetActivation(snap({ roster: pool, queuedHumans: 1, humansOnline: 1 }), 25);
+    const served = targetActivation(snap({ roster: pool, queuedHumans: 1, humansOnline: 1 }), 25, HALF);
     expect(served.activate[0].action).toBe('queue');
-    const idle = targetActivation(snap({ roster: pool, humansOnline: 0 }), 25);
+    const idle = targetActivation(snap({ roster: pool, humansOnline: 0 }), 25, HALF);
     expect(idle.activate.every((a) => a.action === 'host')).toBe(true);
   });
 
@@ -317,7 +363,8 @@ describe('activation and deactivation', () => {
 
     const table = targetActivation(
       snap({ roster: pool, openTableVenues: ['casual'], humansOnline: 1, queuedHumans: 0 }),
-      25
+      25,
+      HALF
     );
     expect(table.activate[0].action).toBe('join');
 
@@ -325,7 +372,8 @@ describe('activation and deactivation', () => {
     // each -- queue first, since that human's band is still widening.
     const both = targetActivation(
       snap({ roster: pool, openTableVenues: ['casual'], queuedHumans: 1, humansOnline: 2 }),
-      25
+      25,
+      HALF
     );
     expect(both.activate.slice(0, 2).map((a) => a.action)).toEqual(['queue', 'join']);
   });
@@ -343,7 +391,8 @@ describe('activation and deactivation', () => {
     // can activate anybody is the demand itself.
     const t = targetActivation(
       snap({ humansOnline: 30, queuedHumans: 1, activeBotIds: ['bot-0'] }),
-      25
+      25,
+      HALF
     );
     expect(t.activate).toHaveLength(1);
     expect(t.activate[0].action).toBe('queue');
@@ -371,18 +420,74 @@ describe('activation and deactivation', () => {
     }
   });
 
+  const actionOf = (t: PlaybotTraits, roll: number) =>
+    targetActivation(
+      snap({ roster: [bot('bot-solo', { traits: t })], humansOnline: 0 }),
+      25,
+      () => roll
+    ).activate[0].action;
+
   it('follows each appetite when a bot plays for its own sake', () => {
     const only = (over: Partial<PlaybotTraits>): PlaybotTraits => ({
       ...DEFAULT_TRAITS, hostAppetite: 0, joinAppetite: 0, queueAppetite: 0, ...over,
     });
-    const pick = (t: PlaybotTraits) =>
-      targetActivation(
-        snap({ roster: [bot('bot-solo', { traits: t })], humansOnline: 0 }),
-        25
-      ).activate[0].action;
-    expect(pick(only({ hostAppetite: 1 }))).toBe('host');
-    expect(pick(only({ joinAppetite: 1 }))).toBe('join');
-    expect(pick(only({ queueAppetite: 1 }))).toBe('queue');
+    // Two rolls at opposite ends of the interval, not one: with the action a
+    // DRAW rather than an argmax, "the only appetite it has" has to hold
+    // everywhere in [0,1) rather than at whatever number the fixture happened
+    // to pass. A zero appetite is never drawn.
+    for (const roll of [0, 0.5, 0.999]) {
+      expect(actionOf(only({ hostAppetite: 1 }), roll)).toBe('host');
+      expect(actionOf(only({ joinAppetite: 1 }), roll)).toBe('join');
+      expect(actionOf(only({ queueAppetite: 1 }), roll)).toBe('queue');
+    }
+  });
+
+  it('DRAWS its action, so an appetite is a tendency and not a role', () => {
+    // The one that matters, and the tie is load-bearing: with a clear argmax
+    // winner all three rolls agree and this passes against the unfixed code.
+    //
+    // What the argmax cost. `actionFor` was `hostAppetite >= join && >= queue
+    // ? 'host' : join >= queue ? 'join' : 'queue'` over three traits seeded
+    // once from the username and never written again -- so a bot's action was
+    // a LIFELONG CONSTANT. A queue-bot always queued and a host-bot always
+    // hosted, which means the subset of the roster that could ever appear in
+    // the queue was fixed for the life of the deployment; with a handful
+    // active that subset is one or two accounts, and the queue then paired
+    // them with each other every sweep. The owner reported exactly that: the
+    // number one bot had played the same other bot exclusively.
+    //
+    // Same shape as `chooseVenue`'s bias-as-its-own-roll defect one level up.
+    // A seeded bias is a tendency; collapsed into an argmax it became a role.
+    const even: PlaybotTraits = {
+      ...DEFAULT_TRAITS, hostAppetite: 1, joinAppetite: 1, queueAppetite: 1,
+    };
+    expect([actionOf(even, 0.1), actionOf(even, 0.5), actionOf(even, 0.9)]).toEqual([
+      'host', 'join', 'queue',
+    ]);
+  });
+
+  it('answers an action for a roll at the very top of the interval', () => {
+    // A RAIL against a nonsense input rather than a reachable branch: the
+    // contract is [0,1), so the walk below always crosses zero on a real
+    // draw. At exactly 1 the float residue can leave it standing, and the
+    // honest answer is still an action — a bot that cannot be told what to do
+    // is a bot that does nothing, which is the stall this round is about.
+    const even: PlaybotTraits = {
+      ...DEFAULT_TRAITS, hostAppetite: 1, joinAppetite: 1, queueAppetite: 1,
+    };
+    expect(['host', 'join', 'queue']).toContain(actionOf(even, 1));
+  });
+
+  it('still plays when it wants nothing at all', () => {
+    // Three zero appetites is a bot with no preference, not one that cannot
+    // play. Falling back to an argmax here would quietly reinstate the
+    // constant for exactly the bots that express no bias.
+    const none: PlaybotTraits = {
+      ...DEFAULT_TRAITS, hostAppetite: 0, joinAppetite: 0, queueAppetite: 0,
+    };
+    expect([actionOf(none, 0.1), actionOf(none, 0.5), actionOf(none, 0.9)]).toEqual([
+      'host', 'join', 'queue',
+    ]);
   });
 
   it('holds a skill curve over a simulated evening with nothing retuned', () => {
@@ -400,7 +505,8 @@ describe('activation and deactivation', () => {
       const humans = [0, 1, 4, 9, 16, 20, 16, 9, 4, 1, 0, 0][hour];
       const t = targetActivation(
         snap({ humansOnline: humans, queuedHumans: humans % 5, activeBotIds: active, roster: pool }),
-        bands[hour % bands.length]
+        bands[hour % bands.length],
+        HALF
       );
       active = active.filter((id) => !t.deactivate.includes(id)).concat(t.activate.map((a) => a.id));
       // Never more bots switched on than the target asked for, PLUS the
@@ -473,7 +579,7 @@ describe('a table slot goes to a bot that can sit at the table', () => {
     });
     // One slot, and it is the table's.
     expect(targetActiveCount(s)).toBe(1);
-    expect(targetActivation(s, 25).activate).toEqual([
+    expect(targetActivation(s, 25, HALF).activate).toEqual([
       { id: 'eligible', action: 'join', venue: 'beginner' },
     ]);
   });
@@ -489,7 +595,7 @@ describe('a table slot goes to a bot that can sit at the table', () => {
         bot('far', { mu: 18, venues: ['casual', 'beginner'] }),
       ],
     });
-    expect(targetActivation(s, 25).activate).toEqual([
+    expect(targetActivation(s, 25, HALF).activate).toEqual([
       { id: 'near', action: 'join', venue: 'beginner' },
     ]);
   });
@@ -509,7 +615,7 @@ describe('a table slot goes to a bot that can sit at the table', () => {
         bot('eligible', { mu: 18, venues: ['casual', 'beginner'] }),
       ],
     });
-    expect(targetActivation(s, 25).activate).toEqual([
+    expect(targetActivation(s, 25, HALF).activate).toEqual([
       { id: 'placed', action: 'queue' },
       { id: 'eligible', action: 'join', venue: 'beginner' },
     ]);
@@ -535,7 +641,7 @@ describe('a table slot goes to a bot that can sit at the table', () => {
         }),
       ],
     });
-    const target = targetActivation(s, 25);
+    const target = targetActivation(s, 25, HALF);
     expect(target.activate.some((a) => a.action === 'join')).toBe(false);
     // It is still switched on, for its own sake, on its own appetite.
     expect(target.activate).toEqual([{ id: 'placed', action: 'host' }]);
@@ -577,7 +683,7 @@ describe('a bot only ONE kind of demand can use', () => {
         bot('casual-only', 20, ['casual']),
       ],
     };
-    expect(targetActivation(snapshot, 25).activate).toEqual([
+    expect(targetActivation(snapshot, 25, HALF).activate).toEqual([
       { id: 'casual-only', action: 'queue' },
       { id: 'both', action: 'join', venue: 'beginner' },
     ]);
@@ -597,7 +703,7 @@ describe('a bot only ONE kind of demand can use', () => {
       activeBotIds: [],
       roster: [bot('both', 25, ['casual', 'beginner'])],
     };
-    expect(targetActivation(snapshot, 25).activate).toEqual([{ id: 'both', action: 'queue' }]);
+    expect(targetActivation(snapshot, 25, HALF).activate).toEqual([{ id: 'both', action: 'queue' }]);
   });
 
   it('reserves the only Beginner-eligible bot even when supply LOOKS ample', () => {
@@ -621,7 +727,7 @@ describe('a bot only ONE kind of demand can use', () => {
         bot('casual-b', 23, ['casual']),
       ],
     };
-    const activate = targetActivation(snapshot, 25).activate;
+    const activate = targetActivation(snapshot, 25, HALF).activate;
     expect(activate.find((a) => a.action === 'queue')?.id).not.toBe('both');
     expect(activate.find((a) => a.venue === 'beginner')?.id).toBe('both');
   });
@@ -649,7 +755,7 @@ describe('a bot only ONE kind of demand can use', () => {
         bot('casual-only', 23, ['casual']),
       ],
     };
-    const activate = targetActivation(snapshot, 25).activate;
+    const activate = targetActivation(snapshot, 25, HALF).activate;
     expect(activate.find((a) => a.action === 'queue')?.id).toBe('dual-a');
     expect(activate.find((a) => a.action === 'join')?.id).toBe('dual-b');
   });
@@ -673,7 +779,7 @@ describe('a bot only ONE kind of demand can use', () => {
         bot('beginner-only', 19, ['casual', 'beginner']),
       ],
     };
-    const activate = targetActivation(snapshot, 25).activate;
+    const activate = targetActivation(snapshot, 25, HALF).activate;
     expect(activate.filter((a) => a.action === 'join').map((a) => a.id).sort()).toEqual([
       'beginner-only',
       'casual-a',
@@ -694,7 +800,7 @@ describe('a bot only ONE kind of demand can use', () => {
       activeBotIds: [],
       roster: [bot('casual-only', 25, ['casual']), bot('beginner-only', 24, ['beginner'])],
     };
-    const activate = targetActivation(snapshot, 25).activate;
+    const activate = targetActivation(snapshot, 25, HALF).activate;
     expect(activate.find((a) => a.action === 'queue')?.id).toBe('casual-only');
     expect(activate.find((a) => a.action === 'join')?.id).toBe('beginner-only');
   });

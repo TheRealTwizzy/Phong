@@ -18,6 +18,9 @@ import { OPEN_VENUES, PATIENCE_MS, targetActivation } from '../server/playbotPop
 import { START_MU } from '../src/rating';
 import { Phone, sleep, startRelay, type Relay } from './helpers/relay';
 
+/** The draw `targetActivation` requires; these cases are about counts, not actions. */
+const HALF = () => 0.5;
+
 // Step 22's other half: "the population starts with the process".
 //
 // The lifecycle suite next door owns what happens at the END -- SIGTERM
@@ -457,7 +460,7 @@ describe('the roster the controller is shown', () => {
       expect(venuesOf('bot-open')).toEqual(['casual', 'beginner']);
       // And therefore the one slot this demand buys goes to the bot that can
       // sit down, not to the one nearest the band.
-      expect(targetActivation(snapshot, 25).activate).toEqual([
+      expect(targetActivation(snapshot, 25, HALF).activate).toEqual([
         { id: 'bot-open', action: 'join', venue: 'beginner' },
       ]);
     } finally {
@@ -656,11 +659,19 @@ describe('a bot plays more than one match', () => {
       //
       // Host/host is the case the window and the jitter below exist for, so it
       // is asked for rather than hoped for.
+      //
+      // `joinAppetite: 0` and not 0.5, because the action is a weighted DRAW
+      // now rather than an argmax: at 1/0.5/0 this fixture would be host 67%
+      // and join 33% against a live `Math.random`, which is a fixture HOPING
+      // for the case instead of asking for it. Zeroing the other two is what
+      // makes "host" the answer at every roll. The two bots still meet:
+      // `dispatchInner`'s `gaveUpEmptyTable` sends a bot that has given up an
+      // empty table looking for one to JOIN whatever its appetite says.
       traitsFor: (u) => ({
         ...seedTraits(u),
         skill: MIN_AI_COMPETENCE,
         hostAppetite: 1,
-        joinAppetite: 0.5,
+        joinAppetite: 0,
         queueAppetite: 0,
       }),
       store: {
@@ -757,7 +768,19 @@ describe('a driver the controller has stopped naming', () => {
       // inside the test rather than after twenty seconds of it.
       idleLobbyMs: 500,
       idleLobbyJitterMs: 0,
-      traitsFor: (u) => ({ ...seedTraits(u), skill: MIN_AI_COMPETENCE }),
+      // The bot must HOST, because the state under test is an empty lobby
+      // past its window. Left to the seed this was hoped for rather than
+      // asked for -- and once the action became a weighted DRAW rather than
+      // an argmax it stopped being decidable at all: a bot that draws `queue`
+      // is engaged unconditionally and this reads as a reap that did not
+      // happen. Zeroing the other two makes `host` the answer at every roll.
+      traitsFor: (u) => ({
+        ...seedTraits(u),
+        skill: MIN_AI_COMPETENCE,
+        hostAppetite: 1,
+        joinAppetite: 0,
+        queueAppetite: 0,
+      }),
       store: {
         load: () => [...rows.values()],
         save: (botId, deviceCookie, traits) => {
@@ -944,14 +967,14 @@ describe('a stand-down is derived from the controller, never latched', () => {
     // fixture in which the controller never asked for a stand-down would pass
     // with nothing cleared and nothing to clear.
     crowd(true);
-    expect(targetActivation(sup.snapshot(), START_MU).deactivate).toEqual([botId]);
+    expect(targetActivation(sup.snapshot(), START_MU, HALF).deactivate).toEqual([botId]);
     sup.tick();
 
     // Demand recovers, and the bot is KEPT -- named by neither array, which is
     // the path under test. Asserted too, because a fixture that quietly
     // re-ACTIVATED it would be exercising the loop that was already right.
     crowd(false);
-    const target = targetActivation(sup.snapshot(), START_MU);
+    const target = targetActivation(sup.snapshot(), START_MU, HALF);
     expect([target.deactivate, target.activate.map((a) => a.id)]).toEqual([[], []]);
     sup.tick();
 
@@ -985,7 +1008,7 @@ describe('a stand-down is derived from the controller, never latched', () => {
     const { sup, phone, botId, crowd, seat } = await seatedAgainstOneBot('playbot-standdown');
 
     crowd(true);
-    expect(targetActivation(sup.snapshot(), START_MU).deactivate).toEqual([botId]);
+    expect(targetActivation(sup.snapshot(), START_MU, HALF).deactivate).toEqual([botId]);
     sup.tick();
 
     // Still mid-match, so the request is granted at the whistle and not before
@@ -1088,7 +1111,7 @@ describe('a finished court holds a rematch window', () => {
     // urgency stays zero, which is the state that names a still-engaged bot
     // for deactivation without any human being unserved.
     crowd(true);
-    expect(targetActivation(sup.snapshot(), START_MU).deactivate).toEqual([botId]);
+    expect(targetActivation(sup.snapshot(), START_MU, HALF).deactivate).toEqual([botId]);
     sup.tick();
     await sleep(500);
 
@@ -1381,4 +1404,185 @@ describe('two settings that arrive as an environment string', () => {
     expect(src).toMatch(/rosterSize: Number\(process\.env\.PLAYBOT_ROSTER_SIZE\),/);
     expect(src).not.toMatch(/PLAYBOT_ROSTER_SIZE\) \|\| 0/);
   });
+});
+
+describe('a bot that has stopped playing says so', () => {
+  // `ENGAGED` holds five phases and only two of them were ever bounded: the
+  // EMPTY lobby (IDLE_LOBBY_MS) and the finished court (REMATCH_GRACE_MS).
+  // The other three are states a bot cannot leave by itself, and two of them
+  // are states it can be stuck in indefinitely.
+
+  it('gives up a queue place nobody was ever going to fill', async () => {
+    // `queued` is engaged, unconditionally and forever. A bot alone in the
+    // queue with nobody to pair with held one of the active slots for the
+    // life of the process -- and never recorded a match, so its recent-play
+    // count stayed at zero, so `rankForActivation` sorted it FIRST and kept
+    // it there. A permanent slot leak that grows by one with every cohort,
+    // and at six active slots one or two of these is most of the population.
+    relay = await startRelay('playbot-queue-stall');
+    const rows = new Map<string, ReturnType<PlaybotAccountStore['load']>[number]>();
+    const sup = new PlaybotSupervisor({
+      base: relay.base,
+      wsUrl: relay.wsUrl,
+      rosterSize: 1,
+      tickMs: 3_600_000,
+      // Longer than DISPATCH_GRACE_MS (5s), and that is the load-bearing
+      // half: inside the grace `engaged` answers true whatever the phase
+      // says, so a shorter window would be answered by the grace and this
+      // would pass against the unfixed code. Round sixteen's own trap.
+      queuePatienceMs: 8_000,
+      // The bot must QUEUE, because that is the state under test.
+      traitsFor: (u) => ({
+        ...seedTraits(u),
+        skill: MIN_AI_COMPETENCE,
+        hostAppetite: 0,
+        joinAppetite: 0,
+        queueAppetite: 1,
+      }),
+      store: {
+        load: () => [...rows.values()],
+        save: (botId, deviceCookie, traits) => {
+          rows.set(botId, {
+            botId, username: botId, deviceCookie, traits,
+            mu: 25, recentMatches: 0, level: 1, tier: 'unranked' as const,
+          });
+        },
+        ensureAvatar: () => {},
+        pairingView: flatPairingView,
+      },
+      live: () => ({
+        humansOnline: 0, queuedHumans: 0, queuedBots: 0, longestWaitMs: 0, openTableVenues: [],
+      }),
+    });
+    await sup.start();
+
+    sup.tick();
+    // Waited for rather than assumed: provisioning and the connect are round
+    // trips, so the driver reads `idle` for seconds after the tick — and a
+    // fixture that starts its clock there measures the DISPATCH GRACE and
+    // reports it as the patience window. Round sixteen's trap, and this
+    // probe caught it: the "still engaged" assertion below passed at six
+    // seconds against a driver that had not reached the queue at all.
+    let queued = false;
+    for (let i = 0; i < 80 && !queued; i++) {
+      queued = sup.queuedBotIds().length === 1;
+      if (!queued) await sleep(250);
+    }
+    expect(queued).toBe(true);
+
+    // Inside the window: HELD, because a bot that has just joined the queue
+    // is one the next sweep may pair, and taking it away then would be
+    // removing the supply a queued human is one sweep from meeting. Without
+    // this half the window could be zero and the release below would still
+    // pass.
+    expect(sup.activeBotIds()).toHaveLength(1);
+
+    // ...and past it, spare again. Spare and not CLOSED: the controller still
+    // wants a bot active on an empty server, so the next tick re-dispatches
+    // this one rather than reaping it — which is the whole point, since a
+    // released bot draws a fresh action and goes and does something else.
+    // The reap is a different rule and has its own test above.
+    await sleep(9_000);
+    expect(sup.activeBotIds()).toHaveLength(0);
+    await sup.stop();
+  }, 60_000);
+
+  it('waits out a person deciding, and gives up on one who has gone', async () => {
+    // The occupied lobby, which `standDown` refuses to leave -- correctly,
+    // that is round four's rule and a person picking a winning score is what
+    // a pre-match lobby is FOR. So nothing released it either: `lobby` with
+    // an opponent is engaged, the reap never fires, and the bot holds a
+    // socket and a seat until the process restarts.
+    //
+    // Measured from when they SAT DOWN and never from the dispatch, which is
+    // the half that would reintroduce the bug it fixes: a bot hosting for
+    // four minutes before somebody walks up would otherwise abandon them a
+    // minute later.
+    relay = await startRelay('playbot-lobby-stall');
+    const r = relay;
+    const human = await r.newDevice('LobbySitter');
+    const phone = await r.openPhone(human);
+
+    const rows = new Map<string, ReturnType<PlaybotAccountStore['load']>[number]>();
+    const sup = new PlaybotSupervisor({
+      base: r.base,
+      wsUrl: r.wsUrl,
+      rosterSize: 1,
+      tickMs: 3_600_000,
+      lobbyStallHumanMs: 8_000,
+      // Long, so the bot is still hosting its EMPTY table when the person
+      // walks up. That is what lets the two clocks disagree — see below.
+      idleLobbyMs: 120_000,
+      idleLobbyJitterMs: 0,
+      traitsFor: (u) => ({
+        ...seedTraits(u),
+        skill: MIN_AI_COMPETENCE,
+        hostAppetite: 1,
+        joinAppetite: 0,
+        queueAppetite: 0,
+      }),
+      store: {
+        load: () => [...rows.values()],
+        save: (botId, deviceCookie, traits) => {
+          rows.set(botId, {
+            botId, username: botId, deviceCookie, traits,
+            mu: 25, recentMatches: 0, level: 1, tier: 'unranked' as const,
+          });
+        },
+        ensureAvatar: () => {},
+        pairingView: flatPairingView,
+      },
+      live: () => ({
+        humansOnline: 0, queuedHumans: 0, queuedBots: 0, longestWaitMs: 0, openTableVenues: [],
+      }),
+    });
+    await sup.start();
+
+    sup.tick();
+    for (let i = 0; i < 60 && sup.connectedBotIds().length === 0; i++) await sleep(250);
+    // Every venue the bot may enter, not just `casual`: `rankedBias` is
+    // floored at 0.55, so most of the time it hosts in a BRACKET and a poll
+    // of one room finds nothing.
+    let roomId: string | null = null;
+    for (let i = 0; i < 60 && !roomId; i++) {
+      for (const venue of OPEN_VENUES) {
+        const res = await fetch(`${r.base}/api/rooms/${venue}/tables`).catch(() => null);
+        if (!res?.ok) continue;
+        const body = (await res.json()) as { tables?: Array<{ id: string }> };
+        roomId = body.tables?.[0]?.id ?? null;
+        if (roomId) break;
+      }
+      if (!roomId) await sleep(250);
+    }
+    expect(roomId).toBeTruthy();
+
+    // The bot hosts an empty table for LONGER than the stall window before
+    // anybody arrives, and that is the whole fixture: it is what makes
+    // `opponentSince` and `dispatchedAt` give different answers. Measured
+    // from the dispatch, this person is already past the window the moment
+    // they sit down and the bot walks out on them — which is round four's
+    // finding arriving through the timer that was written to bound it.
+    //
+    // Without this wait the two clocks are a second apart, the window
+    // swallows the difference, and swapping one for the other reddens
+    // nothing. Checked: it did not.
+    await sleep(10_000);
+
+    // Somebody sits down and never presses Start. The clock starts HERE.
+    phone.send({ type: 'join_room', roomId: roomId!, playerId: human.id });
+    await phone.await('room_joined');
+    await sleep(500);
+
+    // Held, which is round four's rule and the half that must not regress.
+    expect(sup.activeBotIds()).toHaveLength(1);
+    await sleep(5_000);
+    expect(sup.activeBotIds()).toHaveLength(1);
+
+    // ...and released once the window says they have gone.
+    await sleep(4_000);
+    expect(sup.activeBotIds()).toHaveLength(0);
+
+    phone.close();
+    await sup.stop();
+  }, 90_000);
 });

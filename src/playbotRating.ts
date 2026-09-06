@@ -60,6 +60,17 @@ export const BOT_PAIR_BANDS: readonly PairBand[] = [
   { through: 12, gain: 0.4, loss: 0.5 },
 ];
 
+/**
+ * The prior-pair count past which a BOT-involved pair rates nothing at all.
+ *
+ * The last rung of the ladder above, DERIVED rather than written twice: an
+ * edit to the rungs cannot leave the queue's own diversity preference
+ * (`findPair`, `server/matchmaking.ts`) preferring against the wrong number.
+ * Read it as "12 prior matches still rate, the 13th does not", which is what
+ * `participantWeights` answers.
+ */
+export const BOT_PAIR_CAP = BOT_PAIR_BANDS[BOT_PAIR_BANDS.length - 1]!.through;
+
 /** §2.3, two humans. Wider throughout — hard cap from match 25. */
 export const HUMAN_PAIR_BANDS: readonly PairBand[] = [
   { through: 8, gain: 1.0, loss: 1.0 },

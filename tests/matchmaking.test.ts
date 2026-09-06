@@ -408,3 +408,81 @@ describe.todo('greedy pairing loses matches (§4.14, gated — not this feature)
     expect(sweep(q, now).sort()).toEqual(['A/B', 'C/D']);
   });
 });
+
+
+describe('bots prefer somebody they have not just played', () => {
+  // §2.11's diversity preference, at the ONE bot-vs-bot pairing path that
+  // never asked for it. The other three are covered: `pickTable` runs
+  // `chooseOpponent`, `acceptsRematch` tapers to zero across the pair ladder,
+  // and `rotate` spreads concurrent joins. The queue knew nothing about pair
+  // history at all, so two bots at similar ratings paired every sweep for as
+  // long as both were active — which is how the account at the top of the
+  // ladder came to have played one opponent exclusively.
+  //
+  // A PREFERENCE and never a refusal, which is `chooseOpponent`'s own rule:
+  // low population is a legitimate reason to repeat an opponent.
+
+  /** Nobody has ever met. */
+  const fresh = () => 0;
+
+  it('passes over the closer partner it has already exhausted', () => {
+    // The fixture is built so the un-predicated scoring picks the WRONG one:
+    // `b` is nearer a coin flip than `c`, so without the preference `a` pairs
+    // `b` and this test passes against the unfixed code (catalogue shape 1).
+    // The capped bot has to be the BEST-scoring one or the case proves
+    // nothing.
+    //
+    // And `c` has to be inside the BAND, which is the other half and cost a
+    // first attempt: at mu 27 the gap is 2.0 and p = 0.380, outside TIGHT's
+    // 0.45-0.55 at a wait of zero -- so `a` pairing `b` anyway was the band
+    // refusing `c`, not the preference failing, and the test would have
+    // reddened against the FIXED code for a reason that had nothing to do
+    // with the rule. At 25.5 the gap is 0.5 and p = 0.470: comparable, and
+    // strictly worse-scoring than the coin flip `b` offers.
+    const q = [bot('a', 25), bot('b', 25), bot('c', 25.5)];
+    expect(kindOf(findPair(q, 0))).toBe('bb');
+    expect(findPair(q, 0)!.map((x) => x.deviceId).sort()).toEqual(['a', 'b']);
+
+    const met = (x: Candidate, y: Candidate) =>
+      [x.deviceId, y.deviceId].sort().join('') === 'ab' ? 99 : 0;
+    expect(findPair(q, 0, met)!.map((x) => x.deviceId).sort()).toEqual(['a', 'c']);
+  });
+
+  it('plays the opponent it HAS when every pair is exhausted', () => {
+    // The fallback, and it must exist: a capped match still happens and still
+    // pays XP, so refusing here would turn a preference into a queue that
+    // stops pairing bots at all once the population has been round once.
+    const q = [bot('a', 25), bot('b', 25)];
+    const allMet = () => 99;
+    expect(kindOf(findPair(q, 0, allMet))).toBe('bb');
+  });
+
+  it('never asks the question of a HUMAN', () => {
+    // A person's game is never refused or deprioritised for a rating reason —
+    // `acceptsRematch`'s first line, and D25. If the predicate reached pass 2,
+    // this human's only compatible bot would be skipped and they would sit in
+    // an empty queue.
+    const q = [human('h', 25), bot('b', 25)];
+    const allMet = () => 99;
+    expect(kindOf(findPair(q, 0, allMet))).toBe('bh');
+  });
+
+  it('answers nothing when there is no legal bot pair at any threshold', () => {
+    // The bottom of the ladder: all three passes decline, so the widening is
+    // exhausted and there is genuinely nobody to pair. A band refusal rather
+    // than a diversity one — the preference NEVER produces this, which is
+    // what the fallback arm above guarantees.
+    const q = [bot('a', 25), bot('b', 60)];
+    expect(findPair(q, 0, fresh)).toBeNull();
+  });
+
+  it('is byte-equivalent to what it was when nothing is passed', () => {
+    // Every existing caller and every case above it omits the argument, which
+    // is also the hazard: a test that calls `findPair(q, now)` proves nothing
+    // about any of this.
+    const q = [bot('a', 25), bot('b', 25), bot('c', 27)];
+    expect(findPair(q, 0, fresh)!.map((x) => x.deviceId)).toEqual(
+      findPair(q, 0)!.map((x) => x.deviceId)
+    );
+  });
+});
