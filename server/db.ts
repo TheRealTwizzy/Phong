@@ -5202,11 +5202,15 @@ class GameDatabase {
     return position <= LADDER_TOP_N ? position : null;
   }
 
-  public getLeaderboard(
-    sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
-    limit = 50,
-    includeBots = false
-  ): LeaderboardEntry[] {
+  /**
+   * The pieces of one board query, shared by the whole board and by a page.
+   *
+   * One builder rather than two, because `getLeaderboard` and
+   * `getLeaderboardPage` must agree about who is ON the board and in what
+   * order down to the tiebreak — and `total` has to count that same filter or
+   * the page count is a different question from the rows.
+   */
+  private boardQuery(sortBy: string, includeBots: boolean) {
     // Both lookups below are keyed on sortBy, and an unrecognised key made
     // BOTH of them undefined — which built `ORDER BY undefined` and
     // `AND (undefined OR ...)`, so `?sort=anything` was a 500 echoing "no such
@@ -5216,14 +5220,6 @@ class GameDatabase {
     // callers.
     const key: 'elo' | 'level' | 'rally' | 'wins' =
       sortBy === 'level' || sortBy === 'rally' || sortBy === 'wins' ? sortBy : 'elo';
-    // NaN never satisfied `out.length >= limit`, so `?limit=abc` returned the
-    // ENTIRE board — an unauthenticated full scan plus every row serialized.
-    // Bounded here against non-finite and unbounded input only; the PUBLIC cap
-    // of 100 belongs at the route, because ladderPosition and its tests ask
-    // this method for more than a page on purpose.
-    const take = Number.isFinite(limit)
-      ? Math.max(1, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(limit)))
-      : 50;
 
     const orderBy = {
       level: 'xp DESC',
@@ -5239,8 +5235,7 @@ class GameDatabase {
     // Rows of zeros are noise: a freshly onboarded profile is not "last
     // place", it simply is not on the board yet — and the skill board is a
     // PvP ladder, so a solo-only career belongs on the level, wins and rally
-    // boards instead. Bots are exempt: they are a curated roster, inserted
-    // deliberately, not idle players.
+    // boards instead. Bots are exempt: they are inserted deliberately.
     const progress = {
       level: 'p.xp > 0',
       rally: 'p.highestRally > 0',
@@ -5253,53 +5248,117 @@ class GameDatabase {
     // Bots are dropped in SQL rather than skipped in the loop below when they
     // are not wanted. That is what lets LIMIT be exact: with them excluded
     // every returned row is emitted, and with them included every returned row
-    // is emitted too, so `take` bounds the result either way and no over-fetch
-    // is needed. The output is identical — humanRank only ever counted
-    // non-bots, so removing rows that never incremented it changes nothing.
+    // is emitted too, so the limit bounds the result either way and no
+    // over-fetch is needed. The output is identical — humanRank only ever
+    // counted non-bots, so removing rows that never incremented it changes
+    // nothing.
     const botClause = includeBots ? '' : ` AND ${GameDatabase.NOT_A_BOT}`;
-    // LIMIT in the SQL, not just in the loop. Without it every eligible row
-    // was materialized as p.* and run through rowToProfile (which JSON.parses
-    // the achievements column) before the loop threw all but `take` away —
-    // 110ms at 10k players, synchronously, on the loop that relays paddle_move
-    // for every live match.
+    const where =
+      `p.initializedAt IS NOT NULL` +
+      ` AND (${progress} OR EXISTS (SELECT 1 FROM bot_accounts b2 WHERE b2.botId = p.id))` +
+      botClause;
+    return { where, order: `${orderBy}, ${GameDatabase.LADDER_TIEBREAK}` };
+  }
+
+  /** One row of the board, given the dense human rank it sits at. */
+  private boardEntry(row: PlayerRow, humanRank: number): LeaderboardEntry {
+    const isBot = isBotAccount(row.id);
+    const p = rowToProfile(row);
+    const winRate = p.matchesPlayed > 0 ? Math.round((p.matchesWon / p.matchesPlayed) * 100) : 0;
+    return {
+      rank: isBot ? null : humanRank,
+      isBot: isBot || undefined,
+      id: p.id,
+      username: p.username,
+      tier: p.tier,
+      rankedGames: p.rankedGames,
+      level: p.level,
+      xp: p.xp,
+      matchesPlayed: p.matchesPlayed,
+      matchesWon: p.matchesWon,
+      winRate,
+      highestRally: p.highestRally,
+      avatarVersion: p.avatarVersion,
+    };
+  }
+
+  public getLeaderboard(
+    sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
+    limit = 50,
+    includeBots = false
+  ): LeaderboardEntry[] {
+    return this.getLeaderboardPage(sortBy, { limit, includeBots }).entries;
+  }
+
+  /**
+   * One page of the board, plus the `total` counting the same filter.
+   *
+   * The shape `/api/matches/me` already uses, for the same reason: the caller
+   * needs a page count and must not have to build a second query to get one.
+   *
+   * THE RANK IS THE HARD PART. `rank` is a dense counter over non-bot rows,
+   * so it is a property of where a row sits in the WHOLE ordering rather than
+   * in this page — count it per page and the top of every page is #1. Two
+   * cases, and only one of them costs anything:
+   *
+   *   * bots hidden — every row in the set is human, so the first row of the
+   *     page is rank `offset + 1` and there is nothing to ask;
+   *   * bots shown — bots occupy rows without consuming a rank, so the count
+   *     of humans above the page is strictly less than the offset once any bot
+   *     has appeared. One extra query answers it, over IDS ONLY: the p.*
+   *     materialisation is what made the unpaged board 110ms at 10k players,
+   *     and none of that applies to a column the partial indexes already
+   *     carry.
+   */
+  public getLeaderboardPage(
+    sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
+    opts: { limit?: number; offset?: number; includeBots?: boolean } = {}
+  ): { entries: LeaderboardEntry[]; total: number } {
+    const includeBots = opts.includeBots ?? false;
+    const { where, order } = this.boardQuery(sortBy, includeBots);
+    // NaN never satisfied the old loop's `out.length >= limit`, so `?limit=abc`
+    // returned the ENTIRE board — an unauthenticated full scan plus every row
+    // serialized. Bounded here against non-finite and unbounded input only;
+    // the PUBLIC cap of 100 belongs at the route, because ladderPosition and
+    // its tests ask for more than a page on purpose.
+    const take = Number.isFinite(opts.limit)
+      ? Math.max(1, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(opts.limit!)))
+      : 50;
+    const skip = Number.isFinite(opts.offset)
+      ? Math.max(0, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(opts.offset!)))
+      : 0;
+
+    const total = (
+      this.stmt(`SELECT COUNT(*) AS n FROM players p WHERE ${where}`).get() as { n: number }
+    ).n;
+
     const rows = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
-          WHERE p.initializedAt IS NOT NULL
-            AND (${progress} OR EXISTS (SELECT 1 FROM bot_accounts b2 WHERE b2.botId = p.id))${botClause}
-          ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
-          LIMIT ?`
+          WHERE ${where}
+          ORDER BY ${order}
+          LIMIT ? OFFSET ?`
       )
-      .all(take) as unknown as PlayerRow[];
+      .all(take, skip) as unknown as PlayerRow[];
 
-    // Ranks count human players only, so a human's number is identical
-    // whether bot rows are interleaved into the view or not.
-    const out: LeaderboardEntry[] = [];
-    let humanRank = 0;
-    for (const row of rows) {
-      if (out.length >= take) break;
-      const isBot = isBotAccount(row.id);
-      if (isBot && !includeBots) continue;
-      if (!isBot) humanRank++;
-      const p = rowToProfile(row);
-      const winRate = p.matchesPlayed > 0 ? Math.round((p.matchesWon / p.matchesPlayed) * 100) : 0;
-      out.push({
-        rank: isBot ? null : humanRank,
-        isBot: isBot || undefined,
-        id: p.id,
-        username: p.username,
-        tier: p.tier,
-        rankedGames: p.rankedGames,
-        level: p.level,
-        xp: p.xp,
-        matchesPlayed: p.matchesPlayed,
-        matchesWon: p.matchesWon,
-        winRate,
-        highestRally: p.highestRally,
-        avatarVersion: p.avatarVersion,
-      });
+    let humanRank = skip;
+    if (includeBots && skip > 0) {
+      humanRank = (
+        this.stmt(
+            `SELECT COUNT(*) AS n FROM (
+               SELECT p.id AS id FROM players p WHERE ${where} ORDER BY ${order} LIMIT ?
+             ) q WHERE NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = q.id)`
+          )
+          .get(skip) as { n: number }
+      ).n;
     }
-    return out;
+
+    const entries: LeaderboardEntry[] = [];
+    for (const row of rows) {
+      if (!isBotAccount(row.id)) humanRank += 1;
+      entries.push(this.boardEntry(row, humanRank));
+    }
+    return { entries, total };
   }
 
   public getAchievementsList(playerId?: string): Achievement[] {

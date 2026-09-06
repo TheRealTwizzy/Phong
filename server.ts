@@ -2372,8 +2372,20 @@ async function startServer() {
       const parsed = parseInt(String(req.query.limit ?? '50'), 10);
       const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(100, parsed)) : 50;
       const includeBots = req.query.bots === '1' || req.query.bots === 'true';
-      const leaderboard = db.getLeaderboard(sort, limit, includeBots);
-      res.json({ leaderboard });
+      // Bounded at the edge like `sort` and `limit` above, and for the same
+      // reason: this route is unauthenticated, so a page number is another
+      // free variable a caller chooses. The db bounds the offset again.
+      const askedPage = parseInt(String(req.query.page ?? '1'), 10);
+      const page = Number.isFinite(askedPage) ? Math.max(1, Math.min(1000, askedPage)) : 1;
+      const { entries, total } = db.getLeaderboardPage(sort, {
+        limit,
+        offset: (page - 1) * limit,
+        includeBots,
+      });
+      // `leaderboard` keeps its name and shape, so a bundle open across the
+      // deploy still reads it and slices whatever it asked for — exactly what
+      // `matches` was kept for on /api/matches/me.
+      res.json({ leaderboard: entries, total, page, pageSize: limit });
     } catch (e: any) {
       serverError(res, e);
     }
