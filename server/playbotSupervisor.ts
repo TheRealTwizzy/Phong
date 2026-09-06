@@ -27,6 +27,7 @@
 
 import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
+import { defaultPlaybotName } from './playbotNames';
 import { chooseOpponent, chooseVenue, type PolicyCandidate } from './playbotPolicy';
 import { newRating } from '../src/rating';
 import type { Tier } from '../src/rating';
@@ -92,6 +93,19 @@ export interface PlaybotAccountStore {
   }>;
   /** Marker row, credential and traits, written once at creation. */
   save(botId: string, deviceCookie: string, traits: PlaybotTraits): void;
+  /**
+   * Give this bot the shared robot avatar if it has none.
+   *
+   * A boot pass rather than a step in `save`, because the roster that needs it
+   * most is the one already on disk from before the avatar existed — and a
+   * meta flag would be wrong for the opposite reason, since `applyWipe` DROPs
+   * `avatars` and `bot_accounts` together and a one-shot would fire once
+   * against an empty roster and never again.
+   *
+   * It is the disclosure half of the human names: most surfaces render a name
+   * with no BOT badge beside it, so the avatar is what remains of §4.11 there.
+   */
+  ensureAvatar(botId: string): void;
   /**
    * What §2.11's diversity preference needs about people this bot could sit
    * down with: the three things a table listing cannot carry.
@@ -521,6 +535,17 @@ export class PlaybotSupervisor {
       if (held.has(naming(n))) continue;
       attempts += 1;
       await this.provision(n);
+    }
+    // After the load AND after provisioning, so it covers the accounts already
+    // on disk and the ones this boot just made. Per-bot try/catch for the
+    // reason `provision` has one: one bot without a picture is a cosmetic
+    // shortfall, and taking the population down over it is not.
+    for (const m of this.managed) {
+      try {
+        this.store.ensureAvatar(m.botId);
+      } catch (e) {
+        console.warn(`[playbot] could not give ${m.username} an avatar:`, (e as Error)?.message ?? e);
+      }
     }
     const every = this.opts.tickMs ?? DEFAULT_TICK_MS;
     this.timer = setInterval(() => void this.tickSafely(), every);
@@ -1085,14 +1110,15 @@ export function humanTablesFirst(
 }
 
 /**
- * The nth name the population asks for.
+ * The nth name the population asks for — see `server/playbotNames.ts`.
  *
- * Exported so a test can take one out of the pool before the population boots
- * and watch it walk past — the collision that used to leave the roster short
- * for the life of the deployment.
+ * Re-exported rather than moved outright because a test takes one out of the
+ * pool before the population boots and watches the provisioning loop walk past
+ * it, and that test is about the SUPERVISOR's loop. The list and the overflow
+ * rule are the names module's; which name this deployment reaches for is this
+ * one's.
  */
-export const defaultPlaybotName = (n: number): string =>
-  `Rally${String(n + 1).padStart(2, '0')}Bot`;
+export { defaultPlaybotName } from './playbotNames';
 const defaultName = defaultPlaybotName;
 
 /**

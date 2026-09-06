@@ -67,6 +67,7 @@ import {
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
+import { botAvatarPng } from './server/botAvatar';
 import {
   PlaybotSupervisor,
   liveStateFrom,
@@ -4505,6 +4506,11 @@ async function startServer() {
     store: {
       load: () => db.playbotAccounts(),
       save: (botId, cookie, traits) => db.rememberPlaybot(botId, cookie, traits),
+      // One shared image, byte-identical for every bot, written only where
+      // there is nothing already. See server/botAvatar.ts for why it is
+      // generated rather than checked in, and server/db.ts's `ensureAvatar`
+      // for why it is not `setAvatar`.
+      ensureAvatar: (botId) => db.ensureAvatar(botId, botAvatarPng()),
       // Both sides on the MATCHMAKER's own estimator, which is the one that
       // decides whether the pair this preference is about could happen at all
       // (`queueCandidate` reads the same pair). Reading self on the visible

@@ -87,6 +87,7 @@ import {
   rankMoveSize,
 } from '../src/rating';
 import { BotSeed, botProfileFields } from './bots';
+import { PLAYBOT_NAMES, defaultPlaybotName } from './playbotNames';
 import {
   MISSION_POOL,
   RECENT_DEAL_MEMORY,
@@ -1430,6 +1431,7 @@ class GameDatabase {
     // meaning before the name is revived at the top of the ladder.
     this.backfillMatchRanked();
     this.relabelChaosMatches();
+    this.renamePlaybots();
     this.recountShutouts();
     // Strictly ordered: each copies the column the one before it filled.
     // backfillMatchRanked classifies `ranked`; advanced_ladder copies that;
@@ -1570,6 +1572,95 @@ class GameDatabase {
    * Rewriting the rows to what the retirement map already said they meant,
    * one time, is what lets the map itself be deleted.
    */
+  /**
+   * Give the play-bots already on disk human-looking names.
+   *
+   * They were provisioned as `Rally01Bot`...`RallyNNBot`, which disclosed in
+   * the name itself on every surface a name reaches — the in-match opponent
+   * label, the lobby, the result strip, the denormalized names in match
+   * history — none of which carries the BOT badge. Handles do not, so the
+   * shared robot avatar becomes the tell instead. Renaming only the bots
+   * provisioned AFTER the change would do nothing for a live server, which is
+   * entirely populated by the old ones.
+   *
+   * NOT `changeUsername`, which enforces the 365-day lock these accounts are
+   * well inside. NOT `server/moderate.ts`, whose lock override is deliberately
+   * out of reach here — its `find()` selects
+   * `WHERE NOT EXISTS (SELECT 1 FROM bot_accounts ...)`, so the rename tool
+   * cannot see a bot at all. And not a new public `db.renamePlaybot`, which
+   * would be a lock-override door that one caller needs and anything could
+   * later find. A one-shot beside `chaos_relabel_v1` keeps the only writer
+   * inside the migration.
+   *
+   * Keyed on `deviceCookie IS NOT NULL` — the schema's own discriminator
+   * between drivable play-bots and the curated roster, the same test
+   * `playbotAccounts()` asks — and never on the `bot-` id prefix, which is
+   * D26's retired classifier. Ordered by `createdAt` so bot #1 takes name #1,
+   * matching what a fresh deployment produces.
+   *
+   * A target a human already holds costs ONE NAME, not the batch: the cursor
+   * advances and the row takes the next free entry, which is how
+   * `seedBotRoster` treats a roster collision. Only `/^Rally\d+Bot$/` rows are
+   * touched, so a bot already carrying a list name is left alone.
+   *
+   * TRAITS DO NOT MOVE, and that is the question a rename raises here, because
+   * `provision` seeds them FROM the username. It seeds at creation only and
+   * every later read comes off `bot_accounts`, so a live bot keeps the
+   * competence it has been playing with — re-deriving from the new name would
+   * retune every bot on the server, which is exactly what "creation may seed,
+   * nothing after creation may steer" forbids. This touches `players` and the
+   * denormalized names in `matches`, and nothing else.
+   */
+  private renamePlaybots(): void {
+    const KEY = 'playbot_names_v1';
+    if (this.getMeta(KEY)) return;
+    const now = new Date().toISOString();
+
+    const rows = this.stmt(
+        `SELECT p.id AS id, p.username AS username
+           FROM players p JOIN bot_accounts b ON b.botId = p.id
+          WHERE b.deviceCookie IS NOT NULL
+          ORDER BY b.createdAt, b.botId`
+      )
+      .all() as unknown as Array<{ id: string; username: string }>;
+
+    const held = this.stmt('SELECT id FROM players WHERE lower(username) = lower(?)');
+    let cursor = 0;
+    let renamed = 0;
+    for (const row of rows) {
+      if (!/^Rally\d+Bot$/.test(row.username)) continue;
+      // Advance past anything already taken — by a human, or by a bot this
+      // loop has just renamed.
+      let next: string | null = null;
+      while (cursor < PLAYBOT_NAMES.length * 2) {
+        const candidate = defaultPlaybotName(cursor);
+        cursor += 1;
+        if (!held.get(candidate)) {
+          next = candidate;
+          break;
+        }
+      }
+      // Out of names is survivable: the bot keeps the name it has, which is
+      // ugly and works, where a half-applied batch would not be.
+      if (!next) break;
+      this.stmt('UPDATE players SET username = ?, usernameChangedAt = ? WHERE id = ?').run(
+        next,
+        now,
+        row.id
+      );
+      // The denormalized copies, the same three columns `deleteAccount`
+      // rewrites and for the same reason: without this a human's own history
+      // keeps naming the old handle while the profile it links to has moved.
+      this.stmt('UPDATE matches SET player1Name = ? WHERE player1Id = ?').run(next, row.id);
+      this.stmt('UPDATE matches SET player2Name = ? WHERE player2Id = ?').run(next, row.id);
+      this.stmt('UPDATE matches SET winnerName = ? WHERE winnerId = ?').run(next, row.id);
+      renamed += 1;
+    }
+
+    this.setMeta(KEY, now);
+    if (renamed) console.log(`playbot_names_v1: renamed ${renamed} play-bot account(s)`);
+  }
+
   private relabelChaosMatches(): void {
     const KEY = 'chaos_relabel_v1';
     if (this.getMeta(KEY)) return;
@@ -3305,6 +3396,35 @@ class GameDatabase {
       )
       .run(playerId, data, now);
     return Date.parse(now);
+  }
+
+  /**
+   * Give this player the avatar it has none of. Answers whether one was written.
+   *
+   * Deliberately NOT an overload of `setAvatar`, and deliberately DO NOTHING
+   * rather than DO UPDATE. "Write this avatar" and "make sure one exists" are
+   * different intents, and conflating them costs something real: `setAvatar`
+   * rewrites `updatedAt`, and `avatarVersion` is `Date.parse(updatedAt)`, so
+   * an idempotent boot pass built on it would bump the version for every bot
+   * on EVERY deploy and invalidate the `max-age=31536000, immutable` copy
+   * every browser had cached.
+   *
+   * A boot pass rather than a meta-flagged one-shot for the other half of the
+   * same reason: `applyWipe` DROPs both `avatars` and `bot_accounts`, so a
+   * flag would fire once against a database with no bots in it yet and never
+   * again, leaving every post-wipe bot bare for good.
+   *
+   * It also refuses to clobber an avatar already there, which is what makes it
+   * safe to point at a wider set of accounts later than the one it has today.
+   */
+  public ensureAvatar(playerId: string, data: Uint8Array): boolean {
+    const now = new Date().toISOString();
+    const res = this.stmt(
+        `INSERT INTO avatars (playerId, data, updatedAt) VALUES (?, ?, ?)
+         ON CONFLICT(playerId) DO NOTHING`
+      )
+      .run(playerId, data, now);
+    return Number(res.changes) > 0;
   }
 
   public getAvatar(playerId: string): { data: Uint8Array; updatedAt: string } | null {

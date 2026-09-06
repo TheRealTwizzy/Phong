@@ -93,6 +93,18 @@ const playbots = (dir: string): string[] =>
     ).map((r) => r.botId)
   );
 
+/** (playerId, updatedAt) for every play-bot carrying an avatar. */
+const playbotAvatars = (dir: string): Array<{ playerId: string; updatedAt: string }> =>
+  readDb(dir, (h) =>
+    h
+      .prepare(
+        `SELECT a.playerId AS playerId, a.updatedAt AS updatedAt
+           FROM avatars a JOIN bot_accounts b ON b.botId = a.playerId
+          WHERE b.deviceCookie IS NOT NULL ORDER BY a.playerId`
+      )
+      .all() as Array<{ playerId: string; updatedAt: string }>
+  );
+
 /** Usernames burned out of the pool by accounts that are NOT the roster. */
 const playbotNames = (dir: string): string[] =>
   readDb(dir, (h) =>
@@ -233,6 +245,33 @@ describe('the population starts with the process', () => {
     expect(born).toHaveLength(2);
     // Two accounts, and neither wearing the name the human holds.
     expect(playbotNames(dir)).not.toContain(defaultPlaybotName(0));
+  }, 180_000);
+
+  it('gives every bot the shared avatar, and never re-stamps it', async () => {
+    // Human-looking names take the disclosure out of the name, and most
+    // surfaces that render a name carry no BOT badge — so the avatar is what
+    // is left of §4.11 there. It has to reach the accounts already on disk,
+    // which is why it is a boot pass rather than a step in provisioning.
+    //
+    // The SECOND boot is the load-bearing half. `setAvatar` would satisfy the
+    // first assertion exactly as well, and it rewrites updatedAt — which is
+    // `avatarVersion` — so every deploy would invalidate the year-long
+    // immutable copy every browser had cached, for every bot at once.
+    relay = await withPopulation(0);
+    const dir = relay.dataDir;
+    leftovers.push(dir);
+    await relay.terminate();
+
+    relay = await withPopulation(2, dir, { PLAYBOT_TICK_MS: '1000' });
+    const born = await settle(dir, 2);
+    expect(born).toHaveLength(2);
+    const first = playbotAvatars(dir);
+    expect(first.map((a) => a.playerId)).toEqual([...born].sort());
+    await relay.terminate();
+
+    relay = await withPopulation(2, dir, { PLAYBOT_TICK_MS: '1000' });
+    await settle(dir, 2);
+    expect(playbotAvatars(dir)).toEqual(first);
   }, 180_000);
 
   it('starts nothing at all when the roster size is zero', async () => {
@@ -387,6 +426,7 @@ describe('the roster the controller is shown', () => {
       save: () => {
         throw new Error('nothing in this test provisions');
       },
+      ensureAvatar: () => {},
       pairingView: () => {
         throw new Error('nothing in this test dispatches');
       },
@@ -508,6 +548,7 @@ describe('§2.11: which of two comparable tables a bot walks up to', () => {
         // nothing but the history can separate them. This is the store's job
         // in production too: the listing carries an id and the ratings and the
         // pair history come from the database beside it.
+        ensureAvatar: () => {},
         pairingView: (_selfId, ids) => {
           asked = ids;
           return {
@@ -602,7 +643,26 @@ describe('a bot plays more than one match', () => {
       // Barely-there opponents, so a first-to-3 match is over in seconds.
       // `tests/playbotTraits.test.ts` owns how good a bot is; what is under
       // test here is that a finished one is sent somewhere again.
-      traitsFor: (u) => ({ ...seedTraits(u), skill: MIN_AI_COMPETENCE }),
+      //
+      // The APPETITES are pinned too, and that is not tidying. `actionFor` is
+      // an argmax over three seeded numbers and the seed is the USERNAME, so
+      // this test was silently depending on what the name list happened to
+      // give bots 0 and 1: it drew host/host, the idle-lobby window resolved
+      // it, and the assertion held. Renaming the roster drew host/queue
+      // instead — one bot at a table nobody joins, one in a queue where
+      // bot-vs-bot needs a second queuer — and two bots then have no way to
+      // meet at all, so the suite failed on a name change with nothing about
+      // dispatch broken.
+      //
+      // Host/host is the case the window and the jitter below exist for, so it
+      // is asked for rather than hoped for.
+      traitsFor: (u) => ({
+        ...seedTraits(u),
+        skill: MIN_AI_COMPETENCE,
+        hostAppetite: 1,
+        joinAppetite: 0.5,
+        queueAppetite: 0,
+      }),
       store: {
         load: () => [...rows.values()],
         save: (botId, deviceCookie, traits) => {
@@ -622,6 +682,7 @@ describe('a bot plays more than one match', () => {
             tier: 'unranked' as const,
           });
         },
+        ensureAvatar: () => {},
         pairingView: flatPairingView,
       },
       live: () => ({
@@ -711,6 +772,7 @@ describe('a driver the controller has stopped naming', () => {
             tier: 'unranked' as const,
           });
         },
+        ensureAvatar: () => {},
         pairingView: flatPairingView,
       },
       live: () => ({
@@ -797,6 +859,7 @@ const seatedAgainstOneBot = async (
           tier: 'unranked' as const,
         });
       },
+      ensureAvatar: () => {},
       pairingView: flatPairingView,
     },
     live: () => ({
@@ -1116,6 +1179,7 @@ describe('a dispatch that throws', () => {
             tier: 'unranked' as const,
           });
         },
+        ensureAvatar: () => {},
         pairingView: () => {
           throw new Error('database is locked');
         },
