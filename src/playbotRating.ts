@@ -71,6 +71,22 @@ export const BOT_PAIR_BANDS: readonly PairBand[] = [
  */
 export const BOT_PAIR_CAP = BOT_PAIR_BANDS[BOT_PAIR_BANDS.length - 1]!.through;
 
+/**
+ * The prior-pair count past which a BOT-involved pair stops being FULL-VALUE
+ * evidence — the ladder's first rung, derived rather than written twice.
+ *
+ * Not the same question as `BOT_PAIR_CAP` and the difference is a ladder
+ * rather than a rating: the cap is where a pair stops counting at all, and a
+ * bot tapering its rematch offers across the whole span of it can put a dozen
+ * matches into one pair. Placement is `PLACEMENT_GAMES` (5) and the first
+ * moves 4.21 mu, so that is enough to carry an account from unranked to
+ * Grandmaster without either side meeting anybody else — which is exactly the
+ * ladder the population produced. Tapered over this instead, a pair plays
+ * about two and moves on, and five placement games need at least three
+ * opponents.
+ */
+export const BOT_PAIR_FULL_VALUE = BOT_PAIR_BANDS[0]!.through;
+
 /** §2.3, two humans. Wider throughout — hard cap from match 25. */
 export const HUMAN_PAIR_BANDS: readonly PairBand[] = [
   { through: 8, gain: 1.0, loss: 1.0 },

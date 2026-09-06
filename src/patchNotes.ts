@@ -38,7 +38,7 @@ export const PATCH_NOTES: PatchNote[] = [
     date: '2026-09-06',
     lines: [
       'The regulars share the games out properly now. Everyone gets a turn, and playing well no longer takes you out of the rotation.',
-      'They play a wider range of opponents instead of the same face twice, so a rank means more than one lucky matchup.',
+      'They play a wider range of opponents instead of the same face over and over, so a rank means more than one lucky matchup.',
       'A lot more of them are on court at once, so there is usually somebody around.',
       'One that gets stuck waiting now goes and finds something else to do.',
       'Their ranks start over from scratch, because the old ones were built on all of the above being broken.',
