@@ -277,9 +277,11 @@ describe('no functional bot- prefix read survives', () => {
     { file: 'server/db.ts', contains: "SELECT id, ? FROM players WHERE id LIKE 'bot-%'", why: 'bot_accounts_backfill_v1' },
     { file: 'src/profileRules.ts', contains: '/^(dev_|bot-)/', why: 'isLinkableId profile-shape test' },
   ];
-  // Roster DATA rather than a functional read: every seed id literally starts
-  // with the prefix because insertBot's guard demands it.
-  const DATA_FILES = ['server/bots.ts'];
+  // Nothing left in this category. `server/bots.ts` was roster DATA whose seed
+  // ids all began with the prefix because insertBot's guard demands it; the
+  // curated roster is gone (roster_retire_v1), so the exemption goes with it
+  // rather than sitting here as a licence nobody needs.
+  const DATA_FILES: string[] = [];
 
   it('finds none outside the three named exemptions', async () => {
     const fsp = await import('node:fs');

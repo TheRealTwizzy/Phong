@@ -86,7 +86,6 @@ import {
   RANK_MOVE_EPSILON,
   rankMoveSize,
 } from '../src/rating';
-import { BotSeed, botProfileFields } from './bots';
 import { PLAYBOT_NAMES, defaultPlaybotName } from './playbotNames';
 import {
   MISSION_POOL,
@@ -1448,6 +1447,10 @@ class GameDatabase {
     // human — which would put the whole roster on the human ladder.
     this.claimPrefixedBots();
     this.reloadBotAccounts();
+    // After both, because it reads `bot_accounts` to tell furniture from a
+    // drivable account and the backfill above is what puts the legacy
+    // prefixed rows in there at all.
+    this.retireCuratedRoster();
     // LAST, and after the roster is in `bot_accounts`: this reads that table
     // to exempt the curated bots, and it clears the counters every backfill
     // above spent its run deriving. Both orders end in the same state; last
@@ -1659,6 +1662,63 @@ class GameDatabase {
 
     this.setMeta(KEY, now);
     if (renamed) console.log(`playbot_names_v1: renamed ${renamed} play-bot account(s)`);
+  }
+
+  /**
+   * Delete the curated leaderboard roster.
+   *
+   * `server/bots.ts` seeded eight accounts with fabricated careers because a
+   * launched deployment had no players and the boards refuse rows of zeros, so
+   * the first person to open the leaderboard saw an empty list and the second
+   * saw themselves alone at rank 1. Play-bots now do that job with records
+   * they actually earned, so the furniture goes rather than being hidden:
+   * eight accounts with invented match counts, reachable through the public
+   * profile route, are worse than an honest short board.
+   *
+   * Through `deleteAccount` and never a bare DELETE. That is the function that
+   * walks PLAYER_KEYED_TABLES and clears `device_links` in BOTH directions,
+   * and a surviving link row resolves as `superseded` — a full-screen wall
+   * telling somebody their account is live elsewhere, about an account that is
+   * live nowhere. `wipe_v1` shipped without dropping that table and learned it
+   * the same way.
+   *
+   * Keyed on `deviceCookie IS NULL`, the schema's own discriminator between
+   * furniture and a drivable play-bot and the same test `playbotAccounts()`
+   * asks. Never the `bot-` id prefix: that is D26's retired classifier and
+   * `tests/botIdentity.test.ts` greps the tree for it.
+   *
+   * `bot_accounts` is cleared by hand because it is keyed `botId` and
+   * deliberately not `playerId` — a `playerId` column there would drag roster
+   * rows onto a human's device on sign-in — so it is not in
+   * PLAYER_KEYED_TABLES and `deleteAccount` cannot see it. The cache is
+   * reloaded AFTER the loop, never inside a transaction: it is derived state
+   * that must equal the table once a mutation has committed, and a stale id
+   * makes `isBotAccount` answer true for an account that no longer exists.
+   */
+  private retireCuratedRoster(): void {
+    const KEY = 'roster_retire_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `SELECT b.botId AS botId
+           FROM bot_accounts b JOIN players p ON p.id = b.botId
+          WHERE b.deviceCookie IS NULL`
+      )
+      .all() as unknown as Array<{ botId: string }>;
+    let removed = 0;
+    for (const row of rows) {
+      // Per-row, so one failure costs one account rather than the boot — the
+      // same granularity seedBotRoster used when it was creating them.
+      try {
+        this.deleteAccount(row.botId);
+        this.stmt('DELETE FROM bot_accounts WHERE botId = ?').run(row.botId);
+        removed += 1;
+      } catch (e) {
+        console.warn(`roster_retire_v1: could not remove ${row.botId}:`, (e as Error)?.message ?? e);
+      }
+    }
+    if (removed) this.reloadBotAccounts();
+    this.setMeta(KEY, new Date().toISOString());
+    if (removed) console.log(`roster_retire_v1: removed ${removed} curated roster account(s)`);
   }
 
   private relabelChaosMatches(): void {
@@ -3567,43 +3627,6 @@ class GameDatabase {
       .run(bot.id, now, ...TRAIT_KEYS.map((k) => traits[k]));
     botAccountIds.add(bot.id);
     return this.readProfile(bot.id)!;
-  }
-
-  /**
-   * Seed the curated bot roster, once per database.
-   *
-   * A launched deployment has no players and the boards refuse rows of zeros,
-   * so the leaderboard opened empty — and stayed close to empty long enough
-   * for the ladder to be invisible to exactly the players deciding whether to
-   * climb it. Bot rows carry `rank: null` and never shift a human's number,
-   * which is what makes them safe to show at all.
-   *
-   * One-shot and flagged, like every other migration here: re-running is a
-   * no-op, so a restart cannot resurrect a bot an operator deleted on purpose.
-   *
-   * A roster name may already be held by a human on an existing deployment —
-   * the username index is unique and case-insensitive, so inserting would
-   * throw. That is per-bot recoverable and must never take the boot down with
-   * it: the collision is skipped and named in the log, the rest of the roster
-   * still lands, and the flag is still stamped so this does not retry forever.
-   */
-  public seedBotRoster(roster: BotSeed[]): { inserted: number; skipped: string[] } {
-    const KEY = 'bot_roster_v1';
-    if (this.getMeta(KEY)) return { inserted: 0, skipped: [] };
-    let inserted = 0;
-    const skipped: string[] = [];
-    for (const bot of roster) {
-      try {
-        this.insertBot(botProfileFields(bot));
-        inserted++;
-      } catch (e: any) {
-        skipped.push(`${bot.username} (${e?.message || 'insert failed'})`);
-      }
-    }
-    this.setMeta(KEY, new Date().toISOString());
-    if (inserted) console.log(`bot_roster_v1: seeded ${inserted} bot(s) onto the leaderboard`);
-    if (skipped.length) console.log(`bot_roster_v1: skipped ${skipped.length} — ${skipped.join(', ')}`);
-    return { inserted, skipped };
   }
 
   public recordMatch(

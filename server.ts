@@ -5,7 +5,6 @@ import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DATA_DIR, db, isBotAccount, RecordMatchContext } from './server/db';
-import { BOT_ROSTER } from './server/bots';
 import {
   clearSessionCookie,
   deviceIdentity,
@@ -4413,11 +4412,6 @@ async function startServer() {
     serverError(res, err);
   });
 
-  // The leaderboard's pace-setters. One-shot and flagged in the DB, so this
-  // is a no-op on every boot after the first — it lives here rather than in
-  // the schema migrations because a curated roster is a deployment decision,
-  // not a shape the database needs to be correct.
-  db.seedBotRoster(BOT_ROSTER);
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Split-Screen Half Pong server running at http://0.0.0.0:${PORT}`);

@@ -155,12 +155,22 @@ describe('playbot_names_v1', () => {
       .toEqual({ n: 1 });
   });
 
-  it('leaves the curated roster alone', () => {
+  it('spends no name on the curated roster', () => {
     // `deviceCookie IS NULL` is the schema's own discriminator between
     // furniture and a drivable account — the same test `playbotAccounts()`
     // asks. Keying on the `bot-` id prefix instead would be D26's classifier,
     // which tests/botIdentity.test.ts greps the tree for.
-    expect(nameOf('bot-ladder-01')).toBe('CircuitPup');
+    //
+    // Asserted through the CURSOR rather than by reading the row back, because
+    // `roster_retire_v1` deletes the furniture later in the same boot and
+    // there is nothing left to look at. That is the sharper assertion anyway:
+    // a rename that failed to skip it would have spent a list entry on it, so
+    // the three play-bots would each have shifted one name along — which is
+    // exactly what the first test in this block pins.
+    expect(read((h) => h.prepare('SELECT id FROM players WHERE id = ?').get('bot-ladder-01')))
+      .toBeUndefined();
+    expect(nameOf(BOTS[2]!.id)).toBe(PLAYBOT_NAMES[3]);
+    expect(nameOf(BOTS[2]!.id)).not.toBe(PLAYBOT_NAMES[4]);
   });
 
   it('stamps usernameChangedAt, so the new name gets its own lock', () => {
