@@ -142,9 +142,9 @@ export interface PopulationTarget {
  * Vanguard the answer was `['casual']` and nothing else, for the life of that
  * account. Casual is the one room with `ranked: false`. Every bot that got
  * good was therefore exiled to the only room that could not rate it, and the
- * population could never grow a top — measured over 30 simulated days, a top
- * rating of mu 30.0 and not one account past Grandmaster, with the highest
- * SKILLED bot on the roster ending the month having played two ranked games.
+ * population could never grow a top. That is arithmetic rather than a
+ * measurement: `venuesFor` filters this list through `roomEntryVerdict`, and
+ * past a tier ceiling there is nothing left in it that rates.
  *
  * Derived rather than hand-listed, so a bracket added to ROOMS cannot leave
  * the population behind — the never-model-it-twice rule this feature has
@@ -274,9 +274,11 @@ export function targetActiveCount(s: PopulationSnapshot): number {
  * a homeostat: on an idle server — the server the population exists for — it
  * permanently activated whoever sat nearest mu 25 and stopped choosing any bot
  * that had climbed away from it, so a roster could never develop a top.
- * Measured over 30 simulated days, a top rating of 30.0 against 49.0 under
- * round-robin, with the highest-SKILLED account finishing the month on two
- * ranked games.
+ *
+ * No simulation is needed to see it and none is quoted: the ordering is
+ * `|mu - bandCentre|`, the active set is about six of sixty, and a bot that
+ * has won its way to mu 33 sits behind every account still near the start.
+ * WINNING IS WHAT TOOK A BOT OUT OF THE POPULATION.
  *
  * That is also why the replacement is stronger against §4.13 rather than
  * weaker: the old idle rule was the one thing in the selection path naming a

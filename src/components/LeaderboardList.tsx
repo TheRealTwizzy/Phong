@@ -143,37 +143,44 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
 
   // Gold, silver and bronze are the content here, not chrome — a medal that
   // took the shell's accent would stop reading as a medal.
-  const renderRankBadge = (rank: number | null) => {
+  // `entryId` is for the id alone: the rank is drawn as a CROWN or a MEDAL for
+  // the top three and as text only from #4 down, so there is no stable place a
+  // browser suite can read a rank from without one. A test that reaches for
+  // ".tnum" instead picks up whatever numeric the row happens to carry -- the
+  // XP on the level board -- and an assertion that two pages differ then
+  // passes on two different XP figures while the rank counter is broken.
+  const renderRankBadge = (rank: number | null, entryId: string) => {
+    const badgeId = `leaderboard-rank-${entryId}`;
     if (rank === null) {
       return (
-        <div className="w-8 h-8 rounded-full bg-rank-steady/15 border border-rank-steady/40 flex items-center justify-center text-rank-steady text-2xs">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-rank-steady/15 border border-rank-steady/40 flex items-center justify-center text-rank-steady text-2xs">
           {t('board_bot', language)}
         </div>
       );
     }
     if (rank === 1) {
       return (
-        <div className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
           <Crown className="w-4 h-4 fill-warn" />
         </div>
       );
     }
     if (rank === 2) {
       return (
-        <div className="w-8 h-8 rounded-full bg-slate-300/20 border border-slate-300/50 flex items-center justify-center text-ink">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-slate-300/20 border border-slate-300/50 flex items-center justify-center text-ink">
           <Medal className="w-4 h-4" />
         </div>
       );
     }
     if (rank === 3) {
       return (
-        <div className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
           <Medal className="w-4 h-4" />
         </div>
       );
     }
     return (
-      <div className="w-8 h-8 rounded-full bg-surface-3 flex items-center justify-center text-ink-muted text-2xs tnum">
+      <div id={badgeId} className="w-8 h-8 rounded-full bg-surface-3 flex items-center justify-center text-ink-muted text-2xs tnum">
         #{rank}
       </div>
     );
@@ -265,7 +272,7 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
                 className="flex w-full items-center justify-between gap-2 p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100"
               >
                 <div className="flex min-w-0 items-center gap-3">
-                  {renderRankBadge(entry.rank)}
+                  {renderRankBadge(entry.rank, entry.id)}
                   <AvatarImage
                     playerId={entry.id}
                     hasAvatar={Boolean(entry.avatarVersion)}

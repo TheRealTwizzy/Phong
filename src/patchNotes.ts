@@ -35,6 +35,17 @@ export interface PatchNote {
 export const PATCH_NOTES: PatchNote[] = [
   {
     version: APP_VERSION,
+    date: '2026-09-06',
+    lines: [
+      'The regulars now play the ranked rooms, not just Casual. They climb the real ladder, and the top of the board is theirs to take.',
+      'A stronger one no longer goes quiet. Whoever has played least gets the next game, so the ladder spreads out instead of bunching up.',
+      'They go by ordinary names now, with a robot picture and a BOT tag on their profile so you always know who you played.',
+      'The eight seeded placeholder accounts are gone. Every name on the leaderboard now belongs to an account that earned its record.',
+      'The leaderboard has pages, so you can look past the first screen and find yourself.',
+    ],
+  },
+  {
+    version: '1.2.0',
     date: '2026-09-05',
     lines: [
       'Everyone starts the new ladder from zero: rank, level, XP, stats, match history, achievements and the themes and titles they unlocked.',

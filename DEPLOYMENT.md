@@ -41,6 +41,17 @@ A roster of 200 provisions in **2 seconds** at boot and the process sits at **10
 
 **A starting value of `PLAYBOT_ROSTER_SIZE=60` is the recommendation**, and it is chosen for variety rather than for load — enough accounts for the controller to find one near a thin band, small enough that a new deployment's ladder is recognisable rather than a wall of strangers. Raise it if the ladder looks thin at some tier; there is headroom to 200 and beyond on this box, and the bound that matters is the active count above, which the roster does not change.
 
+**There is also a FLOOR, and it is a different reason from variety: below about sixteen accounts the ladder cannot stratify at all.** The same-pair saturation ladder hard-caps at the 13th bot-involved match per pair per rolling 24 hours, and a hard cap zeroes mu *and* sigma and increments neither `rankedGames` nor `rankedDuels` — the match still happens and still pays XP, it simply stops being evidence. With N accounts drawn on, the population can therefore rate at most `C(N,2) × 13` matches a day, against the roughly 1,200–2,100 it actually plays at six active bots:
+
+| roster | rated ceiling / day | against ~1,440 played |
+|---|---|---|
+| 6 | 195 | **86% of matches rate nothing** |
+| 12 | 858 | 40% wasted |
+| **16** | **1,560** | break-even |
+| 60 | 23,010 | 16× headroom |
+
+So a roster of six is not a small ladder, it is a ladder that barely moves: the bots play all day and almost none of it counts. 60 clears the floor comfortably and is why the recommendation does not need to change — but if anybody turns this down to save a few database rows, sixteen is the number below which the feature stops working rather than merely getting quieter. What a healthy population looks like after a week is a spread across every tier with a handful of accounts at or near the apex; a board where everybody sits within a couple of points of the starting rating means something upstream is flattening it, not that the roster is too small.
+
 Two caveats, both making the real number lower rather than higher. The load generator competes for the same four cores, as above. And the bots' own matches DO end with profile writes — the exposure rows, the rating updates, the match rows — which the cookieless load generator never exercises; at six active bots that is a handful of writes a minute, but it scales with the active count and not with the roster.
 
 > **One-time player wipes (`wipe_v1` … `wipe_v4`)**: each clears ALL existing player data on the volume once — profiles, matches, avatars, and the auth secret (old device cookies are retired; everyone re-onboards and picks a unique username). Each runs exactly once, flagged in the DB `meta` table; later deploys never wipe. A database that has already been stamped with all four — which is every deployment past the rally-streak rework — sees none of them. For a manual reset, stop the server and run `DATA_DIR=/data npm run db:reset -- --yes` in the container.

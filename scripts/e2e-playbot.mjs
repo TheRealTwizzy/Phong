@@ -110,7 +110,33 @@ await human.waitForSelector('#public-profile-username', { timeout: 10000 });
 if (!(await human.$('#public-profile-bot-badge'))) fail(`${botName}'s profile carries no BOT badge`);
 // And it is a full card rather than a reduced one -- same shape a human gets.
 if (!(await human.$('#public-history-tab-all'))) fail("a bot's profile withholds its match history");
-ok('the opponent name opens an ordinary public profile, badged BOT');
+
+// The NAME no longer discloses, and the avatar is what replaced it.
+//
+// Bots were provisioned as RallyNNBot, which disclosed on every surface a name
+// reaches -- the label above, the lobby, the result strip, the denormalized
+// names in history -- none of which carries the badge. Human-looking handles
+// take that away, so the badge and a shared robot avatar are jointly what tell
+// a player who they played. Asserted TOGETHER, in one leg, for exactly that
+// reason: a check on either alone stays green while the product has stopped
+// disclosing.
+if (/^Rally\d+Bot$/.test(botName)) {
+  fail(`the bot is still named ${botName} -- the name list or the rename regressed`);
+}
+const avatarImg = await human.$('#public-profile-card img[src*="/api/avatar/"]');
+if (!avatarImg) fail(`${botName}'s profile falls back to the empty avatar tile`);
+const avatarSrc = await avatarImg.getAttribute('src');
+const avatarRes = await human.evaluate(
+  async (src) => {
+    const r = await fetch(src);
+    return { status: r.status, type: r.headers.get('content-type') };
+  },
+  avatarSrc
+);
+if (avatarRes.status !== 200 || !/image\/png/.test(avatarRes.type || '')) {
+  fail(`the bot avatar did not serve a PNG: ${JSON.stringify(avatarRes)}`);
+}
+ok('the opponent has a human name, a robot avatar and a BOT badge');
 await human.click('#btn-close-public-profile');
 
 // ---- 3. The match finishes and the strip says what it did -----------------
