@@ -245,19 +245,16 @@ describe('a wipe takes the bot roster with it, table AND cache', () => {
       raw.close();
     }
 
-    // And a re-seed repopulates both: the wipe clears `meta`, so bot_roster_v1
-    // is unstamped and the boot after it seeds again. Through the real
-    // seedBotRoster rather than insertBot, because that guard is part of what
-    // is being asserted — and with a COMPLETE BotSeed, since botProfileFields
-    // derives rankedGames from matchesPlayed and a partial one lands NaN.
-    const seeded = booted.seedBotRoster([
-      {
-        id: 'bot-wiped-01', username: 'WipedBot', mu: 24, xp: 500,
-        matchesPlayed: 20, matchesWon: 12, highestRally: 8, totalPointsScored: 90,
-      },
-    ]);
-    expect(seeded.skipped).toEqual([]);
-    expect(seeded.inserted).toBe(1);
+    // And a bot written after the wipe classifies as one: the marker table is
+    // recreated by the schema pass and the in-memory cache follows it.
+    //
+    // Through `insertBot` now that the curated roster is gone. This used to go
+    // through `seedBotRoster`, on the grounds that its one-shot guard was part
+    // of what was being asserted -- but the roster it seeded was leaderboard
+    // furniture with fabricated careers, and play-bots earn theirs, so
+    // `roster_retire_v1` removed it and the seeder with it. What survives is
+    // `insertBot`, which is what a test builds a bot fixture with.
+    booted.insertBot({ id: 'bot-wiped-01', username: 'WipedBot', mu: 24, xp: 500 });
     expect(isBotAccount('bot-wiped-01')).toBe(true);
   });
 });

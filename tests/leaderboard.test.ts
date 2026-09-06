@@ -299,3 +299,86 @@ describe('a qualified bot has a ladder position, in its own lane', () => {
     expect(human.ladderPosition).toBe(1);
   });
 });
+
+describe('paging the board', () => {
+  // The board fetched a hard-coded limit of 50 and rendered whatever came
+  // back, so past 50 accounts nobody below could be seen at all. Paged the
+  // same way /api/matches/me already is: one page of rows plus the `total`
+  // counting the identical filter, so the caller does not need a second query
+  // shape to keep in agreement.
+
+  const SORTS = ['elo', 'level', 'rally', 'wins'] as const;
+
+  it('is the same rows as the unpaged board, in the same order', () => {
+    for (const sort of SORTS) {
+      const whole = db.getLeaderboard(sort, 100, true);
+      const paged = [0, 1, 2].flatMap((n) => db.getLeaderboardPage(sort, {
+        limit: 2,
+        offset: n * 2,
+        includeBots: true,
+      }).entries);
+      expect(paged.map((e) => e.id)).toEqual(whole.slice(0, 6).map((e) => e.id));
+    }
+  });
+
+  it('CONTINUES the human rank counter onto page two', () => {
+    // The one real problem in paging this board. `rank` is a dense counter
+    // built in the loop over the page's own rows, incremented only for
+    // non-bots -- so page two restarts it at 1 and two different players are
+    // both shown as #1. It is a property of the ROW's position in the whole
+    // ordering, not of the page, and the page has to be told where it starts.
+    for (const sort of SORTS) {
+      const whole = db.getLeaderboard(sort, 100, true);
+      const expected = whole.slice(2, 5).map((e) => e.rank);
+      const page = db.getLeaderboardPage(sort, { limit: 3, offset: 2, includeBots: true });
+      expect({ sort, ranks: page.entries.map((e) => e.rank) }).toEqual({ sort, ranks: expected });
+    }
+  });
+
+  it('counts bots skipped on earlier pages, not just the rows', () => {
+    // The half a naive `offset + i + 1` gets wrong. With bots shown they
+    // occupy rows without consuming a rank, so the first human on page two is
+    // NOT the (offset+1)th human -- and the two only diverge once a bot has
+    // appeared above the page boundary, which is exactly the fixture here.
+    const whole = db.getLeaderboard('elo', 100, true);
+    // Start the page AT the first human who has a bot somewhere above them —
+    // the only boundary where the two answers can differ at all.
+    const offset = whole.findIndex((e, i) => !e.isBot && whole.slice(0, i).some((x) => x.isBot));
+    expect(offset, 'fixture has no human below a bot').toBeGreaterThan(0);
+
+    const humansBefore = whole.slice(0, offset).filter((e) => !e.isBot).length;
+    // The assertion is only worth anything if the two answers diverge here.
+    expect(humansBefore + 1, 'fixture makes the row index the right answer').not.toBe(offset + 1);
+
+    const page = db.getLeaderboardPage('elo', { limit: 3, offset, includeBots: true });
+    expect(page.entries[0]!.isBot).toBeFalsy();
+    expect(page.entries[0]!.rank).toBe(humansBefore + 1);
+  });
+
+  it('ranks humans identically whether bots are shown or hidden', () => {
+    // The invariant the unpaged board already holds, carried onto a page: a
+    // human's number is theirs and does not move because somebody toggled a
+    // filter.
+    const shown = db.getLeaderboardPage('elo', { limit: 50, offset: 0, includeBots: true });
+    const hidden = db.getLeaderboardPage('elo', { limit: 50, offset: 0 });
+    const mine = new Map(shown.entries.filter((e) => !e.isBot).map((e) => [e.id, e.rank]));
+    for (const e of hidden.entries) expect({ id: e.id, rank: e.rank }).toEqual({ id: e.id, rank: mine.get(e.id) });
+  });
+
+  it('reports a total counting the same filter as the rows', () => {
+    for (const sort of SORTS) {
+      const whole = db.getLeaderboard(sort, 1000, true);
+      expect({ sort, total: db.getLeaderboardPage(sort, { limit: 1, offset: 0, includeBots: true }).total })
+        .toEqual({ sort, total: whole.length });
+      const humans = db.getLeaderboard(sort, 1000).length;
+      expect({ sort, total: db.getLeaderboardPage(sort, { limit: 1, offset: 0 }).total })
+        .toEqual({ sort, total: humans });
+    }
+  });
+
+  it('answers an empty page past the end rather than throwing', () => {
+    const page = db.getLeaderboardPage('elo', { limit: 10, offset: 10_000, includeBots: true });
+    expect(page.entries).toEqual([]);
+    expect(page.total).toBeGreaterThan(0);
+  });
+});

@@ -19,6 +19,18 @@
 // have had*, never as *a bot may not give a person a game*.
 
 import type { PlaybotTraits } from './playbotTraits';
+import { roomById, roomEntryVerdict, roomsOf } from '../src/venues';
+
+/**
+ * Who a bracket judges — level and visible tier.
+ *
+ * Derived from `roomEntryVerdict`'s own parameter rather than naming `Tier`,
+ * so this module still imports nothing from `../src/rating`. That absence is
+ * asserted: the guard next door reads this file for a write path to a rating,
+ * and the cheapest way to keep it honest is to have no reason to reach for
+ * that module at all.
+ */
+type Bracketed = NonNullable<Parameters<typeof roomEntryVerdict>[1]>;
 
 /** One bot the controller could switch on. */
 export interface PopulationBot {
@@ -36,6 +48,16 @@ export interface PopulationBot {
   mu: number;
   /** Matches it has played in the recent window, for spreading participation. */
   recentMatches: number;
+  /**
+   * When it was last SENT somewhere, ms epoch, or 0 for never.
+   *
+   * The attempt rather than the result, deliberately. A bot whose connect
+   * keeps failing records no match, so `recentMatches` never rises — and with
+   * that as the only idle key it stays permanently first in line and takes
+   * every slot for the life of the process. Rotating on the dispatch is what
+   * makes participation spread rather than reward never finishing anything.
+   */
+  lastDispatchedAt: number;
   /**
    * The venues the bracket gate would actually let it into, as the caller
    * judges them — the same `allowed` list `chooseVenue` is handed.
@@ -102,6 +124,69 @@ export interface PopulationTarget {
   activate: Array<{ id: string; action: PopulationAction; venue?: string }>;
   /** Bots that should stand down once their current match ends. */
   deactivate: string[];
+}
+
+/**
+ * The venues a bot may open a table in — every listable PvP room.
+ *
+ * This was `['casual', 'beginner']`, and the reasoning was the wrong way
+ * round: "the two ungated ones", because a bracketed room refuses a host who
+ * may not play there and the brackets exist to sort HUMANS by tier. But a
+ * play-bot IS a player on that ladder, and what keeps one out of a room it may
+ * not enter is `venuesOpenTo` below, which asks the relay's own
+ * `roomEntryVerdict` — not this constant, which was answering the same
+ * question a second time and answering it wrong.
+ *
+ * What the narrow list actually did: `beginner` carries `tierMax: contender`,
+ * whose band ends at mu 22, so the moment a bot's results carried it past
+ * Vanguard the answer was `['casual']` and nothing else, for the life of that
+ * account. Casual is the one room with `ranked: false`. Every bot that got
+ * good was therefore exiled to the only room that could not rate it, and the
+ * population could never grow a top. That is arithmetic rather than a
+ * measurement: `venuesFor` filters this list through `roomEntryVerdict`, and
+ * past a tier ceiling there is nothing left in it that rates.
+ *
+ * Derived rather than hand-listed, so a bracket added to ROOMS cannot leave
+ * the population behind — the never-model-it-twice rule this feature has
+ * arrived at from seven directions. `roomsOf` drops `listable: false`, which
+ * is what keeps `_queue` (the matchmaker's own room) and `_default` (where a
+ * venue-less table lands) out of reach: a bot hosting in either would open a
+ * table nobody can browse to.
+ *
+ * The ladder is continuous and therefore self-sequencing. Every bracket above
+ * `beginner` has a `tierMin`, and `roomEntryVerdict` waives the level gate
+ * once a tier floor is met, so a fresh bot still starts in casual/beginner and
+ * walks up as its own results place it. Nothing here chooses where it lands.
+ */
+export const OPEN_VENUES = roomsOf('pvp').map((r) => r.id);
+
+/** The rooms one bot may enter, judged by the predicate the relay asks. */
+export function venuesOpenTo(who: Bracketed): string[] {
+  return OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), who).ok);
+}
+
+/**
+ * The rooms THIS roster can reach, which is not the same question as
+ * OPEN_VENUES and stopped being the same answer when that list grew brackets.
+ *
+ * It exists because demand and supply must be judged by one predicate. The
+ * demand count reads every public table with a lone human at it; against the
+ * raw constant, a human hosting in `advanced` counts as somebody to serve
+ * while no bot on the roster is Ace yet — `unmetHumanDemand` inflates `want`,
+ * the slot loop correctly finds nobody eligible and breaks, and the surplus is
+ * spent by the baseline arm on a bot playing with itself. That is the fading
+ * population bound defeated by somebody the population cannot serve, which is
+ * the CPU-table finding wearing a third coat.
+ *
+ * Empty for an empty roster, deliberately: falling back to OPEN_VENUES there
+ * would restore exactly the over-count this removes.
+ *
+ * Ordered by OPEN_VENUES rather than by the roster, so the answer does not
+ * depend on which account happened to load first.
+ */
+export function servableVenues(bots: Bracketed[]): string[] {
+  const reach = new Set(bots.flatMap((b) => venuesOpenTo(b)));
+  return OPEN_VENUES.filter((id) => reach.has(id));
 }
 
 /**
@@ -180,18 +265,52 @@ export function targetActiveCount(s: PopulationSnapshot): number {
  * bot's rating moves because it was chosen, and a roster with nobody near the
  * band simply supplies its nearest, which is the honest answer.
  *
- * Ties break on who has played LEAST recently, so participation spreads rather
- * than falling on the same handful every evening.
+ * ABSENT IS AN ANSWER, NOT A MISSING VALUE, and the arms are the whole design.
+ * A centre exists when a named human is waiting, and preferring the bot whose
+ * rating suits them is a service decision about that person. With nobody
+ * waiting there is no band to serve, so this reads no rating at all.
+ *
+ * The caller used to substitute START_MU for the absent case, which made this
+ * a homeostat: on an idle server — the server the population exists for — it
+ * permanently activated whoever sat nearest mu 25 and stopped choosing any bot
+ * that had climbed away from it, so a roster could never develop a top.
+ *
+ * No simulation is needed to see it and none is quoted: the ordering is
+ * `|mu - bandCentre|`, the active set is about six of sixty, and a bot that
+ * has won its way to mu 33 sits behind every account still near the start.
+ * WINNING IS WHAT TOOK A BOT OUT OF THE POPULATION.
+ *
+ * That is also why the replacement is stronger against §4.13 rather than
+ * weaker: the old idle rule was the one thing in the selection path naming a
+ * target rating, so climbing was punished with deactivation. This cannot
+ * express a target, because with no centre it does not read `mu`. Nothing is
+ * written either way — the only lever here is which dormant account gets a
+ * socket.
+ *
+ * Rejected, so they are not re-proposed: the population's own median (still an
+ * attractor, and it flattens from the middle so the spread can never open); a
+ * sweeping centre to "fill thin tiers" (steering in the plainest form the rule
+ * forbids); and an anchor cohort picked by nearest-mu (puts a rating term back
+ * in the idle path, and MINIMISES what builds a ladder — an even duel at sigma
+ * 2 moves 0.489 mu against 0.196 for a +6 mismatch, and band-gating idle
+ * pairing cut rated volume 60% without raising the top). Pairing quality has a
+ * home already: `chooseOpponent`'s COMPARABLE_BAND and the queue's own band.
+ *
+ * Ties break on who has played LEAST, then on who was SENT least recently, so
+ * participation spreads rather than falling on the same handful every evening.
  */
 export function rankForActivation(
   roster: PopulationBot[],
-  bandCentre: number
+  bandCentre?: number
 ): PopulationBot[] {
   return [...roster].sort((a, b) => {
-    const da = Math.abs(a.mu - bandCentre);
-    const db = Math.abs(b.mu - bandCentre);
-    if (Math.abs(da - db) > 1e-9) return da - db;
+    if (bandCentre !== undefined) {
+      const da = Math.abs(a.mu - bandCentre);
+      const db = Math.abs(b.mu - bandCentre);
+      if (Math.abs(da - db) > 1e-9) return da - db;
+    }
     if (a.recentMatches !== b.recentMatches) return a.recentMatches - b.recentMatches;
+    if (a.lastDispatchedAt !== b.lastDispatchedAt) return a.lastDispatchedAt - b.lastDispatchedAt;
     return a.id < b.id ? -1 : 1;
   });
 }
@@ -248,7 +367,7 @@ export function demandSplit(s: PopulationSnapshot): { queue: number; table: numb
  */
 export function targetActivation(
   s: PopulationSnapshot,
-  bandCentre: number
+  bandCentre?: number
 ): PopulationTarget {
   const want = targetActiveCount(s);
   const active = new Set(s.activeBotIds);

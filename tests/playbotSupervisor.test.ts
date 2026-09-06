@@ -14,7 +14,7 @@ import {
 } from '../server/playbotSupervisor';
 import { seedTraits, type PlaybotTraits } from '../server/playbotTraits';
 import { MIN_AI_COMPETENCE } from '../src/game/physics';
-import { PATIENCE_MS, targetActivation } from '../server/playbotPopulation';
+import { OPEN_VENUES, PATIENCE_MS, targetActivation } from '../server/playbotPopulation';
 import { START_MU } from '../src/rating';
 import { Phone, sleep, startRelay, type Relay } from './helpers/relay';
 
@@ -93,6 +93,18 @@ const playbots = (dir: string): string[] =>
     ).map((r) => r.botId)
   );
 
+/** (playerId, updatedAt) for every play-bot carrying an avatar. */
+const playbotAvatars = (dir: string): Array<{ playerId: string; updatedAt: string }> =>
+  readDb(dir, (h) =>
+    h
+      .prepare(
+        `SELECT a.playerId AS playerId, a.updatedAt AS updatedAt
+           FROM avatars a JOIN bot_accounts b ON b.botId = a.playerId
+          WHERE b.deviceCookie IS NOT NULL ORDER BY a.playerId`
+      )
+      .all() as Array<{ playerId: string; updatedAt: string }>
+  );
+
 /** Usernames burned out of the pool by accounts that are NOT the roster. */
 const playbotNames = (dir: string): string[] =>
   readDb(dir, (h) =>
@@ -128,7 +140,11 @@ const settle = async (dir: string, want: number): Promise<string[]> => {
  */
 const seatedAtTables = async (base: string): Promise<number> => {
   let n = 0;
-  for (const room of ['casual', 'beginner']) {
+  // Every room the population may open a table in, not the two it used to be
+  // limited to: a bot seated in a bracket is still a bot seated at a table,
+  // and counting a narrower list would let this pass while the dispatch had
+  // stopped working.
+  for (const room of OPEN_VENUES) {
     const body = await (await fetch(`${base}/api/rooms/${room}/tables`)).json();
     n += ((body?.tables ?? []) as Array<{ playerCount: number }>).reduce(
       (t, x) => t + x.playerCount,
@@ -229,6 +245,33 @@ describe('the population starts with the process', () => {
     expect(born).toHaveLength(2);
     // Two accounts, and neither wearing the name the human holds.
     expect(playbotNames(dir)).not.toContain(defaultPlaybotName(0));
+  }, 180_000);
+
+  it('gives every bot the shared avatar, and never re-stamps it', async () => {
+    // Human-looking names take the disclosure out of the name, and most
+    // surfaces that render a name carry no BOT badge — so the avatar is what
+    // is left of §4.11 there. It has to reach the accounts already on disk,
+    // which is why it is a boot pass rather than a step in provisioning.
+    //
+    // The SECOND boot is the load-bearing half. `setAvatar` would satisfy the
+    // first assertion exactly as well, and it rewrites updatedAt — which is
+    // `avatarVersion` — so every deploy would invalidate the year-long
+    // immutable copy every browser had cached, for every bot at once.
+    relay = await withPopulation(0);
+    const dir = relay.dataDir;
+    leftovers.push(dir);
+    await relay.terminate();
+
+    relay = await withPopulation(2, dir, { PLAYBOT_TICK_MS: '1000' });
+    const born = await settle(dir, 2);
+    expect(born).toHaveLength(2);
+    const first = playbotAvatars(dir);
+    expect(first.map((a) => a.playerId)).toEqual([...born].sort());
+    await relay.terminate();
+
+    relay = await withPopulation(2, dir, { PLAYBOT_TICK_MS: '1000' });
+    await settle(dir, 2);
+    expect(playbotAvatars(dir)).toEqual(first);
   }, 180_000);
 
   it('starts nothing at all when the roster size is zero', async () => {
@@ -383,6 +426,7 @@ describe('the roster the controller is shown', () => {
       save: () => {
         throw new Error('nothing in this test provisions');
       },
+      ensureAvatar: () => {},
       pairingView: () => {
         throw new Error('nothing in this test dispatches');
       },
@@ -405,7 +449,11 @@ describe('the roster the controller is shown', () => {
     try {
       const snapshot = sup.snapshot();
       const venuesOf = (id: string) => snapshot.roster.find((b) => b.id === id)!.venues;
-      expect(venuesOf('bot-placed')).toEqual(['casual']);
+      // An Ace is refused `beginner` (tierMax contender) and keeps the middle
+      // of the ladder; an unplaced bot sits below every tierMin and keeps the
+      // bottom. Neither list matters to the point below — what does is that
+      // they do not overlap on the venue the demand names.
+      expect(venuesOf('bot-placed')).toEqual(['casual', 'intermediate', 'advanced']);
       expect(venuesOf('bot-open')).toEqual(['casual', 'beginner']);
       // And therefore the one slot this demand buys goes to the bot that can
       // sit down, not to the one nearest the band.
@@ -415,6 +463,26 @@ describe('the roster the controller is shown', () => {
     } finally {
       await sup.stop();
     }
+  });
+});
+
+describe('the file names no rating target', () => {
+  it('does not substitute START_MU for an absent band centre', () => {
+    // What the substitution did is measured in playbotPopulation.test.ts; what
+    // this pins is that the supervisor has no rating constant left to reach
+    // for. `bandCentre` is `number | undefined` and the absence is the answer
+    // -- with nobody waiting there is no band to serve, so preferring anybody
+    // BY RATING is answering a question nobody asked.
+    //
+    // A source read because the alternative is a behavioural test of an idle
+    // server, which is exactly the shape this suite's own catalogue keeps
+    // finding vacuous: with no human anywhere, every ordering produces some
+    // bot, and 'some bot was chosen' is true of the bug too.
+    const src = fs
+      .readFileSync(path.join(process.cwd(), 'server', 'playbotSupervisor.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(src).not.toContain('START_MU');
   });
 });
 
@@ -480,6 +548,7 @@ describe('§2.11: which of two comparable tables a bot walks up to', () => {
         // nothing but the history can separate them. This is the store's job
         // in production too: the listing carries an id and the ratings and the
         // pair history come from the database beside it.
+        ensureAvatar: () => {},
         pairingView: (_selfId, ids) => {
           asked = ids;
           return {
@@ -574,7 +643,26 @@ describe('a bot plays more than one match', () => {
       // Barely-there opponents, so a first-to-3 match is over in seconds.
       // `tests/playbotTraits.test.ts` owns how good a bot is; what is under
       // test here is that a finished one is sent somewhere again.
-      traitsFor: (u) => ({ ...seedTraits(u), skill: MIN_AI_COMPETENCE }),
+      //
+      // The APPETITES are pinned too, and that is not tidying. `actionFor` is
+      // an argmax over three seeded numbers and the seed is the USERNAME, so
+      // this test was silently depending on what the name list happened to
+      // give bots 0 and 1: it drew host/host, the idle-lobby window resolved
+      // it, and the assertion held. Renaming the roster drew host/queue
+      // instead — one bot at a table nobody joins, one in a queue where
+      // bot-vs-bot needs a second queuer — and two bots then have no way to
+      // meet at all, so the suite failed on a name change with nothing about
+      // dispatch broken.
+      //
+      // Host/host is the case the window and the jitter below exist for, so it
+      // is asked for rather than hoped for.
+      traitsFor: (u) => ({
+        ...seedTraits(u),
+        skill: MIN_AI_COMPETENCE,
+        hostAppetite: 1,
+        joinAppetite: 0.5,
+        queueAppetite: 0,
+      }),
       store: {
         load: () => [...rows.values()],
         save: (botId, deviceCookie, traits) => {
@@ -586,12 +674,15 @@ describe('a bot plays more than one match', () => {
             mu: 25,
             recentMatches: 0,
             // A fresh account, which is what the bracket gate judges an
-            // unplayed bot as — and what makes every OPEN_VENUES room
-            // enterable, since `beginner` carries a ceiling and no floor.
+            // unplayed bot as: below every tierMin, so it reaches `casual` and
+            // `beginner` and nothing above them. (This used to say "every
+            // OPEN_VENUES room", which was true only while that list held the
+            // two ungated ones.)
             level: 1,
             tier: 'unranked' as const,
           });
         },
+        ensureAvatar: () => {},
         pairingView: flatPairingView,
       },
       live: () => ({
@@ -681,6 +772,7 @@ describe('a driver the controller has stopped naming', () => {
             tier: 'unranked' as const,
           });
         },
+        ensureAvatar: () => {},
         pairingView: flatPairingView,
       },
       live: () => ({
@@ -767,6 +859,7 @@ const seatedAgainstOneBot = async (
           tier: 'unranked' as const,
         });
       },
+      ensureAvatar: () => {},
       pairingView: flatPairingView,
     },
     live: () => ({
@@ -1086,6 +1179,7 @@ describe('a dispatch that throws', () => {
             tier: 'unranked' as const,
           });
         },
+        ensureAvatar: () => {},
         pairingView: () => {
           throw new Error('database is locked');
         },

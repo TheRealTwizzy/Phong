@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { validateAvatarPng } from '../server/image';
+import { botAvatarPng } from '../server/botAvatar';
 import { AVATAR_SIZE, AVATAR_MAX_BYTES } from '../src/profileRules';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'phong-avatar-test-'));
@@ -124,5 +125,62 @@ describe('public profiles', () => {
     const pub = db.getPublicProfile('bot-test-01')!;
     expect(pub.isBot).toBe(true);
     expect(pub.username).toBe('TestBot');
+  });
+});
+
+describe('the avatar every play-bot wears', () => {
+  it('is a PNG the upload path itself would accept', () => {
+    // Checked against `validateAvatarPng` and not against a hand-rolled
+    // assertion, deliberately: that is the predicate a human's upload passes,
+    // so the generator cannot drift from the validator without this reddening.
+    // The bytes are produced rather than checked in — `node:zlib` is built in
+    // and PNG is four chunks — because a base64 literal in a repo whose
+    // public/ holds two SVGs is a thing nobody could later tell had been
+    // swapped.
+    const png = botAvatarPng();
+    const check = validateAvatarPng(png);
+    expect(check.ok).toBe(true);
+    expect(check.width).toBe(AVATAR_SIZE);
+    expect(check.height).toBe(AVATAR_SIZE);
+    expect(png.length).toBeLessThanOrEqual(AVATAR_MAX_BYTES);
+  });
+
+  it('is the same bytes every time it is asked for', () => {
+    // Every bot stores its own copy, so a generator that varied would put a
+    // different image on each row and a different `avatarVersion` on each
+    // boot — which is the cache-busting failure `ensureAvatar` exists to
+    // avoid, arriving by another door.
+    expect(botAvatarPng().equals(botAvatarPng())).toBe(true);
+  });
+
+  it('is written once and never re-stamped', () => {
+    // `setAvatar` is an upsert that rewrites updatedAt, and `avatarVersion` is
+    // Date.parse(updatedAt) — so an idempotent boot pass built on it would
+    // bump the version for every bot on EVERY deploy and bust the
+    // `max-age=31536000, immutable` copy every browser had cached.
+    //
+    // The second half is the load-bearing one: the first assertion passes just
+    // as well against setAvatar, which is the bug.
+    const id = 'bot-avatar-once';
+    db.getProfile(id);
+    expect(db.ensureAvatar(id, botAvatarPng())).toBe(true);
+    const first = db.getProfile(id).avatarVersion;
+    expect(first).toBeTruthy();
+
+    expect(db.ensureAvatar(id, botAvatarPng())).toBe(false);
+    expect(db.getProfile(id).avatarVersion).toBe(first);
+  });
+
+  it('does not overwrite an avatar that is already there', () => {
+    // "Make sure one exists" and "write this one" are different intents, which
+    // is why this is not an overload of setAvatar. A bot is never going to
+    // upload its own, but a boot pass that could clobber a row is one nobody
+    // can safely point at a wider set of accounts later.
+    const id = 'bot-avatar-keep';
+    db.getProfile(id);
+    const mine = makePng(AVATAR_SIZE, AVATAR_SIZE, 512);
+    db.setAvatar(id, mine);
+    expect(db.ensureAvatar(id, botAvatarPng())).toBe(false);
+    expect(Buffer.from(db.getAvatar(id)!.data).equals(mine)).toBe(true);
   });
 });

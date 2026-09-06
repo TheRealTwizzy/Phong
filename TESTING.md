@@ -61,13 +61,17 @@ coverage number.
 | `matchmaking` | Who the ranked queue pairs, and how hard it insists (pure) — including the three pair classes and the demand-sized fallback reservation. Two of its cases were vacuous as written: pair-class ties with every seat at the same mu resolved to queue order, so a type-blind matcher satisfied them, and no case discriminated pass 2 from pass 3, because the reservation empties pass 3 whenever an unpaired human is compatible with a bot |
 | `playbotRating` | What a match against a bot is worth: every cell of the three saturation ladders, that the ×0.70 lands on the HUMAN and never the bot, that a hard cap zeroes mu AND sigma, and the neutrality identity `0.5·w·gain + 0.5·w·loss === 0` — which fails against the rejected ×0.70/×0.50 and is the whole argument for the symmetric weight |
 | `playbotTraits` | What one bot IS, and the rule that nothing after creation may steer it. The trait module alone cannot hold that rule — it has no writer BECAUSE the database owns the write — so the assertion reads every server file for an `UPDATE bot_accounts` and names the enclosing METHOD of each trait-carrying INSERT |
-| `playbotPolicy` `playbotPopulation` | What an autonomous bot chooses, and which existing bots should be playing (both pure, both floored at 100/95). The coverage floor found a duplicated rule rather than an untested line: the patience clause existed in two places, and one copy had no test |
+| `playbotPolicy` `playbotPopulation` | What an autonomous bot chooses, and which existing bots should be playing (both pure, both floored at 100/95). The coverage floor found a duplicated rule rather than an untested line: the patience clause existed in two places, and one copy had no test. Plus the two rules that decide whether the population can climb AT ALL: that every tier — `unranked` through `overlord` — has a room in `OPEN_VENUES` it may enter AND that rates it, which nothing stated and which failed from Vanguard up; and that with NO band centre the ordering reads no rating, with the fixture built so the μ40 bot has played least, so restoring the old `START_MU` substitution reddens it. `chooseVenue`'s second draw needs a pool of three or more, which is exactly why no existing case could reach it: every one passed `['casual','beginner']` or `['casual']`, where any index is correct |
+| `playbotNames` | The list bots are created under, and one assertion that matters more than the rest: `defaultPlaybotName` is TOTAL. A bare `NAMES[n]` past the end is `undefined`, which stringifies to `"undefined"` — a string the username regex ACCEPTS — so the failure is one burned name and then a permanent collision, with nothing in a log |
+| `playbotRename` `rosterRetire` | The two one-shots the bot rename needed. The rename asserts what it must NOT touch as carefully as what it must: `bot_accounts` traits byte-identical (a rename must not retune a live bot, and traits are seeded from the username), one name spent per collision rather than the batch aborted, and the curated roster spending no name at all — asserted through the CURSOR, since the retire migration deletes that row later in the same boot and there is nothing left to read |
 | `exposure` `exposureRelay` | The anti-farming store: both seats reading one window, one persisted match counting once however long it ran, the prior/current off-by-one pinned on BOTH sides of every band transition, and retention asserted apart from eligibility — a row can be retained and eligible for nothing, which is the normal state of the back half of the window |
 | `playbotRecord` `advancedLadder` | The weights inside `recordMatch`, the three history columns, and the trust/eligibility separation — which takes three cases because "is the opponent trusted" and "is this match eligible" are independent questions |
 | `playbotDuel` `playbotLifecycle` `playbotSupervisor` | The driver and the population against a real server: two bots playing a duel end to end, a SIGTERM mid-duel charging nobody an abandon, a stand-down waiting for the whistle, and the population starting with the process and coming back to its own accounts across a restart, the reap letting go of a driver the controller has stopped naming, and the bot's own half streaming its live ball — asserted in the SENDER's frame, since a mirror applied on the way out is invisible to every other check the sample could carry |
 | `queue` | Joining, pairing, seating and starting, against a real server |
+| `leaderboard` | Who is on each board, and — since it pages — that the dense human rank CONTINUES across pages rather than restarting. Its own precondition is asserted: the fixture proves the humans-above count and the row index actually diverge at the boundary it picks, or the test would pass against the bug it exists for |
+| `avatar` | Avatar storage and validation, plus the one every play-bot wears — checked against `validateAvatarPng`, the predicate a human's upload passes, so the generator cannot drift from the validator. The load-bearing half is the SECOND boot leaving `updatedAt` untouched: the first assertion passes just as well against `setAvatar`, which is the bug |
 | `duelRecord` `deviceSession` `accountRecovery` `accountDeletion` `roomLifecycle` `spectators` `queue` `tableBrowser` `cpuTable` `seatGate` `p2pParity` `headers` | Twelve suites that boot the real server (see §4) |
-| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` `rankedDuelsBackfill` `advancedLadder` `botIdentity` | The one-shot migrations. **A one-shot is invisible to a test that does not un-stamp it and re-import** — its key is already in `meta`, so nothing drives it and a mutation to its SQL reddens nothing. Clear the key, `vi.resetModules()`, re-import, then assert the repair |
+| `db-wipe` `taskReset` `placementRescue` `rankedBackfill` `chaosRelabel` `shutoutRecount` `rankedDuelsBackfill` `advancedLadder` `botIdentity` `playbotRename` `rosterRetire` | The one-shot migrations. **A one-shot is invisible to a test that does not un-stamp it and re-import** — its key is already in `meta`, so nothing drives it and a mutation to its SQL reddens nothing. Clear the key, `vi.resetModules()`, re-import, then assert the repair |
 | `sigv4` | The request signing offsite backups upload with. Hand-rolled, so it is pinned against fixtures generated by **botocore** — the AWS CLI's own signer — with `canonicalRequest`, `stringToSign` and `signature` asserted SEPARATELY, since one `Authorization` comparison is one bit and says nothing about where it broke |
 | `backupSchedule` | When a backup is due, whether it has anywhere to go, and whether `BACKUP_DIR` is on the same filesystem as `DATA_DIR` — the check that catches an unmounted volume, which a path comparison cannot |
 | `backupTick` | The orchestration, with the child runner and the uploader injected: that a failed upload does not suppress the local success, that a rejecting child leaves the tick resolved, and that no logged path carries the secret |
@@ -78,7 +82,7 @@ coverage number.
 
 `profiles` · `cosmetics` · `venues` · `menu` · `gameplay` · `rating` · `rules` ·
 `achievements` · `elite` · `duel` · `invite` · `lobby` · `spectate` · `queue` · `split` ·
-`streak` · `history` · `delete` · `report` · `eject` · `load` · `build-id`
+`streak` · `history` · `delete` · `report` · `playbot` · `eject` · `load` · `build-id`
 
 `lobby` and `spectate` are where the CPU seat is driven through a real browser, because the
 cost of it is on the CLIENT and `tsc` names none of the branches: `lobby` proves the picker
@@ -177,6 +181,18 @@ recognising rather than rediscovering:
     out with the test. **A production option whose only consumer is a test that proves nothing
     is worse than no test at all**, and the difference between "a behavioural test would be
     hard" and "there is nothing to observe" is whether anybody ran it.
+14. **A fixture that inherits its setup from a DATA TABLE through a hidden seed.** The
+    play-bot redispatch test drives two bots to play each other, and `actionFor` is an argmax
+    over three seeded appetites whose seed is the bot's USERNAME — which comes from a name
+    list the test never mentions. The old names happened to give host/host, the idle-lobby
+    window resolved it, and the assertion held for two releases. Renaming the roster drew
+    host/queue instead: one bot at a table nobody joins, one in a queue where bot-vs-bot needs
+    a second queuer, and **two bots then have no way to meet at all** — so a suite about
+    dispatch failed on a name change with nothing about dispatch broken. It is in the
+    catalogue rather than filed as a flake because the passing state was the vacuous one: the
+    test never asked for the condition it needed. It pins the appetites now. **When a fixture
+    depends on a value some other file chose, ask for it explicitly** — even, and especially,
+    when the default happens to work.
 
 The standing habit: **before writing an assertion, name the mutation it should redden, then check
 that the mutation compiles and that it does.**
@@ -626,6 +642,31 @@ still in the DOM while the request is in flight. That second leg is the one to r
 copying: intercepting proves the request LEFT, not that React has painted the loading state, and
 sampled immediately it reads the pre-refresh paint and goes green however the branch is written.
 It was measured exactly that way. The wait after interception is what makes it a test.
+
+**A play-bot's profile must never imply a human is behind it, and after the rename that rests
+on TWO things at once.** The name used to carry the disclosure by accident of spelling —
+`RallyNNBot` reads as a bot on the in-match opponent label, in the lobby, on the result strip and
+in the denormalized names in match history, none of which shows the BOT badge. Human-looking
+handles take that away, so the badge on the profile card and the shared robot avatar are jointly
+what tell a player who they played. `scripts/e2e-playbot.mjs` asserts both **in one leg**, and
+that is deliberate rather than tidy: a check on either alone stays green while the product has
+stopped disclosing. Prove-fail: skip the boot-time avatar pass and the leg names the bot it
+could not find a picture for.
+
+**A dense rank is a property of the whole ordering, not of the page it is drawn on.** The
+leaderboard's `rank` counts non-bot rows, so paging it with a bare `LIMIT/OFFSET` makes the top of
+every page #1 and shows two different players as the best. `tests/leaderboard.test.ts` holds the
+arithmetic, and it asserts its own precondition — that the humans-above count and the row index
+genuinely diverge at the boundary the fixture picks — because with no bot above the page they are
+the same number and the test would pass against the bug. `scripts/e2e-menu.mjs` holds that the
+pager is WIRED, and that leg is worth reading before writing another like it: the first version
+read the rank from `.tnum` and passed for the wrong reason, because ranks 1-3 are drawn as a crown
+or a medal with **no text at all** and the selector picked up the row's XP instead — "the two pages
+differ" was true of two XP figures. The rank badge carries an id now, and the assertion is exact
+(`#26`) rather than merely different. The mutation that proves it is disabling the humans-above
+count, **not** zeroing the starting rank: the client asks for bots by default, so the count
+overwrites the start and a zeroed one reddens nothing. That was measured — the obvious mutation
+passed.
 
 **A progression meter is not fresh on arrival, and only the fast layer can say so.** A page
 that leaves the pager's three-slot window unmounts and resets, which is right for a page and

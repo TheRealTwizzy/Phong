@@ -5,7 +5,6 @@ import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DATA_DIR, db, isBotAccount, RecordMatchContext } from './server/db';
-import { BOT_ROSTER } from './server/bots';
 import {
   clearSessionCookie,
   deviceIdentity,
@@ -67,11 +66,11 @@ import {
 import { MatchEndPayload, MatchEndResult, RoomMatchConfig, SpectatorSnapshot, TableSeat, TableSeatInfo } from './src/types';
 import { DEFAULT_ROOM_CONFIG, duelMatchKey, normalizeRoomConfig } from './src/matchRules';
 import { Candidate, findPair } from './server/matchmaking';
+import { botAvatarPng } from './server/botAvatar';
 import {
   PlaybotSupervisor,
   liveStateFrom,
   bandCentreFor,
-  OPEN_VENUES,
 } from './server/playbotSupervisor';
 import {
   DEFAULT_VENUE_ROOM,
@@ -2373,8 +2372,20 @@ async function startServer() {
       const parsed = parseInt(String(req.query.limit ?? '50'), 10);
       const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(100, parsed)) : 50;
       const includeBots = req.query.bots === '1' || req.query.bots === 'true';
-      const leaderboard = db.getLeaderboard(sort, limit, includeBots);
-      res.json({ leaderboard });
+      // Bounded at the edge like `sort` and `limit` above, and for the same
+      // reason: this route is unauthenticated, so a page number is another
+      // free variable a caller chooses. The db bounds the offset again.
+      const askedPage = parseInt(String(req.query.page ?? '1'), 10);
+      const page = Number.isFinite(askedPage) ? Math.max(1, Math.min(1000, askedPage)) : 1;
+      const { entries, total } = db.getLeaderboardPage(sort, {
+        limit,
+        offset: (page - 1) * limit,
+        includeBots,
+      });
+      // `leaderboard` keeps its name and shape, so a bundle open across the
+      // deploy still reads it and slices whatever it asked for — exactly what
+      // `matches` was kept for on /api/matches/me.
+      res.json({ leaderboard: entries, total, page, pageSize: limit });
     } catch (e: any) {
       serverError(res, e);
     }
@@ -4413,11 +4424,6 @@ async function startServer() {
     serverError(res, err);
   });
 
-  // The leaderboard's pace-setters. One-shot and flagged in the DB, so this
-  // is a no-op on every boot after the first — it lives here rather than in
-  // the schema migrations because a curated roster is a deployment decision,
-  // not a shape the database needs to be correct.
-  db.seedBotRoster(BOT_ROSTER);
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Split-Screen Half Pong server running at http://0.0.0.0:${PORT}`);
@@ -4486,7 +4492,10 @@ async function startServer() {
    * deliberately no privileged in-process shortcut: that would be a second
    * door past `requireActiveSession` and the WS upgrade.
    */
-  const playbots = new PlaybotSupervisor({
+  // Annotated because `live` below reaches back for `playbots.servableVenues()`
+  // — a self-reference in the initializer, which tsc cannot infer a type
+  // through even though the call itself only happens later, from `tick()`.
+  const playbots: PlaybotSupervisor = new PlaybotSupervisor({
     base: `http://127.0.0.1:${PORT}`,
     wsUrl: `ws://127.0.0.1:${PORT}/ws`,
     // Bounded by the supervisor itself — see `normalizeRosterSize`. `Number`
@@ -4503,6 +4512,11 @@ async function startServer() {
     store: {
       load: () => db.playbotAccounts(),
       save: (botId, cookie, traits) => db.rememberPlaybot(botId, cookie, traits),
+      // One shared image, byte-identical for every bot, written only where
+      // there is nothing already. See server/botAvatar.ts for why it is
+      // generated rather than checked in, and server/db.ts's `ensureAvatar`
+      // for why it is not `setAvatar`.
+      ensureAvatar: (botId) => db.ensureAvatar(botId, botAvatarPng()),
       // Both sides on the MATCHMAKER's own estimator, which is the one that
       // decides whether the pair this preference is about could happen at all
       // (`queueCandidate` reads the same pair). Reading self on the visible
@@ -4536,20 +4550,28 @@ async function startServer() {
       // to open more of them.
       //
       // Demand and the search have to name the SAME venues, or the count asks
-      // for bots the dispatch cannot spend. `openTable` looks in OPEN_VENUES
-      // and nowhere else, so a human hosting in `intermediate` was counted
-      // here, a bot was activated to serve them, it searched two rooms it was
-      // never in, found nothing and opened a table of its own — while that
-      // human went on waiting. Narrowed here rather than widened there,
-      // deliberately: the other brackets gate who may PLAY, so a bot walking
-      // into one has to clear `roomEntryVerdict` on its own tier, and the
-      // search would have to carry that judgement. Counting only what the
+      // for bots the dispatch cannot spend. `openTable` looks only where the
+      // dispatch will search, so a human hosting somewhere the population
+      // cannot go was counted here, a bot was activated to serve them, it
+      // searched rooms it was never in, found nothing and opened a table of
+      // its own — while that human went on waiting.
+      //
+      // `servableVenues()` and NOT the OPEN_VENUES constant, which is what a
+      // bot MIGHT enter rather than what these bots may enter today. Against
+      // the constant a human hosting in `advanced` counts as demand while no
+      // bot on the roster is Ace yet: `want` inflates, the slot loop correctly
+      // finds nobody eligible and breaks, and the surplus is spent by the
+      // baseline arm on a bot playing with itself. Counting only what the
       // population can actually serve is the honest half.
+      //
+      // Safe to reach `playbots` from inside its own constructor argument:
+      // `live` is a callback the supervisor invokes from `tick()`, long after
+      // the binding is initialised. Never call it during construction.
       const openTables = [...rooms.values()].filter((r) => {
         const seated = r.players.filter(Boolean);
         return (
           r.visibility === 'public' &&
-          OPEN_VENUES.includes(r.venueRoomId) &&
+          playbots.servableVenues().includes(r.venueRoomId) &&
           seated.length === 1 &&
           !isBotAccount(seated[0]!.playerId) &&
           // A human playing the MACHINE has one real player at their table, so

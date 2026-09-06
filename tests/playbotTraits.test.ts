@@ -11,6 +11,8 @@ import {
   seedTraits,
   styleFor,
   TRAIT_KEYS,
+  TRAIT_RANGE,
+  RANKED_BIAS_FLOOR,
   type PlaybotTraits,
 } from '../server/playbotTraits';
 
@@ -59,6 +61,8 @@ describe('seeding', () => {
       expect(t.skill).toBeGreaterThanOrEqual(MIN_AI_COMPETENCE);
       expect(t.skill).toBeLessThanOrEqual(1);
       expect(t.spinRead).toBeLessThanOrEqual(MAX_SPIN_READ);
+      expect(t.rankedBias).toBeGreaterThanOrEqual(RANKED_BIAS_FLOOR);
+      expect(t.rankedBias).toBeLessThanOrEqual(1);
       for (const key of TRAIT_KEYS) {
         expect({ key, ok: Number.isFinite(t[key]) }).toEqual({ key, ok: true });
       }
@@ -155,6 +159,45 @@ describe('normalizing', () => {
     expect(normalizeTraits({ skill: 9 }).skill).toBe(1);
     expect(normalizeTraits({ skill: -9 }).skill).toBe(MIN_AI_COMPETENCE);
     expect(normalizeTraits({ spinRead: 9 }).spinRead).toBe(MAX_SPIN_READ);
+  });
+
+  it('lifts a stored rankedBias into the band, which is how the LIVE roster is repaired', () => {
+    // Not incidental, and worth naming: this clamp is the whole migration.
+    // Every bot seeded before the floor existed carries whatever [0,1] gave
+    // it, and `db.playbotAccounts()` normalizes on READ — so the population
+    // that has been sitting in Casual comes back inside the band on the
+    // deploy that ships the floor, with no migration and no write.
+    expect(normalizeTraits({ rankedBias: 0 }).rankedBias).toBe(RANKED_BIAS_FLOOR);
+    expect(normalizeTraits({ rankedBias: 0.2 }).rankedBias).toBe(RANKED_BIAS_FLOOR);
+    // Above the floor is left exactly as stored — a clamp, not an assignment.
+    expect(normalizeTraits({ rankedBias: 0.9 }).rankedBias).toBe(0.9);
+  });
+
+  it('keeps every DEFAULT inside its own band', () => {
+    // `normalizeTraits` substitutes the default for a missing or unusable
+    // value and does NOT clamp it — the fallback is the answer, not an input
+    // to one. So a default outside its band is a value the band promises
+    // cannot exist, handed out for every NULL column, and the only thing that
+    // would notice is a range assertion somewhere else being quietly wrong.
+    // Raising a floor without moving the default is how that happens.
+    for (const key of TRAIT_KEYS) {
+      const [lo, hi] = TRAIT_RANGE[key];
+      expect({ key, ok: DEFAULT_TRAITS[key] >= lo && DEFAULT_TRAITS[key] <= hi }).toEqual({
+        key,
+        ok: true,
+      });
+    }
+  });
+
+  it('does NOT narrow the band skill is drawn from', () => {
+    // The guard on the edit the next person reaches for when a tier looks
+    // thin. Narrowing `rankedBias` is legitimate: it decides WHERE a bot
+    // plays, and the venue is not the rating. The identical edit to `skill`
+    // is a post-creation change to a live bot's competence, which is what
+    // "CREATION MAY SEED; NOTHING AFTER CREATION MAY STEER" forbids — and it
+    // would arrive through exactly this door, as a one-line range change with
+    // every other test still green.
+    expect(TRAIT_RANGE.skill).toEqual([MIN_AI_COMPETENCE, 1]);
   });
 
   it('never lets skill fall below the competence floor', () => {
@@ -424,14 +467,24 @@ describe('what the composition has to pass along', () => {
   });
 
   it('counts as demand only the venues the dispatch will search', () => {
-    // `openTable` looks in OPEN_VENUES and nowhere else, while the demand
-    // count took every public room — so a human hosting in `intermediate`
-    // activated a bot that searched two rooms it was never in, found nothing,
-    // and opened a table of its own while that human went on waiting.
-    // Narrowed at the count rather than widened at the search: the other
-    // brackets gate who may PLAY, so serving them needs the bot's own tier
-    // judged, which is a design step and not this fix.
-    expect(liveBlock()).toMatch(/OPEN_VENUES\.includes\(r\.venueRoomId\)/);
+    // `openTable` looks only in the venues the DISPATCH will search, while
+    // the demand count took every public room — so a human hosting in a room
+    // the population could not enter activated a bot that searched rooms it
+    // was never in, found nothing, and opened a table of its own while that
+    // human went on waiting.
+    //
+    // Narrowed at the count rather than widened at the search, and the
+    // narrowing is now the roster's OWN reach rather than the constant.
+    // `OPEN_VENUES` is every listable PvP room, which is what a bot MIGHT
+    // enter; `servableVenues()` is what these bots may enter today, judged by
+    // the same `roomEntryVerdict` the relay asks. Against the constant, a
+    // human hosting in `advanced` counts as demand while no bot is Ace yet:
+    // `want` inflates, the slot loop correctly finds nobody, and the surplus
+    // is spent by the baseline arm on a bot playing with itself.
+    expect(liveBlock()).toMatch(/servableVenues\(\)\.includes\(r\.venueRoomId\)/);
+    expect(liveBlock(), 'the demand count still reads the raw constant').not.toMatch(
+      /OPEN_VENUES\.includes/
+    );
   });
 
   it('clamps a bot’s return into the match’s own speed band', () => {
@@ -633,7 +686,12 @@ describe('what the composition has to pass along', () => {
     // filtered list now, which is the root the two fallbacks were patching.
     const src = read('server/playbotSupervisor.ts');
     expect(src).toMatch(/const allowed = this\.venuesFor\(m\)/);
-    expect(src).toMatch(/roomEntryVerdict\(roomById\(id\), who\)\.ok/);
+    // The filter itself now lives in the pure module, so both the dispatch and
+    // the demand count can ask one function rather than two spellings of it.
+    expect(src).toMatch(/venuesOpenTo\(\{ level: m\.level, tier: m\.tier \}\)/);
+    expect(read('server/playbotPopulation.ts')).toMatch(
+      /roomEntryVerdict\(roomById\(id\), who\)\.ok/
+    );
     // BOTH consumers, or the half that was left raw is the half that breaks.
     expect(src).toMatch(/chooseVenue\(\{[\s\S]*?allowed,[\s\S]*?\}\)/);
     expect(src).toMatch(/this\.openTable\(m, venue, allowed, assigned\)/);

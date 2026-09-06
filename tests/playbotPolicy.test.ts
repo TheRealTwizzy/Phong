@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'fs';
-import { OPEN_VENUES, humanTablesFirst } from '../server/playbotSupervisor';
+import { humanTablesFirst } from '../server/playbotSupervisor';
+import { OPEN_VENUES } from '../server/playbotPopulation';
 import { roomById, roomEntryVerdict } from '../src/venues';
 import { TIER_ORDER } from '../src/rating';
 import path from 'path';
@@ -147,8 +148,9 @@ describe('choosing an opponent', () => {
 
 describe('choosing a venue', () => {
   it('follows the bot’s own rankedBias', () => {
-    const rankedish = chooseVenue({ traits: traits({ rankedBias: 1 }), roll: 0.5, allowed: ['casual', 'beginner'] });
-    const casualish = chooseVenue({ traits: traits({ rankedBias: 0 }), roll: 0.5, allowed: ['casual', 'beginner'] });
+    const opts = { roll: 0.5, pick: 0, allowed: ['casual', 'beginner'] };
+    const rankedish = chooseVenue({ traits: traits({ rankedBias: 1 }), ...opts });
+    const casualish = chooseVenue({ traits: traits({ rankedBias: 0 }), ...opts });
     expect(rankedish).toBe('beginner');
     expect(casualish).toBe('casual');
   });
@@ -159,14 +161,60 @@ describe('choosing a venue', () => {
     // is a bot that never plays.
     for (const roll of [0, 0.25, 0.5, 0.75, 0.99]) {
       for (const bias of [0, 0.3, 0.7, 1]) {
-        const v = chooseVenue({ traits: traits({ rankedBias: bias }), roll, allowed: ['casual'] });
+        const v = chooseVenue({ traits: traits({ rankedBias: bias }), roll, pick: roll, allowed: ['casual'] });
         expect(v).toBe('casual');
       }
     }
   });
 
+
+  // The SECOND draw, and why one roll cannot do both jobs.
+  //
+  // `roll` answers "ranked or Casual" against the bias, and `pick` answers
+  // "which ranked room". Spent as one number they are not independent: a bot
+  // that wants ranked has, by construction, rolled BELOW its own bias, so
+  // `Math.floor(roll * n)` can only ever reach the first `ceil(bias * n)`
+  // entries of the pool. With two brackets open and a bias of 0.4 the second
+  // one needs `roll >= 0.5` and the branch needs `roll < 0.4`, so it is
+  // unreachable -- for every bot on the roster, permanently, with nothing to
+  // see. That is the same shape as the bias-as-its-own-roll defect below, one
+  // step along, and it was invisible until OPEN_VENUES could hold two ranked
+  // rooms at once: both pools were length <= 1, so the index never chose
+  // anything.
+  it('reaches every ranked room it may enter, not just the first', () => {
+    const allowed = ['casual', 'beginner', 'intermediate', 'advanced'];
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i += 1) {
+      const v = chooseVenue({
+        traits: traits({ rankedBias: 0.4 }),
+        roll: 0.1,
+        pick: i / 100,
+        allowed,
+      });
+      if (v) seen.add(v);
+    }
+    expect([...seen].sort()).toEqual(['advanced', 'beginner', 'intermediate']);
+  });
+
+  it('does not let the ranked/casual draw bias WHICH ranked room', () => {
+    // The tail of the pool has to be reachable at every appetite, including
+    // the low ones. Spelled as a loop over biases because the unreachable
+    // range is a function of the bias: at 0.4 the defect hides `advanced`, at
+    // 0.9 it hides nothing, and a single-bias test would pass on the wrong one.
+    const allowed = ['casual', 'beginner', 'intermediate', 'advanced'];
+    for (const bias of [0.1, 0.4, 0.6, 0.9, 1]) {
+      const last = chooseVenue({
+        traits: traits({ rankedBias: bias }),
+        roll: 0,
+        pick: 0.99,
+        allowed,
+      });
+      expect(last, `rankedBias ${bias} could not reach the last ranked room`).toBe('advanced');
+    }
+  });
+
   it('returns null when it may enter nowhere', () => {
-    expect(chooseVenue({ traits: traits(), roll: 0.5, allowed: [] })).toBeNull();
+    expect(chooseVenue({ traits: traits(), roll: 0.5, pick: 0.5, allowed: [] })).toBeNull();
   });
 
   // The function above is right and was right throughout. What shipped wrong
@@ -184,6 +232,7 @@ describe('choosing a venue', () => {
       const v = chooseVenue({
         traits: traits({ rankedBias: bias }),
         roll: bias,
+        pick: 0.5,
         allowed: ['casual', 'beginner'],
       });
       expect(v, `rankedBias ${bias} passed as its own roll`).toBe('casual');
@@ -201,6 +250,22 @@ describe('choosing a venue', () => {
     const roll = /roll:([^,\n]*)/.exec(call![1]);
     expect(roll, 'the chooseVenue call passes no roll').toBeTruthy();
     expect(roll![1]).not.toMatch(/rankedBias/);
+
+    // ...and `pick` is a SECOND draw, not the same one under another name.
+    // `pick: roll` type-checks, reads as deliberate, and silently restores the
+    // defect the two tests above measure.
+    //
+    // The property asserted is that each field INVOKES for itself, not that
+    // the two expressions differ textually: `draw()` and `draw()` are the same
+    // text and are two independent numbers, which is the correct shape, while
+    // `pick: roll` is different text and is one number used twice, which is
+    // the bug. A bare identifier is a value already drawn; a call is a draw.
+    const pick = /pick:([^,\n]*)/.exec(call![1]);
+    expect(pick, 'the chooseVenue call passes no pick').toBeTruthy();
+    expect(pick![1]).not.toMatch(/rankedBias/);
+    for (const [name, m] of [['roll', roll!], ['pick', pick!]] as const) {
+      expect(m[1], `${name} reuses a value instead of drawing one`).toMatch(/\(\s*\)/);
+    }
   });
 });
 
@@ -328,15 +393,24 @@ describe('which table to walk up to, and which venues may be tried', () => {
     // property, over every tier a bot's own results can reach.
     for (const tier of TIER_ORDER) {
       for (const level of [1, 5, 20, 100]) {
-        const open = OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), { level, tier }).ok);
+        const open = OPEN_VENUES.filter((id: string) => roomEntryVerdict(roomById(id), { level, tier }).ok);
         expect(open, `${tier} at level ${level} may enter nowhere`).not.toHaveLength(0);
       }
     }
-    // And it genuinely NARROWS, or it is not a filter: a bot past Contender
-    // loses `beginner` and keeps `casual`.
+    // And it genuinely NARROWS, or it is not a filter. A Master loses both
+    // ends of the ladder — `beginner` (tierMax contender) below it and
+    // `elite`/`pro` (tierMin grandmaster/legend) above — and keeps the middle.
+    //
+    // This used to expect `['casual']`, which was the whole bug rather than
+    // the property: with OPEN_VENUES holding only the two ungated rooms, a bot
+    // past Contender kept nothing but the one room that cannot rate it. What
+    // is asserted now is that the filter still refuses in BOTH directions,
+    // which is what makes it a bracket rather than a floor.
     const climbed = OPEN_VENUES.filter(
-      (id) => roomEntryVerdict(roomById(id), { level: 20, tier: 'master' }).ok
+      (id: string) => roomEntryVerdict(roomById(id), { level: 20, tier: 'master' }).ok
     );
-    expect(climbed).toEqual(['casual']);
+    expect(climbed).toEqual(['casual', 'intermediate', 'advanced']);
+    expect(climbed).not.toContain('beginner');
+    expect(climbed).not.toContain('pro');
   });
 });

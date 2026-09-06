@@ -388,6 +388,31 @@ ok('a page refetches every time it becomes current, mounted or not');
 // route handler firing is itself the proof the fetch is in flight, since the
 // component sets `isLoading` synchronously before calling fetch.
 const boardRows = () => page.$$eval('[id^="leaderboard-row-"]', (els) => els.length);
+
+// This player has to BE on the board for the rest of the leg to mean
+// anything, and until the curated roster was retired somebody else always
+// was: eight seeded accounts with fabricated careers put rows on every board
+// of every fresh database. Play-bots replaced them and earn their rows, and
+// the population is off in this suite -- so the board is now legitimately
+// empty here unless the suite puts something on it.
+//
+// A roomless POST pays XP and moves no rating (it cannot vouch for a room),
+// so it lands on the LEVEL board and not the skill one -- which is why the
+// category is switched rather than the payload made ranked. `e2e-profiles`
+// uses the same pair for the same reason.
+await page.evaluate(async () => {
+  await fetch('/api/match/record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      playerScore: 5, opponentScore: 3, bestStreak: 9, earnedStreak: 9,
+      mode: 'multiplayer', isWinner: true,
+    }),
+  });
+});
+await page.click('#filter-leaderboard-level');
+await page.waitForSelector('[id^="leaderboard-row-"]', { timeout: 8000 });
+
 const rowsBefore = await boardRows();
 if (rowsBefore === 0) {
   fail('the leaderboard has no rows, so "the refetch did not blank it" would pass vacuously');
@@ -608,6 +633,107 @@ if (profileCalls !== 0) {
 }
 page.off('request', countProfile);
 ok('RANKS refetches the profile behind the header on arrival AND on its refresh button, and no other page does');
+
+// ---- 14. The leaderboard pages ------------------------------------------
+// The board fetched a hard-coded 50 and rendered whatever came back, so past
+// 50 accounts nobody below could be seen. What only a browser can answer is
+// that the pager is WIRED -- the rank arithmetic across a page boundary is
+// `tests/leaderboard.test.ts`'s, where the fixture can be built exactly and a
+// mutation can be pointed at it.
+//
+// The accounts are made over plain HTTP rather than in browser contexts: this
+// needs more than a page of them, and twenty-six onboarding flows would add a
+// minute and a half to the suite to assert something none of the UI is
+// involved in. Four requests each, following the same doors a browser walks
+// through -- the document for the device cookie, a session, the username
+// claim, then a match so the row has progress and lands on the LEVEL board.
+const PAGE_SIZE = 25;
+const makeAccount = async (n) => {
+  // `accept: text/html` is REQUIRED, not decoration: the device cookie is minted
+  // by a middleware that only runs for a DOCUMENT NAVIGATION, and a bare fetch
+  // sends `*/*`. Without it the response carries no Set-Cookie and every call
+  // below is cookieless -- which is the middleware behaving correctly, not
+  // something to route around.
+  // A cookie JAR rather than one header, because there are two cookies and the
+  // second arrives later: the document mints `phong_device`, and
+  // POST /api/session mints `phong_session`, which every write sits behind
+  // (`requireActiveSession`). Keeping only the first answers 401 on the
+  // username claim.
+  const jar = new Map();
+  const absorb = (res) => {
+    for (const c of res.headers.getSetCookie?.() ?? []) {
+      const [pair] = c.split(';');
+      const eq = pair.indexOf('=');
+      if (eq > 0) jar.set(pair.slice(0, eq), pair.slice(eq + 1));
+    }
+    return res;
+  };
+  const cookie = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
+  const send = (path, body) =>
+    fetch(`${BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: cookie() },
+      body: JSON.stringify(body ?? {}),
+    }).then(absorb);
+
+  absorb(await fetch(`${BASE}/`, { headers: { accept: 'text/html' } }));
+  if (!jar.size) throw new Error('the document set no device cookie');
+  await send('/api/session');
+  const claimed = await send('/api/profile/initialize', { username: `Pager${String(n).padStart(3, '0')}` });
+  if (!claimed.ok) throw new Error(`onboarding ${n} answered ${claimed.status}`);
+  // XP and no rating: a roomless report cannot vouch for a room, so the row
+  // lands on the level board and not the skill one.
+  await send('/api/match/record', {
+    playerScore: 5, opponentScore: n % 5, bestStreak: 4 + (n % 7), earnedStreak: 4,
+    mode: 'multiplayer', isWinner: true,
+  });
+};
+for (let n = 0; n < PAGE_SIZE + 3; n += 1) await makeAccount(n);
+
+await page.click('#menu-nav-leaderboard');
+await settle();
+await page.click('#filter-leaderboard-level');
+await page.waitForSelector('#leaderboard-page-2', { timeout: 10000 });
+
+const readBoard = () =>
+  page.$$eval('[id^="leaderboard-row-"]', (els) => els.map((e) => e.id));
+// Read from the rank BADGE and not from ".tnum". The first version did the
+// latter and passed for the wrong reason: the top three ranks are drawn as a
+// crown or a medal with no text at all, so it picked up the row's XP instead,
+// and "the two pages differ" was true of two XP figures while the rank counter
+// could have been restarting at 1 on every page.
+const rankOf = (rowId) =>
+  page.$eval(`#leaderboard-rank-${rowId.replace('leaderboard-row-', '')}`, (e) =>
+    e.textContent.trim()
+  );
+
+const pageOne = await readBoard();
+if (pageOne.length !== PAGE_SIZE) fail(`page one holds ${pageOne.length} rows, expected ${PAGE_SIZE}`);
+
+await page.click('#leaderboard-page-2');
+await page.waitForFunction(
+  (before) => {
+    const ids = [...document.querySelectorAll('[id^="leaderboard-row-"]')].map((e) => e.id);
+    return ids.length > 0 && ids[0] !== before;
+  },
+  pageOne[0],
+  { timeout: 10000 }
+);
+const pageTwo = await readBoard();
+if (!pageTwo.length) fail('page two is empty');
+if (pageTwo.some((id) => pageOne.includes(id))) {
+  fail('page two repeats rows from page one');
+}
+// The rank CONTINUES rather than restarting -- the defect a naive
+// LIMIT/OFFSET produces, where the top of every page is #1 and two different
+// players are both shown as the best. Exact rather than merely different: the
+// population is off in this suite, so every row is human and the first of page
+// two is the (PAGE_SIZE + 1)th.
+const rankTwo = await rankOf(pageTwo[0]);
+if (rankTwo !== `#${PAGE_SIZE + 1}`) {
+  fail(`page two opens at ${rankTwo}, expected #${PAGE_SIZE + 1} — the rank counter restarts per page`);
+}
+ok('the leaderboard pages, and the rank continues across the boundary');
 
 if (pageErrors.length) fail(`page errors: ${pageErrors.join(' | ')}`);
 await browser.close();

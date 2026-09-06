@@ -3,7 +3,7 @@ import { LeaderboardEntry, LanguageCode } from '../types';
 import { t } from '../i18n/translations';
 import { AvatarImage } from './AvatarImage';
 import { TierBadge } from './TierBadge';
-import { Button, Panel } from './ui';
+import { Button, Pagination, Panel } from './ui';
 import { Crown, Medal, RefreshCw } from 'lucide-react';
 
 // The leaderboard itself — the category strip, the bots toggle and the rows —
@@ -18,6 +18,16 @@ import { Crown, Medal, RefreshCw } from 'lucide-react';
 // An unused prefix would just be untested surface, and it would make
 // `#leaderboard-row-*` a computed string that the browser suites already name
 // literally.
+
+/**
+ * Rows a page of the board holds.
+ *
+ * 25 rather than the 50 this used to fetch and render whole: on a phone a
+ * fifty-row list is a long scroll to nowhere, and on a small server a page
+ * size at or above the player count means the pager never appears and nobody
+ * discovers there is one.
+ */
+const BOARD_PAGE_SIZE = 25;
 
 type SortCategory = 'elo' | 'level' | 'rally' | 'wins';
 
@@ -70,20 +80,32 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
   // entries found. Be the first to claim the top spot!" — a confident,
   // specific, and wrong claim about the ladder, on a dropped connection.
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [pageSize, setPageSize] = useState(BOARD_PAGE_SIZE);
   const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
     setIsLoading(true);
-    fetch(`/api/leaderboard?sort=${category}&limit=50${showBots ? '&bots=1' : ''}`)
+    fetch(
+      `/api/leaderboard?sort=${category}&limit=${BOARD_PAGE_SIZE}&page=${page}${
+        showBots ? '&bots=1' : ''
+      }`
+    )
       .then((res) => {
         if (!res.ok) throw new Error(String(res.status));
         return res.json();
       })
       .then((data) => {
         if (!cancelled) {
-          setEntries(data.leaderboard || []);
+          const rows = data.leaderboard || [];
+          setEntries(rows);
+          // A bundle talking to an older server gets neither field back, so
+          // both fall back to what this page can see — one page, no pager.
+          setTotal(Number.isFinite(data.total) ? data.total : rows.length);
+          if (Number.isFinite(data.pageSize) && data.pageSize > 0) setPageSize(data.pageSize);
           setError(null);
         }
       })
@@ -102,41 +124,63 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [active, category, showBots, reloadKey, retryKey, language]);
+  }, [active, category, showBots, page, reloadKey, retryKey, language]);
+
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  // A filter change starts again at the top: the rank a player is looking for
+  // is not on the same page of a different board.
+  useEffect(() => {
+    setPage(1);
+  }, [category, showBots]);
+
+  // The board can also shrink under the page being read — a bot retired, an
+  // account deleted — so walk back rather than stranding an empty page with a
+  // pager that still offers it. MatchHistoryList carries the same pair.
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
 
   // Gold, silver and bronze are the content here, not chrome — a medal that
   // took the shell's accent would stop reading as a medal.
-  const renderRankBadge = (rank: number | null) => {
+  // `entryId` is for the id alone: the rank is drawn as a CROWN or a MEDAL for
+  // the top three and as text only from #4 down, so there is no stable place a
+  // browser suite can read a rank from without one. A test that reaches for
+  // ".tnum" instead picks up whatever numeric the row happens to carry -- the
+  // XP on the level board -- and an assertion that two pages differ then
+  // passes on two different XP figures while the rank counter is broken.
+  const renderRankBadge = (rank: number | null, entryId: string) => {
+    const badgeId = `leaderboard-rank-${entryId}`;
     if (rank === null) {
       return (
-        <div className="w-8 h-8 rounded-full bg-rank-steady/15 border border-rank-steady/40 flex items-center justify-center text-rank-steady text-2xs">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-rank-steady/15 border border-rank-steady/40 flex items-center justify-center text-rank-steady text-2xs">
           {t('board_bot', language)}
         </div>
       );
     }
     if (rank === 1) {
       return (
-        <div className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
           <Crown className="w-4 h-4 fill-warn" />
         </div>
       );
     }
     if (rank === 2) {
       return (
-        <div className="w-8 h-8 rounded-full bg-slate-300/20 border border-slate-300/50 flex items-center justify-center text-ink">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-slate-300/20 border border-slate-300/50 flex items-center justify-center text-ink">
           <Medal className="w-4 h-4" />
         </div>
       );
     }
     if (rank === 3) {
       return (
-        <div className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
+        <div id={badgeId} className="w-8 h-8 rounded-full bg-warn/20 border border-warn/50 flex items-center justify-center text-warn">
           <Medal className="w-4 h-4" />
         </div>
       );
     }
     return (
-      <div className="w-8 h-8 rounded-full bg-surface-3 flex items-center justify-center text-ink-muted text-2xs tnum">
+      <div id={badgeId} className="w-8 h-8 rounded-full bg-surface-3 flex items-center justify-center text-ink-muted text-2xs tnum">
         #{rank}
       </div>
     );
@@ -228,7 +272,7 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
                 className="flex w-full items-center justify-between gap-2 p-3 text-left transition-transform active:scale-[0.99] motion-reduce:active:scale-100"
               >
                 <div className="flex min-w-0 items-center gap-3">
-                  {renderRankBadge(entry.rank)}
+                  {renderRankBadge(entry.rank, entry.id)}
                   <AvatarImage
                     playerId={entry.id}
                     hasAvatar={Boolean(entry.avatarVersion)}
@@ -303,6 +347,37 @@ export const LeaderboardList: React.FC<LeaderboardListProps> = ({
           );
         })
       )}
+
+      {/*
+        Outside the rows branch, so the pager survives the empty and error
+        states — a board that fails to load on page 3 must still offer the way
+        back to page 1. `Pagination` renders nothing at a single page, so this
+        costs nothing on a small server.
+
+        It resolves history_page_label / history_prev_page / history_next_page,
+        which already ship in all seven locales, so paging the board adds no
+        new copy at all.
+      */}
+      <div className="flex flex-col items-center gap-1 pt-1">
+        <Pagination
+          page={page}
+          pageCount={pageCount}
+          onPage={setPage}
+          idPrefix="leaderboard"
+          language={language}
+        />
+        {pageCount > 1 && (
+          <span
+            id="leaderboard-page-label"
+            className="text-2xs font-normal tracking-normal text-ink-dim"
+          >
+            {t('history_page_label', language, {
+              page: String(page),
+              pages: String(pageCount),
+            })}
+          </span>
+        )}
+      </div>
     </>
   );
 };

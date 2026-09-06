@@ -27,8 +27,9 @@
 
 import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
+import { defaultPlaybotName } from './playbotNames';
 import { chooseOpponent, chooseVenue, type PolicyCandidate } from './playbotPolicy';
-import { roomById, roomEntryVerdict } from '../src/venues';
+import { newRating } from '../src/rating';
 import type { Tier } from '../src/rating';
 import {
   impatientDemand,
@@ -37,8 +38,10 @@ import {
   type PopulationAction,
   type PopulationBot,
   type PopulationSnapshot,
+  OPEN_VENUES,
+  servableVenues,
+  venuesOpenTo,
 } from './playbotPopulation';
-import { START_MU } from '../src/rating';
 
 /** Live server state the supervisor cannot see for itself. */
 export interface LiveState {
@@ -90,6 +93,19 @@ export interface PlaybotAccountStore {
   }>;
   /** Marker row, credential and traits, written once at creation. */
   save(botId: string, deviceCookie: string, traits: PlaybotTraits): void;
+  /**
+   * Give this bot the shared robot avatar if it has none.
+   *
+   * A boot pass rather than a step in `save`, because the roster that needs it
+   * most is the one already on disk from before the avatar existed — and a
+   * meta flag would be wrong for the opposite reason, since `applyWipe` DROPs
+   * `avatars` and `bot_accounts` together and a one-shot would fire once
+   * against an empty roster and never again.
+   *
+   * It is the disclosure half of the human names: most surfaces render a name
+   * with no BOT badge beside it, so the avatar is what remains of §4.11 there.
+   */
+  ensureAvatar(botId: string): void;
   /**
    * What §2.11's diversity preference needs about people this bot could sit
    * down with: the three things a table listing cannot carry.
@@ -520,6 +536,17 @@ export class PlaybotSupervisor {
       attempts += 1;
       await this.provision(n);
     }
+    // After the load AND after provisioning, so it covers the accounts already
+    // on disk and the ones this boot just made. Per-bot try/catch for the
+    // reason `provision` has one: one bot without a picture is a cosmetic
+    // shortfall, and taking the population down over it is not.
+    for (const m of this.managed) {
+      try {
+        this.store.ensureAvatar(m.botId);
+      } catch (e) {
+        console.warn(`[playbot] could not give ${m.username} an avatar:`, (e as Error)?.message ?? e);
+      }
+    }
     const every = this.opts.tickMs ?? DEFAULT_TICK_MS;
     this.timer = setInterval(() => void this.tickSafely(), every);
     // A bot population must never be the reason a process refuses to exit.
@@ -558,7 +585,11 @@ export class PlaybotSupervisor {
     const live = this.live();
     const urgent = urgencyOf(live);
 
-    const target = targetActivation(this.snapshotFrom(live), live.bandCentre ?? START_MU);
+    // No `?? START_MU`. An absent centre means nobody is waiting anywhere the
+    // controller can see, which is an answer — see `rankForActivation`. The
+    // substitution made the idle server a homeostat around mu 25 and was the
+    // dominant reason the population never grew a top.
+    const target = targetActivation(this.snapshotFrom(live), live.bandCentre);
 
     for (const { id, action, venue } of target.activate) {
       const m = this.managed.find((x) => x.botId === id);
@@ -672,8 +703,18 @@ export class PlaybotSupervisor {
         // EARNED, read and never written: a bot suits a thin band or it does
         // not, and if none does the answer is more bots at creation rather
         // than a different rating on this one (§4.13).
-        mu: row?.mu ?? START_MU,
+        // `newRating().mu` rather than START_MU, and the distinction is the
+        // point: this is what a bot with no stored row HAS, not a number the
+        // controller is aiming at. Naming the constant here is what let the
+        // idle fallback above look like an ordinary default.
+        mu: row?.mu ?? newRating().mu,
         recentMatches: row?.recentMatches ?? 0,
+        // When this bot was last SENT, not when it last finished. With nobody
+        // waiting the controller has no rating to rank on, so this is what
+        // stops a bot whose connect keeps failing holding the front of the
+        // queue forever: it never records a match, so `recentMatches` never
+        // moves, and the dispatch is the only thing that does.
+        lastDispatchedAt: m.dispatchedAt,
         // The same `allowed` list `chooseVenue` is handed, and for the same
         // reason: an activation aimed at a table the relay would refuse this
         // bot is an activation that serves nobody, and nothing about the bot
@@ -833,10 +874,15 @@ export class PlaybotSupervisor {
     // simply retried the same forbidden table on every tick, while the human
     // it was dispatched to serve went on waiting.
     const allowed = this.venuesFor(m);
-    // An INDEPENDENT roll, never the bias itself — see `rollFor`.
+    // TWO independent draws, and neither is the bias itself — see `rollFor`.
+    // `roll` decides ranked-or-Casual and `pick` decides which room; sharing
+    // one number puts the tail of the ranked pool out of reach, which is the
+    // bias-as-its-own-roll defect wearing a different coat.
+    const draw = this.opts.rollFor ?? Math.random;
     const venue = chooseVenue({
       traits: m.traits,
-      roll: (this.opts.rollFor ?? Math.random)(),
+      roll: draw(),
+      pick: draw(),
       allowed,
     });
     // JOIN means join. Mapping it to `host` looked harmless — a table somebody
@@ -878,8 +924,24 @@ export class PlaybotSupervisor {
    * `_default` room.
    */
   private venuesFor(m: Managed): string[] {
-    const who = { level: m.level, tier: m.tier };
-    return OPEN_VENUES.filter((id) => roomEntryVerdict(roomById(id), who).ok);
+    return venuesOpenTo({ level: m.level, tier: m.tier });
+  }
+
+  /**
+   * The rooms this ROSTER can reach right now — what `server.ts` narrows the
+   * demand count to.
+   *
+   * Reads only the in-memory `level`/`tier` that `roster()` refreshes on every
+   * tick, so it costs no store read and is exactly as fresh as the roster the
+   * controller ranks. No recursion either: `roster()` never asks for the live
+   * state.
+   *
+   * Public because the alternative is `server.ts` holding its own copy of the
+   * rule, and a rule spelled twice is the thing this feature keeps being bitten
+   * by. Demand and the search have to be one predicate.
+   */
+  public servableVenues(): string[] {
+    return servableVenues(this.managed.map((m) => ({ level: m.level, tier: m.tier })));
   }
 
   /**
@@ -1006,17 +1068,6 @@ export class PlaybotSupervisor {
   }
 }
 
-/**
- * The venues a bot will open a table in.
- *
- * Deliberately the two ungated ones. A bracketed room refuses a host who may
- * not play there (`roomEntryVerdict`, enforced at `create_room`), so a bot
- * aiming at one would be turned away for a reason nothing here can fix, and
- * the brackets exist to sort HUMANS by tier rather than to be filled by the
- * population.
- */
-export const OPEN_VENUES = ['casual', 'beginner'];
-
 /** A table with a playing seat going spare, as the listing describes it. */
 export interface FreeTable {
   id: string;
@@ -1059,14 +1110,15 @@ export function humanTablesFirst(
 }
 
 /**
- * The nth name the population asks for.
+ * The nth name the population asks for — see `server/playbotNames.ts`.
  *
- * Exported so a test can take one out of the pool before the population boots
- * and watch it walk past — the collision that used to leave the roster short
- * for the life of the deployment.
+ * Re-exported rather than moved outright because a test takes one out of the
+ * pool before the population boots and watches the provisioning loop walk past
+ * it, and that test is about the SUPERVISOR's loop. The list and the overflow
+ * rule are the names module's; which name this deployment reaches for is this
+ * one's.
  */
-export const defaultPlaybotName = (n: number): string =>
-  `Rally${String(n + 1).padStart(2, '0')}Bot`;
+export { defaultPlaybotName } from './playbotNames';
 const defaultName = defaultPlaybotName;
 
 /**

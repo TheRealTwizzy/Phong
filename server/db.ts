@@ -86,7 +86,7 @@ import {
   RANK_MOVE_EPSILON,
   rankMoveSize,
 } from '../src/rating';
-import { BotSeed, botProfileFields } from './bots';
+import { PLAYBOT_NAMES, defaultPlaybotName } from './playbotNames';
 import {
   MISSION_POOL,
   RECENT_DEAL_MEMORY,
@@ -1430,6 +1430,7 @@ class GameDatabase {
     // meaning before the name is revived at the top of the ladder.
     this.backfillMatchRanked();
     this.relabelChaosMatches();
+    this.renamePlaybots();
     this.recountShutouts();
     // Strictly ordered: each copies the column the one before it filled.
     // backfillMatchRanked classifies `ranked`; advanced_ladder copies that;
@@ -1446,6 +1447,10 @@ class GameDatabase {
     // human — which would put the whole roster on the human ladder.
     this.claimPrefixedBots();
     this.reloadBotAccounts();
+    // After both, because it reads `bot_accounts` to tell furniture from a
+    // drivable account and the backfill above is what puts the legacy
+    // prefixed rows in there at all.
+    this.retireCuratedRoster();
     // LAST, and after the roster is in `bot_accounts`: this reads that table
     // to exempt the curated bots, and it clears the counters every backfill
     // above spent its run deriving. Both orders end in the same state; last
@@ -1570,6 +1575,152 @@ class GameDatabase {
    * Rewriting the rows to what the retirement map already said they meant,
    * one time, is what lets the map itself be deleted.
    */
+  /**
+   * Give the play-bots already on disk human-looking names.
+   *
+   * They were provisioned as `Rally01Bot`...`RallyNNBot`, which disclosed in
+   * the name itself on every surface a name reaches — the in-match opponent
+   * label, the lobby, the result strip, the denormalized names in match
+   * history — none of which carries the BOT badge. Handles do not, so the
+   * shared robot avatar becomes the tell instead. Renaming only the bots
+   * provisioned AFTER the change would do nothing for a live server, which is
+   * entirely populated by the old ones.
+   *
+   * NOT `changeUsername`, which enforces the 365-day lock these accounts are
+   * well inside. NOT `server/moderate.ts`, whose lock override is deliberately
+   * out of reach here — its `find()` selects
+   * `WHERE NOT EXISTS (SELECT 1 FROM bot_accounts ...)`, so the rename tool
+   * cannot see a bot at all. And not a new public `db.renamePlaybot`, which
+   * would be a lock-override door that one caller needs and anything could
+   * later find. A one-shot beside `chaos_relabel_v1` keeps the only writer
+   * inside the migration.
+   *
+   * Keyed on `deviceCookie IS NOT NULL` — the schema's own discriminator
+   * between drivable play-bots and the curated roster, the same test
+   * `playbotAccounts()` asks — and never on the `bot-` id prefix, which is
+   * D26's retired classifier. Ordered by `createdAt` so bot #1 takes name #1,
+   * matching what a fresh deployment produces.
+   *
+   * A target a human already holds costs ONE NAME, not the batch: the cursor
+   * advances and the row takes the next free entry, which is how
+   * `seedBotRoster` treats a roster collision. Only `/^Rally\d+Bot$/` rows are
+   * touched, so a bot already carrying a list name is left alone.
+   *
+   * TRAITS DO NOT MOVE, and that is the question a rename raises here, because
+   * `provision` seeds them FROM the username. It seeds at creation only and
+   * every later read comes off `bot_accounts`, so a live bot keeps the
+   * competence it has been playing with — re-deriving from the new name would
+   * retune every bot on the server, which is exactly what "creation may seed,
+   * nothing after creation may steer" forbids. This touches `players` and the
+   * denormalized names in `matches`, and nothing else.
+   */
+  private renamePlaybots(): void {
+    const KEY = 'playbot_names_v1';
+    if (this.getMeta(KEY)) return;
+    const now = new Date().toISOString();
+
+    const rows = this.stmt(
+        `SELECT p.id AS id, p.username AS username
+           FROM players p JOIN bot_accounts b ON b.botId = p.id
+          WHERE b.deviceCookie IS NOT NULL
+          ORDER BY b.createdAt, b.botId`
+      )
+      .all() as unknown as Array<{ id: string; username: string }>;
+
+    const held = this.stmt('SELECT id FROM players WHERE lower(username) = lower(?)');
+    let cursor = 0;
+    let renamed = 0;
+    for (const row of rows) {
+      if (!/^Rally\d+Bot$/.test(row.username)) continue;
+      // Advance past anything already taken — by a human, or by a bot this
+      // loop has just renamed.
+      let next: string | null = null;
+      while (cursor < PLAYBOT_NAMES.length * 2) {
+        const candidate = defaultPlaybotName(cursor);
+        cursor += 1;
+        if (!held.get(candidate)) {
+          next = candidate;
+          break;
+        }
+      }
+      // Out of names is survivable: the bot keeps the name it has, which is
+      // ugly and works, where a half-applied batch would not be.
+      if (!next) break;
+      this.stmt('UPDATE players SET username = ?, usernameChangedAt = ? WHERE id = ?').run(
+        next,
+        now,
+        row.id
+      );
+      // The denormalized copies, the same three columns `deleteAccount`
+      // rewrites and for the same reason: without this a human's own history
+      // keeps naming the old handle while the profile it links to has moved.
+      this.stmt('UPDATE matches SET player1Name = ? WHERE player1Id = ?').run(next, row.id);
+      this.stmt('UPDATE matches SET player2Name = ? WHERE player2Id = ?').run(next, row.id);
+      this.stmt('UPDATE matches SET winnerName = ? WHERE winnerId = ?').run(next, row.id);
+      renamed += 1;
+    }
+
+    this.setMeta(KEY, now);
+    if (renamed) console.log(`playbot_names_v1: renamed ${renamed} play-bot account(s)`);
+  }
+
+  /**
+   * Delete the curated leaderboard roster.
+   *
+   * `server/bots.ts` seeded eight accounts with fabricated careers because a
+   * launched deployment had no players and the boards refuse rows of zeros, so
+   * the first person to open the leaderboard saw an empty list and the second
+   * saw themselves alone at rank 1. Play-bots now do that job with records
+   * they actually earned, so the furniture goes rather than being hidden:
+   * eight accounts with invented match counts, reachable through the public
+   * profile route, are worse than an honest short board.
+   *
+   * Through `deleteAccount` and never a bare DELETE. That is the function that
+   * walks PLAYER_KEYED_TABLES and clears `device_links` in BOTH directions,
+   * and a surviving link row resolves as `superseded` — a full-screen wall
+   * telling somebody their account is live elsewhere, about an account that is
+   * live nowhere. `wipe_v1` shipped without dropping that table and learned it
+   * the same way.
+   *
+   * Keyed on `deviceCookie IS NULL`, the schema's own discriminator between
+   * furniture and a drivable play-bot and the same test `playbotAccounts()`
+   * asks. Never the `bot-` id prefix: that is D26's retired classifier and
+   * `tests/botIdentity.test.ts` greps the tree for it.
+   *
+   * `bot_accounts` is cleared by hand because it is keyed `botId` and
+   * deliberately not `playerId` — a `playerId` column there would drag roster
+   * rows onto a human's device on sign-in — so it is not in
+   * PLAYER_KEYED_TABLES and `deleteAccount` cannot see it. The cache is
+   * reloaded AFTER the loop, never inside a transaction: it is derived state
+   * that must equal the table once a mutation has committed, and a stale id
+   * makes `isBotAccount` answer true for an account that no longer exists.
+   */
+  private retireCuratedRoster(): void {
+    const KEY = 'roster_retire_v1';
+    if (this.getMeta(KEY)) return;
+    const rows = this.stmt(
+        `SELECT b.botId AS botId
+           FROM bot_accounts b JOIN players p ON p.id = b.botId
+          WHERE b.deviceCookie IS NULL`
+      )
+      .all() as unknown as Array<{ botId: string }>;
+    let removed = 0;
+    for (const row of rows) {
+      // Per-row, so one failure costs one account rather than the boot — the
+      // same granularity seedBotRoster used when it was creating them.
+      try {
+        this.deleteAccount(row.botId);
+        this.stmt('DELETE FROM bot_accounts WHERE botId = ?').run(row.botId);
+        removed += 1;
+      } catch (e) {
+        console.warn(`roster_retire_v1: could not remove ${row.botId}:`, (e as Error)?.message ?? e);
+      }
+    }
+    if (removed) this.reloadBotAccounts();
+    this.setMeta(KEY, new Date().toISOString());
+    if (removed) console.log(`roster_retire_v1: removed ${removed} curated roster account(s)`);
+  }
+
   private relabelChaosMatches(): void {
     const KEY = 'chaos_relabel_v1';
     if (this.getMeta(KEY)) return;
@@ -3307,6 +3458,35 @@ class GameDatabase {
     return Date.parse(now);
   }
 
+  /**
+   * Give this player the avatar it has none of. Answers whether one was written.
+   *
+   * Deliberately NOT an overload of `setAvatar`, and deliberately DO NOTHING
+   * rather than DO UPDATE. "Write this avatar" and "make sure one exists" are
+   * different intents, and conflating them costs something real: `setAvatar`
+   * rewrites `updatedAt`, and `avatarVersion` is `Date.parse(updatedAt)`, so
+   * an idempotent boot pass built on it would bump the version for every bot
+   * on EVERY deploy and invalidate the `max-age=31536000, immutable` copy
+   * every browser had cached.
+   *
+   * A boot pass rather than a meta-flagged one-shot for the other half of the
+   * same reason: `applyWipe` DROPs both `avatars` and `bot_accounts`, so a
+   * flag would fire once against a database with no bots in it yet and never
+   * again, leaving every post-wipe bot bare for good.
+   *
+   * It also refuses to clobber an avatar already there, which is what makes it
+   * safe to point at a wider set of accounts later than the one it has today.
+   */
+  public ensureAvatar(playerId: string, data: Uint8Array): boolean {
+    const now = new Date().toISOString();
+    const res = this.stmt(
+        `INSERT INTO avatars (playerId, data, updatedAt) VALUES (?, ?, ?)
+         ON CONFLICT(playerId) DO NOTHING`
+      )
+      .run(playerId, data, now);
+    return Number(res.changes) > 0;
+  }
+
   public getAvatar(playerId: string): { data: Uint8Array; updatedAt: string } | null {
     const row = this.stmt('SELECT data, updatedAt FROM avatars WHERE playerId = ?')
       .get(playerId) as unknown as { data: Uint8Array; updatedAt: string } | undefined;
@@ -3447,43 +3627,6 @@ class GameDatabase {
       .run(bot.id, now, ...TRAIT_KEYS.map((k) => traits[k]));
     botAccountIds.add(bot.id);
     return this.readProfile(bot.id)!;
-  }
-
-  /**
-   * Seed the curated bot roster, once per database.
-   *
-   * A launched deployment has no players and the boards refuse rows of zeros,
-   * so the leaderboard opened empty — and stayed close to empty long enough
-   * for the ladder to be invisible to exactly the players deciding whether to
-   * climb it. Bot rows carry `rank: null` and never shift a human's number,
-   * which is what makes them safe to show at all.
-   *
-   * One-shot and flagged, like every other migration here: re-running is a
-   * no-op, so a restart cannot resurrect a bot an operator deleted on purpose.
-   *
-   * A roster name may already be held by a human on an existing deployment —
-   * the username index is unique and case-insensitive, so inserting would
-   * throw. That is per-bot recoverable and must never take the boot down with
-   * it: the collision is skipped and named in the log, the rest of the roster
-   * still lands, and the flag is still stamped so this does not retry forever.
-   */
-  public seedBotRoster(roster: BotSeed[]): { inserted: number; skipped: string[] } {
-    const KEY = 'bot_roster_v1';
-    if (this.getMeta(KEY)) return { inserted: 0, skipped: [] };
-    let inserted = 0;
-    const skipped: string[] = [];
-    for (const bot of roster) {
-      try {
-        this.insertBot(botProfileFields(bot));
-        inserted++;
-      } catch (e: any) {
-        skipped.push(`${bot.username} (${e?.message || 'insert failed'})`);
-      }
-    }
-    this.setMeta(KEY, new Date().toISOString());
-    if (inserted) console.log(`bot_roster_v1: seeded ${inserted} bot(s) onto the leaderboard`);
-    if (skipped.length) console.log(`bot_roster_v1: skipped ${skipped.length} — ${skipped.join(', ')}`);
-    return { inserted, skipped };
   }
 
   public recordMatch(
@@ -5059,11 +5202,15 @@ class GameDatabase {
     return position <= LADDER_TOP_N ? position : null;
   }
 
-  public getLeaderboard(
-    sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
-    limit = 50,
-    includeBots = false
-  ): LeaderboardEntry[] {
+  /**
+   * The pieces of one board query, shared by the whole board and by a page.
+   *
+   * One builder rather than two, because `getLeaderboard` and
+   * `getLeaderboardPage` must agree about who is ON the board and in what
+   * order down to the tiebreak — and `total` has to count that same filter or
+   * the page count is a different question from the rows.
+   */
+  private boardQuery(sortBy: string, includeBots: boolean) {
     // Both lookups below are keyed on sortBy, and an unrecognised key made
     // BOTH of them undefined — which built `ORDER BY undefined` and
     // `AND (undefined OR ...)`, so `?sort=anything` was a 500 echoing "no such
@@ -5073,14 +5220,6 @@ class GameDatabase {
     // callers.
     const key: 'elo' | 'level' | 'rally' | 'wins' =
       sortBy === 'level' || sortBy === 'rally' || sortBy === 'wins' ? sortBy : 'elo';
-    // NaN never satisfied `out.length >= limit`, so `?limit=abc` returned the
-    // ENTIRE board — an unauthenticated full scan plus every row serialized.
-    // Bounded here against non-finite and unbounded input only; the PUBLIC cap
-    // of 100 belongs at the route, because ladderPosition and its tests ask
-    // this method for more than a page on purpose.
-    const take = Number.isFinite(limit)
-      ? Math.max(1, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(limit)))
-      : 50;
 
     const orderBy = {
       level: 'xp DESC',
@@ -5096,8 +5235,7 @@ class GameDatabase {
     // Rows of zeros are noise: a freshly onboarded profile is not "last
     // place", it simply is not on the board yet — and the skill board is a
     // PvP ladder, so a solo-only career belongs on the level, wins and rally
-    // boards instead. Bots are exempt: they are a curated roster, inserted
-    // deliberately, not idle players.
+    // boards instead. Bots are exempt: they are inserted deliberately.
     const progress = {
       level: 'p.xp > 0',
       rally: 'p.highestRally > 0',
@@ -5110,53 +5248,117 @@ class GameDatabase {
     // Bots are dropped in SQL rather than skipped in the loop below when they
     // are not wanted. That is what lets LIMIT be exact: with them excluded
     // every returned row is emitted, and with them included every returned row
-    // is emitted too, so `take` bounds the result either way and no over-fetch
-    // is needed. The output is identical — humanRank only ever counted
-    // non-bots, so removing rows that never incremented it changes nothing.
+    // is emitted too, so the limit bounds the result either way and no
+    // over-fetch is needed. The output is identical — humanRank only ever
+    // counted non-bots, so removing rows that never incremented it changes
+    // nothing.
     const botClause = includeBots ? '' : ` AND ${GameDatabase.NOT_A_BOT}`;
-    // LIMIT in the SQL, not just in the loop. Without it every eligible row
-    // was materialized as p.* and run through rowToProfile (which JSON.parses
-    // the achievements column) before the loop threw all but `take` away —
-    // 110ms at 10k players, synchronously, on the loop that relays paddle_move
-    // for every live match.
+    const where =
+      `p.initializedAt IS NOT NULL` +
+      ` AND (${progress} OR EXISTS (SELECT 1 FROM bot_accounts b2 WHERE b2.botId = p.id))` +
+      botClause;
+    return { where, order: `${orderBy}, ${GameDatabase.LADDER_TIEBREAK}` };
+  }
+
+  /** One row of the board, given the dense human rank it sits at. */
+  private boardEntry(row: PlayerRow, humanRank: number): LeaderboardEntry {
+    const isBot = isBotAccount(row.id);
+    const p = rowToProfile(row);
+    const winRate = p.matchesPlayed > 0 ? Math.round((p.matchesWon / p.matchesPlayed) * 100) : 0;
+    return {
+      rank: isBot ? null : humanRank,
+      isBot: isBot || undefined,
+      id: p.id,
+      username: p.username,
+      tier: p.tier,
+      rankedGames: p.rankedGames,
+      level: p.level,
+      xp: p.xp,
+      matchesPlayed: p.matchesPlayed,
+      matchesWon: p.matchesWon,
+      winRate,
+      highestRally: p.highestRally,
+      avatarVersion: p.avatarVersion,
+    };
+  }
+
+  public getLeaderboard(
+    sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
+    limit = 50,
+    includeBots = false
+  ): LeaderboardEntry[] {
+    return this.getLeaderboardPage(sortBy, { limit, includeBots }).entries;
+  }
+
+  /**
+   * One page of the board, plus the `total` counting the same filter.
+   *
+   * The shape `/api/matches/me` already uses, for the same reason: the caller
+   * needs a page count and must not have to build a second query to get one.
+   *
+   * THE RANK IS THE HARD PART. `rank` is a dense counter over non-bot rows,
+   * so it is a property of where a row sits in the WHOLE ordering rather than
+   * in this page — count it per page and the top of every page is #1. Two
+   * cases, and only one of them costs anything:
+   *
+   *   * bots hidden — every row in the set is human, so the first row of the
+   *     page is rank `offset + 1` and there is nothing to ask;
+   *   * bots shown — bots occupy rows without consuming a rank, so the count
+   *     of humans above the page is strictly less than the offset once any bot
+   *     has appeared. One extra query answers it, over IDS ONLY: the p.*
+   *     materialisation is what made the unpaged board 110ms at 10k players,
+   *     and none of that applies to a column the partial indexes already
+   *     carry.
+   */
+  public getLeaderboardPage(
+    sortBy: 'elo' | 'level' | 'rally' | 'wins' = 'elo',
+    opts: { limit?: number; offset?: number; includeBots?: boolean } = {}
+  ): { entries: LeaderboardEntry[]; total: number } {
+    const includeBots = opts.includeBots ?? false;
+    const { where, order } = this.boardQuery(sortBy, includeBots);
+    // NaN never satisfied the old loop's `out.length >= limit`, so `?limit=abc`
+    // returned the ENTIRE board — an unauthenticated full scan plus every row
+    // serialized. Bounded here against non-finite and unbounded input only;
+    // the PUBLIC cap of 100 belongs at the route, because ladderPosition and
+    // its tests ask for more than a page on purpose.
+    const take = Number.isFinite(opts.limit)
+      ? Math.max(1, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(opts.limit!)))
+      : 50;
+    const skip = Number.isFinite(opts.offset)
+      ? Math.max(0, Math.min(GameDatabase.MAX_BOARD_ROWS, Math.floor(opts.offset!)))
+      : 0;
+
+    const total = (
+      this.stmt(`SELECT COUNT(*) AS n FROM players p WHERE ${where}`).get() as { n: number }
+    ).n;
+
     const rows = this.stmt(
         `SELECT p.*, a.updatedAt AS avatarUpdatedAt
            FROM players p LEFT JOIN avatars a ON a.playerId = p.id
-          WHERE p.initializedAt IS NOT NULL
-            AND (${progress} OR EXISTS (SELECT 1 FROM bot_accounts b2 WHERE b2.botId = p.id))${botClause}
-          ORDER BY ${orderBy}, ${GameDatabase.LADDER_TIEBREAK}
-          LIMIT ?`
+          WHERE ${where}
+          ORDER BY ${order}
+          LIMIT ? OFFSET ?`
       )
-      .all(take) as unknown as PlayerRow[];
+      .all(take, skip) as unknown as PlayerRow[];
 
-    // Ranks count human players only, so a human's number is identical
-    // whether bot rows are interleaved into the view or not.
-    const out: LeaderboardEntry[] = [];
-    let humanRank = 0;
-    for (const row of rows) {
-      if (out.length >= take) break;
-      const isBot = isBotAccount(row.id);
-      if (isBot && !includeBots) continue;
-      if (!isBot) humanRank++;
-      const p = rowToProfile(row);
-      const winRate = p.matchesPlayed > 0 ? Math.round((p.matchesWon / p.matchesPlayed) * 100) : 0;
-      out.push({
-        rank: isBot ? null : humanRank,
-        isBot: isBot || undefined,
-        id: p.id,
-        username: p.username,
-        tier: p.tier,
-        rankedGames: p.rankedGames,
-        level: p.level,
-        xp: p.xp,
-        matchesPlayed: p.matchesPlayed,
-        matchesWon: p.matchesWon,
-        winRate,
-        highestRally: p.highestRally,
-        avatarVersion: p.avatarVersion,
-      });
+    let humanRank = skip;
+    if (includeBots && skip > 0) {
+      humanRank = (
+        this.stmt(
+            `SELECT COUNT(*) AS n FROM (
+               SELECT p.id AS id FROM players p WHERE ${where} ORDER BY ${order} LIMIT ?
+             ) q WHERE NOT EXISTS (SELECT 1 FROM bot_accounts b WHERE b.botId = q.id)`
+          )
+          .get(skip) as { n: number }
+      ).n;
     }
-    return out;
+
+    const entries: LeaderboardEntry[] = [];
+    for (const row of rows) {
+      if (!isBotAccount(row.id)) humanRank += 1;
+      entries.push(this.boardEntry(row, humanRank));
+    }
+    return { entries, total };
   }
 
   public getAchievementsList(playerId?: string): Achievement[] {
