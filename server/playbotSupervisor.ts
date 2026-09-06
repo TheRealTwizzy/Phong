@@ -28,6 +28,7 @@
 import { PlaybotDriver } from './playbotDriver';
 import { seedTraits, type PlaybotTraits } from './playbotTraits';
 import { chooseOpponent, chooseVenue, type PolicyCandidate } from './playbotPolicy';
+import { newRating } from '../src/rating';
 import type { Tier } from '../src/rating';
 import {
   impatientDemand,
@@ -40,7 +41,6 @@ import {
   servableVenues,
   venuesOpenTo,
 } from './playbotPopulation';
-import { START_MU } from '../src/rating';
 
 /** Live server state the supervisor cannot see for itself. */
 export interface LiveState {
@@ -560,7 +560,11 @@ export class PlaybotSupervisor {
     const live = this.live();
     const urgent = urgencyOf(live);
 
-    const target = targetActivation(this.snapshotFrom(live), live.bandCentre ?? START_MU);
+    // No `?? START_MU`. An absent centre means nobody is waiting anywhere the
+    // controller can see, which is an answer — see `rankForActivation`. The
+    // substitution made the idle server a homeostat around mu 25 and was the
+    // dominant reason the population never grew a top.
+    const target = targetActivation(this.snapshotFrom(live), live.bandCentre);
 
     for (const { id, action, venue } of target.activate) {
       const m = this.managed.find((x) => x.botId === id);
@@ -674,8 +678,18 @@ export class PlaybotSupervisor {
         // EARNED, read and never written: a bot suits a thin band or it does
         // not, and if none does the answer is more bots at creation rather
         // than a different rating on this one (§4.13).
-        mu: row?.mu ?? START_MU,
+        // `newRating().mu` rather than START_MU, and the distinction is the
+        // point: this is what a bot with no stored row HAS, not a number the
+        // controller is aiming at. Naming the constant here is what let the
+        // idle fallback above look like an ordinary default.
+        mu: row?.mu ?? newRating().mu,
         recentMatches: row?.recentMatches ?? 0,
+        // When this bot was last SENT, not when it last finished. With nobody
+        // waiting the controller has no rating to rank on, so this is what
+        // stops a bot whose connect keeps failing holding the front of the
+        // queue forever: it never records a match, so `recentMatches` never
+        // moves, and the dispatch is the only thing that does.
+        lastDispatchedAt: m.dispatchedAt,
         // The same `allowed` list `chooseVenue` is handed, and for the same
         // reason: an activation aimed at a table the relay would refuse this
         // bot is an activation that serves nobody, and nothing about the bot

@@ -29,6 +29,7 @@ const bot = (id: string, over: Partial<PopulationBot> = {}): PopulationBot => ({
   traits: DEFAULT_TRAITS,
   mu: 25,
   recentMatches: 0,
+  lastDispatchedAt: 0,
   // Both ungated rooms unless a case says otherwise — what an unplaced bot,
   // which is every new one, is actually allowed into.
   venues: ['casual', 'beginner'],
@@ -203,6 +204,54 @@ describe('selection, not tuning', () => {
     expect(rankForActivation(pool, 40)[0].id).toBe('bot-b');
     // ...and asking did not change anybody.
     expect(pool).toEqual(before);
+  });
+
+  it('reads NO rating at all when nobody is waiting', () => {
+    // The homeostat. `bandCentreFor` answers undefined when no human is in
+    // the queue and none is sitting alone at a table, and the call site
+    // substituted START_MU -- so on the empty server this population exists
+    // for, the controller permanently activated whoever sat nearest mu 25 and
+    // stopped choosing any bot that had climbed away from it. Measured over
+    // 30 simulated days it is the DOMINANT flattening force: a top rating of
+    // 30.0 against 49.0 under round-robin, and the highest-skilled account on
+    // the roster finishing the month with two ranked games.
+    //
+    // The fixture is built so the answer inverts: the mu 40 bot is the one
+    // that has played least, so any surviving distance-from-25 term puts it
+    // last and this reddens.
+    const pool = [
+      bot('bot-mid', { mu: 25, recentMatches: 40 }),
+      bot('bot-high', { mu: 40, recentMatches: 0 }),
+    ];
+    expect(rankForActivation(pool, undefined)[0].id).toBe('bot-high');
+    expect(rankForActivation([...pool].reverse(), undefined)[0].id).toBe('bot-high');
+  });
+
+  it('rotates on when it was last SENT, so a broken account cannot monopolise', () => {
+    // The hole round-robin opens and the band rule did not have. A bot whose
+    // resume/connect keeps failing records no match, so `recentMatches` never
+    // rises, so it stays permanently first in line and takes every slot for
+    // the life of the process. `lastDispatchedAt` moves on the ATTEMPT rather
+    // than the result, which is what makes the rotation fair rather than a
+    // reward for never finishing anything.
+    const pool = [
+      bot('bot-abel', { recentMatches: 0, lastDispatchedAt: 9_000 }),
+      bot('bot-zulu', { recentMatches: 0, lastDispatchedAt: 1_000 }),
+    ];
+    expect(rankForActivation(pool, undefined)[0].id).toBe('bot-zulu');
+    expect(rankForActivation([...pool].reverse(), undefined)[0].id).toBe('bot-zulu');
+  });
+
+  it('still prefers the band when somebody IS waiting', () => {
+    // The other half, and the pair is the whole design: a rating preference
+    // for a named human whose game this activation exists to provide, and no
+    // rating preference at all when there is no such person. Removing either
+    // arm should redden exactly one of these two tests.
+    const pool = [
+      bot('bot-low', { mu: 18, recentMatches: 0 }),
+      bot('bot-near', { mu: 30.4, recentMatches: 99 }),
+    ];
+    expect(rankForActivation(pool, 30)[0].id).toBe('bot-near');
   });
 
   it('leaves ratings and traits untouched by being asked', () => {
@@ -499,6 +548,7 @@ describe('a bot only ONE kind of demand can use', () => {
     traits: seedTraits(id),
     mu,
     recentMatches: 0,
+    lastDispatchedAt: 0,
     venues,
   });
 

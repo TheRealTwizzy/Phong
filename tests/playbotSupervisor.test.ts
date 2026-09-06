@@ -426,6 +426,26 @@ describe('the roster the controller is shown', () => {
   });
 });
 
+describe('the file names no rating target', () => {
+  it('does not substitute START_MU for an absent band centre', () => {
+    // What the substitution did is measured in playbotPopulation.test.ts; what
+    // this pins is that the supervisor has no rating constant left to reach
+    // for. `bandCentre` is `number | undefined` and the absence is the answer
+    // -- with nobody waiting there is no band to serve, so preferring anybody
+    // BY RATING is answering a question nobody asked.
+    //
+    // A source read because the alternative is a behavioural test of an idle
+    // server, which is exactly the shape this suite's own catalogue keeps
+    // finding vacuous: with no human anywhere, every ordering produces some
+    // bot, and 'some bot was chosen' is true of the bug too.
+    const src = fs
+      .readFileSync(path.join(process.cwd(), 'server', 'playbotSupervisor.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(src).not.toContain('START_MU');
+  });
+});
+
 describe('§2.11: which of two comparable tables a bot walks up to', () => {
   it('prefers the opponent it has played less, not the first one listed', async () => {
     // `chooseOpponent` had no caller in the shipped server: a repository-wide
